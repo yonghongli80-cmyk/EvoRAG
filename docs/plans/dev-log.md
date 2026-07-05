@@ -4622,3 +4622,73 @@ f02d40f fix: 测试 Qdrant 锁冲突 — mock KnowledgeBaseManager
 5bd79c9 fix: test_kb_permissions mock create_kb 返回正确 kb_id
 38e797b fix: API 层测试 mock KnowledgeBaseManager 避免 Qdrant 锁冲突
 ```
+
+---
+
+## 知识库目录显示 + SPA 路由修复（2026-07-05）
+
+### 目录（TOC）生成优化
+
+**问题：** `generate_toc()` 只截取 3000 字符给 LLM，长文档只能提取第一章。
+
+**修复：** 改用正则提取标题 + LLM 兜底：
+- 正则提取所有 `#` 和 `##` 标题（快速、完整、不消耗 token）
+- 正则失败时用 LLM（截取 8000 字符）
+- subsection 格式统一为 `{title: "..."}` dict
+
+### 目录（TOC）前端显示
+
+**改动：** `KnowledgeDetailView.vue` — 文档列表每行可展开显示目录结构
+- 点击文档行展开/收起目录
+- 目录显示章节 + 子章节，带层级缩进和圆点标记
+- 展开时有 fadeIn 动画
+
+### SPA 路由修复
+
+**问题 1：** `/analysis` 返回 404 — SPA 路由列表里写的是 `/analytics`（带 s），前端路由是 `/analysis`（不带 s）。
+
+**修复：** `_VUE_ROUTES` 同时包含 `/analysis` 和 `/analytics`。
+
+**问题 2：** `/settings/password` 刷新后 404 — 不在 SPA 路由列表中。
+
+**修复：** `_VUE_ROUTES` 添加 `/settings/password`。
+
+### 共享机制修复
+
+**问题：** 共享 KB 给用户后，被共享用户看不到。因为 `check_kb_permission` 要求 `scope == "shared"` 才检查共享列表，但 scope 可能是 "private"。
+
+**修复：** 共享检查不再依赖 scope 值，只要在共享列表里就放行。
+
+### 自动 scope 切换
+
+**改动：** `share_kb()` 自动将 scope 改为 "shared"，`unshare_kb()` 在最后一个共享用户被移除后自动改回 "private"。
+
+### KB 编辑权限扩展
+
+**问题：** 共享 edit 权限的用户无法添加文档、生成概述等。
+
+**修复：** 新增 `_check_kb_edit_permission()` 辅助函数，所有 KB 编辑端点（8 个）改用此函数，支持 owner / admin / 共享 edit 三种身份。
+
+### 代码审查修复
+
+| # | 级别 | 问题 | 修复 |
+|---|------|------|------|
+| C1 | Critical | fadeIn 动画未定义 | 添加 @keyframes fadeIn |
+| C2 | Critical | /settings/password 不在 SPA 路由中 | 添加到 _VUE_ROUTES |
+| I6 | Important | TOC subsection 类型不一致 | 正则路径改为 dict 格式 |
+
+### 测试结果
+
+558 个测试全过。
+
+### 提交记录
+
+```
+ea4a4ca fix: 目录生成改用正则提取 + LLM 兜底（截取 8000 字符）
+c1a0302 feat: 知识库详情页 — 文档目录（TOC）展开显示
+5b93d2d fix: SPA 路由列表添加 /analysis
+f1dc0f8 fix: 共享检查不依赖 scope 值
+81476d0 feat: 共享时自动切换 scope + KB 列表显示共享用户
+d3dad5c fix: KB 编辑端点支持共享 edit 权限
+265678b fix: 代码审查修复 — fadeIn 动画 + /settings/password 路由 + TOC subsection 类型统一
+```
