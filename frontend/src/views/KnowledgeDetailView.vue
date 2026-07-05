@@ -340,6 +340,14 @@ function getStatusLabel(status: string) {
   }
 }
 
+function parseToc(toc: string | object): any {
+  if (!toc) return {}
+  if (typeof toc === 'string') {
+    try { return JSON.parse(toc) } catch { return {} }
+  }
+  return toc
+}
+
 </script>
 
 <template>
@@ -479,18 +487,34 @@ function getStatusLabel(status: string) {
           </div>
           <div v-else class="kb-docs-list">
             <div v-for="doc in documents" :key="doc.filename" class="kb-doc-item">
-              <div class="kb-doc-icon">📄</div>
-              <div class="kb-doc-info">
-                <div class="kb-doc-name">{{ doc.filename }}</div>
-                <div class="kb-doc-meta">
-                  {{ doc.chunk_count }} 块
-                  <el-tag v-if="doc.status" :type="getStatusType(doc.status)" size="small" effect="plain">
-                    {{ getStatusLabel(doc.status) }}
-                  </el-tag>
+              <div class="kb-doc-header" @click="doc._showToc = !doc._showToc">
+                <div class="kb-doc-icon">📄</div>
+                <div class="kb-doc-info">
+                  <div class="kb-doc-name">{{ doc.filename }}</div>
+                  <div class="kb-doc-meta">
+                    {{ doc.chunk_count }} 块
+                    <el-tag v-if="doc.status" :type="getStatusType(doc.status)" size="small" effect="plain">
+                      {{ getStatusLabel(doc.status) }}
+                    </el-tag>
+                  </div>
+                </div>
+                <div class="kb-doc-actions">
+                  <el-button text size="small" @click.stop="removeFromKB(doc)" title="从知识库移除">移除</el-button>
+                  <span v-if="doc.toc" class="toc-toggle">{{ doc._showToc ? '▲' : '▼' }}</span>
                 </div>
               </div>
-              <div class="kb-doc-actions">
-                <el-button text size="small" @click="removeFromKB(doc)" title="从知识库移除">移除</el-button>
+              <!-- TOC 展开区域 -->
+              <div v-if="doc._showToc && doc.toc" class="kb-doc-toc">
+                <div v-if="parseToc(doc.toc).title" class="toc-title">{{ parseToc(doc.toc).title }}</div>
+                <ul v-if="parseToc(doc.toc).sections?.length" class="toc-list">
+                  <li v-for="(section, i) in parseToc(doc.toc).sections" :key="i" class="toc-section">
+                    <span class="toc-section-title">{{ section.title }}</span>
+                    <ul v-if="section.subsections?.length" class="toc-subsections">
+                      <li v-for="(sub, j) in section.subsections" :key="j" class="toc-subsection">{{ sub.title || sub }}</li>
+                    </ul>
+                  </li>
+                </ul>
+                <p v-else class="toc-empty">无目录结构</p>
               </div>
             </div>
           </div>
@@ -833,16 +857,92 @@ function getStatusLabel(status: string) {
 }
 
 .kb-doc-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius);
   transition: background var(--duration-fast);
 }
 
+.kb-doc-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
 .kb-doc-item:hover {
-  background: var(--color-muted);
+  background: var(--color-surface-2);
+}
+
+.toc-toggle {
+  font-size: 10px;
+  color: var(--color-secondary);
+  margin-left: var(--space-1);
+}
+
+.kb-doc-toc {
+  padding: var(--space-2) var(--space-3) var(--space-3) calc(var(--space-3) + 18px + var(--space-3));
+  border-top: 1px solid var(--color-border);
+  animation: fadeIn 0.2s ease-out;
+}
+
+.toc-title {
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  color: var(--color-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-2);
+}
+
+.toc-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.toc-section {
+  margin-bottom: var(--space-1);
+}
+
+.toc-section-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  color: var(--color-foreground);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.toc-section-title::before {
+  content: '•';
+  color: var(--color-primary);
+  font-weight: bold;
+}
+
+.toc-subsections {
+  list-style: none;
+  padding-left: var(--space-4);
+  margin: var(--space-1) 0 0 0;
+}
+
+.toc-subsection {
+  font-size: var(--text-xs);
+  color: var(--color-secondary);
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.toc-subsection::before {
+  content: '◦';
+  color: var(--color-muted);
+}
+
+.toc-empty {
+  font-size: var(--text-xs);
+  color: var(--color-muted);
+  font-style: italic;
 }
 
 .kb-doc-icon {
