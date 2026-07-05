@@ -25,7 +25,7 @@ def generate_toc(content: str) -> dict:
             # 二级标题 = 子章节
             title = line.lstrip('# ').strip()
             if title:
-                current_section["subsections"].append(title)
+                current_section["subsections"].append({"title": title})
 
     if sections:
         # 正则提取成功，直接返回
