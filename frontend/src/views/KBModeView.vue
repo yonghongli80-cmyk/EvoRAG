@@ -266,26 +266,6 @@ async function selectKB(kb: KnowledgeBase) {
   color: var(--color-secondary);
   margin-top: var(--space-1);
 }
-.kb-page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: var(--space-8);
-}
-
-.kb-page-title {
-  font-family: var(--font-heading);
-  font-size: var(--text-2xl);
-  font-weight: var(--font-bold);
-  color: var(--color-foreground);
-  line-height: var(--leading-tight);
-}
-
-.kb-page-subtitle {
-  font-size: var(--text-sm);
-  color: var(--color-secondary);
-  margin-top: var(--space-1);
-}
 
 /* ── Grid ── */
 .kb-grid {
@@ -506,18 +486,18 @@ async function selectKB(kb: KnowledgeBase) {
 }
 
 .scope-tag.private {
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--color-destructive-light);
+  color: var(--color-destructive);
 }
 
 .scope-tag.public {
-  background: #ecfdf5;
-  color: #059669;
+  background: var(--color-success-light);
+  color: var(--color-success);
 }
 
 .scope-tag.shared {
-  background: #eff6ff;
-  color: #3b82f6;
+  background: var(--color-accent-light);
+  color: var(--color-accent);
 }
 
 .shared-hint {
@@ -529,5 +509,22 @@ async function selectKB(kb: KnowledgeBase) {
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
+}
+
+/* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 768px) {
+  .kb-page {
+    padding: var(--space-4);
+  }
+
+  .kb-page-header {
+    flex-direction: column;
+    gap: var(--space-4);
+    margin-bottom: var(--space-6);
+  }
+
+  .kb-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

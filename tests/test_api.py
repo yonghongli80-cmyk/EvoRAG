@@ -300,4 +300,5 @@ def test_update_doc_toc(mock_kb_cls):
     assert res.status_code == 200
     kb_id = res.json()["kb_id"]
     response = client.put(f"/knowledge-bases/{kb_id}/documents/test.txt/toc", json={"toc": {"title": "test", "sections": []}}, headers=headers)
-    assert response.status_code != 404 or response.status_code == 404
+    # 文档不存在时返回 404，或成功时返回 200
+    assert response.status_code in (200, 404)

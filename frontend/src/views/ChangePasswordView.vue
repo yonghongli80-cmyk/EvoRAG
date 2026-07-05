@@ -135,7 +135,8 @@ async function handleSubmit() {
 }
 
 .change-password-card {
-  width: 400px;
+  width: 100%;
+  max-width: 400px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
