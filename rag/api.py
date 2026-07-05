@@ -161,7 +161,7 @@ async def request_id_middleware(request, call_next):
 
 
 # Vue Router SPA fallback: browser requests to known frontend paths → serve index.html
-_VUE_ROUTES = {"/files", "/kb", "/analytics", "/mode/file", "/mode/kb", "/mode/analysis"}
+_VUE_ROUTES = {"/files", "/kb", "/analysis", "/analytics", "/mode/file", "/mode/kb", "/mode/analysis"}
 _VUE_ROUTE_PREFIXES = {"/kb/"}
 
 
