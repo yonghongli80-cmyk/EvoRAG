@@ -6,12 +6,13 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag.auth import create_token, decode_token, verify_api_key
+from rag.api_security import require_user
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
@@ -295,6 +296,7 @@ class UpdateRoleRequest(BaseModel):
 from config import settings as _settings
 _DB_PATH = Path(_settings.users_db_path)
 user_db = UserDB(str(_DB_PATH))
+app.state.user_db = user_db
 
 
 # ── FeedbackProcessor 单例 ──────────────────────────────────────────────
@@ -365,16 +367,8 @@ async def login(req: LoginRequest):
 
 
 @app.get("/me", summary="获取当前用户信息")
-async def get_me(user_id: str = Security(verify_api_key), authorization: str = Header(default="")):
-    # When auth_enabled=True, verify_api_key already validated the token/JWT.
-    # Try to resolve full user info from JWT when authorization is provided.
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user = await asyncio.to_thread(_get_current_user, token)
-        if user:
-            return {"id": user["id"], "username": user["username"]}
-    # auth_enabled=False → user_id="anonymous"; or token didn't resolve to a user
-    return {"id": user_id, "username": "anonymous"}
+async def get_me(user: dict = Depends(require_user)):
+    return {"id": user["id"], "username": user["username"]}
 
 
 async def _require_auth(authorization: str) -> dict:
