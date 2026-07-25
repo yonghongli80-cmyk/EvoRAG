@@ -12,7 +12,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from rag.auth import create_token, decode_token, verify_api_key
-from rag.api_security import require_user
+from rag.api_security import (
+    log_security_mode,
+    redact_source_config,
+    require_data_sources_admin,
+    require_user,
+)
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
@@ -35,6 +40,7 @@ _pipeline_lock = ReadWriteLock()
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
+    log_security_mode()
     if not DATA_DIR.is_dir():
         return
 
@@ -2320,7 +2326,7 @@ class SourceResponse(BaseModel):
 
 
 @app.post("/sources", summary="创建数据源", description="创建新的数据源（RSS / 数据库 / API）")
-async def create_source(req: CreateSourceRequest, user_id: str = Security(verify_api_key)):
+async def create_source(req: CreateSourceRequest, user: dict = Depends(require_data_sources_admin)):
     source_id = await asyncio.to_thread(
         user_db.create_data_source,
         req.name,
@@ -2331,14 +2337,14 @@ async def create_source(req: CreateSourceRequest, user_id: str = Security(verify
         "id": source_id,
         "name": req.name,
         "type": req.type,
-        "config": req.config,
+        "config": redact_source_config(req.config),
         "status": "inactive",
         "last_synced_at": None,
     }
 
 
 @app.get("/sources", summary="列出数据源", description="获取所有数据源列表")
-async def list_sources(user_id: str = Security(verify_api_key)):
+async def list_sources(user: dict = Depends(require_data_sources_admin)):
     sources = await asyncio.to_thread(user_db.list_data_sources)
     result = []
     for s in sources:
@@ -2346,7 +2352,7 @@ async def list_sources(user_id: str = Security(verify_api_key)):
             "id": s["id"],
             "name": s["name"],
             "type": s["type"],
-            "config": _json.loads(s["config"]) if s["config"] else {},
+            "config": redact_source_config(_json.loads(s["config"]) if s["config"] else {}),
             "status": s["status"],
             "last_synced_at": s["last_synced_at"],
             "created_at": s["created_at"],
@@ -2355,7 +2361,7 @@ async def list_sources(user_id: str = Security(verify_api_key)):
 
 
 @app.delete("/sources/{source_id}", summary="删除数据源", description="删除指定数据源")
-async def delete_source(source_id: int, user_id: str = Security(verify_api_key)):
+async def delete_source(source_id: int, user: dict = Depends(require_data_sources_admin)):
     deleted = await asyncio.to_thread(user_db.delete_data_source, source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="数据源不存在")
@@ -2431,7 +2437,7 @@ def _sync_source(source_id: int) -> dict:
 
 
 @app.post("/sources/{source_id}/sync", summary="同步数据源", description="手动触发数据源同步")
-async def sync_source(source_id: int, user_id: str = Security(verify_api_key)):
+async def sync_source(source_id: int, user: dict = Depends(require_data_sources_admin)):
     # Check existence first
     source = await asyncio.to_thread(user_db.get_data_source, source_id)
     if source is None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
+from collections.abc import Mapping
 
 from fastapi import Header, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
@@ -14,6 +16,12 @@ from rag.auth import decode_token
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+logger = logging.getLogger(__name__)
+
+_SOURCE_SECRET_KEYS = frozenset({
+    "authorization", "password", "token", "api_key", "apikey", "secret",
+    "access_token", "refresh_token", "connection_string", "dsn",
+})
 
 
 def get_user_db(request: Request) -> UserDB:
@@ -80,3 +88,38 @@ def require_admin(user: dict) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+async def require_data_sources_admin(
+    request: Request,
+    authorization: str = Header(default=""),
+    api_key: str | None = Security(api_key_header),
+) -> dict:
+    """Expose data-source management only when explicitly enabled for admins."""
+    if not settings.data_sources_enabled:
+        raise HTTPException(status_code=404, detail="资源不存在")
+
+    user = await require_user(request, authorization, api_key)
+    return require_admin(user)
+
+
+def redact_source_config(value: object) -> object:
+    """Return a recursively redacted, safe-to-serialize source configuration."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): "[REDACTED]" if str(key).lower() in _SOURCE_SECRET_KEYS
+            else redact_source_config(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_source_config(item) for item in value]
+    return value
+
+
+def log_security_mode() -> None:
+    """Make the intentionally insecure local-development mode impossible to miss."""
+    if not settings.auth_enabled:
+        logger.critical(
+            "Authentication is disabled because RAG_AUTH_ENABLED=false; "
+            "do not use this setting in a shared or production environment."
+        )

@@ -26,8 +26,11 @@ class Settings(BaseSettings):
     users_db_path: str = str(Path(__file__).resolve().parent / "data" / "users.db")
 
     # 鉴权
-    auth_enabled: bool = False
+    auth_enabled: bool = True
     auth_keys: str = "{}"
+
+    # 外部数据源可能携带连接凭据；未显式开启前不暴露相关接口。
+    data_sources_enabled: bool = False
 
     # Qdrant 本地模式
     qdrant_path: str = str(Path(__file__).resolve().parent / "qdrant_data")
