@@ -15,6 +15,7 @@ from rag.auth import create_token, decode_token, verify_api_key
 from rag.api_security import (
     log_security_mode,
     redact_source_config,
+    require_admin,
     require_data_sources_admin,
     require_user,
 )
@@ -728,6 +729,80 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} TB"
 
 
+async def _ingest_default_document(
+    *, content: bytes, filename: str, user: dict, db: UserDB
+) -> dict:
+    """Atomically index a private default-library document for its uploader."""
+    filename = Path(filename or "upload.txt").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="不支持的文件格式")
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    dest = DATA_DIR / filename
+    if dest.exists() or db.get_document_permission(filename, "rag_docs"):
+        raise HTTPException(status_code=409, detail="同名文件已存在")
+
+    stage_dir = DATA_DIR / ".staging"
+    stage_dir.mkdir(exist_ok=True)
+    stage = stage_dir / f"{uuid.uuid4().hex}-{filename}"
+    perm_id: int | None = None
+    reserved = False
+    promoted = False
+    indexing_started = False
+    try:
+        # Reserve the final name before expensive work, preventing concurrent overwrite.
+        dest.touch(exist_ok=False)
+        reserved = True
+        stage.write_bytes(content)
+        await asyncio.to_thread(load_document, str(stage))
+        perm_id = await asyncio.to_thread(
+            db.create_document_permission, filename, "rag_docs", user["id"], 1, False
+        )
+        indexing_started = True
+        manager = KnowledgeBaseManager()
+        count = await asyncio.to_thread(
+            manager.add_document,
+            "rag_docs",
+            str(stage),
+            doc_name=filename,
+            doc_permission_id=perm_id,
+        )
+        os.replace(stage, dest)
+        promoted = True
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail="同名文件已存在") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if indexing_started:
+            try:
+                await asyncio.to_thread(
+                    KnowledgeBaseManager().remove_document, "rag_docs", filename
+                )
+            except Exception:
+                logger.exception("upload vector rollback failed", extra={"upload_filename": filename})
+        if perm_id is not None:
+            try:
+                await asyncio.to_thread(db.delete_document_permission, perm_id)
+            except Exception:
+                logger.exception("upload permission rollback failed", extra={"upload_filename": filename})
+        logger.exception("upload failed", extra={"user_id": user["id"], "upload_filename": filename})
+        raise HTTPException(status_code=400, detail="文件处理失败") from exc
+    finally:
+        stage.unlink(missing_ok=True)
+        if reserved and not promoted:
+            dest.unlink(missing_ok=True)
+        try:
+            stage_dir.rmdir()
+        except OSError:
+            pass
+
+    return {"status": "uploaded", "filename": filename, "chunks": count}
+
+
 @app.post(
     "/upload",
     summary="上传文件",
@@ -735,71 +810,24 @@ def _human_size(size: int) -> str:
 )
 async def upload_file(
     file: UploadFile = File(..., description="要上传的文件"),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
-    from rag.pipeline import RAGPipeline
+    content = await file.read(MAX_FILE_SIZE + 1)
+    result = await _ingest_default_document(
+        content=content,
+        filename=file.filename or "upload.txt",
+        user=user,
+        db=user_db,
+    )
 
     global pipeline
-
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-
-    # Sanitize filename to prevent path traversal
-    filename = Path(file.filename).name if file.filename else "upload.txt"
-    suffix = Path(filename).suffix.lower()
-
-    if suffix not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400, detail=f"不支持的文件格式: {suffix}，支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-        )
-
-    # Ensure DATA_DIR exists
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Save file to DATA_DIR
-    dest = DATA_DIR / filename
-    try:
-        dest.write_bytes(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存文件失败: {e}")
-
-    # 获取当前用户
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
-
-    # 先创建权限记录（默认私有，索引失败时回滚）
-    perm_id = None
-    if user_dict:
-        def _create_perm():
-            # 检查是否已有权限记录（避免重复上传同名文件时冲突）
-            existing = user_db.get_document_permission(filename, "rag_docs")
-            if existing:
-                return existing["id"]
-            return user_db.create_document_permission(filename, "rag_docs", user_dict["id"], is_public=False)
-        perm_id = await asyncio.to_thread(_create_perm)
-
-    # Index the file
-    try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document("rag_docs", str(dest), doc_name=filename, doc_permission_id=perm_id)
-    except Exception as e:
-        dest.unlink(missing_ok=True)
-        # 回滚权限记录
-        if perm_id:
-            await asyncio.to_thread(user_db.delete_document_permission, perm_id)
-        raise HTTPException(status_code=400, detail=str(e))
-
-    # Refresh pipeline
+    from rag.pipeline import RAGPipeline
     with _pipeline_lock.write():
         try:
             pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
-        except Exception as e:
-            logger.error("Pipeline 刷新失败（上传后）: %s", e)
-
-    return {"status": "uploaded", "filename": filename, "chunks": count}
+        except Exception:
+            logger.exception("Pipeline refresh failed after upload")
+    return result
 
 
 @app.delete("/files/{filename}", summary="删除文件", description="从 data/upload/ 删除文件并重新索引")
@@ -993,17 +1021,19 @@ async def list_tags(user_id: str = Security(verify_api_key)):
 
 
 @app.post("/index-all", summary="索引全部文件", description="索引 data/upload/ 目录下的所有文件")
-async def index_all(user_id: str = Security(verify_api_key)):
+async def index_all(user: dict = Depends(require_user)):
     from rag.folder_indexer import index_folder
     from rag.pipeline import RAGPipeline
 
     global pipeline
+    require_admin(user)
     if not DATA_DIR.is_dir():
         raise HTTPException(status_code=400, detail="data/upload/ 目录不存在")
     try:
         stats = await asyncio.to_thread(index_folder, str(DATA_DIR))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.exception("full reindex failed", extra={"user_id": user["id"]})
+        raise HTTPException(status_code=400, detail="全量索引失败") from exc
     with _pipeline_lock.write():
         try:
             pipeline = await asyncio.to_thread(RAGPipeline, kb_id="rag_docs", user_db=user_db)
@@ -1013,37 +1043,27 @@ async def index_all(user_id: str = Security(verify_api_key)):
 
 
 @app.post("/index", summary="索引文档", description="上传文档并添加到知识库，支持 txt/md/pdf/docx/xlsx 格式，最大 10MB")
-async def index(file: UploadFile = File(..., description="要索引的文档文件"), user_id: str = Security(verify_api_key)):
+async def index(
+    file: UploadFile = File(..., description="要索引的文档文件"),
+    user: dict = Depends(require_user),
+):
     from rag.pipeline import RAGPipeline
 
     global pipeline
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-    suffix = Path(file.filename).suffix if file.filename else ".txt"
-    allowed = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".csv"}
-    if suffix.lower() not in allowed:
-        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {suffix}，支持: {', '.join(allowed)}")
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    try:
-        tmp.write(content)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
-    try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document("rag_docs", tmp_path, doc_name=file.filename or "upload")
-    except Exception as e:
-        os.unlink(tmp_path)
-        raise HTTPException(status_code=400, detail=str(e))
-    os.unlink(tmp_path)
+    content = await file.read(MAX_FILE_SIZE + 1)
+    result = await _ingest_default_document(
+        content=content,
+        filename=file.filename or "upload.txt",
+        user=user,
+        db=user_db,
+    )
     # 刷新 pipeline（冷启动时创建，运行时更新）
     with _pipeline_lock.write():
         try:
             pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
-        except Exception as e:
-            logger.error("Pipeline 刷新失败（索引后）: %s", e)
-    return {"status": "indexed", "chunks": count}
+        except Exception:
+            logger.exception("Pipeline refresh failed after index")
+    return {**result, "status": "indexed"}
 
 
 @app.post("/batch-import", summary="批量导入", description="上传 Excel/CSV 批量导入到知识库")
@@ -1051,18 +1071,22 @@ async def batch_import(
     file: UploadFile = File(...),
     mode: str = "qa_pair",
     config: str = "{}",
-    user_id: str = Security(verify_api_key),
+    user: dict = Depends(require_user),
 ):
     import json as _json
     from rag.batch_importer import BatchImporter
 
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="文件过大")
 
     suffix = Path(file.filename).suffix.lower() if file.filename else ".csv"
     if suffix not in {".csv", ".xlsx"}:
         raise HTTPException(status_code=400, detail=f"不支持的格式: {suffix}")
+
+    doc_name = Path(file.filename or "upload").stem
+    if await asyncio.to_thread(user_db.get_document_permission, doc_name, "rag_docs"):
+        raise HTTPException(status_code=409, detail="同名文件已存在")
 
     # 保存临时文件
     tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
@@ -1079,17 +1103,42 @@ async def batch_import(
 
     try:
         importer = BatchImporter()
-        chunks = importer.parse(tmp_path, mode=mode, config=parsed_config)
+        chunks = importer.parse(
+            tmp_path, mode=mode, config=parsed_config, doc_name=doc_name
+        )
 
         if not chunks:
             raise HTTPException(status_code=400, detail="解析结果为空")
 
         # 索引到知识库
         from rag.embedder import embed
-        from rag.vector_store import add
+        from rag.vector_store import _ensure_collection_name, add_to_collection, delete_doc
 
         embeddings = embed([c.text for c in chunks])
-        add(chunks, embeddings)
+        permission_id = await asyncio.to_thread(
+            user_db.create_document_permission,
+            doc_name,
+            "rag_docs",
+            user["id"],
+            1,
+            False,
+        )
+        try:
+            await asyncio.to_thread(_ensure_collection_name, "rag_docs")
+            await asyncio.to_thread(
+                add_to_collection,
+                "rag_docs",
+                chunks,
+                embeddings,
+                doc_permission_id=permission_id,
+            )
+        except Exception:
+            await asyncio.to_thread(user_db.delete_document_permission, permission_id)
+            try:
+                await asyncio.to_thread(delete_doc, "rag_docs", doc_name)
+            except Exception:
+                logger.exception("batch import vector rollback failed", extra={"doc_name": doc_name})
+            raise
 
         # 刷新 pipeline
         global pipeline
@@ -1101,10 +1150,15 @@ async def batch_import(
                 logger.error("Pipeline 刷新失败: %s", e)
 
         return {"status": "imported", "chunks": len(chunks), "mode": mode}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="批量导入失败") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("batch import failed", extra={"user_id": user["id"], "doc_name": doc_name})
+        raise HTTPException(status_code=400, detail="批量导入失败") from exc
     finally:
-        os.unlink(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 @app.post("/query", response_model=QueryResponse, summary="查询知识库", description="对已索引的文档进行语义检索问答")
@@ -2475,9 +2529,5 @@ DATA_CHARTS_DIR = DATA_DIR_PATH / "charts"
 DATA_CHARTS_DIR.mkdir(exist_ok=True)
 if DATA_CHARTS_DIR.is_dir():
     app.mount("/data/charts", StaticFiles(directory=str(DATA_CHARTS_DIR)), name="data-charts")
-DATA_UPLOAD_DIR = DATA_DIR_PATH / "upload"
-if DATA_UPLOAD_DIR.is_dir():
-    app.mount("/data/upload", StaticFiles(directory=str(DATA_UPLOAD_DIR)), name="data-upload")
-
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

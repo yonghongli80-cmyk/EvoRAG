@@ -2,6 +2,7 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../utils/api'
+import { downloadLibraryFile } from '../api/files'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
@@ -304,9 +305,10 @@ async function addFileToKB() {
   addingFile.value = true
   try {
     const formData = new FormData()
-    const res = await fetch(`/data/upload/${encodeURIComponent(selectedFile.value.name)}`)
-    if (!res.ok) throw new Error('无法读取文件')
-    const blob = await res.blob()
+    const blob = await downloadLibraryFile(
+      selectedFile.value.name,
+      authStore.getAuthHeaders()
+    )
     formData.append('file', blob, selectedFile.value.name)
 
     await api.post(`/knowledge-bases/${kbId}/documents`, formData, {

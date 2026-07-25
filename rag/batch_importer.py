@@ -11,7 +11,13 @@ SUPPORTED_EXTENSIONS = {".csv", ".xlsx"}
 
 
 class BatchImporter:
-    def parse(self, file_path: str, mode: str, config: dict = None) -> list[Chunk]:
+    def parse(
+        self,
+        file_path: str,
+        mode: str,
+        config: dict | None = None,
+        doc_name: str | None = None,
+    ) -> list[Chunk]:
         """解析文件，返回 Chunk 列表。
 
         Args:
@@ -32,14 +38,14 @@ class BatchImporter:
         else:
             raise ValueError(f"不支持的文件格式: {suffix}，支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
 
+        source_name = doc_name or Path(file_path).stem
         if mode == "qa_pair":
-            return self._parse_qa_pair(rows, config, file_path)
-        elif mode == "document":
-            return self._parse_document(rows, config, file_path)
-        elif mode == "table":
-            return self._parse_table(rows, file_path)
-        else:
-            raise ValueError(f"不支持的导入模式: {mode}，支持: qa_pair / document / table")
+            return self._parse_qa_pair(rows, config, source_name)
+        if mode == "document":
+            return self._parse_document(rows, config, source_name)
+        if mode == "table":
+            return self._parse_table(rows, source_name)
+        raise ValueError(f"不支持的导入模式: {mode}，支持: qa_pair / document / table")
 
     def _read_csv(self, file_path: str) -> list[dict]:
         rows = []
@@ -63,10 +69,9 @@ class BatchImporter:
         wb.close()
         return result
 
-    def _parse_qa_pair(self, rows: list[dict], config: dict, file_path: str) -> list[Chunk]:
+    def _parse_qa_pair(self, rows: list[dict], config: dict, doc_name: str) -> list[Chunk]:
         q_col = config.get("question_col", "问题")
         a_col = config.get("answer_col", "答案")
-        doc_name = Path(file_path).stem
         chunks = []
         for i, row in enumerate(rows):
             q = row.get(q_col, "").strip()
@@ -76,9 +81,8 @@ class BatchImporter:
                 chunks.append(Chunk(text=text, doc_name=doc_name, chunk_index=i))
         return chunks
 
-    def _parse_document(self, rows: list[dict], config: dict, file_path: str) -> list[Chunk]:
+    def _parse_document(self, rows: list[dict], config: dict, doc_name: str) -> list[Chunk]:
         col = config.get("content_col", "content")
-        doc_name = Path(file_path).stem
         chunks = []
         for i, row in enumerate(rows):
             text = row.get(col, "").strip()
@@ -86,10 +90,9 @@ class BatchImporter:
                 chunks.append(Chunk(text=text, doc_name=doc_name, chunk_index=i))
         return chunks
 
-    def _parse_table(self, rows: list[dict], file_path: str) -> list[Chunk]:
+    def _parse_table(self, rows: list[dict], doc_name: str) -> list[Chunk]:
         if not rows:
             return []
-        doc_name = Path(file_path).stem
         headers = list(rows[0].keys())
         lines = ["\t".join(headers)]
         for row in rows:
