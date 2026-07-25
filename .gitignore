@@ -49,3 +49,6 @@ data/index_state.json
 
 # Ruff cache
 .ruff_cache/
+
+# Isolated Codex implementation worktrees
+/.worktrees/
