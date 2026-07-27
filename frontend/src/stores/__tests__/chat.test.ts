@@ -240,6 +240,23 @@ describe('chat store', () => {
     expect(store.messages[1].role).toBe('assistant')
   })
 
+  it('sendMessage carries the selected knowledge base ID', async () => {
+    const mockResponse = {
+      ok: true,
+      body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }) }) }
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+    vi.mocked(api.post).mockResolvedValue({ data: { id: 1, mode: 'kb' } } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('leave policy', 'kb', 'kb_hr')
+
+    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body))).toMatchObject({
+      question: 'leave policy',
+      kb_id: 'kb_hr'
+    })
+  })
+
   it('sendMessage streams tokens into assistant message', async () => {
     const encoder = new TextEncoder()
     const mockResponse = {

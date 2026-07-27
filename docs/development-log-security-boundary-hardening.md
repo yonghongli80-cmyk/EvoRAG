@@ -15,6 +15,7 @@
 | `3c0609a` | 移除按“问题文本”缓存最终答案的逻辑，避免跨用户泄漏 | 专门缓存安全测试通过 |
 | `89cd0b2` | 知识库源文件隔离路径、暂存写入与原子落盘基础模块 | 3 项路径安全测试通过 |
 | `c863551` | 上传、单文件删除和整库删除接入持久化源文件、状态记录与失败补偿 | 15 项生命周期/知识库/文档 ACL 测试通过 |
+| 待本次提交 | 流式聊天绑定显式 `kb_id` 并在后端先做 KB ACL 验证 | 2 项后端测试、1 项前端 store 测试、前端构建通过 |
 
 ## 正在进行
 
@@ -35,6 +36,7 @@ Set-Location $project
   tests\test_kb_security_boundaries.py `
   tests\test_document_security_boundaries.py `
   tests\test_kb_file_lifecycle.py `
+  tests\test_stream_kb_target.py `
   tests\test_pipeline_cache_security.py -v
 
 Set-Location "$project\frontend"

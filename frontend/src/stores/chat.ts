@@ -134,7 +134,7 @@ export const useChatStore = defineStore('chat', () => {
     selectedFile.value = name
   }
 
-  async function sendMessage(question: string, mode?: ChatMode) {
+  async function sendMessage(question: string, mode?: ChatMode, kbId?: string) {
     const auth = useAuthStore()
 
     // Auto-create conversation if none exists
@@ -160,6 +160,9 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (selectedFile.value) {
         payload.doc_name = selectedFile.value
+      }
+      if (mode === 'kb' && kbId) {
+        payload.kb_id = kbId
       }
 
       const response = await fetch(`${API}/query/stream`, {

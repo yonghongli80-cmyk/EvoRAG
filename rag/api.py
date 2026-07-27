@@ -245,6 +245,7 @@ class StreamQueryRequest(BaseModel):
     conversation_id: int | None = None
     doc_name: str | None = None
     tags: list[str] | None = None
+    kb_id: str | None = None
 
 
 class SuggestRequest(BaseModel):
@@ -1225,22 +1226,21 @@ async def query(req: QueryRequest, user_id: str = Security(verify_api_key), auth
 @app.post("/query/stream", summary="流式查询知识库", description="SSE 流式返回查询结果")
 async def query_stream(
     req: StreamQueryRequest,
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
     global pipeline
-    with _pipeline_lock.read():
-        if pipeline is None:
-            return JSONResponse(status_code=400, content={"error": "尚未索引文档"})
-        current_pipeline = pipeline
-
-    user = None
-    if authorization:
-        try:
-            token = authorization.replace("Bearer ", "")
-            user = await asyncio.to_thread(_get_current_user, token)
-        except (HTTPException, Exception):
-            pass
+    target_kb = req.kb_id or "rag_docs"
+    if target_kb != "rag_docs":
+        require_kb_view(user_db, target_kb, user)
+        from rag.pipeline import RAGPipeline
+        current_pipeline = await asyncio.to_thread(
+            RAGPipeline, kb_id=target_kb, user_db=user_db
+        )
+    else:
+        with _pipeline_lock.read():
+            if pipeline is None:
+                return JSONResponse(status_code=400, content={"error": "尚未索引文档"})
+            current_pipeline = pipeline
 
     session_id = req.session_id
     if user and req.conversation_id is not None:
@@ -1250,7 +1250,7 @@ async def query_stream(
         answer_buffer = ""
         async for event in current_pipeline.query_stream(
             req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
-            user=user, kb_id="rag_docs",
+            user=user, kb_id=target_kb,
         ):
             # 从 token 事件中提取 answer 用于持久化
             if '"type": "token"' in event:

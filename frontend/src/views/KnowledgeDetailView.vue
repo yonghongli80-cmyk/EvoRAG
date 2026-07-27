@@ -139,7 +139,7 @@ function formatTime(ts: string | number) {
 }
 
 function askSuggested(q: string) {
-  chatStore.sendMessage(q)
+  chatStore.sendMessage(q, 'kb', kbId)
 }
 
 // ── Settings menu actions ──
@@ -568,7 +568,7 @@ function parseToc(toc: string | object): any {
         </button>
       </div>
 
-      <ChatInput v-if="chatStore.currentConvId" mode="kb" />
+      <ChatInput v-if="chatStore.currentConvId" mode="kb" :kb-id="kbId" />
     </div>
 
     <!-- Dialogs -->
