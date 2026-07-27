@@ -115,3 +115,32 @@ def test_kb_delete_removes_document_files_before_collection_metadata(
     assert not stored.exists()
     assert db.get_kb_document("kb_ops", "report.txt") is None
     assert db.get_kb_metadata("kb_ops") is None
+
+
+def test_kb_detail_never_exposes_stored_source_path(isolated_api, make_user, monkeypatch):
+    import rag.api as api
+    from rag.knowledge_base import KnowledgeBaseInfo
+
+    owner, headers = make_user("owner")
+    db = isolated_api.app.state.user_db
+    db.create_kb_metadata("kb_ops", "Ops", owner["id"], "private")
+    document_id = db.create_kb_document_pending("kb_ops", "report.txt")
+    db.finish_kb_document(
+        document_id,
+        r"C:\internal\knowledge-base\report.txt",
+        "[]",
+        "summary",
+        1,
+    )
+
+    class FakeManager:
+        def list_kbs(self):
+            return [KnowledgeBaseInfo("kb_ops", "Ops", 1, "")]
+
+    monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
+    response = isolated_api.get("/knowledge-bases/kb_ops", headers=headers)
+
+    assert response.status_code == 200
+    document = response.json()["documents"][0]
+    assert "file_path" not in document
+    assert "last_error" not in document

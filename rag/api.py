@@ -1592,7 +1592,8 @@ async def get_knowledge_base_detail(
             is_owner = meta["owner_id"] == user["id"]
 
             docs = conn.execute(
-                "SELECT * FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
+                "SELECT id, kb_id, filename, toc, summary, chunk_count, status, added_at "
+                "FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
                 (kb_id,),
             ).fetchall()
 
