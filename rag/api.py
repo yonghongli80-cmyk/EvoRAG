@@ -17,6 +17,8 @@ from rag.api_security import (
     redact_source_config,
     require_admin,
     require_data_sources_admin,
+    require_kb_edit,
+    require_kb_view,
     require_user,
 )
 from rag.kb_metadata import generate_summary, generate_toc
@@ -1294,47 +1296,41 @@ class KBResponse(BaseModel):
 
 
 @app.get("/knowledge-bases", summary="列出知识库", description="获取所有知识库列表")
-async def list_knowledge_bases(authorization: str = Header(default="")):
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
-
-    def _list():
-        manager = KnowledgeBaseManager()
-        kbs = manager.list_kbs()
-        kb_ids = [kb.kb_id for kb in kbs]
-        meta_map = user_db.get_kb_metadata_by_names(kb_ids)
-        result = []
-        for kb in kbs:
-            meta = meta_map.get(kb.kb_id)
-            scope = meta["scope"] if meta else "public"
-            owner_id = meta["owner_id"] if meta else 0
-            is_admin = user_dict and user_dict.get("is_admin", False)
-            is_owner = user_dict and owner_id == user_dict["id"]
-            if not is_admin and scope == "private" and not is_owner:
+async def list_knowledge_bases(user: dict = Depends(require_user)):
+    manager = KnowledgeBaseManager()
+    result = []
+    for kb in await asyncio.to_thread(manager.list_kbs):
+        try:
+            meta = await asyncio.to_thread(require_kb_view, user_db, kb.kb_id, user)
+        except HTTPException as exc:
+            if exc.status_code in {403, 409}:
                 continue
-            # 获取共享用户列表（仅 owner 或 admin 可见）
-            shared_users = []
-            if is_owner or is_admin:
-                shares = user_db.list_kb_shared_users(kb.kb_id)
-                shared_users = [{"username": s["username"], "permission": s["permission"]} for s in shares]
-            result.append(KBResponse(
-                kb_id=kb.kb_id, name=kb.name, doc_count=kb.doc_count,
-                scope=scope, is_owner=is_owner, shared_users=shared_users,
-            ))
-        return result
-    return await asyncio.to_thread(_list)
+            raise
+        is_owner = meta["owner_id"] == user["id"]
+        shares = []
+        if is_owner or user.get("is_admin"):
+            shares = await asyncio.to_thread(user_db.list_kb_shared_users, kb.kb_id)
+        result.append(KBResponse(
+            kb_id=kb.kb_id,
+            name=meta.get("name", kb.name),
+            doc_count=kb.doc_count,
+            scope=meta["scope"],
+            is_owner=is_owner,
+            shared_users=[
+                {"username": share["username"], "permission": share["permission"]}
+                for share in shares
+            ],
+        ))
+    return result
 
 
 @app.post("/knowledge-bases", summary="创建知识库", description="创建一个新的知识库")
-async def create_knowledge_base(req: CreateKBRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
+async def create_knowledge_base(req: CreateKBRequest, user: dict = Depends(require_user)):
 
     def _create():
         manager = KnowledgeBaseManager()
         kb_id = manager.create_kb(req.name)
-        user_db.create_kb_metadata(kb_id, req.name, owner_id=user_dict["id"], scope=req.scope)
+        user_db.create_kb_metadata(kb_id, req.name, owner_id=user["id"], scope=req.scope)
         return kb_id
 
     kb_id = await asyncio.to_thread(_create)
@@ -1346,15 +1342,14 @@ class KBScopeRequest(BaseModel):
 
 
 @app.put("/knowledge-bases/{kb_id}/scope", summary="切换知识库可见范围")
-async def update_kb_scope(kb_id: str, req: KBScopeRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-
-    # Owner 检查
-    meta = user_db.get_kb_metadata(kb_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="知识库不存在")
-    if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可操作")
+async def update_kb_scope(
+    kb_id: str,
+    req: KBScopeRequest,
+    user: dict = Depends(require_user),
+):
+    require_kb_edit(user_db, kb_id, user)
+    if req.scope == "private" and await asyncio.to_thread(user_db.list_kb_shared_users, kb_id):
+        raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
 
     try:
         await asyncio.to_thread(user_db.update_kb_scope, kb_id, req.scope)
@@ -1365,13 +1360,8 @@ async def update_kb_scope(kb_id: str, req: KBScopeRequest, authorization: str = 
 
 
 @app.delete("/knowledge-bases/{kb_id}", summary="删除知识库", description="删除指定知识库及其所有文档")
-async def delete_knowledge_base(kb_id: str, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-
-    # Owner 检查
-    meta = user_db.get_kb_metadata(kb_id)
-    if meta and not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可删除")
+async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
+    require_kb_edit(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
@@ -1398,10 +1388,9 @@ async def delete_knowledge_base(kb_id: str, authorization: str = Header(default=
 async def add_document_to_kb(
     kb_id: str,
     file: UploadFile = File(...),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+    require_kb_edit(user_db, kb_id, user)
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -1414,14 +1403,13 @@ async def add_document_to_kb(
         tmp_path = tmp.name
     finally:
         tmp.close()
-    # 使用已验证的 user_dict（来自 _require_auth）
+    # Use the authenticated caller as the immutable document owner.
 
     # 先创建权限记录（索引失败时回滚）
     perm_id = None
-    if user_dict:
-        def _create_perm():
-            return user_db.create_document_permission(filename, kb_id, user_dict["id"], is_public=False)
-        perm_id = await asyncio.to_thread(_create_perm)
+    def _create_perm():
+        return user_db.create_document_permission(filename, kb_id, user["id"], is_public=False)
+    perm_id = await asyncio.to_thread(_create_perm)
 
     try:
         manager = KnowledgeBaseManager()
@@ -1468,9 +1456,10 @@ async def add_document_to_kb(
 
 
 @app.delete("/knowledge-bases/{kb_id}/documents/{doc_name}", summary="删除文档", description="从知识库中删除指定文档")
-async def remove_document_from_kb(kb_id: str, doc_name: str, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+async def remove_document_from_kb(
+    kb_id: str, doc_name: str, user: dict = Depends(require_user)
+):
+    require_kb_edit(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
@@ -1525,14 +1514,10 @@ class ShareRequest(BaseModel):
 
 
 @app.post("/knowledge-bases/{kb_id}/query", summary="查询知识库", description="对指定知识库进行语义检索")
-async def query_knowledge_base(kb_id: str, req: QueryKBRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-
-    # Scope 检查：private KB 只有 owner/admin 可查询
-    meta = user_db.get_kb_metadata(kb_id)
-    if meta and meta["scope"] == "private":
-        if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-            raise HTTPException(status_code=403, detail="私有知识库仅所有者可查询")
+async def query_knowledge_base(
+    kb_id: str, req: QueryKBRequest, user: dict = Depends(require_user)
+):
+    require_kb_view(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
@@ -1546,14 +1531,10 @@ async def query_knowledge_base(kb_id: str, req: QueryKBRequest, authorization: s
 @app.get("/knowledge-bases/{kb_id}", summary="获取知识库详情")
 async def get_knowledge_base_detail(
     kb_id: str,
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
     """获取知识库详情，包括元数据、文档列表、概述、目录。"""
-    # 认证（可选，未登录时只能看 public KB）
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
+    meta = require_kb_view(user_db, kb_id, user)
 
     def _get():
         import sqlite3
@@ -1570,16 +1551,9 @@ async def get_knowledge_base_detail(
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
-            meta = conn.execute("SELECT * FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
-
-            # Scope 检查
-            scope = meta["scope"] if meta else "public"
-            owner_id = meta["owner_id"] if meta else 0
-            is_admin = user_dict and user_dict.get("is_admin", False)
-            is_owner = user_dict and owner_id == user_dict["id"]
-
-            if scope == "private" and not is_admin and not is_owner:
-                return "forbidden"
+            db_meta = conn.execute("SELECT * FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
+            scope = meta["scope"]
+            is_owner = meta["owner_id"] == user["id"]
 
             docs = conn.execute(
                 "SELECT * FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
@@ -1590,9 +1564,9 @@ async def get_knowledge_base_detail(
 
             return {
                 "kb_id": kb_id,
-                "name": meta["name"] if meta else kb.name,
-                "description": meta["description"] if meta else "",
-                "overview": meta["overview"] if meta else "",
+                "name": meta.get("name", kb.name),
+                "description": db_meta["description"] if db_meta else "",
+                "overview": db_meta["overview"] if db_meta else "",
                 "doc_count": kb.doc_count,
                 "scope": scope,
                 "is_owner": is_owner,
@@ -1602,8 +1576,6 @@ async def get_knowledge_base_detail(
             conn.close()
 
     result = await asyncio.to_thread(_get)
-    if result == "forbidden":
-        raise HTTPException(status_code=403, detail="私有知识库仅所有者可查看")
     if not result:
         raise HTTPException(status_code=404, detail="知识库不存在")
     return result

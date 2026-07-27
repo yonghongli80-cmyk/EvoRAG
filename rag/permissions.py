@@ -42,9 +42,11 @@ def check_doc_permission(
     """
     doc = db.get_document_permission(doc_name, kb_id)
 
-    # 无权限记录 = 旧文档，视为公开，放行
+    # Historical documents without an ACL are visible only to administrators.
     if not doc:
-        return None
+        if user.get("is_admin"):
+            return None
+        raise HTTPException(status_code=403, detail="文档尚未建立权限记录")
 
     # 管理员绕过
     if user.get("is_admin"):
@@ -56,8 +58,7 @@ def check_doc_permission(
         # owner / public → 可查看
         if doc["owner_id"] == user["id"] or scope == "public":
             return doc
-        # 共享检查：只要在共享列表里就放行（不依赖 scope 值）
-        if db.is_document_shared(doc["id"], user["id"]):
+        if scope == "shared" and db.is_document_shared(doc["id"], user["id"]):
             return doc
         raise HTTPException(status_code=403, detail="无权查看该文档")
 
@@ -96,7 +97,9 @@ def check_kb_permission(
     """
     meta = db.get_kb_metadata(kb_id)
     if not meta:
-        return None  # 旧 KB，放行
+        if user.get("is_admin"):
+            return None
+        raise HTTPException(status_code=403, detail="知识库尚未建立元数据")
 
     if user.get("is_admin"):
         return meta
@@ -106,16 +109,14 @@ def check_kb_permission(
     if action == "view":
         if meta["owner_id"] == user["id"] or scope == "public":
             return meta
-        # 共享检查：只要在共享列表里就放行（不依赖 scope 值）
-        if db.is_kb_shared(kb_id, user["id"]):
+        if scope == "shared" and db.is_kb_shared(kb_id, user["id"]):
             return meta
         raise HTTPException(status_code=403, detail="无权查看该知识库")
 
     if action in ("edit", "delete"):
         if meta["owner_id"] == user["id"]:
             return meta
-        # 共享检查：需要 edit 权限
-        if db.is_kb_shared(kb_id, user["id"], permission="edit"):
+        if scope == "shared" and db.is_kb_shared(kb_id, user["id"], permission="edit"):
             return meta
         raise HTTPException(status_code=403, detail="无权操作该知识库")
 
@@ -167,10 +168,7 @@ def filter_chunks_by_permission(
     result = []
     for c in chunks:
         perm = perm_map.get(c.doc_name)
-        if perm is None:
-            # 无权限记录 = 旧文档，视为公开
-            result.append(c)
-        elif c.doc_name in allowed_set:
+        if perm is not None and c.doc_name in allowed_set:
             # 有权限记录且用户有权查看
             result.append(c)
         # else: 有权限记录但用户无权，过滤掉

@@ -13,6 +13,7 @@ from fastapi.security import APIKeyHeader
 
 from config import settings
 from rag.auth import decode_token
+from rag.permissions import check_kb_permission
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -88,6 +89,26 @@ def require_admin(user: dict) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
+    """Require an explicit KB view grant; legacy metadata is admin-only."""
+    meta = db.get_kb_metadata(kb_id)
+    if meta is None:
+        if user.get("is_admin"):
+            return {"kb_id": kb_id, "owner_id": 0, "scope": "orphaned"}
+        raise HTTPException(status_code=409, detail="知识库元数据缺失")
+    check_kb_permission(db, kb_id, user, "view")
+    return meta
+
+
+def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
+    """Require an explicit KB edit grant and reject orphaned collections."""
+    meta = db.get_kb_metadata(kb_id)
+    if meta is None:
+        raise HTTPException(status_code=409, detail="知识库元数据缺失")
+    check_kb_permission(db, kb_id, user, "edit")
+    return meta
 
 
 async def require_data_sources_admin(
