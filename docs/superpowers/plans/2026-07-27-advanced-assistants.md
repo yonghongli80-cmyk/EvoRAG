@@ -1,6 +1,6 @@
 # Advanced Assistants Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add sales, project, and data-analysis profiles to the same assistant platform with cited drafts, confirmation gates, and deterministic spreadsheet tools.
 
@@ -87,9 +87,9 @@ git commit -m "feat: add cited sales drafts"
 
 ### Task 2: Project Spaces, Reports, and Confirmation
 
-**Files:** Create project workflow/tool modules, `tests/test_project_assistant.py`, `tests/test_assistant_confirmation.py`; modify `rag/user_db.py`.
+**Files:** Create project workflow/tool modules, `rag/assistants/confirmations.py`, `tests/test_project_assistant.py`, `tests/test_assistant_confirmation.py`; modify `rag/user_db.py`.
 
-**Interfaces:** `summarize_project_changes`; `extract_action_candidates`; `confirm_action_candidate`; `archive_project`.
+**Interfaces:** `summarize_project_changes`; `extract_action_candidates`; `confirm_action_candidate(candidate_id, actor, edited_text, expected_version, idempotency_key)`; `archive_project`.
 
 - [ ] **Step 1: Write failing no-auto-assignment test**
 
@@ -100,6 +100,15 @@ async def test_extracted_action_is_not_task_until_confirmed(project_fixture):
     assert project_fixture.task_count() == 0
     project_fixture.confirm(result.candidates[0].id)
     assert project_fixture.task_count() == 1
+
+
+def test_project_confirmation_is_idempotent_and_optimistic(project_fixture):
+    candidate = project_fixture.seed_candidate(version=1)
+    first = project_fixture.confirm(candidate.id, expected_version=1, idempotency_key="confirm-1")
+    second = project_fixture.confirm(candidate.id, expected_version=1, idempotency_key="confirm-1")
+    assert first.action_item_id == second.action_item_id
+    with pytest.raises(StateConflict):
+        project_fixture.confirm(candidate.id, expected_version=1, idempotency_key="confirm-2")
 ```
 
 - [ ] **Step 2: Run RED**
@@ -112,12 +121,19 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add project metadata, candidates, confirmation, and archive gate**
 
-Project status is `active | archived`. Archived profile scope is read-only. Candidate confirmation records original draft, edited result, actor, citations, and profile version.
+Add separate `project_action_candidates` and `project_action_items`; do not reuse `knowledge_tasks`. Candidates persist project ID, creator, proposed assignee, payload, citations, profile version, `status`, integer `version`, expiry, and unique generation key. Action items have `UNIQUE(candidate_id)` and `UNIQUE(confirmation_idempotency_key)`. Confirmation first resolves an existing idempotency record, then requires project edit permission and active project state, then performs `UPDATE ... WHERE id=? AND status='pending' AND version=?` and inserts the item in the same `BEGIN IMMEDIATE` transaction. Zero updated rows return `409 state_conflict`; a retry with the same actor/key and request hash returns the original item. Project status is `active | archived`; archived scope is read-only.
 
 ```python
-def confirm_candidate(candidate, actor, edited_text):
+def confirm_candidate(candidate, actor, edited_text, expected_version, idempotency_key):
+    require_project_edit(candidate.project_id, actor)
     require_project_active(candidate.project_id)
-    return create_project_task(text=edited_text, confirmed_by=actor["id"], source_candidate_id=candidate.id)
+    return create_project_action_item_once(
+        candidate_id=candidate.id,
+        text=edited_text,
+        confirmed_by=actor["id"],
+        expected_version=expected_version,
+        idempotency_key=idempotency_key,
+    )
 ```
 
 - [ ] **Step 4: Run project tests**
@@ -131,7 +147,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add rag/assistants/projects.py rag/assistants/tools/projects.py rag/user_db.py tests/test_project_assistant.py tests/test_assistant_confirmation.py
+git add rag/assistants/projects.py rag/assistants/tools/projects.py rag/assistants/confirmations.py rag/user_db.py tests/test_project_assistant.py tests/test_assistant_confirmation.py
 git commit -m "feat: add project assistant"
 ```
 
@@ -139,9 +155,9 @@ git commit -m "feat: add project assistant"
 
 ### Task 3: Data Analysis Router and Multi-Dataset Mapping
 
-**Files:** Create data-analysis/structured tool modules and `tests/test_data_analysis_assistant.py`.
+**Files:** Create data-analysis/structured tool modules and `tests/test_data_analysis_assistant.py`; modify `rag/assistants/confirmations.py`, `rag/user_db.py`.
 
-**Interfaces:** `plan_data_question(question, visible_datasets) -> DataAnalysisPlan`; `run_data_analysis(plan, scope) -> DataAnalysisResult`.
+**Interfaces:** `plan_data_question(question, visible_datasets) -> DataAnalysisPlan`; `confirm_dataset_mapping(mapping_id, actor, expected_version, idempotency_key)`; `run_data_analysis(plan, scope) -> DataAnalysisResult`.
 
 - [ ] **Step 1: Write failing mapping/payroll tests**
 
@@ -155,6 +171,13 @@ def test_incompatible_units_require_mapping_confirmation(data_fixture):
 def test_payroll_disabled_even_for_platform_admin(data_fixture):
     with pytest.raises(StructuredDataDisabled):
         data_fixture.run_payroll(user=platform_admin_without_hr())
+
+
+def test_mapping_confirmation_requires_all_dataset_permissions(data_fixture):
+    proposal = data_fixture.mapping_proposal(dataset_versions=[4, 5])
+    data_fixture.revoke_dataset_view(version_id=5)
+    with pytest.raises(PermissionDenied):
+        data_fixture.confirm_mapping(proposal.id, expected_version=1, idempotency_key="map-1")
 ```
 
 - [ ] **Step 2: Run RED**
@@ -167,7 +190,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement semantic/lookup/aggregate/compare/hybrid routing**
 
-Resolve dataset candidates via schema chunks, require mapping confirmation for type/unit/date/key mismatches, then call only `execute_structured_query`. Persist dataset versions, plan, row counts, and spreadsheet citations.
+Persist `dataset_mapping_confirmations` with exact sorted dataset-version IDs, canonical mapping JSON/hash, creator, `status CHECK(status IN ('pending','confirmed','rejected','expired'))`, integer version, expiry, confirmation actor/time, request hash, and unique confirmation idempotency key. Confirmation first resolves a same-key retry, then rechecks view permission for every dataset version and verifies those versions are still current for the proposal's datasets. It performs compare-and-set and writes the idempotency result in one transaction. A changed dataset version expires the proposal; concurrent different confirmations return `409 state_conflict`. Only a non-expired confirmed mapping with the same mapping hash can reach `execute_structured_query`.
 
 ```python
 if any(mapping.requires_confirmation for mapping in plan.mappings):
@@ -186,7 +209,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add rag/assistants/data_analysis.py rag/assistants/tools/structured.py tests/test_data_analysis_assistant.py
+git add rag/assistants/data_analysis.py rag/assistants/tools/structured.py rag/assistants/confirmations.py rag/user_db.py tests/test_data_analysis_assistant.py tests/test_assistant_confirmation.py
 git commit -m "feat: add spreadsheet analysis assistant"
 ```
 
@@ -222,6 +245,7 @@ Allow `line | bar | stacked_bar | pie | scatter`, validated numeric series, unpr
 
 ```python
 class ChartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
     type: Literal["line", "bar", "stacked_bar", "pie", "scatter"]
     title: str
     series: tuple[ChartSeries, ...]

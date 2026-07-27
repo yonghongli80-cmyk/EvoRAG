@@ -173,7 +173,7 @@ class DocumentSource(Protocol):
 4. 解析、分块、嵌入并写入带版本 payload 的新向量。
 5. 原子移动临时文件到版本目录。
 6. 单个 SQLite 事务内把旧版改为 `historical`、新版改为 `current`、更新 `current_version_id` 和 `kb_documents`。
-7. 把旧版向量标记为 `is_current=false`。
+7. SQLite 的 `current_version_id` 是当前版本唯一事实源；检索按它生成 `document_version_id` 过滤。Qdrant 的 `is_current` 仅作可修复元数据，提交后把旧版标记为 `false`，失败则进入幂等修复队列。
 
 任一步失败都删除本次向量、临时文件和 `staging` 记录；旧版保持当前版本。
 
@@ -183,7 +183,7 @@ class DocumentSource(Protocol):
 
 ### 6.1 检索规则
 
-第一轮只检索 `is_current=true AND validity_status='valid'` 的可见文档。ACL 过滤后结果少于 `min(top_k, 3)` 时，再检索历史版本或已确认过期的当前版本补足。
+第一轮先从 SQLite 解析用户可见文档的 `current_version_id`，再按这些 `document_version_id AND validity_status='valid'` 检索。不得只依赖 Qdrant `is_current`。ACL 过滤后结果少于 `min(top_k, 3)` 时，再检索历史版本或已确认过期的当前版本补足。
 
 历史结果：
 
@@ -227,7 +227,7 @@ CREATE TABLE answer_citations (
 );
 ```
 
-聊天保存 assistant message 后立即批量保存 citations。SSE 在 `done` 事件返回 `assistant_message_id`，前端据此提交反馈。
+assistant message 与其全部 citations 必须由单个 `persist_assistant_answer_with_citations()` 在同一个 SQLite 事务中写入；任何引用失败都回滚消息。请求带唯一 `persistence_key`，重试只有在回答哈希、引用哈希和引用数量一致时才返回原消息，否则报幂等冲突。SSE 只在事务提交后于 `done` 事件返回 `assistant_message_id`，前端据此提交反馈。
 
 对外 citation 响应只包含：
 
@@ -274,7 +274,9 @@ CREATE TABLE answer_citations (
 ```sql
 CREATE TABLE knowledge_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_type TEXT NOT NULL CHECK(task_type IN ('outdated', 'not_useful')),
+    task_type TEXT NOT NULL CHECK(task_type IN (
+        'outdated', 'not_useful', 'insufficient_evidence', 'evidence_conflict'
+    )),
     cluster_key TEXT NOT NULL,
     active_key TEXT UNIQUE,
     document_id INTEGER,

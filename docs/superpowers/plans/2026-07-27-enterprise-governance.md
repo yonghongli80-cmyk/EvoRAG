@@ -1,6 +1,6 @@
 # Enterprise Governance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add separated capabilities, sensitivity classification, tamper-evident audit, batch permissions, verified backup/restore, and idempotent departure handover.
 
@@ -97,6 +97,8 @@ def test_scanner_failure_keeps_document_pending(classification_fixture):
     result = classification_fixture.upload("工资表.xlsx")
     assert result.classification_status == "classification_pending"
     assert classification_fixture.viewer("outsider").status_code == 403
+    assert classification_fixture.embedder.calls == []
+    assert classification_fixture.external_model.calls == []
 ```
 
 - [ ] **Step 2: Run RED**
@@ -109,13 +111,18 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add classification fields, scanner rules, and confirmation**
 
-Scan filenames, headers, and configured patterns asynchronously. Raising sensitivity is owner/content-admin; lowering requires both owner confirmation and `content_admin`. Scanner output is advisory and never grants access.
+New uploads enter a local quarantine. Filename inspection and sandboxed local parsing may run before classification because they are required to inspect headers/content. While status is `classification_pending`, the orchestrator must not call embedding, reranking, external LLM, vector insertion, ordinary preview, download, or search indexing. After confirmed policy classification, enqueue the allowed downstream work. Raising sensitivity is owner/content-admin; lowering requires both owner confirmation and `content_admin`.
 
 ```python
 class ClassificationSuggestion(BaseModel):
     level: Literal["internal", "confidential", "restricted"]
     reasons: tuple[str, ...]
     requires_confirmation: bool = True
+
+
+def require_classification_release(document: dict) -> None:
+    if document["classification_status"] != "confirmed":
+        raise ClassificationPending(document["id"])
 ```
 
 - [ ] **Step 4: Run classification/version tests**
@@ -253,6 +260,21 @@ def test_corrupt_backup_cannot_be_restored(backup_fixture):
     assert verification.status == "verification_failed"
     with pytest.raises(BackupNotRestorable):
         backup_fixture.restore_test(backup)
+
+
+def test_backup_epoch_has_one_cross_store_recovery_point(backup_fixture):
+    backup = backup_fixture.create_with_concurrent_write_attempt()
+    assert backup_fixture.concurrent_write_blocked
+    assert backup.manifest.sqlite_epoch == backup.manifest.qdrant_epoch
+    assert backup_fixture.sqlite_integrity(backup)
+    assert backup_fixture.qdrant_snapshot_matches_manifest(backup)
+
+
+def test_failed_qdrant_snapshot_never_publishes_restorable_manifest(backup_fixture):
+    backup_fixture.qdrant.fail_snapshot()
+    with pytest.raises(BackupFailed):
+        backup_fixture.create()
+    assert backup_fixture.list_restorable_backups() == []
 ```
 
 - [ ] **Step 2: Run RED**
@@ -265,7 +287,9 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement manifests and isolation-only restore**
 
-Manifest covers SQLite snapshot, immutable versions, structured datasets, Qdrant snapshot/rebuild manifest, schema version, sizes, and SHA-256. Secrets are excluded. Restore uses a caller-provided isolated root and never replaces production paths.
+First release uses one global write barrier shared by every SQLite mutation, file promotion, outbox writer, and Qdrant mutation. Acquire it, drain active writers, capture the SQLite `mutation_sequence`, assign a random `backup_epoch`, run `PRAGMA wal_checkpoint(FULL)`, and create SQLite snapshots with the SQLite backup API—never by copying a live `.db`, `-wal`, or `-shm` file. Copy immutable/structured files by hash, request one snapshot per Qdrant collection, and wait for every snapshot to reach a terminal-success state while the barrier remains held.
+
+Only then write one signed manifest that binds `backup_epoch`, `mutation_sequence`, schema version, SQLite hash/integrity result, immutable-file hashes, each Qdrant snapshot ID, collection point counts, and object counts. Publish the manifest atomically from `incomplete` to `restorable`, then release the barrier. A failure removes temporary artifacts or leaves an explicitly non-restorable record; it never publishes a partial manifest. Secrets are excluded. Restore uses a caller-provided isolated root, verifies every recorded component against that manifest and epoch, and never replaces production paths.
 
 ```python
 def restore_test(record: BackupRecord, isolation_root: Path) -> RestoreReport:

@@ -1,6 +1,6 @@
 # Spreadsheet Knowledge Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn Excel/CSV into versioned, browser-viewable knowledge with exact structured queries and row-range vector citations.
 
@@ -261,6 +261,18 @@ def test_vector_failure_keeps_old_spreadsheet_current(spreadsheet_context):
     assert spreadsheet_context.db.current_version_id() == old.version_id
     assert spreadsheet_context.db.current_dataset_id() == old.dataset_id
     assert not spreadsheet_context.new_dataset_path.exists()
+
+
+def test_compound_activation_uses_one_sqlite_transaction(spreadsheet_context):
+    spreadsheet_context.extract()
+    assert spreadsheet_context.db.begin_immediate_count == 1
+
+
+def test_old_vector_flag_failure_does_not_hide_new_current_version(spreadsheet_context):
+    spreadsheet_context.vector_writer.fail_when_marking_old_historical()
+    result = spreadsheet_context.extract()
+    assert spreadsheet_context.search_current() == [result.version_id]
+    assert spreadsheet_context.repair_queue.contains(result.version_id)
 ```
 
 - [ ] **Step 2: Run RED**
@@ -273,17 +285,40 @@ Expected: FAIL because extraction service is missing.
 
 - [ ] **Step 3: Implement staging and atomic activation**
 
-Order is source stage, version row, dataset stage, integrity check, chunks, vectors with `is_current=false`, file promotion, and one SQLite activation transaction. On failure delete only new vectors/files and mark the new dataset/version failed.
+Order is source stage, version row, dataset stage, integrity check, chunks, vectors with `is_current=false`, file promotion, mark the new Qdrant points `is_current=true` while the old points remain true, then one SQLite activation transaction. Queries always resolve the authoritative current version IDs from SQLite and filter Qdrant by `document_version_id`; therefore pre-commit new points and post-commit old points cannot leak even when both carry `is_current=true`.
+
+Expose one public compound operation. It owns exactly one `BEGIN IMMEDIATE`; its two `_in_tx` helpers only mutate rows and never control the transaction:
 
 ```python
-with db.activation_transaction():
-    db.mark_old_dataset_historical(document_id)
-    db.activate_document_version(document_id, version_id, kb_id, filename)
-    db.activate_structured_dataset(dataset_id)
-vector_store.mark_document_version_current(collection, document_id, version_id)
+def activate_document_and_dataset(
+    self,
+    *,
+    document_id: int,
+    version_id: int,
+    dataset_id: int,
+    kb_id: str,
+    filename: str,
+) -> None:
+    with self._lock, self.transaction(immediate=True):
+        self._activate_document_version_in_tx(document_id, version_id, kb_id, filename)
+        self._activate_structured_dataset_in_tx(document_id, dataset_id)
+
+
+vector_store.mark_version_flag(collection, version_id, is_current=True)
+db.activate_document_and_dataset(
+    document_id=document_id,
+    version_id=version_id,
+    dataset_id=dataset_id,
+    kb_id=kb_id,
+    filename=filename,
+)
+try:
+    vector_store.mark_other_versions_historical(collection, document_id, version_id)
+except Exception:
+    db.enqueue_vector_flag_repair(document_id, version_id)
 ```
 
-If the post-transaction vector flag update fails, enqueue a repair record and keep retrieval filtering by current version ID from SQLite until repair succeeds.
+If SQLite activation fails, reset/delete the new vector points and leave the old SQLite pointer unchanged. If post-commit cleanup fails, enqueue an idempotent repair; retrieval remains correct because it filters by SQLite-derived version IDs rather than `is_current`.
 
 - [ ] **Step 4: Run lifecycle and version tests**
 
@@ -405,6 +440,15 @@ Expected: FAIL because typed plan and gateway are absent.
 - [ ] **Step 3: Implement allowlisted filtering and aggregation**
 
 Allowed operations: `lookup`, `aggregate`, `compare`. Allowed filters: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains`, `between`, `in`. Allowed metrics: `count`, `distinct_count`, `sum`, `average`, `min`, `max`.
+
+```python
+class StructuredQueryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    dataset_id: int
+    operation: Literal["lookup", "aggregate", "compare"]
+    metrics: tuple[Metric, ...] = ()
+    filters: tuple[FilterClause, ...] = ()
+```
 
 Resolve all column keys through metadata, generate parameterized filtering SQL, cap rows/time, and aggregate Decimal columns in Python. Persist only plan/field/filter summaries and result hash.
 

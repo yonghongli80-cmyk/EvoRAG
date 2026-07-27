@@ -1,6 +1,6 @@
 # Trusted Knowledge Loop Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task in the user's workbench. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add document ownership, durable versions, traceable citations, employee correction feedback, owner tasks, and a role-aware knowledge-operations page while keeping future NAS integration behind a source adapter.
 
@@ -100,6 +100,7 @@
 
 **Interfaces:**
 - Produces: `UserDB.create_document_version(document_id: int, original_filename: str, file_path: str, content_hash: str, uploaded_by: int) -> int`
+- Produces: `UserDB._activate_document_version_in_tx(document_id: int, version_id: int, kb_id: str, filename: str) -> None`; this row-mutation primitive requires an already-open write transaction and never begins, commits, or rolls one back.
 - Produces: `UserDB.activate_document_version(document_id: int, version_id: int, kb_id: str, filename: str) -> None`
 - Produces: `UserDB.get_current_document_version(document_id: int) -> dict | None`
 - Produces: `UserDB.list_document_versions(document_id: int) -> list[dict]`
@@ -207,41 +208,38 @@ ALTER TABLE kb_documents ADD COLUMN document_id INTEGER;
 ALTER TABLE kb_documents ADD COLUMN document_version_id INTEGER;
 ```
 
-Implement activation under `self._lock` with explicit rollback:
+Separate transaction ownership from row mutation. `_activate_document_version_in_tx()` never starts, commits, or rolls back a transaction; the public wrapper owns exactly one transaction. Later compound activations must call the `_in_tx` method inside their own transaction.
 
 ```python
-def activate_document_version(
+def _activate_document_version_in_tx(
     self, document_id: int, version_id: int, kb_id: str, filename: str
 ) -> None:
-    with self._lock:
-        try:
-            now = time.time()
-            self._conn.execute("BEGIN IMMEDIATE")
-            self._conn.execute(
-                "UPDATE document_versions SET status='historical', superseded_at=? "
-                "WHERE document_id=? AND status='current'",
-                (now, document_id),
-            )
-            activated = self._conn.execute(
-                "UPDATE document_versions SET status='current', validity_status='valid' "
-                "WHERE id=? AND document_id=? AND status='staging'",
-                (version_id, document_id),
-            )
-            if activated.rowcount != 1:
-                raise VersionConflict("version is no longer staging")
-            self._conn.execute(
-                "UPDATE document_permissions SET current_version_id=?, updated_at=? WHERE id=?",
-                (version_id, now, document_id),
-            )
-            self._conn.execute(
-                "UPDATE kb_documents SET document_id=?, document_version_id=? "
-                "WHERE kb_id=? AND filename=?",
-                (document_id, version_id, kb_id, filename),
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+    now = time.time()
+    self._conn.execute(
+        "UPDATE document_versions SET status='historical', superseded_at=? "
+        "WHERE document_id=? AND status='current'",
+        (now, document_id),
+    )
+    activated = self._conn.execute(
+        "UPDATE document_versions SET status='current', validity_status='valid' "
+        "WHERE id=? AND document_id=? AND status='staging'",
+        (version_id, document_id),
+    )
+    if activated.rowcount != 1:
+        raise VersionConflict("version is no longer staging")
+    self._conn.execute(
+        "UPDATE document_permissions SET current_version_id=?, updated_at=? WHERE id=?",
+        (version_id, now, document_id),
+    )
+    self._conn.execute(
+        "UPDATE kb_documents SET document_id=?, document_version_id=? WHERE kb_id=? AND filename=?",
+        (document_id, version_id, kb_id, filename),
+    )
+
+
+def activate_document_version(self, document_id: int, version_id: int, kb_id: str, filename: str) -> None:
+    with self._lock, self.transaction(immediate=True):
+        self._activate_document_version_in_tx(document_id, version_id, kb_id, filename)
 ```
 
 Add to `Settings`:
@@ -570,9 +568,25 @@ def test_version_payload_round_trips_through_qdrant(mock_qdrant):
     )
 
     add_to_collection("kb_test", [original], [[0.1, 0.2]], doc_permission_id=7)
-    result = search_collection("kb_test", [0.1, 0.2], top_k=1, current_only=True)
+    result = search_collection(
+        "kb_test",
+        [0.1, 0.2],
+        top_k=1,
+        allowed_version_ids={11},
+        validity_statuses={"valid"},
+    )
 
     assert result[0] == original
+
+
+def test_stale_is_current_flags_cannot_change_sqlite_selected_results(versioned_retrieval):
+    versioned_retrieval.seed_sqlite_current_version(document_id=7, version_id=11)
+    versioned_retrieval.seed_vector(version_id=10, is_current=True)
+    versioned_retrieval.seed_vector(version_id=11, is_current=False)
+
+    result = versioned_retrieval.retrieve_current(document_id=7)
+
+    assert [item.document_version_id for item in result] == [11]
 ```
 
 - [ ] **Step 2: Run tests and verify RED**
@@ -606,16 +620,29 @@ class Chunk:
     historical_weight: float = 1.0
 ```
 
-The first Qdrant search filter must require:
+SQLite `document_permissions.current_version_id` is the authoritative current-version source. Resolve the visible current version IDs first, then use those IDs in the Qdrant filter; `is_current` remains repairable metadata and is never the sole visibility condition.
+
+The vector-store boundary is explicit:
+
+```python
+search_collection(
+    collection_name: str,
+    query_vector: list[float],
+    *,
+    top_k: int,
+    allowed_version_ids: set[int],
+    validity_statuses: set[str],
+) -> list[Chunk]
+```
 
 ```python
 must=[
-    FieldCondition(key="is_current", match=MatchValue(value=True)),
+    FieldCondition(key="document_version_id", match=MatchAny(any=visible_current_version_ids)),
     FieldCondition(key="validity_status", match=MatchValue(value="valid")),
 ]
 ```
 
-Only when ACL-filtered results are below `min(top_k, 3)`, issue the fallback query for `is_current=false OR validity_status=confirmed_outdated`. Reconstruct fallback chunks with `historical_weight=settings.historical_result_weight`.
+Only when ACL-filtered current results are below `min(top_k, 3)`, resolve the user's visible historical version IDs from SQLite. Issue the fallback query for `(document_version_id IN visible_historical_version_ids) OR (document_version_id IN visible_current_version_ids AND validity_status = confirmed_outdated)`. Never select history from the Qdrant `is_current` flag. Reconstruct fallback chunks with `historical_weight=settings.historical_result_weight`.
 
 Update the prompt context builder to prefix historical text with:
 
@@ -653,7 +680,7 @@ git commit -m "feat: add version-aware retrieval"
 
 **Interfaces:**
 - Produces: `CitationRecord`
-- Produces: `UserDB.add_answer_citations(assistant_message_id: int, citations: list[CitationRecord]) -> None`
+- Produces: `UserDB.persist_assistant_answer_with_citations(conversation_id: int, answer: str, citations: list[CitationRecord], persistence_key: str) -> int`
 - Produces: `UserDB.get_answer_citations(assistant_message_id: int) -> list[dict]`
 - Produces: `citation_response(db: UserDB, citation: dict, user: dict) -> dict`
 - Produces SSE event: `{"type":"done","assistant_message_id":<int|null>}`
@@ -696,6 +723,27 @@ def test_citation_response_never_exposes_file_path(isolated_api, make_user):
     assert response["download_url"].endswith("/versions/4/download")
 ```
 
+```python
+def test_citation_insert_failure_rolls_back_assistant_message(db, seeded_conversation, monkeypatch):
+    monkeypatch.setattr(db, "_insert_answer_citations_in_tx", lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="boom"):
+        db.persist_assistant_answer_with_citations(
+            seeded_conversation, "answer", [citation_record()], persistence_key="req-1"
+        )
+    assert db.list_messages(seeded_conversation) == []
+
+
+def test_answer_persistence_retry_is_idempotent(db, seeded_conversation):
+    first = db.persist_assistant_answer_with_citations(
+        seeded_conversation, "answer", [citation_record()], persistence_key="req-1"
+    )
+    second = db.persist_assistant_answer_with_citations(
+        seeded_conversation, "answer", [citation_record()], persistence_key="req-1"
+    )
+    assert first == second
+    assert len(db.get_answer_citations(first)) == 1
+```
+
 - [ ] **Step 2: Run tests and verify RED**
 
 Run:
@@ -722,19 +770,22 @@ class CitationRecord:
     is_historical: bool
 ```
 
-After completing a streamed answer:
+Persist the assistant message and all citations with one public database transaction. Add `persistence_key`, `citations_hash`, and `citation_count` to assistant-message persistence and enforce a unique `(conversation_id, persistence_key)` index. The private row helpers accept the existing cursor/connection and never commit. On retry, read the existing row first and return it only when answer hash, citation hash, and citation count match; otherwise raise an idempotency conflict instead of silently returning different content.
 
 ```python
 assistant_message_id = None
 if user and req.conversation_id is not None:
     assistant_message_id = await asyncio.to_thread(
-        user_db.add_message, req.conversation_id, "assistant", answer_buffer
-    )
-    await asyncio.to_thread(
-        user_db.add_answer_citations, assistant_message_id, citation_records
+        user_db.persist_assistant_answer_with_citations,
+        req.conversation_id,
+        answer_buffer,
+        citation_records,
+        request_persistence_key,
     )
 yield f"data: {_json.dumps({'type': 'done', 'assistant_message_id': assistant_message_id})}\n\n"
 ```
+
+`persist_assistant_answer_with_citations()` uses one `BEGIN IMMEDIATE`/commit boundary and calls private `_insert_message_in_tx()` plus `_insert_answer_citations_in_tx()`. Any citation failure rolls back the message. A duplicate `persistence_key` returns the existing message only after verifying its citation count/hash.
 
 Ensure the endpoint does not add the assistant message a second time in its existing post-stream persistence block.
 
@@ -987,7 +1038,9 @@ Create:
 ```sql
 CREATE TABLE IF NOT EXISTS knowledge_tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_type TEXT NOT NULL CHECK(task_type IN ('outdated', 'not_useful')),
+    task_type TEXT NOT NULL CHECK(task_type IN (
+        'outdated', 'not_useful', 'insufficient_evidence', 'evidence_conflict'
+    )),
     cluster_key TEXT NOT NULL,
     active_key TEXT UNIQUE,
     document_id INTEGER,

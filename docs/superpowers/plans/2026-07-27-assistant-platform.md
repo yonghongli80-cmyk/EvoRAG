@@ -1,6 +1,6 @@
 # Assistant Platform Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add one configuration-driven assistant runtime to RAGv3 and deliver onboarding and policy assistants without creating separate applications.
 
@@ -25,7 +25,7 @@
 
 ## File Structure
 
-- New backend: `rag/assistants/{models,profiles,scope,runtime,onboarding,policy,api}.py`, `rag/assistants/tools/__init__.py`, `rag/assistants/tools/registry.py`.
+- New backend: `rag/assistants/{models,profiles,scope,runtime,workflow_dsl,prompts,onboarding,policy,api}.py`, `rag/assistants/tools/__init__.py`, `rag/assistants/tools/registry.py`.
 - New tests: `tests/test_assistant_*.py`, `tests/test_onboarding_assistant.py`, `tests/test_policy_assistant.py`.
 - Modify: `rag/user_db.py`, `rag/pipeline.py`, `rag/api.py`, reliability/citation/history/audit services.
 - New frontend: `frontend/src/api/assistants.ts`, `frontend/src/components/AssistantSelector.vue`, `AssistantCard.vue`, `frontend/src/views/AssistantAdminView.vue`, tests.
@@ -33,46 +33,98 @@
 
 ---
 
-### Task 1: Versioned Assistant Profiles
+### Task 1: Tool Registry, Workflow DSL, and Prompt Templates
 
-**Files:** Create `rag/assistants/models.py`, `rag/assistants/profiles.py`, `tests/test_assistant_profiles.py`; modify `rag/user_db.py`.
+**Files:** Create `rag/assistants/models.py`, `rag/assistants/tools/__init__.py`, `rag/assistants/tools/registry.py`, `rag/assistants/workflow_dsl.py`, `rag/assistants/prompts.py`, `tests/test_assistant_tools.py`, `tests/test_workflow_dsl.py`; modify `rag/user_db.py`.
 
-**Interfaces:** `create_assistant_draft`, `validate_assistant_draft`, `publish_assistant_profile`, `get_published_profile(key)`.
+**Interfaces:** `ToolSpec`; `ToolRegistry.register`; `WorkflowDefinition`; `validate_workflow`; `publish_prompt_template`.
 
 - [ ] **Step 1: Write failing immutable-version test**
 
 ```python
-def test_publishing_profile_does_not_mutate_previous_version(profile_fixture):
-    first = profile_fixture.publish(name="制度助手", tools=["retrieve"])
-    second = profile_fixture.publish(name="制度助手", tools=["retrieve", "compare"])
-    assert first.version == 1
-    assert second.version == 2
-    assert profile_fixture.get_version(1).tools == ("retrieve",)
+def test_workflow_rejects_unknown_tool_and_cycle(tool_registry):
+    definition = workflow(
+        steps=[
+            step("a", tool="missing", on_success="b"),
+            step("b", tool="retrieve", on_success="a"),
+        ]
+    )
+    with pytest.raises(WorkflowValidationError, match="unknown tool|cycle"):
+        validate_workflow(definition, tool_registry)
+
+
+def test_workflow_rejects_unreachable_step_and_forward_output_reference(tool_registry):
+    definition = workflow(
+        entrypoint="a",
+        steps=[
+            step("a", tool="retrieve", input_bindings={"query": "steps.b.result"}, on_success="stop"),
+            step("b", tool="retrieve", on_success="stop"),
+        ],
+    )
+    with pytest.raises(WorkflowValidationError, match="unreachable|not an ancestor"):
+        validate_workflow(definition, tool_registry)
+
+
+def test_workflow_rejects_more_than_twenty_steps(tool_registry):
+    with pytest.raises(WorkflowValidationError, match="20"):
+        validate_workflow(workflow_with_linear_steps(21), tool_registry)
+
+
+def test_prompt_publication_creates_immutable_versions(prompt_store):
+    first = prompt_store.publish("policy-answer", "v1")
+    second = prompt_store.publish("policy-answer", "v2")
+    assert first.version == 1 and second.version == 2
+    assert prompt_store.get(first.id).template == "v1"
 ```
 
 - [ ] **Step 2: Run RED**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_profiles.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_tools.py tests\test_workflow_dsl.py -v
 ```
 
 Expected: FAIL.
 
-- [ ] **Step 3: Add profile/version tables and schema validation**
+- [ ] **Step 3: Implement registry and declarative versioned DSL**
 
-Tool keys must exist in registry; execution kind is enum; output schema is valid JSON Schema; knowledge scopes reference existing KBs; prompt length and profile key are bounded.
+The DSL is a bounded DAG of at most 20 steps with exactly one declared entrypoint. A step contains only `id`, `tool_key`, `input_bindings`, `output_key`, `condition`, `on_success`, and `on_error`. Bindings may reference `request.<declared-field>`, `context.<allowlisted-field>`, or `steps.<ancestor-id>.<declared-output-field>`. Conditions allow only `eq | ne | exists | not_exists | in` against a literal JSON value. No Python expressions, imports, arbitrary attribute traversal, loops, dynamic tool names, or runtime templates.
+
+Validation rejects duplicate IDs/output keys, missing or unreachable steps, cycles, missing transitions, non-terminating paths, references to non-ancestors, unknown tools, bindings that do not exactly satisfy the registered tool's Pydantic input model, and output bindings absent from its output model. Canonical workflow JSON plus registry schema hashes are persisted as an immutable workflow-definition version. Prompt templates are immutable version rows with `(template_key, version)`, content hash, bounded variables, and an exact allowlist of variable names; publication never updates an existing row.
 
 ```python
-class AssistantProfileDraft(BaseModel):
-    key: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{1,47}$")]
-    execution_kind: Literal["rag_chat", "deterministic_workflow", "controlled_multi_agent"]
-    tool_keys: tuple[str, ...]
+class ToolSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    key: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{1,63}$")]
+    input_model: type[BaseModel]
+    output_model: type[BaseModel]
+    required_capabilities: frozenset[str] = frozenset()
+    read_only: bool
+    timeout_seconds: Annotated[int, Field(ge=1, le=120)]
+    max_result_bytes: Annotated[int, Field(ge=1, le=1_000_000)]
+
+
+class WorkflowStep(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str
+    tool_key: str
+    input_bindings: dict[str, str]
+    output_key: str
+    condition: StepCondition | None = None
+    on_success: str | Literal["stop"]
+    on_error: str | Literal["stop"]
+
+
+class WorkflowDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    key: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_.-]{1,63}$")]
+    entrypoint: str
+    steps: Annotated[tuple[WorkflowStep, ...], Field(min_length=1, max_length=20)]
 ```
 
 - [ ] **Step 4: Run profile tests**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_profiles.py tests\test_user_db.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_tools.py tests\test_workflow_dsl.py tests\test_user_db.py -v
 ```
 
 Expected: PASS.
@@ -80,21 +132,27 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add rag/assistants/models.py rag/assistants/profiles.py rag/user_db.py tests/test_assistant_profiles.py
-git commit -m "feat: add versioned assistant profiles"
+git add rag/assistants/models.py rag/assistants/tools rag/assistants/workflow_dsl.py rag/assistants/prompts.py rag/user_db.py tests/test_assistant_tools.py tests/test_workflow_dsl.py
+git commit -m "feat: define assistant workflow contracts"
 ```
 
 ---
 
-### Task 2: Tool Registry and Immutable Execution Scope
+### Task 2: Versioned Assistant Profiles and Immutable Execution Scope
 
-**Files:** Create `rag/assistants/tools/__init__.py`, `rag/assistants/tools/registry.py`, `rag/assistants/scope.py`, `tests/test_assistant_tools.py`.
+**Files:** Create `rag/assistants/profiles.py`, `rag/assistants/scope.py`, `tests/test_assistant_profiles.py`, `tests/test_assistant_scope.py`; modify `rag/user_db.py`.
 
-**Interfaces:** `ToolSpec`; `ToolRegistry.register(spec, handler)`; `build_execution_scope(db, user, profile) -> ExecutionScope`; `scope.narrow(...)`.
+**Interfaces:** `create_assistant_draft`, `validate_assistant_draft`, `publish_assistant_profile`, `get_published_profile`; `build_execution_scope`; `scope.narrow`.
 
 - [ ] **Step 1: Write failing non-expansion test**
 
 ```python
+def test_profile_publish_resolves_registered_tools_and_workflow(profile_fixture):
+    published = profile_fixture.publish(tool_keys=["retrieve"], workflow_key="policy-v1")
+    assert published.version == 1
+    assert published.workflow_definition_version_id is not None
+
+
 def test_child_scope_cannot_add_document(parent_scope):
     with pytest.raises(ScopeExpansionError):
         parent_scope.narrow(document_ids=parent_scope.document_ids | {999})
@@ -103,14 +161,14 @@ def test_child_scope_cannot_add_document(parent_scope):
 - [ ] **Step 2: Run RED**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_tools.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_profiles.py tests\test_assistant_scope.py -v
 ```
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement registry declarations and frozen scope**
+- [ ] **Step 3: Implement profile validation and frozen scope**
 
-ToolSpec includes Pydantic input/output, capabilities, assistants, read-only flag, timeout, max result bytes, model visibility, and audit action. Register only explicit callables; no module path strings.
+Publishing resolves every tool, prompt-template version, workflow-definition version, output schema, KB scope, and capability. Profiles store immutable resolved version IDs, not mutable names.
 
 ```python
 @dataclass(frozen=True)
@@ -124,7 +182,7 @@ class ExecutionScope:
 - [ ] **Step 4: Run tool/scope tests**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_tools.py tests\test_document_security_boundaries.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_assistant_profiles.py tests\test_assistant_scope.py tests\test_document_security_boundaries.py -v
 ```
 
 Expected: PASS.
@@ -132,8 +190,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add rag/assistants/tools rag/assistants/scope.py tests/test_assistant_tools.py
-git commit -m "feat: constrain assistant tools"
+git add rag/assistants/profiles.py rag/assistants/scope.py rag/user_db.py tests/test_assistant_profiles.py tests/test_assistant_scope.py
+git commit -m "feat: publish bounded assistant profiles"
 ```
 
 ---

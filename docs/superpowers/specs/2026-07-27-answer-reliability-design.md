@@ -254,7 +254,7 @@ Excel/CSV 同时进入：
 - `POST /structured-data/query`
 - `GET /structured-data/datasets`
 - `GET /answers/{message_id}/reliability`
-- `POST /knowledge-operations/conflicts/{conflict_id}/resolve`
+- `PUT /knowledge-operations/conflicts/{conflict_id}/resolve`
 
 响应中的比较、冲突和计算引用继续使用可信知识闭环的 citation 模型。
 

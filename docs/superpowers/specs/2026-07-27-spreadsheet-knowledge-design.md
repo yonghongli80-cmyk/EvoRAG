@@ -86,7 +86,7 @@ Excel/CSV 在 RAGv3 中是一等知识来源，不再只作为“转成一大段
 
 ### 3.3 向量层
 
-使用现有 Qdrant collection，但每个点必须带完整表格 payload。当前版本切换仍遵守可信知识闭环的 `is_current` 和 `validity_status`。
+使用现有 Qdrant collection，但每个点必须带完整表格 payload。`validity_status` 参与检索；`is_current` 仅用于展示、诊断和后台修复，当前版本可见性以 SQLite `current_version_id` 解析出的版本 ID 为准。
 
 向量库负责“找到相关工作表、字段和行组”，不作为工资合计、出勤次数等精确数值的最终计算来源。
 
@@ -266,9 +266,12 @@ CSV 创建一个名为 `CSV` 的虚拟工作表。
 → 生成表格 chunks
 → 写入带 version payload 的 Qdrant staging points
 → 原子移动原文件和结构化库
-→ SQLite 事务切换当前文档/数据集版本
-→ 新向量设为 current，旧向量设为 historical
+→ 新向量预先设为 current（旧向量暂时仍为 current）
+→ 一个 SQLite 事务同时切换当前文档/数据集版本
+→ 旧向量设为 historical；失败进入修复队列
 ```
+
+SQLite `current_version_id` 是可见性的唯一事实源，Qdrant 查询按 SQLite 解析出的版本 ID 过滤，而不是只看 `is_current`。因此提交前的新向量和提交后的旧向量即使标记尚未收敛，也不会进入错误答案。
 
 失败补偿：
 

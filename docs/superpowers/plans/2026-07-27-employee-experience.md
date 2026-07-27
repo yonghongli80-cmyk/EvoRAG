@@ -1,6 +1,6 @@
 # Employee Experience Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add permission-safe suggestions, popular questions, favorites, subscriptions, notifications, personal history, and a unified employee home.
 
@@ -102,6 +102,20 @@ def test_suggestions_exclude_invisible_titles(suggestion_fixture):
 def test_popular_question_requires_five_distinct_users(popular_fixture):
     popular_fixture.ask_same_question(users=["a", "b", "c", "d", "a"])
     assert popular_fixture.snapshot() == []
+
+
+def test_popular_question_is_filtered_by_current_document_acl(popular_fixture):
+    popular_fixture.seed_snapshot(scope_id="hr", resource_ids=[7], distinct_users=10)
+    popular_fixture.revoke_document_view(user="alice", document_id=7)
+    assert popular_fixture.list_for("alice") == []
+
+
+def test_permission_version_change_cannot_reuse_popular_cache(popular_fixture):
+    first = popular_fixture.list_for("alice")
+    popular_fixture.revoke_document_view(user="alice", document_id=7)
+    second = popular_fixture.list_for("alice")
+    assert first.cache_key != second.cache_key
+    assert all(7 not in item.supporting_resource_ids for item in second.items)
 ```
 
 - [ ] **Step 2: Run RED**
@@ -114,10 +128,13 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement scoped merge and privacy filter**
 
-Merge visible names, curated questions, personal history, scoped popular snapshots, and favorites in the specified priority. Cache key is `(user_id, permission_version, query_prefix)`. Exclude restricted, private-marked, and sensitive-pattern questions before aggregation.
+Merge visible names, curated questions, personal history, scoped popular snapshots, and favorites in the specified priority. Every snapshot stores the current supporting resource IDs; response serialization intersects them with the requesting user's current visible resource set and suppresses a question when no visible current support remains. `visible_resource_fingerprint` is SHA-256 over sorted `(resource_type, resource_id, current_version_id, classification_revision)` tuples, so equal knowledge-library buckets cannot erase document-level ACL differences. Cache key is `(user_id, permission_version, visible_resource_fingerprint, query_prefix)`. Exclude restricted, private-marked, and sensitive-pattern questions before aggregation.
 
 ```python
-cache_key = f"suggest:{user['id']}:{user['permission_version']}:{normalize_prefix(query)}"
+cache_key = (
+    f"suggest:{user['id']}:{user['permission_version']}:"
+    f"{visible_resource_fingerprint}:{normalize_prefix(query)}"
+)
 ```
 
 - [ ] **Step 4: Run suggestion/popular tests**
@@ -204,6 +221,14 @@ def test_three_version_events_become_one_notification(notification_fixture):
     delivered = notification_fixture.deliver()
     assert delivered.created == 1
     assert notification_fixture.items()[0].event_count == 3
+
+
+def test_delivery_drops_event_after_acl_revocation(notification_fixture):
+    notification_fixture.subscribe(document_id=7)
+    notification_fixture.publish("document.updated", document_id=7, version_id=2)
+    notification_fixture.revoke_document_view(document_id=7)
+    notification_fixture.deliver()
+    assert notification_fixture.items() == []
 ```
 
 - [ ] **Step 2: Run RED**
@@ -216,7 +241,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement outbox, aggregation window, and ACL-safe opening**
 
-Version/task commits append outbox events in their transaction. Delivery groups by recipient/resource/type/window and uses idempotency keys. `notification_response` removes summary/action if ACL is gone.
+Version/task commits append identifier-only outbox events in their transaction: event type, resource type/ID, version/task ID, actor ID, and time; no title, excerpt, question, or generated summary is stored there. Delivery rechecks recipient ACL before creating a notification, drops unauthorized events, generates a safe summary only after authorization, then groups allowed events by recipient/resource/type/window. Opening performs a second ACL check as defense in depth.
 
 ```python
 event_key = f"{recipient_id}:{resource_type}:{resource_id}:{event_type}:{window_start}"

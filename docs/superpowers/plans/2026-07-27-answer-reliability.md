@@ -1,6 +1,6 @@
 # Answer Reliability Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add evidence-aware refusal, explainable confidence, conflict detection, and permission-safe cross-document comparison to RAGv3.
 
@@ -437,7 +437,7 @@ git commit -m "feat: add controlled document comparison"
 **Interfaces:**
 - Produces: `POST /reliability/compare`.
 - Produces: `GET /answers/{message_id}/reliability`.
-- Produces: `PUT /knowledge-operations/conflicts/{conflict_id}`.
+- Produces: `PUT /knowledge-operations/conflicts/{conflict_id}/resolve`.
 
 - [ ] **Step 1: Write failing API and component tests**
 
@@ -512,8 +512,10 @@ git commit -m "feat: expose answer reliability"
 **Files:**
 - Modify: `rag/knowledge_tasks.py`
 - Modify: `rag/reliability/conflicts.py`
+- Modify: `rag/user_db.py`
 - Modify: `docs/development-log-security-boundary-hardening.md`
 - Test: `tests/test_reliability_operations.py`
+- Test: `tests/test_knowledge_task_type_migration.py`
 
 **Interfaces:**
 - Produces aggregated task types `insufficient_evidence` and `evidence_conflict`.
@@ -527,21 +529,33 @@ def test_repeated_refusals_create_one_owner_task(task_fixture):
     tasks = task_fixture.db.list_tasks(task_type="insufficient_evidence")
     assert len(tasks) == 1
     assert tasks[0]["report_count"] == 3
+
+
+def test_task_type_migration_preserves_rows_and_foreign_keys(legacy_task_db):
+    legacy_task_db.seed_task(task_type="outdated")
+    migrate_knowledge_task_types(legacy_task_db.connection)
+    assert legacy_task_db.list_tasks()[0]["task_type"] == "outdated"
+    assert legacy_task_db.foreign_key_check() == []
+    legacy_task_db.create_task(task_type="insufficient_evidence")
+    legacy_task_db.create_task(task_type="evidence_conflict")
 ```
 
 - [ ] **Step 2: Run and verify RED**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_reliability_operations.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_reliability_operations.py tests\test_knowledge_task_type_migration.py -v
 ```
 
 Expected: FAIL because reliability task types are unknown.
 
 - [ ] **Step 3: Add deterministic aggregation keys**
 
-Use normalized question hash + document ID for refusals and conflict active key for conflicts. Reuse task visibility and owner assignment; do not expose reporter identity beyond existing rules.
+First inspect `sqlite_master.sql`. If the installed table still has the two-value CHECK, snapshot the table's index and trigger definitions, set `PRAGMA foreign_keys=OFF` before `BEGIN IMMEDIATE`, create `knowledge_tasks_new` with all four values, copy every named column, compare row counts, drop old, rename new, recreate indexes/triggers, and run `PRAGMA foreign_key_check` before commit. Commit only when the check is empty, then restore `PRAGMA foreign_keys=ON` in `finally`. SQL errors, row-count mismatch, or foreign-key errors roll the transaction back and leave the old table intact; a process crash is covered by SQLite transaction recovery. Fresh databases already use the four-value CHECK from the trusted-loop plan.
 
 ```python
+TASK_TYPES = ("outdated", "not_useful", "insufficient_evidence", "evidence_conflict")
+
+
 def refusal_active_key(question: str, document_id: int | None) -> str:
     raw = f"insufficient:{normalize_question(question)}:{document_id or 0}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -551,7 +565,7 @@ def refusal_active_key(question: str, document_id: int | None) -> str:
 
 ```powershell
 & .\.venv\Scripts\python.exe -m pytest -q
-& .\.venv\Scripts\python.exe -m ruff check rag/reliability tests/test_answerability.py tests/test_confidence.py tests/test_conflicts.py tests/test_document_comparison.py tests/test_reliability_api.py
+& .\.venv\Scripts\python.exe -m ruff check rag/reliability tests/test_answerability.py tests/test_confidence.py tests/test_conflicts.py tests/test_document_comparison.py tests/test_reliability_api.py tests/test_knowledge_task_type_migration.py
 Set-Location frontend
 & .\node_modules\.bin\vitest.cmd run
 & npm.cmd run build
@@ -565,6 +579,6 @@ Expected: all tests/build pass and no data residue.
 - [ ] **Step 5: Document and commit**
 
 ```powershell
-git add rag/knowledge_tasks.py rag/reliability tests/test_reliability_operations.py docs/development-log-security-boundary-hardening.md
+git add rag/knowledge_tasks.py rag/user_db.py rag/reliability tests/test_reliability_operations.py tests/test_knowledge_task_type_migration.py docs/development-log-security-boundary-hardening.md
 git commit -m "docs: verify answer reliability"
 ```
