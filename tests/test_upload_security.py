@@ -88,3 +88,24 @@ def test_index_failure_compensates_file_and_permission(
         isolated_api.app.state.user_db.get_document_permission("failed.txt", "rag_docs")
         is None
     )
+
+
+def test_delete_file_refreshes_the_default_pipeline(
+    isolated_api, make_user, monkeypatch
+):
+    """Deleting a default-library file must rebuild its in-memory pipeline."""
+    import rag.api as api
+
+    user, headers = make_user("alice")
+    upload_dir = isolated_api.app.state.upload_dir
+    upload_dir.mkdir()
+    (upload_dir / "delete-me.txt").write_text("private", encoding="utf-8")
+    api.user_db.create_document_permission("delete-me.txt", "rag_docs", user["id"], 1, False)
+    refreshed = object()
+    monkeypatch.setattr("rag.vector_store.delete_doc", lambda *args: None)
+    monkeypatch.setattr("rag.pipeline.RAGPipeline", lambda **kwargs: refreshed)
+
+    response = isolated_api.delete("/files/delete-me.txt", headers=headers)
+
+    assert response.status_code == 200
+    assert api.pipeline is refreshed

@@ -450,6 +450,34 @@ class UserDB:
             )
             self._conn.commit()
 
+    def update_kb_overview(self, kb_id: str, overview: str) -> bool:
+        """Update an existing knowledge base overview through the shared connection."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_metadata SET overview = ? WHERE kb_id = ?",
+                (overview, kb_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_kb_document_toc(self, kb_id: str, filename: str, toc: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
+                (toc, kb_id, filename),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_kb_document_summary(self, kb_id: str, filename: str, summary: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_documents SET summary = ? WHERE kb_id = ? AND filename = ?",
+                (summary, kb_id, filename),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def get_kb_metadata_by_names(self, kb_ids: list[str]) -> dict[str, dict[str, Any] | None]:
         """批量查询 KB 元数据。返回 {kb_id: meta_dict_or_None}。"""
         if not kb_ids:

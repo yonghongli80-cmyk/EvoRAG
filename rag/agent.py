@@ -117,14 +117,21 @@ class RAGAgent:
     """Wraps a LangChain Agent with tools."""
 
     def __init__(self, retriever, db_path: str = ":memory:", max_iterations: int = 5, output_dir: str = "data/charts"):
+        self.max_iterations = max_iterations
+        self.output_dir = output_dir
+        self.tools = [_wrap_tool_with_reflection(t) for t in create_agent_tools(retriever, db_path, output_dir)]
+        self.llm = None
+        self.agent = None
+
+    def _ensure_agent(self) -> None:
+        """Create the external model client only when an Agent query is requested."""
+        if self.agent is not None:
+            return
+
         from langchain.agents import create_agent
         from langchain_openai import ChatOpenAI
 
         from config import settings
-
-        self.max_iterations = max_iterations
-        self.output_dir = output_dir
-        self.tools = [_wrap_tool_with_reflection(t) for t in create_agent_tools(retriever, db_path, output_dir)]
 
         self.llm = ChatOpenAI(
             model=settings.deepseek_model,
@@ -146,6 +153,8 @@ class RAGAgent:
         import os
 
         from langchain_core.messages import HumanMessage
+
+        self._ensure_agent()
 
         max_reflection = 2
         current_question = question

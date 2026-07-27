@@ -1,6 +1,19 @@
 from config import settings
 
 
+def test_query_rejects_api_key_without_a_real_user(isolated_api, monkeypatch):
+    """An API key principal must resolve to a real user before querying."""
+    monkeypatch.setattr(settings, "auth_keys", '{"removed-user":"stale-key"}')
+
+    response = isolated_api.post(
+        "/query",
+        json={"question": "confidential information"},
+        headers={"X-API-Key": "stale-key"},
+    )
+
+    assert response.status_code == 401
+
+
 def test_bearer_token_resolves_full_database_user(isolated_api, make_user):
     user, headers = make_user("alice")
 

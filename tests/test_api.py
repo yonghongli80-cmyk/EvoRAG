@@ -27,7 +27,7 @@ def test_health():
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_index_adds_to_kb(mock_kb_cls, tmp_path):
+def test_index_adds_to_kb(mock_kb_cls, tmp_path, isolated_api):
     mock_manager = MagicMock()
     mock_manager.add_document.return_value = 5
     mock_kb_cls.return_value = mock_manager
@@ -36,7 +36,11 @@ def test_index_adds_to_kb(mock_kb_cls, tmp_path):
     doc.write_text("test content")
 
     with open(doc, "rb") as f:
-        response = client.post("/index", files={"file": ("test.txt", f, "text/plain")})
+        response = isolated_api.post(
+            "/index",
+            files={"file": ("test.txt", f, "text/plain")},
+            headers=_auth_headers(),
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -47,7 +51,7 @@ def test_index_adds_to_kb(mock_kb_cls, tmp_path):
 
 @patch("rag.pipeline.RAGPipeline")
 def test_query_without_index_returns_400(mock_pipeline_cls):
-    response = client.post("/query", json={"question": "test"})
+    response = client.post("/query", json={"question": "test"}, headers=_auth_headers())
     assert response.status_code == 400
 
 
@@ -59,7 +63,11 @@ def test_query_returns_answer():
     # 直接设置全局 pipeline
     api_module.pipeline = mock_pipeline
     try:
-        response = client.post("/query", json={"question": "what is RAG?"})
+        response = client.post(
+            "/query",
+            json={"question": "what is RAG?"},
+            headers=_auth_headers(),
+        )
         assert response.status_code == 200
         assert response.json()["answer"] == "answer from RAG"
     finally:
@@ -88,7 +96,8 @@ def test_query_knowledge_base(mock_kb_manager_cls):
     assert data["kb_id"] == "kb_abc12345"
     assert len(data["results"]) == 1
     assert data["results"][0]["doc_name"] == "doc.txt"
-    mock_manager.search.assert_called_once_with("kb_abc12345", "what is RAG?", top_k=3)
+    assert len(data["results"]) <= 3
+    mock_manager.search.assert_called_once_with("kb_abc12345", "what is RAG?", top_k=9)
 
 
 @patch("rag.api.KnowledgeBaseManager")
@@ -179,7 +188,7 @@ def test_list_tags(mock_get_client):
     p3.payload = {"tags": []}
     mock_client.scroll.return_value = ([p1, p2, p3], None)
 
-    response = client.get("/tags")
+    response = client.get("/tags", headers=_auth_headers())
     assert response.status_code == 200
     data = response.json()
     assert "tags" in data
@@ -195,7 +204,7 @@ def test_list_tags_empty_collection():
         mock_client.collection_exists.return_value = True
         mock_client.scroll.return_value = ([], None)
 
-        response = client.get("/tags")
+        response = client.get("/tags", headers=_auth_headers())
         assert response.status_code == 200
         assert response.json()["tags"] == []
 
@@ -226,7 +235,7 @@ def test_files_endpoint_returns_in_kb_field():
     from fastapi.testclient import TestClient
     from rag.api import app
     client = TestClient(app)
-    response = client.get("/files")
+    response = client.get("/files", headers=_auth_headers())
     assert response.status_code == 200
     data = response.json()
     if data["files"]:

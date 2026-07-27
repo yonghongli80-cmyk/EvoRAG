@@ -26,10 +26,16 @@ class RedisCache:
         self._fallback: dict[str, tuple[str, float]] = {}  # 内存降级缓存
         self._lock = threading.Lock()
         self._connected = False
+        self._last_connection_attempt = 0.0
+        self._connection_retry_seconds = 30
 
     def _get_redis(self):
         """延迟初始化 Redis 连接。"""
         if self._redis is None:
+            now = time.monotonic()
+            if now - self._last_connection_attempt < self._connection_retry_seconds:
+                return None
+            self._last_connection_attempt = now
             try:
                 import redis
                 self._redis = redis.from_url(settings.redis_url, decode_responses=True)

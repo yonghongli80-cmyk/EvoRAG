@@ -844,7 +844,8 @@ async def upload_file(
 
 @app.delete("/files/{filename}", summary="删除文件", description="从 data/upload/ 删除文件并重新索引")
 async def delete_file(filename: str, authorization: str = Header(default="")):
-    from rag.vector_store import delete_doc, COLLECTION_NAME
+    from rag.pipeline import RAGPipeline
+    from rag.vector_store import COLLECTION_NAME, delete_doc
 
     global pipeline
 
@@ -871,7 +872,6 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
     await asyncio.to_thread(check_doc_permission, user_db, safe_name, "rag_docs", user_dict, "delete")
 
     # 先删向量，再删文件（确保向量删除成功）
-    from rag.vector_store import delete_doc, COLLECTION_NAME
     try:
         delete_doc(COLLECTION_NAME, safe_name)
         logger.info("向量已删除: %s", safe_name)
@@ -1174,7 +1174,7 @@ async def batch_import(
 
 
 @app.post("/query", response_model=QueryResponse, summary="查询知识库", description="对已索引的文档进行语义检索问答")
-async def query(req: QueryRequest, user_id: str = Security(verify_api_key), authorization: str = Header(default="")):
+async def query(req: QueryRequest, user: dict = Depends(require_user)):
     global pipeline
     with _pipeline_lock.read():
         if pipeline is None:
@@ -1183,15 +1183,6 @@ async def query(req: QueryRequest, user_id: str = Security(verify_api_key), auth
                 content={"error": "尚未索引文档，请先调用 POST /index 上传文档"},
             )
         current_pipeline = pipeline
-
-    # Try to resolve user from authorization header (optional)
-    user = None
-    if authorization:
-        try:
-            token = authorization.replace("Bearer ", "")
-            user = await asyncio.to_thread(_get_current_user, token)
-        except (HTTPException, Exception):
-            logger.debug("Query auth failed (non-critical): token invalid or expired")
 
     # Determine session_id: use conversation-based session if user + conversation_id provided
     session_id = req.session_id
@@ -1370,6 +1361,9 @@ async def update_kb_scope(
 
 @app.delete("/knowledge-bases/{kb_id}", summary="删除知识库", description="删除指定知识库及其所有文档")
 async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
+    if kb_id == "rag_docs":
+        raise HTTPException(status_code=400, detail="不能删除系统集合 rag_docs")
+
     require_kb_edit(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
@@ -1619,27 +1613,13 @@ async def get_knowledge_base_detail(
 
 
 @app.put("/knowledge-bases/{kb_id}/overview", summary="更新知识库概述")
-async def update_kb_overview(kb_id: str, req: KBOverviewRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
-
-    def _update():
-        import sqlite3
-        from config import settings as _settings
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute(
-                "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
-                "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
-                (kb_id, req.overview, req.overview)
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    await asyncio.to_thread(_update)
+async def update_kb_overview(
+    kb_id: str, req: KBOverviewRequest, user: dict = Depends(require_user)
+):
+    require_kb_edit(user_db, kb_id, user)
+    updated = await asyncio.to_thread(user_db.update_kb_overview, kb_id, req.overview)
+    if not updated:
+        raise HTTPException(status_code=404, detail="知识库不存在")
     return {"status": "updated"}
 
 
@@ -1668,60 +1648,35 @@ async def rename_knowledge_base(kb_id: str, req: KBRenameRequest, authorization:
 
 
 @app.put("/knowledge-bases/{kb_id}/documents/{doc_name}/toc", summary="更新文档目录")
-async def update_doc_toc(kb_id: str, doc_name: str, req: KBTocRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+async def update_doc_toc(
+    kb_id: str, doc_name: str, req: KBTocRequest, user: dict = Depends(require_user)
+):
+    document = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
 
     import json
-    def _update():
-        import sqlite3
 
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            toc_str = json.dumps(req.toc, ensure_ascii=False)
-            cur = conn.execute(
-                "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
-                (toc_str, kb_id, doc_name)
-            )
-            if cur.rowcount == 0:
-                return False
-            conn.commit()
-            return True
-        finally:
-            conn.close()
-
-    result = await asyncio.to_thread(_update)
-    if not result:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    await asyncio.to_thread(
+        user_db.update_kb_document_toc,
+        kb_id,
+        doc_name,
+        json.dumps(req.toc, ensure_ascii=False),
+    )
     return {"status": "updated"}
 
 
 @app.put("/knowledge-bases/{kb_id}/documents/{doc_name}/summary", summary="更新文档概述")
-async def update_doc_summary(kb_id: str, doc_name: str, req: KBSummaryRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
-
-    def _update():
-        import sqlite3
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.execute(
-                "UPDATE kb_documents SET summary = ? WHERE kb_id = ? AND filename = ?",
-                (req.summary, kb_id, doc_name)
-            )
-            if cur.rowcount == 0:
-                return False
-            conn.commit()
-            return True
-        finally:
-            conn.close()
-
-    result = await asyncio.to_thread(_update)
-    if not result:
+async def update_doc_summary(
+    kb_id: str, doc_name: str, req: KBSummaryRequest, user: dict = Depends(require_user)
+):
+    document = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if document is None:
         raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
+
+    await asyncio.to_thread(user_db.update_kb_document_summary, kb_id, doc_name, req.summary)
     return {"status": "updated"}
 
 
