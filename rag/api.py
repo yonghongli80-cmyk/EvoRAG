@@ -17,6 +17,7 @@ from rag.api_security import (
     redact_source_config,
     require_admin,
     require_data_sources_admin,
+    require_doc_edit,
     require_kb_edit,
     require_kb_view,
     require_user,
@@ -25,6 +26,7 @@ from rag.kb_metadata import generate_summary, generate_toc
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
+from rag.permissions import filter_chunks_by_permission
 from rag.user_db import UserDB
 
 # Initialize logging at module level so it is active before any request arrives.
@@ -1521,10 +1523,16 @@ async def query_knowledge_base(
 
     manager = KnowledgeBaseManager()
     try:
-        chunks = manager.search(kb_id, req.question, top_k=req.top_k)
+        chunks = manager.search(kb_id, req.question, top_k=req.top_k * 3)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    results = [{"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text": c.text} for c in chunks]
+    visible_chunks = await asyncio.to_thread(
+        filter_chunks_by_permission, user_db, kb_id, chunks, user
+    )
+    results = [
+        {"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text": c.text}
+        for c in visible_chunks[:req.top_k]
+    ]
     return {"kb_id": kb_id, "results": results}
 
 
@@ -1925,6 +1933,7 @@ async def update_document_permission(doc_id: int, authorization: str = Header(de
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可修改权限")
         new_val = user_db.toggle_document_visibility(doc_id)
@@ -1946,6 +1955,7 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可共享")
         # I4: 检查目标用户是否存在
@@ -1953,10 +1963,15 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         if not target:
             raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
         try:
-            share_id = user_db.share_document(doc_id, req.user_id, user_dict["id"])
+            share_id = user_db.share_document(doc_id, req.user_id, user_dict["id"], req.permission)
         except _sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="该用户已被共享")
-        return {"doc_id": doc_id, "user_id": req.user_id, "granted_by": user_dict["id"]}
+        return {
+            "doc_id": doc_id,
+            "user_id": req.user_id,
+            "granted_by": user_dict["id"],
+            "permission": req.permission,
+        }
 
     try:
         return await asyncio.to_thread(_share)
@@ -1973,6 +1988,7 @@ async def unshare_document(doc_id: int, user_id: int, authorization: str = Heade
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可撤销共享")
         user_db.unshare_document(doc_id, user_id)

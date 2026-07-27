@@ -13,7 +13,7 @@ from fastapi.security import APIKeyHeader
 
 from config import settings
 from rag.auth import decode_token
-from rag.permissions import check_kb_permission
+from rag.permissions import check_doc_permission, check_kb_permission
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -109,6 +109,26 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
     check_kb_permission(db, kb_id, user, "edit")
     return meta
+
+
+def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
+    doc = db.get_document_permission(doc_name, kb_id)
+    if doc is None:
+        if user.get("is_admin"):
+            return {"id": 0, "doc_name": doc_name, "kb_id": kb_id, "historical": True}
+        raise HTTPException(status_code=403, detail="文档尚未建立权限记录")
+    check_doc_permission(db, doc_name, kb_id, user, "view")
+    return doc
+
+
+def require_doc_edit(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
+    doc = db.get_document_permission(doc_name, kb_id)
+    if doc is None:
+        raise HTTPException(status_code=409, detail="文档权限记录缺失")
+    if doc.get("protected"):
+        raise HTTPException(status_code=403, detail="受保护文档不可修改")
+    check_doc_permission(db, doc_name, kb_id, user, "edit")
+    return doc
 
 
 async def require_data_sources_admin(

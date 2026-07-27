@@ -74,17 +74,17 @@ def test_admin_bypass_all_permissions(db):
     assert result["doc_name"] == "secret.pdf"
 
 
-def test_old_doc_without_permission_record_passes(db):
-    """旧文档无权限记录时，所有操作放行（返回 None，不抛异常）。"""
+def test_old_doc_without_permission_record_is_rejected_for_normal_user(db):
+    """Historical documents without an ACL must not be visible by default."""
     user = _make_user(db, "alice")
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="view")
-    assert result is None
+    with pytest.raises(HTTPException) as exc:
+        check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="view")
+    assert exc.value.status_code == 403
 
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="delete")
-    assert result is None
-
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="edit")
-    assert result is None
+    for action in ("delete", "edit"):
+        with pytest.raises(HTTPException) as exc:
+            check_doc_permission(db, "old_file.pdf", "rag_docs", user, action=action)
+        assert exc.value.status_code == 403
 
 
 # -- check_doc_permission: edit / delete -----------------------------------
@@ -192,13 +192,13 @@ def test_filter_chunks_removes_private_non_owned(db):
 
 
 def test_filter_chunks_old_doc_no_permission_record(db):
-    """旧文档无权限记录，视为公开，保留。"""
+    """Historical chunks without an ACL are removed for normal users."""
     from rag.models import Chunk
     from rag.permissions import filter_chunks_by_permission
     viewer = _make_user(db, "bob")
     chunks = [Chunk(text="a", doc_name="old_file.pdf", chunk_index=0)]
     result = filter_chunks_by_permission(db, "kb1", chunks, viewer)
-    assert len(result) == 1
+    assert result == []
 
 
 def test_filter_chunks_shared_doc_included(db):

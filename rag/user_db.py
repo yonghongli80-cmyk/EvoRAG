@@ -975,6 +975,11 @@ class UserDB:
                 "INSERT INTO document_shares (doc_id, user_id, granted_by, permission) VALUES (?, ?, ?, ?)",
                 (doc_id, user_id, granted_by, permission),
             )
+            self._conn.execute(
+                "UPDATE document_permissions SET scope = 'shared', is_public = 0 "
+                "WHERE id = ? AND scope = 'private'",
+                (doc_id,),
+            )
             self._conn.commit()
             return cur.lastrowid
 
@@ -984,6 +989,15 @@ class UserDB:
                 "DELETE FROM document_shares WHERE doc_id = ? AND user_id = ?",
                 (doc_id, user_id),
             )
+            remaining = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM document_shares WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
+            if remaining["cnt"] == 0:
+                self._conn.execute(
+                    "UPDATE document_permissions SET scope = 'private' "
+                    "WHERE id = ? AND scope = 'shared'",
+                    (doc_id,),
+                )
             self._conn.commit()
 
     def is_document_shared(self, doc_id: int, user_id: int, permission: str = None) -> bool:
@@ -1019,7 +1033,7 @@ class UserDB:
     def list_shared_users(self, doc_id: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT u.id, u.username, ds.granted_by, ds.created_at AS granted_at "
+                "SELECT u.id, u.username, ds.permission, ds.granted_by, ds.created_at AS granted_at "
                 "FROM document_shares ds JOIN users u ON ds.user_id = u.id "
                 "WHERE ds.doc_id = ? ORDER BY ds.created_at",
                 (doc_id,),
