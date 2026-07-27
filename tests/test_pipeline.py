@@ -364,8 +364,8 @@ def test_prepare_context_blocks_injection():
     assert "拦截" in error
 
 
-def test_prepare_context_returns_cached():
-    """_prepare_context 缓存命中时返回 cached route。"""
+def test_pipeline_does_not_construct_final_answer_cache():
+    """Final answers are deliberately not cached without an ACL-versioned key."""
     from unittest.mock import patch, MagicMock
     from rag.pipeline import RAGPipeline
 
@@ -380,12 +380,7 @@ def test_prepare_context_returns_cached():
          patch("rag.pipeline.Reranker"):
         p = RAGPipeline("test.txt", kb_id="test_kb")
 
-    p._cache.set("cached question", "cached answer")
-    result, error = p._prepare_context("cached question", "s1", None)
-    assert error is None
-    assert result["route"] == "cached"
-    assert result["answer"] == "cached answer"
-    assert "sources" in result
+    assert not hasattr(p, "_cache")
 
 
 @patch("rag.agent.route_question", return_value="rag")

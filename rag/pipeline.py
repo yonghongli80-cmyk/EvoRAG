@@ -15,7 +15,6 @@ from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
 from rag.reranker import Reranker
-from rag.redis_cache import RedisCache
 from rag.retriever import Retriever
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
 from rag.vector_store import add, clear
@@ -62,7 +61,6 @@ class RAGPipeline:
 
         self.agent = RAGAgent(retriever=self.retriever)
         self.tracker = ExecutionTracker(db_path=memory_db_path)
-        self._cache = RedisCache()
         self._agent_lock = threading.Lock()
         self._async_agent_lock = asyncio.Lock()
 
@@ -71,15 +69,11 @@ class RAGPipeline:
         self._kb_id = kb_id or "rag_docs"
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
-        """公共逻辑：guard -> cache -> route -> retrieve -> rerank -> build_messages。"""
+        """公共逻辑：guard -> route -> retrieve -> rerank -> build_messages。"""
         question = sanitize_input(question)
         guard = check_injection(question)
         if guard.blocked:
             return None, f"请求被安全策略拦截：{guard.reason}"
-
-        cached = self._cache.get(question)
-        if cached:
-            return {"route": "cached", "answer": cached, "context": [], "sources": [{"doc_name": "缓存", "chunk_index": 0}]}, None
 
         from rag.agent import route_question
         route = route_question(question)
@@ -174,7 +168,6 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer)
         return QueryResult(answer=answer, context=context, sources=sources)
 
     async def query_stream(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
@@ -246,8 +239,6 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer)
-
         yield 'data: {"type": "done"}\n\n'
 
     def _wrap_agent_tools(self, captured_calls: list):
