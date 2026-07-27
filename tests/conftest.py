@@ -56,16 +56,20 @@ def isolated_api(tmp_path, monkeypatch):
 
     db = UserDB(str(tmp_path / "users.db"))
     upload_dir = tmp_path / "upload"
+    kb_files_root = tmp_path / "kb_files"
     previous_db = api.user_db
     previous_state_db = getattr(api.app.state, "user_db", None)
     previous_upload_dir = getattr(api.app.state, "upload_dir", None)
+    previous_kb_files_root = getattr(api.app.state, "kb_files_root", None)
 
     monkeypatch.setattr(api, "user_db", db)
     monkeypatch.setattr(api, "_DB_PATH", tmp_path / "users.db")
     monkeypatch.setattr(api, "DATA_DIR", upload_dir)
+    monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root, raising=False)
     monkeypatch.setattr(settings, "auth_enabled", True)
     api.app.state.user_db = db
     api.app.state.upload_dir = upload_dir
+    api.app.state.kb_files_root = kb_files_root
 
     with TestClient(api.app) as client:
         yield client
@@ -79,6 +83,10 @@ def isolated_api(tmp_path, monkeypatch):
         del api.app.state.upload_dir
     else:
         api.app.state.upload_dir = previous_upload_dir
+    if previous_kb_files_root is None:
+        del api.app.state.kb_files_root
+    else:
+        api.app.state.kb_files_root = previous_kb_files_root
     db.close()
 
 

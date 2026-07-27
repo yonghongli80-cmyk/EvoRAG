@@ -23,6 +23,12 @@ from rag.api_security import (
     require_user,
 )
 from rag.kb_metadata import generate_summary, generate_toc
+from rag.kb_file_store import (
+    final_document_path,
+    promote_stage,
+    resolve_stored_path,
+    stage_upload,
+)
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
@@ -199,6 +205,7 @@ async def spa_fallback_middleware(request, call_next):
 
 # 数据目录
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "upload"
+KB_FILES_ROOT = Path(__file__).resolve().parent.parent / "data" / "kb_files"
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".csv"}
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -1367,6 +1374,22 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
 
     manager = KnowledgeBaseManager()
     try:
+        documents = await asyncio.to_thread(user_db.list_kb_documents, kb_id)
+        for record in documents:
+            await asyncio.to_thread(manager.remove_document, kb_id, record["filename"])
+            permission = await asyncio.to_thread(
+                user_db.get_document_permission, record["filename"], kb_id
+            )
+            if permission:
+                await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
+            if record["file_path"]:
+                stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
+                stored.unlink(missing_ok=True)
+                try:
+                    stored.parent.rmdir()
+                except OSError:
+                    pass
+            await asyncio.to_thread(user_db.delete_kb_document, record["id"])
         manager.delete_kb(kb_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1394,66 +1417,68 @@ async def add_document_to_kb(
 ):
     require_kb_edit(user_db, kb_id, user)
 
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-    filename = Path(file.filename).name if file.filename else "unnamed.txt"
-    suffix = Path(file.filename).suffix if file.filename else ".txt"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    try:
-        tmp.write(content)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
-    # Use the authenticated caller as the immutable document owner.
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+    filename = Path(file.filename or "unnamed.txt").name
+    if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="不支持的文件格式")
+    if await asyncio.to_thread(user_db.get_kb_document, kb_id, filename):
+        raise HTTPException(status_code=409, detail="同名文件已存在")
 
-    # 先创建权限记录（索引失败时回滚）
-    perm_id = None
-    def _create_perm():
-        return user_db.create_document_permission(filename, kb_id, user["id"], is_public=False)
-    perm_id = await asyncio.to_thread(_create_perm)
-
+    stage = None
+    destination = None
+    document_id = None
+    permission_id = None
+    indexed = False
+    completed = False
     try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document(kb_id, tmp_path, doc_name=filename, doc_permission_id=perm_id)
-    except Exception as e:
-        # 回滚权限记录
-        if perm_id:
-            await asyncio.to_thread(user_db.delete_document_permission, perm_id)
-        raise HTTPException(status_code=400, detail=str(e))
+        stage = await asyncio.to_thread(stage_upload, KB_FILES_ROOT, filename, content)
+        parsed = await asyncio.to_thread(load_document, str(stage))
+        toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
+        summary = generate_summary(parsed)
+        document_id = await asyncio.to_thread(user_db.create_kb_document_pending, kb_id, filename)
+        permission_id = await asyncio.to_thread(
+            user_db.create_document_permission, filename, kb_id, user["id"], 1, False
+        )
+        count = await asyncio.to_thread(
+            KnowledgeBaseManager().add_document,
+            kb_id,
+            str(stage),
+            doc_name=filename,
+            doc_permission_id=permission_id,
+        )
+        indexed = True
+        destination = final_document_path(KB_FILES_ROOT, kb_id, document_id, filename)
+        await asyncio.to_thread(promote_stage, stage, destination)
+        stage = None
+        await asyncio.to_thread(
+            user_db.finish_kb_document, document_id, str(destination), toc, summary, count
+        )
+        completed = True
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if indexed:
+            try:
+                await asyncio.to_thread(KnowledgeBaseManager().remove_document, kb_id, filename)
+            except Exception:
+                logger.exception("KB vector rollback failed", extra={"kb_id": kb_id})
+        if permission_id is not None:
+            await asyncio.to_thread(user_db.delete_document_permission, permission_id)
+        if document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, document_id)
+        logger.exception("KB document upload failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=400, detail="文件处理失败") from exc
     finally:
-        os.unlink(tmp_path)
-    # Insert into kb_documents
-    def _insert_doc():
-        import sqlite3
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            # Generate TOC and summary for the document
-            file_path = DATA_DIR / filename
-            toc_str = ""
-            summary_str = ""
-            if file_path.is_file():
-                try:
-                    content = load_document(str(file_path))
-                    toc_str = _json.dumps(generate_toc(content), ensure_ascii=False)
-                    summary_str = generate_summary(content)
-                except Exception:
-                    pass
-            conn.execute(
-                "INSERT OR REPLACE INTO kb_documents (kb_id, filename, file_path, toc, summary, chunk_count, status) VALUES (?, ?, ?, ?, ?, ?, 'indexed')",
-                (kb_id, filename, str(DATA_DIR / filename), toc_str, summary_str, count)
-            )
-            # Derive human-readable name from kb_id (format: kb_slug_hex)
-            readable_name = kb_id.split("_")[1] if "_" in kb_id else kb_id
-            conn.execute(
-                "INSERT OR IGNORE INTO kb_metadata (kb_id, name) VALUES (?, ?)",
-                (kb_id, readable_name)
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    await asyncio.to_thread(_insert_doc)
+        if stage is not None:
+            stage.unlink(missing_ok=True)
+            try:
+                stage.parent.rmdir()
+            except OSError:
+                pass
+        if destination is not None and not completed:
+            destination.unlink(missing_ok=True)
     return {"status": "added", "kb_id": kb_id, "chunks": count}
 
 
@@ -1462,29 +1487,32 @@ async def remove_document_from_kb(
     kb_id: str, doc_name: str, user: dict = Depends(require_user)
 ):
     require_kb_edit(user_db, kb_id, user)
+    record = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if record is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
-        manager.remove_document(kb_id, doc_name)
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"文档 {doc_name} 不存在")
-    # Clean up kb_documents record
-    def _cleanup():
-        import sqlite3
-        conn = sqlite3.connect(str(_DB_PATH))
-        try:
-            conn.execute("DELETE FROM kb_documents WHERE kb_id = ? AND filename = ?", (kb_id, doc_name))
-            conn.commit()
-        finally:
-            conn.close()
-    await asyncio.to_thread(_cleanup)
-
-    # 清理权限记录（级联会自动清理 shares）
-    def _cleanup_perm():
-        perm = user_db.get_document_permission(doc_name, kb_id)
-        if perm:
-            user_db.delete_document_permission(perm["id"])
-    await asyncio.to_thread(_cleanup_perm)
+        await asyncio.to_thread(user_db.set_kb_document_state, record["id"], "deleting")
+        await asyncio.to_thread(manager.remove_document, kb_id, doc_name)
+        permission = await asyncio.to_thread(user_db.get_document_permission, doc_name, kb_id)
+        if permission:
+            await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
+        if record["file_path"]:
+            stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
+            stored.unlink(missing_ok=True)
+            try:
+                stored.parent.rmdir()
+            except OSError:
+                pass
+        await asyncio.to_thread(user_db.delete_kb_document, record["id"])
+    except Exception as exc:
+        await asyncio.to_thread(
+            user_db.set_kb_document_state, record["id"], "delete_failed", str(exc)
+        )
+        logger.exception("KB document deletion failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=400, detail="文档删除失败") from exc
 
     return {"status": "removed", "kb_id": kb_id, "doc_name": doc_name}
 

@@ -13,10 +13,10 @@
 | `8cab15c` | 知识库 ACL：列表、详情、查询、删除遵循所有者/管理员/明确共享规则 | 74 项知识库相关测试通过 |
 | `68a0edf` | 文档 ACL：历史无权限记录默认拒绝、保护文件不可改、共享 edit 权限持久化 | 34 项文档/权限/上传/知识库测试通过 |
 | `3c0609a` | 移除按“问题文本”缓存最终答案的逻辑，避免跨用户泄漏 | 专门缓存安全测试通过 |
+| `89cd0b2` | 知识库源文件隔离路径、暂存写入与原子落盘基础模块 | 3 项路径安全测试通过 |
 
 ## 正在进行
 
-- 知识库源文件持久化与失败补偿（避免 KB 仅引用临时文件）。
 - 审计、数据生命周期与最终验证。
 
 ## 回家后可执行的验证
@@ -33,6 +33,7 @@ Set-Location $project
   tests\test_upload_security.py `
   tests\test_kb_security_boundaries.py `
   tests\test_document_security_boundaries.py `
+  tests\test_kb_file_lifecycle.py `
   tests\test_pipeline_cache_security.py -v
 
 Set-Location "$project\frontend"

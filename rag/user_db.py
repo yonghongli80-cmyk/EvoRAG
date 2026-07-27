@@ -94,6 +94,7 @@ class UserDB:
                     summary TEXT DEFAULT '',
                     chunk_count INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'pending',
+                    last_error TEXT DEFAULT '',
                     added_at TEXT DEFAULT (datetime('now')),
                     UNIQUE(kb_id, filename)
                 );
@@ -274,6 +275,13 @@ class UserDB:
                 self._conn.execute("ALTER TABLE users ADD COLUMN password_changed_at REAL DEFAULT NULL")
                 self._conn.commit()
 
+            # Persist only a bounded diagnostic for retryable KB document work.
+            try:
+                self._conn.execute("SELECT last_error FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN last_error TEXT DEFAULT ''")
+                self._conn.commit()
+
     # ------------------------------------------------------------------
     # User Search (Phase 2)
     # ------------------------------------------------------------------
@@ -363,6 +371,65 @@ class UserDB:
         if row is None:
             return None
         return dict(row)
+
+    # ------------------------------------------------------------------
+    # KB Documents (durable source-file lifecycle)
+    # ------------------------------------------------------------------
+
+    def create_kb_document_pending(self, kb_id: str, filename: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO kb_documents (kb_id, filename, status) VALUES (?, ?, 'pending')",
+                (kb_id, filename),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_kb_document(
+        self, document_id: int, file_path: str, toc: str, summary: str, chunk_count: int
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE kb_documents SET file_path = ?, toc = ?, summary = ?, "
+                "chunk_count = ?, status = 'indexed', last_error = '' WHERE id = ?",
+                (file_path, toc, summary, chunk_count, document_id),
+            )
+            self._conn.commit()
+
+    def set_kb_document_state(
+        self, document_id: int, status: str, last_error: str = ""
+    ) -> None:
+        if status not in {"pending", "indexed", "deleting", "delete_failed"}:
+            raise ValueError("invalid kb document status")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE kb_documents SET status = ?, last_error = ? WHERE id = ?",
+                (status, last_error[:500], document_id),
+            )
+            self._conn.commit()
+
+    def get_kb_document(self, kb_id: str, filename: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, kb_id, filename, file_path, toc, summary, chunk_count, status "
+                "FROM kb_documents WHERE kb_id = ? AND filename = ?",
+                (kb_id, filename),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_kb_documents(self, kb_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, kb_id, filename, file_path, toc, summary, chunk_count, status "
+                "FROM kb_documents WHERE kb_id = ? ORDER BY id",
+                (kb_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_kb_document(self, document_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM kb_documents WHERE id = ?", (document_id,))
+            self._conn.commit()
 
     def update_kb_scope(self, kb_id: str, scope: str) -> None:
         """更新 KB 的 scope 字段。scope 必须是 'private' 或 'public'。
