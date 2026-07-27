@@ -106,6 +106,8 @@
 
 数据分析助手是阶段 1 结构化查询网关的用户入口，不是一个可以执行任意 Python／SQL 的通用 Agent。
 
+它直接复用 `docs/superpowers/specs/2026-07-27-spreadsheet-knowledge-design.md` 定义的三层存储、只读查看器、向量切片和问询路由，不创建另一套表格数据库。
+
 ### 5.2 能力
 
 - 数据集和工作表发现。

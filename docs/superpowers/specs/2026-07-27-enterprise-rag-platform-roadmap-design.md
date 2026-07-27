@@ -62,13 +62,15 @@ LlamaIndex 不替换现有存储和权限系统。它只在跨文档比较等复
 
 规格：`2026-07-27-answer-reliability-design.md`
 
+Excel/CSV 独立详细规格：`2026-07-27-spreadsheet-knowledge-design.md`
+
 交付：
 
 - 无答案和证据不足处理。
 - 高／中／低置信度及理由。
 - 冲突资料检测。
 - LlamaIndex 跨文档比较 Workflow。
-- Excel/CSV 结构化导入与确定性查询。
+- Excel/CSV 原文件、结构化副本、独立向量切片、网页只读查看和确定性查询。
 
 ### 阶段 2：企业治理
 

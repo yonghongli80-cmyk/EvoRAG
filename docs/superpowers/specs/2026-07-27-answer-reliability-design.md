@@ -173,6 +173,12 @@ LlamaIndex 不直接连接文件目录、SQLite 或 Qdrant；它只接收工具�
 
 ## 8. Excel/CSV 结构化能力
 
+完整存储、查看器、切片、向量写入、问询、版本和迁移规范见：
+
+`docs/superpowers/specs/2026-07-27-spreadsheet-knowledge-design.md`
+
+本节只规定回答可靠性与表格能力的接口边界；详细规格优先。
+
 ### 8.1 双通道索引
 
 Excel/CSV 同时进入：
