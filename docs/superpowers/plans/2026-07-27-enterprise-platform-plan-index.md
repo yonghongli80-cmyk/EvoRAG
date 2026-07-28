@@ -5,16 +5,18 @@ This index fixes the execution order for the single RAGv3 platform. Each linked 
 ## Required Order
 
 1. `docs/superpowers/plans/2026-07-27-trusted-knowledge-loop.md`
-2. `docs/superpowers/plans/2026-07-27-answer-reliability.md`
-3. `docs/superpowers/plans/2026-07-27-spreadsheet-knowledge.md`
-4. `docs/superpowers/plans/2026-07-27-enterprise-governance.md`
-5. `docs/superpowers/plans/2026-07-27-employee-experience.md`
-6. `docs/superpowers/plans/2026-07-27-assistant-platform.md`
-7. `docs/superpowers/plans/2026-07-27-advanced-assistants.md`
+2. `docs/superpowers/plans/2026-07-28-incremental-material-lifecycle.md`
+3. `docs/superpowers/plans/2026-07-27-answer-reliability.md`
+4. `docs/superpowers/plans/2026-07-27-spreadsheet-knowledge.md`
+5. `docs/superpowers/plans/2026-07-27-enterprise-governance.md`
+6. `docs/superpowers/plans/2026-07-27-employee-experience.md`
+7. `docs/superpowers/plans/2026-07-27-assistant-platform.md`
+8. `docs/superpowers/plans/2026-07-27-advanced-assistants.md`
 
 ## Checkpoints
 
 - Do not start step 2 until the trusted knowledge loop migration and full regression pass.
+- Do not start answer reliability until the incremental material lifecycle migration, tombstone read-path audit, and full verification pass.
 - Answer reliability Tasks 1–3 are required before spreadsheet query answers are exposed.
 - Spreadsheet storage/query and assistant runtime are required before the data-analysis assistant.
 - Governance is required before company-wide rollout; ordinary sales/project/non-sensitive spreadsheet development may proceed with synthetic data while supervisor approval for payroll/attendance is pending.
