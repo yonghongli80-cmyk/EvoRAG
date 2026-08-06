@@ -2214,6 +2214,17 @@ class UserDB:
 
                 CREATE INDEX IF NOT EXISTS idx_doc_permissions_container
                 ON document_permissions(container_document_id);
+
+                CREATE TABLE IF NOT EXISTS material_unit_fingerprints (
+                    document_id INTEGER NOT NULL,
+                    version_id INTEGER NOT NULL,
+                    unit_key TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    PRIMARY KEY (version_id, unit_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_unit_fp_doc
+                ON material_unit_fingerprints(document_id, version_id);
                 """
             )
 
@@ -2393,6 +2404,50 @@ class UserDB:
             except sqlite3.OperationalError:
                 return []
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Incremental worker support
+    # ------------------------------------------------------------------
+
+    def current_version_id(self, document_id: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT current_version_id FROM document_permissions WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        return row["current_version_id"] if row else None
+
+    def get_latest_version_id(self, document_id: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM document_versions "
+                "WHERE document_id = ? ORDER BY version_no DESC LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return row["id"] if row else None
+
+    def store_unit_fingerprints(
+        self, document_id: int, version_id: int, fingerprints: dict[str, str]
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM material_unit_fingerprints WHERE version_id = ?",
+                (version_id,),
+            )
+            self._conn.executemany(
+                "INSERT INTO material_unit_fingerprints "
+                "(document_id, version_id, unit_key, digest) VALUES (?, ?, ?, ?)",
+                [(document_id, version_id, key, digest) for key, digest in fingerprints.items()],
+            )
+            self._conn.commit()
+
+    def load_unit_fingerprints(self, document_id: int, version_id: int) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT unit_key, digest FROM material_unit_fingerprints WHERE version_id = ?",
+                (version_id,),
+            ).fetchall()
+        return {r["unit_key"]: r["digest"] for r in rows}
 
     def _rebuild_document_versions_status(self) -> None:
         """Widen the ``document_versions`` status CHECK for material states."""
