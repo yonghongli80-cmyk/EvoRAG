@@ -1,0 +1,94 @@
+"""Current-first retrieval with ACL-filtered historical fallback.
+
+SQLite ``document_permissions.current_version_id`` is the authoritative
+current-version source. ``is_current`` in Qdrant is only repairable metadata
+and is never the sole visibility condition.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from config import settings
+
+
+def _visible_current_version_ids(user_db, user, kb_id) -> set[int]:
+    if user is None or user_db is None:
+        return set()
+    names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))
+    ids: set[int] = set()
+    for name in names:
+        perm = user_db.get_document_permission(name, kb_id)
+        if perm and perm.get("current_version_id"):
+            ids.add(perm["current_version_id"])
+    return ids
+
+
+def _visible_historical_version_ids(user_db, user, kb_id) -> set[int]:
+    """Visible historical version IDs plus confirmed-outdated current versions."""
+    if user is None or user_db is None:
+        return set()
+    names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))
+    ids: set[int] = set()
+    for name in names:
+        perm = user_db.get_document_permission(name, kb_id)
+        if not perm:
+            continue
+        for version in user_db.list_document_versions(perm["id"]):
+            if version["status"] != "current":
+                ids.add(version["id"])
+            elif version["validity_status"] == "confirmed_outdated":
+                ids.add(version["id"])
+    return ids
+
+
+def retrieve_current_then_history(
+    retriever,
+    query: str,
+    top_k: int,
+    user,
+    user_db,
+    kb_id: str,
+    doc_name: str = None,
+    tags: list[str] = None,
+) -> list:
+    """Return current valid results first; backfill history only when needed.
+
+    Historical fallback is used only when ACL-filtered current results are
+    fewer than ``min(top_k, 3)`` and receives ``historical_result_weight``.
+    """
+    current_ids = _visible_current_version_ids(user_db, user, kb_id)
+    if not current_ids:
+        return retriever.retrieve(query, top_k=top_k, doc_name=doc_name, tags=tags)
+
+    current = retriever.retrieve(
+        query,
+        top_k=top_k,
+        doc_name=doc_name,
+        tags=tags,
+        allowed_version_ids=current_ids,
+        validity_statuses={"valid"},
+    )
+    if len(current) >= min(top_k, 3):
+        return current
+
+    historical_ids = _visible_historical_version_ids(user_db, user, kb_id)
+    if not historical_ids:
+        return current
+    fallback = retriever.retrieve(
+        query,
+        top_k=top_k,
+        doc_name=doc_name,
+        tags=tags,
+        allowed_version_ids=historical_ids,
+        validity_statuses=set(),
+    )
+    rebuilt = [
+        replace(c, historical_weight=settings.historical_result_weight) for c in fallback
+    ]
+    merged = list(current)
+    for chunk in rebuilt:
+        if len(merged) >= top_k:
+            break
+        merged.append(chunk)
+    return merged

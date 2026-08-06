@@ -68,7 +68,9 @@ class KnowledgeBaseManager:
             raise ValueError(f"知识库 {kb_id} 不存在")
         self._client.delete_collection(kb_id)
 
-    def add_document(self, kb_id: str, file_path: str, doc_name: str = None, doc_permission_id: int = None) -> int:
+    def add_document(self, kb_id: str, file_path: str, doc_name: str = None, doc_permission_id: int = None, document_id: int = None, document_version_id: int = None, version_no: int = None) -> int:
+        import time
+
         from rag.chunker import chunk
         from rag.embedder import embed
         from rag.loader import load
@@ -79,7 +81,16 @@ class KnowledgeBaseManager:
             doc_name = file_path.split("/")[-1].split("\\")[-1]
         chunks = chunk(text, doc_name=doc_name)
         embeddings = embed([c.text for c in chunks])
-        add_to_collection(kb_id, chunks, embeddings, doc_permission_id=doc_permission_id)
+        add_to_collection(
+            kb_id,
+            chunks,
+            embeddings,
+            doc_permission_id=doc_permission_id,
+            document_id=document_id,
+            document_version_id=document_version_id,
+            version_no=version_no,
+            updated_at=time.time(),
+        )
         return len(chunks)
 
     def remove_document(self, kb_id: str, doc_name: str) -> None:

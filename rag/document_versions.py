@@ -122,7 +122,13 @@ def ingest_document_version(
         version = db.get_document_version_by_id(version_id)
         version_no = version["version_no"]
         count = manager.add_document(
-            kb_id, str(stage), doc_name=filename, doc_permission_id=document_id
+            kb_id,
+            str(stage),
+            doc_name=filename,
+            doc_permission_id=document_id,
+            document_id=document_id,
+            document_version_id=version_id,
+            version_no=version_no,
         )
         indexed = True
         final_path = final_version_path(root, document_id, version_no, filename)

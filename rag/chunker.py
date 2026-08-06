@@ -3,7 +3,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from rag.models import Chunk
 
 
-def chunk(text: str, chunk_size: int = None, overlap: int = None, doc_name: str = "") -> list[Chunk]:
+def chunk(text: str, chunk_size: int = None, overlap: int = None, doc_name: str = "", section_title: str = None) -> list[Chunk]:
     if not text:
         return []
     if chunk_size is None or overlap is None:
@@ -18,4 +18,7 @@ def chunk(text: str, chunk_size: int = None, overlap: int = None, doc_name: str 
         separators=["\n\n", "\n", "。", ".", " ", ""],
     )
     texts = splitter.split_text(text)
-    return [Chunk(text=t, doc_name=doc_name, chunk_index=i) for i, t in enumerate(texts)]
+    return [
+        Chunk(text=t, doc_name=doc_name, chunk_index=i, section_title=section_title)
+        for i, t in enumerate(texts)
+    ]

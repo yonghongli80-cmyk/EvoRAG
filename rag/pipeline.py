@@ -84,7 +84,23 @@ class RAGPipeline:
         rewritten = rewrite_query(question)
         # Oversampling: 检索更多结果，过滤后再截取 top_k
         oversample_factor = 3
-        raw_context = self.retriever.retrieve(rewritten, top_k=top_k * oversample_factor, doc_name=doc_name, tags=tags)
+        if user is not None and self._user_db is not None:
+            from rag.versioned_retrieval import retrieve_current_then_history
+
+            raw_context = retrieve_current_then_history(
+                self.retriever,
+                rewritten,
+                top_k=top_k * oversample_factor,
+                user=user,
+                user_db=self._user_db,
+                kb_id=kb_id or self._kb_id,
+                doc_name=doc_name,
+                tags=tags,
+            )
+        else:
+            raw_context = self.retriever.retrieve(
+                rewritten, top_k=top_k * oversample_factor, doc_name=doc_name, tags=tags
+            )
         context = self.reranker.rerank(rewritten, raw_context)
 
         # 权限过滤：移除无权文档的 chunks（user is not None 且有 user_db 时才过滤）

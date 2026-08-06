@@ -119,10 +119,18 @@ class Retriever:
         else:
             self.bm25 = None
 
-    def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None) -> list[Chunk]:
+    def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None, allowed_version_ids: set[int] = None, validity_statuses: set[str] = None) -> list[Chunk]:
         query_vec = embed([query])[0]
         if self.collection_name:
-            dense_hits = search_collection(self.collection_name, query_vec, top_k=top_k * 2, doc_name=doc_name, tags=tags)
+            dense_hits = search_collection(
+                self.collection_name,
+                query_vec,
+                top_k=top_k * 2,
+                doc_name=doc_name,
+                tags=tags,
+                allowed_version_ids=allowed_version_ids,
+                validity_statuses=validity_statuses,
+            )
         else:
             dense_hits = dense_search(query_vec, top_k=top_k * 2)
 
@@ -140,6 +148,18 @@ class Retriever:
         # 如果指定了文档名，过滤 BM25 结果
         if doc_name:
             sparse_hits = [c for c in sparse_hits if c.doc_name == doc_name]
+
+        # 版本过滤：BM25 缓存若缺少版本元数据则整体禁用，避免泄漏历史内容
+        if allowed_version_ids is not None:
+            if self.chunks and getattr(self.chunks[0], "document_version_id", None) is not None:
+                sparse_hits = [c for c in sparse_hits if c.document_version_id in allowed_version_ids]
+            else:
+                sparse_hits = []
+        if validity_statuses:
+            if self.chunks and getattr(self.chunks[0], "validity_status", None) is not None:
+                sparse_hits = [c for c in sparse_hits if c.validity_status in validity_statuses]
+            else:
+                sparse_hits = []
 
         return self._rrf_fuse(dense_hits, sparse_hits, top_k, rrf_k=settings.rrf_k, weights=weights)
 
