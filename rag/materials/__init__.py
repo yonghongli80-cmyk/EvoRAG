@@ -22,6 +22,7 @@ from rag.materials.incremental import (
     plan_incremental_index,
     unit_fingerprint,
 )
+from rag.materials.locator import MaterialLocator, material_result_response
 from rag.materials.models import (
     CitationLocation,
     FormatCapability,
@@ -62,6 +63,7 @@ __all__ = [
     "IndexJobType",
     "JobResult",
     "MaterialLimits",
+    "MaterialLocator",
     "MaterialState",
     "PurgeResult",
     "RecycleError",
@@ -73,6 +75,7 @@ __all__ = [
     "confirm_archive_import",
     "delete_to_recycle",
     "inspect_archive",
+    "material_result_response",
     "plan_incremental_index",
     "process_index_job",
     "purge_document",
