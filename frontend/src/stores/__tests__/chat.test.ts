@@ -574,6 +574,40 @@ describe('chat store', () => {
     expect(analysisConvos.value).toHaveLength(0)
   })
 
+  // ── assistant message id from done event ────────────────
+  it('stores assistant message id from the done event', async () => {
+    const encoder = new TextEncoder()
+    const mockResponse = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"token","content":"answer"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"sources","sources":[{"doc_name":"a.pdf","chunk_index":0}]}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"done","assistant_message_id":42}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question', 'file')
+
+    expect(store.messages.at(-1)?.id).toBe(42)
+    expect(store.messages.at(-1)?.assistantMessageId).toBe(42)
+  })
+
   // ── currentConversation computed ────────────────────────
   it('currentConversation is null when no conversation selected', async () => {
     vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
