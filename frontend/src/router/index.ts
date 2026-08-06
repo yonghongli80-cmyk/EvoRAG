@@ -35,6 +35,11 @@ const router = createRouter({
           component: () => import('../views/KnowledgeDetailView.vue')
         },
         {
+          path: 'operations',
+          name: 'knowledge-operations',
+          component: () => import('../views/KnowledgeOperationsView.vue')
+        },
+        {
           path: 'analysis',
           name: 'analysis',
           component: () => import('../views/AnalysisModeView.vue')

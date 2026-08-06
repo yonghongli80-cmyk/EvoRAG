@@ -14,6 +14,7 @@ onMounted(() => {
 const activeMenu = computed(() => {
   if (route.path.startsWith('/files')) return 'files'
   if (route.path.startsWith('/kb')) return 'kb'
+  if (route.path.startsWith('/operations')) return 'operations'
   if (route.path.startsWith('/analysis')) return 'analysis'
   return 'files'
 })
@@ -59,12 +60,12 @@ function handleLogout() {
           <span class="nav-label">知识库</span>
         </button>
         <button
-          :class="['nav-item', { active: activeMenu === 'analysis' }]"
-          @click="handleMenuSelect('analysis')"
-          aria-label="分析"
+          :class="['nav-item', { active: activeMenu === 'operations' }]"
+          @click="handleMenuSelect('operations')"
+          aria-label="知识运营"
         >
-          <span class="nav-icon">📊</span>
-          <span class="nav-label">分析</span>
+          <span class="nav-icon">🛠️</span>
+          <span class="nav-label">知识运营</span>
         </button>
       </nav>
 
