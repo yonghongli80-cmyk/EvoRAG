@@ -48,6 +48,10 @@ def check_doc_permission(
             return None
         raise HTTPException(status_code=403, detail="文档尚未建立权限记录")
 
+    # Tombstoned documents are denied synchronously on every action.
+    if doc.get("deleted_at") is not None:
+        raise HTTPException(status_code=404, detail="文档已删除")
+
     # 管理员绕过
     if user.get("is_admin"):
         return doc

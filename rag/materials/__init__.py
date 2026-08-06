@@ -30,6 +30,15 @@ from rag.materials.models import (
     MaterialLimits,
     MaterialState,
 )
+from rag.materials.recycle import (
+    PurgeResult,
+    RecycleError,
+    RecycleRecord,
+    RestoreResult,
+    delete_to_recycle,
+    purge_document,
+    restore_from_recycle,
+)
 from rag.materials.worker import (
     ActivationFailed,
     JobResult,
@@ -54,12 +63,19 @@ __all__ = [
     "JobResult",
     "MaterialLimits",
     "MaterialState",
+    "PurgeResult",
+    "RecycleError",
+    "RecycleRecord",
+    "RestoreResult",
     "UnitFingerprint",
     "WorkerServices",
     "build_default_format_registry",
     "confirm_archive_import",
+    "delete_to_recycle",
     "inspect_archive",
     "plan_incremental_index",
     "process_index_job",
+    "purge_document",
+    "restore_from_recycle",
     "unit_fingerprint",
 ]

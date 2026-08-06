@@ -455,6 +455,7 @@ class UserDB:
                 ("restore_until", "REAL"),
                 ("container_document_id", "INTEGER"),
                 ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+                ("purge_state", "TEXT NOT NULL DEFAULT ''"),
             ):
                 try:
                     self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
@@ -1564,7 +1565,8 @@ class UserDB:
         "id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
         "downloadable, current_version_id, source_type, source_key, updated_at, created_at, "
         "logical_path, document_type, tags_json, subject_user_id, metadata_version, "
-        "deleted_at, deleted_by, restore_until, container_document_id, container_relative_path"
+        "deleted_at, deleted_by, restore_until, container_document_id, container_relative_path, "
+        "purge_state"
     )
 
     def get_document_permission(self, doc_name: str, kb_id: str) -> dict[str, Any] | None:
@@ -2073,6 +2075,7 @@ class UserDB:
                 ("restore_until", "REAL"),
                 ("container_document_id", "INTEGER"),
                 ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+                ("purge_state", "TEXT NOT NULL DEFAULT ''"),
             ):
                 try:
                     self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
@@ -2225,8 +2228,27 @@ class UserDB:
 
                 CREATE INDEX IF NOT EXISTS idx_unit_fp_doc
                 ON material_unit_fingerprints(document_id, version_id);
+
+                CREATE TABLE IF NOT EXISTS material_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_audit_doc
+                ON material_audit_log(document_id);
                 """
             )
+            try:
+                self._conn.execute("SELECT state FROM answer_citations LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute(
+                    "ALTER TABLE answer_citations "
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'available'"
+                )
+                self._conn.commit()
 
     # ------------------------------------------------------------------
     # Archive manifest persistence
@@ -2448,6 +2470,28 @@ class UserDB:
                 (version_id,),
             ).fetchall()
         return {r["unit_key"]: r["digest"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Recycle support
+    # ------------------------------------------------------------------
+
+    def is_document_deleted(self, document_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT deleted_at FROM document_permissions WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        return bool(row and row["deleted_at"] is not None)
+
+    def get_citation_state(self, document_id: int) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state FROM answer_citations WHERE document_id = ? "
+                "ORDER BY CASE state WHEN 'purged_by_retention_policy' THEN 0 ELSE 1 END "
+                "LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return row["state"] if row else "available"
 
     def _rebuild_document_versions_status(self) -> None:
         """Widen the ``document_versions`` status CHECK for material states."""
