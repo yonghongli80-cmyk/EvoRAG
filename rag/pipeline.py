@@ -123,7 +123,17 @@ class RAGPipeline:
         sid = session_id or self.session_id or "default"
         messages = self.memory.build_messages(sid, question, context)
         sources = [
-            {"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text_preview": c.text[:100]} for c in context
+            {
+                "doc_name": c.doc_name,
+                "chunk_index": c.chunk_index,
+                "text_preview": c.text[:100],
+                "document_id": c.document_id,
+                "document_version_id": c.document_version_id,
+                "section_title": c.section_title,
+                "is_historical": c.historical_weight < 1.0,
+                "rank": i,
+            }
+            for i, c in enumerate(context)
         ]
         return {
             "route": "rag", "question": question, "context": context,

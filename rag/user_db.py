@@ -368,6 +368,19 @@ class UserDB:
                 self._conn.execute("ALTER TABLE document_permissions ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
                 self._conn.commit()
 
+            # Trusted knowledge loop migrations: citation persistence columns.
+            try:
+                self._conn.execute("SELECT persistence_key FROM chat_messages LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN persistence_key TEXT")
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN citations_hash TEXT")
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN citation_count INTEGER DEFAULT 0")
+                self._conn.commit()
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_persistence "
+                "ON chat_messages(conversation_id, persistence_key)"
+            )
+
             # Trusted knowledge loop migrations: version pointers on kb_documents.
             try:
                 self._conn.execute("SELECT document_id FROM kb_documents LIMIT 1")
@@ -750,16 +763,27 @@ class UserDB:
             self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
 
-    def get_messages(self, conversation_id: int, user_id: int | str) -> list[dict[str, Any]]:
-        """Return all messages in a conversation (only if owned by user_id)."""
+    def get_messages(self, conversation_id: int, user_id: int | str | None = None) -> list[dict[str, Any]]:
+        """Return all messages in a conversation.
+
+        When ``user_id`` is given, ownership is verified; otherwise all
+        messages for the conversation are returned.
+        """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                "FROM chat_messages m "
-                "JOIN conversations c ON m.conversation_id = c.id "
-                "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.created_at",
-                (conversation_id, int(user_id)),
-            ).fetchall()
+            if user_id is not None:
+                rows = self._conn.execute(
+                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "FROM chat_messages m "
+                    "JOIN conversations c ON m.conversation_id = c.id "
+                    "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.created_at",
+                    (conversation_id, int(user_id)),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "FROM chat_messages m WHERE m.conversation_id = ? ORDER BY m.created_at",
+                    (conversation_id,),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def update_message(self, message_id: int, new_content: str, user_id: int = None):
@@ -809,6 +833,120 @@ class UserDB:
                 (message_id, int(user_id)),
             ).fetchone()
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Assistant answers with citations
+    # ------------------------------------------------------------------
+
+    def _insert_message_in_tx(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        persistence_key: str | None = None,
+        citations_hash: str | None = None,
+        citation_count: int = 0,
+    ) -> int:
+        """Insert one message row inside an already-open transaction."""
+        cur = self._conn.execute(
+            "INSERT INTO chat_messages "
+            "(conversation_id, role, content, persistence_key, citations_hash, citation_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (conversation_id, role, content, persistence_key, citations_hash, citation_count),
+        )
+        return int(cur.lastrowid)
+
+    def _insert_answer_citations_in_tx(self, assistant_message_id: int, citations: list) -> None:
+        """Insert citation rows inside an already-open transaction."""
+        for citation in citations:
+            self._conn.execute(
+                "INSERT INTO answer_citations "
+                "(assistant_message_id, document_id, document_version_id, chunk_index, "
+                "section_title, text_preview, rank, is_historical) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    assistant_message_id,
+                    citation.document_id,
+                    citation.document_version_id,
+                    citation.chunk_index,
+                    citation.section_title,
+                    citation.text_preview,
+                    citation.rank,
+                    int(citation.is_historical),
+                ),
+            )
+
+    def persist_assistant_answer_with_citations(
+        self,
+        conversation_id: int,
+        answer: str,
+        citations: list,
+        persistence_key: str,
+    ) -> int:
+        """Persist one assistant answer and its citations atomically.
+
+        Retrying with the same ``persistence_key`` returns the existing
+        message only when content, citation hash, and count all match;
+        otherwise a :class:`VersionConflict` is raised instead of silently
+        storing different content.
+        """
+        citations_hash = self._citations_hash(citations)
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT id, content, citations_hash, citation_count FROM chat_messages "
+                "WHERE conversation_id = ? AND persistence_key = ?",
+                (conversation_id, persistence_key),
+            ).fetchone()
+            if row is not None:
+                if (
+                    row["content"] == answer
+                    and row["citations_hash"] == citations_hash
+                    and row["citation_count"] == len(citations)
+                ):
+                    return int(row["id"])
+                raise VersionConflict("answer persistence idempotency conflict")
+            message_id = self._insert_message_in_tx(
+                conversation_id,
+                "assistant",
+                answer,
+                persistence_key,
+                citations_hash,
+                len(citations),
+            )
+            self._insert_answer_citations_in_tx(message_id, citations)
+            return message_id
+
+    @staticmethod
+    def _citations_hash(citations: list) -> str:
+        import json as _json
+
+        rows = sorted(
+            (
+                c.document_id,
+                c.document_version_id,
+                c.chunk_index,
+                c.section_title,
+                c.text_preview,
+                c.rank,
+                int(c.is_historical),
+            )
+            for c in citations
+        )
+        digest = hashlib.sha256(_json.dumps(rows, ensure_ascii=False).encode("utf-8"))
+        return digest.hexdigest()
+
+    def get_answer_citations(self, assistant_message_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT c.id, c.document_id, c.document_version_id, c.chunk_index, "
+                "c.section_title, c.text_preview, c.rank, c.is_historical, c.created_at, "
+                "v.version_no, v.original_filename, v.created_at AS version_created_at "
+                "FROM answer_citations c "
+                "LEFT JOIN document_versions v ON v.id = c.document_version_id "
+                "WHERE c.assistant_message_id = ? ORDER BY c.rank",
+                (assistant_message_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Data Sources

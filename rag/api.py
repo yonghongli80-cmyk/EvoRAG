@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import tempfile
@@ -1238,7 +1239,12 @@ async def query_stream(
         session_id = f"conv_{req.conversation_id}"
 
     async def event_generator():
+        import json as _json
+
+        from rag.citations import CitationRecord
+
         answer_buffer = ""
+        citation_records: list[CitationRecord] = []
         async for event in current_pipeline.query_stream(
             req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
             user=user, kb_id=target_kb,
@@ -1251,16 +1257,46 @@ async def query_stream(
                     answer_buffer += data.get("content", "")
                 except Exception:
                     pass
+            elif '"type": "sources"' in event:
+                try:
+                    import json as _json
+                    data = _json.loads(event.removeprefix("data: ").strip())
+                    for source in data.get("sources", []):
+                        if source.get("document_id") and source.get("document_version_id"):
+                            citation_records.append(
+                                CitationRecord(
+                                    document_id=source["document_id"],
+                                    document_version_id=source["document_version_id"],
+                                    chunk_index=source.get("chunk_index", 0),
+                                    section_title=source.get("section_title") or "",
+                                    text_preview=source.get("text_preview", "")[:200],
+                                    rank=source.get("rank", 0),
+                                    is_historical=bool(source.get("is_historical", False)),
+                                )
+                            )
+                except Exception:
+                    pass
+            elif '"type": "done"' in event:
+                # The pipeline's final done is replaced with an enriched one below.
+                continue
             yield event
-        # 流式完成后持久化到 chat_messages
+        # 流式完成后持久化 assistant 消息与引用（一个事务内）
+        assistant_message_id = None
         if user and req.conversation_id is not None and answer_buffer:
-            # 验证 conversation 归属
             conv = await asyncio.to_thread(user_db.get_conversation, req.conversation_id, user["id"])
             if conv:
                 await asyncio.to_thread(user_db.add_message, req.conversation_id, "user", req.question)
-                await asyncio.to_thread(user_db.add_message, req.conversation_id, "assistant", answer_buffer)
+                persistence_key = f"stream:{req.conversation_id}:{hashlib.sha256(req.question.encode('utf-8')).hexdigest()[:16]}"
+                assistant_message_id = await asyncio.to_thread(
+                    user_db.persist_assistant_answer_with_citations,
+                    req.conversation_id,
+                    answer_buffer,
+                    citation_records,
+                    persistence_key,
+                )
             else:
                 logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
+        yield f"data: {_json.dumps({'type': 'done', 'assistant_message_id': assistant_message_id})}\n\n"
 
     return StreamingResponse(
         event_generator(),

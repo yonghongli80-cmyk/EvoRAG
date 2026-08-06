@@ -48,3 +48,32 @@ def list_document_versions(
         "document_id": document_id,
         "versions": [_serialize_version(db, v, user, document) for v in versions],
     }
+
+
+@router.get("/documents/{document_id}/versions/{version_id}/download")
+def download_document_version(
+    document_id: int,
+    version_id: int,
+    request: Request,
+    user: dict = Depends(require_user),
+):
+    """Stream an immutable version file to an authorized viewer."""
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse
+
+    from rag.document_version_store import resolve_version_path
+
+    db = request.app.state.user_db
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_view(db, document["doc_name"], document["kb_id"], user)
+    version = db.get_document_version_by_id(version_id)
+    if version is None or version["document_id"] != document_id:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    root = Path(getattr(request.app.state, "document_versions_root", "."))
+    path = resolve_version_path(root, version["file_path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="版本文件缺失")
+    return FileResponse(path, filename=version["original_filename"])
