@@ -49,6 +49,22 @@ class Settings(BaseSettings):
     knowledge_stale_days: int = 180
     historical_result_weight: float = 0.35
 
+    # 增量资料生命周期
+    material_file_max_bytes: int = 50 * 1024 * 1024
+    material_archive_max_bytes: int = 200 * 1024 * 1024
+    material_debounce_seconds: int = 300
+    material_worker_lease_seconds: int = 120
+    material_job_max_attempts: int = 5
+    material_job_queue_limit: int = 10_000
+    material_embedding_cache_path: str = str(Path(__file__).resolve().parent / "data" / "embedding_cache.sqlite3")
+    material_embedding_cache_bytes: int = 10 * 1024 * 1024 * 1024
+    material_worker_count: int = 2
+    material_embedding_slots: int = 4
+    legacy_office_enabled: bool = False
+    legacy_office_launcher: str = ""
+    legacy_office_timeout_seconds: int = 60
+    legacy_office_max_memory_mb: int = 512
+
     # 分块与检索
     chunk_size: int = 500
     chunk_overlap: int = 80

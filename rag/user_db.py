@@ -443,6 +443,27 @@ class UserDB:
                 self._conn.execute("ALTER TABLE kb_documents ADD COLUMN document_version_id INTEGER")
                 self._conn.commit()
 
+            # Material lifecycle migrations: logical metadata columns.
+            for column, ddl in (
+                ("logical_path", "TEXT NOT NULL DEFAULT ''"),
+                ("document_type", "TEXT NOT NULL DEFAULT ''"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("subject_user_id", "INTEGER"),
+                ("metadata_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("deleted_at", "REAL"),
+                ("deleted_by", "INTEGER"),
+                ("restore_until", "REAL"),
+                ("container_document_id", "INTEGER"),
+                ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE document_permissions ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
+
     # ------------------------------------------------------------------
     # User Search (Phase 2)
     # ------------------------------------------------------------------
@@ -1539,11 +1560,17 @@ class UserDB:
             self._conn.commit()
             return cur.lastrowid
 
+    _DOCUMENT_PERMISSION_COLUMNS = (
+        "id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
+        "downloadable, current_version_id, source_type, source_key, updated_at, created_at, "
+        "logical_path, document_type, tags_json, subject_user_id, metadata_version, "
+        "deleted_at, deleted_by, restore_until, container_document_id, container_relative_path"
+    )
+
     def get_document_permission(self, doc_name: str, kb_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
-                "downloadable, current_version_id, source_type, source_key, updated_at, created_at "
+                f"SELECT {self._DOCUMENT_PERMISSION_COLUMNS} "
                 "FROM document_permissions WHERE doc_name = ? AND kb_id = ?",
                 (doc_name, kb_id),
             ).fetchone()
@@ -1558,8 +1585,7 @@ class UserDB:
     def get_document_permission_by_id(self, doc_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
-                "downloadable, current_version_id, source_type, source_key, updated_at, created_at "
+                f"SELECT {self._DOCUMENT_PERMISSION_COLUMNS} "
                 "FROM document_permissions WHERE id = ?",
                 (doc_id,),
             ).fetchone()
@@ -1935,6 +1961,228 @@ class UserDB:
                 "FROM document_permissions ORDER BY id"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Material lifecycle schema (incremental material plan)
+    # ------------------------------------------------------------------
+
+    def foreign_key_check(self) -> list[tuple]:
+        with self._lock:
+            rows = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        return [tuple(r) for r in rows]
+
+    def create_material_schema(self) -> None:
+        """Apply material-lifecycle schema migrations idempotently.
+
+        Adds logical metadata columns, rebuilds ``document_versions`` to widen
+        its status CHECK for recycle/purge states, and creates the job, archive,
+        organization, and FTS tables.
+        """
+        with self._lock:
+            for column, ddl in (
+                ("logical_path", "TEXT NOT NULL DEFAULT ''"),
+                ("document_type", "TEXT NOT NULL DEFAULT ''"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("subject_user_id", "INTEGER"),
+                ("metadata_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("deleted_at", "REAL"),
+                ("deleted_by", "INTEGER"),
+                ("restore_until", "REAL"),
+                ("container_document_id", "INTEGER"),
+                ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE document_permissions ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
+            self._rebuild_document_versions_status()
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS document_index_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    version_id INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    job_type TEXT NOT NULL DEFAULT 'material_index',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    payload_hash TEXT NOT NULL DEFAULT '',
+                    available_at REAL NOT NULL,
+                    lease_owner TEXT,
+                    lease_expires_at REAL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    UNIQUE(document_id, version_id, job_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS material_archive_manifests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    container_document_id INTEGER NOT NULL,
+                    container_version_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending_confirmation',
+                    entry_count INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER NOT NULL,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    expires_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS material_archive_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_id INTEGER NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    normalized_path TEXT NOT NULL,
+                    child_source_key TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(manifest_id) REFERENCES material_archive_manifests(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_proposals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id INTEGER NOT NULL,
+                    instruction_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    target_path TEXT NOT NULL,
+                    add_tags TEXT NOT NULL DEFAULT '[]',
+                    remove_tags TEXT NOT NULL DEFAULT '[]',
+                    document_type TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(proposal_id) REFERENCES material_organization_proposals(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id INTEGER,
+                    actor_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'applied',
+                    created_at REAL NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    UNIQUE(proposal_id, idempotency_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_batch_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    before_logical_path TEXT NOT NULL DEFAULT '',
+                    after_logical_path TEXT NOT NULL DEFAULT '',
+                    before_metadata_version INTEGER NOT NULL DEFAULT 0,
+                    after_metadata_version INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'applied',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(batch_id) REFERENCES material_organization_batches(id) ON DELETE CASCADE
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS material_search_fts USING fts5(
+                    document_id UNINDEXED,
+                    version_id UNINDEXED,
+                    filename,
+                    logical_path,
+                    document_type,
+                    tags,
+                    extracted_text
+                );
+                """
+            )
+
+    def _rebuild_document_versions_status(self) -> None:
+        """Widen the ``document_versions`` status CHECK for material states."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_versions'"
+        ).fetchone()
+        if row is None or "recycle_pending" in (row["sql"] or ""):
+            return
+        indexes = [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='document_versions' AND sql IS NOT NULL"
+            ).fetchall()
+        ]
+        triggers = [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='trigger' AND tbl_name='document_versions'"
+            ).fetchall()
+        ]
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "ALTER TABLE document_versions RENAME TO document_versions_old"
+            )
+            self._conn.execute(
+                "CREATE TABLE document_versions ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " document_id INTEGER NOT NULL,"
+                " version_no INTEGER NOT NULL,"
+                " original_filename TEXT NOT NULL,"
+                " file_path TEXT NOT NULL,"
+                " content_hash TEXT NOT NULL,"
+                " uploaded_by INTEGER NOT NULL,"
+                " status TEXT NOT NULL CHECK(status IN "
+                "('staging','indexing','current','historical','recycle_pending','failed','purged')),"
+                " validity_status TEXT NOT NULL CHECK(validity_status IN "
+                "('valid','reported_outdated','confirmed_outdated')) DEFAULT 'valid',"
+                " created_at REAL NOT NULL DEFAULT (strftime('%s','now')),"
+                " superseded_at REAL,"
+                " UNIQUE(document_id, version_no),"
+                " FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,"
+                " FOREIGN KEY(uploaded_by) REFERENCES users(id)"
+                ")"
+            )
+            self._conn.execute(
+                "INSERT INTO document_versions "
+                "(id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at) "
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions_old"
+            )
+            old_count = self._conn.execute(
+                "SELECT COUNT(*) FROM document_versions_old"
+            ).fetchone()[0]
+            new_count = self._conn.execute(
+                "SELECT COUNT(*) FROM document_versions"
+            ).fetchone()[0]
+            if old_count != new_count:
+                raise RuntimeError(
+                    f"document_versions rebuild row mismatch: {old_count} != {new_count}"
+                )
+            self._conn.execute("DROP TABLE document_versions_old")
+            for index in indexes:
+                self._conn.execute(index["sql"])
+            for trigger in triggers:
+                self._conn.execute(trigger["sql"])
+            violations = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(f"foreign key violations: {violations}")
+            self._conn.commit()
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     # ------------------------------------------------------------------
     # Cleanup
