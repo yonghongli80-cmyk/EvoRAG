@@ -3,6 +3,37 @@
 工作分支：`codex/security-boundary-hardening`  
 工作目录：`RAGv3/.worktrees/security-boundary-hardening`
 
+## 本次会话记录（2026-08-06 晚，第二次会话）
+
+### 前辈会话交接的内容（接手时已知）
+
+接手时通过 `docs/handoff-2026-08-06.md` 获知：
+
+- **计划 1 可信知识闭环已 10/10 完成**（提交 `c833c9e`–`5cc213e`）：文档版本 Schema、源中立 `SourceObject`、统一版本化摄取、版本感知向量、引用持久化、结构化反馈、知识任务、前端交互/运营页、存量迁移。
+- **计划 2 已完成 T1–T4**（至 `46f99d9`）：统一格式注册表 + 材料 Schema；流式暂存 + 持久去抖任务；统一提取 + 本地 PDF OCR + PPTX；隔离旧 Office 转换。
+- 环境限制：本机无模型 API 凭据（`test_pipeline.py` 因 `Missing credentials` 失败）；`.pytest_cache` 跨账户权限问题需 `-p no:cacheprovider`；前端 4 个既有 Vitest 失败；Ruff 仅保留 `B008`；测试用 `mock_embedding_indexing` 夹具。
+- 8 条架构红线（单平台 / `current_version_id` 权威 / 答案缓存禁用 / 权限只收窄 / 置信度不给百分比 / 工资考勤禁启 / 路径凭据不进响应 / TDD 纪律）。
+
+### 本次会话所做（T5–T11 + 全项目安全审查）
+
+逐任务 TDD（先失败测试 → 实现 → 全绿 → 提交），提交与验证见上方「增量资料生命周期」表格：
+
+- **T5** 安全压缩包清单/确认/子版本原子差异（`archives.py`，15 测试 + 47 回归通过）。
+- **T6** 增量单元指纹 + 有界嵌入缓存 + 原子 worker（5 测试 + 54 回归通过）。
+- **T7** 墓碑删除/30 天恢复/幂等清除（5 测试 + 19 回归通过）。
+- **T8** ACL 优先定位 + 授权下载（4 测试 + 16 回归通过）。
+- **T9** 类型化整理 + `generate_structured`（5 测试 + 40 回归通过）。
+- **T10** 材料 API 路由 + 4 个前端组件 + store/视图接线（5 后端测试 + 4 前端组件测试，构建通过）。
+- **T11** 元数据迁移（启动接入，绝不重嵌入）+ `MaterialWorker` 启停 + 全量验证：**后端 708 通过 0 失败**、前端 132 通过 / 4 既有失败、构建通过。
+- 更新 `docs/handoff-2026-08-06.md`（计划 2 → 11/11）并新建 `docs/handoff-2026-08-06-session2.md` 作为下一会话入口。
+- **安全审查**：确认写入路径全部正确（压缩包路径/注入/命令/ eval / XSS 均防护到位）；发现 3 个**未修**的读取端点授权缺口（`GET /materials/recycle`、`GET /materials/archives/{id}`、`GET /materials/jobs/{id}`），详见交接文档第 2 节——**下一会话优先修复**。
+
+### 关键踩坑记录（供后续参考）
+
+- `UserDB._lock` 非重入：事务块内调用 `db.xxx()` 会死锁，只能用 `db._conn.execute()`；本会话因此踩了 3 次。
+- `zipfile` 写加密 zip 不支持（标志恒 0）；`BEGIN IMMEDIATE` + `metadata_version` CAS 用于乐观并发。
+- `tests/test_folder_indexer.py` 断言随统一注册表更新（csv 已支持索引）。
+
 ## 增量资料生命周期（计划 2）— 已完成 11/11
 
 2026-08-06 完成剩余 T5–T11（接 T1–T4），逐任务 TDD（先写失败测试 → 实现 → 全绿 → 提交）：
