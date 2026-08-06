@@ -41,6 +41,7 @@ from rag.kb_file_store import (
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
+from rag.materials.api import router as materials_router
 from rag.operations_api import router as operations_router
 from rag.permissions import filter_chunks_by_permission
 from rag.user_db import UserDB
@@ -58,6 +59,7 @@ _pipeline_lock = ReadWriteLock()
 
 # Versioned document ingest (trusted knowledge loop).
 app.include_router(operations_router)
+app.include_router(materials_router)
 
 
 def _versions_root() -> Path:

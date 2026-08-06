@@ -2624,6 +2624,15 @@ class UserDB:
             ).fetchone()
         return bool(row and row["deleted_at"] is not None)
 
+    def list_recycled_documents(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, deleted_at, deleted_by, restore_until "
+                "FROM document_permissions WHERE deleted_at IS NOT NULL "
+                "ORDER BY deleted_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_citation_state(self, document_id: int) -> str:
         with self._lock:
             row = self._conn.execute(

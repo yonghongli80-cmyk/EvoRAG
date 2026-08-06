@@ -111,7 +111,7 @@ describe('files store', () => {
     await store.uploadFile(fakeFile)
 
     expect(api.post).toHaveBeenCalledWith(
-      '/upload',
+      '/materials/upload',
       expect.any(FormData),
       expect.anything()
     )
@@ -142,11 +142,35 @@ describe('files store', () => {
     await store.uploadFile(fakeFile)
 
     expect(api.post).toHaveBeenCalledWith(
-      '/upload',
+      '/materials/upload',
       expect.any(FormData),
       expect.objectContaining({
         headers: expect.objectContaining({ Authorization: 'Bearer test-token' })
       })
+    )
+  })
+
+  it('uploadFile of an archive opens the manifest dialog without confirming', async () => {
+    vi.mocked(api.post).mockResolvedValue({
+      data: { status: 'awaiting_archive_confirmation', manifest_id: 7 }
+    } as any)
+    vi.mocked(api.get).mockResolvedValue({
+      data: { manifest_id: 7, entries: [{ id: 1, state: 'approved' }] }
+    } as any)
+
+    const store = useFilesStore()
+    const fakeFile = new File([''], 'onboarding.zip', { type: 'application/zip' })
+    const result = await store.uploadFile(fakeFile)
+
+    expect(result.status).toBe('awaiting_archive_confirmation')
+    expect(store.archiveManifestId).toBe(7)
+    expect(store.archiveVisible).toBe(true)
+    expect(store.archiveEntries).toHaveLength(1)
+    // No confirm call until the user confirms in the dialog.
+    expect(api.post).not.toHaveBeenCalledWith(
+      '/materials/archives/7/confirm',
+      expect.anything(),
+      expect.anything()
     )
   })
 

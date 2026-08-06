@@ -7,26 +7,20 @@ from rag.user_db import UserDB
 
 @pytest.fixture(autouse=True)
 def reset_vector_store():
+    import contextlib
+
     import rag.vector_store as vs
-    if vs._client is not None:
-        try:
-            vs._client.close()
-        except Exception:
-            pass
+    with contextlib.suppress(Exception):
+        vs._client.close() if vs._client is not None else None
     vs._client = None
     # Clear BM25 module-level cache to prevent test pollution
-    try:
+    with contextlib.suppress(Exception):
         import sys
         if "rag.retriever" in sys.modules:
             sys.modules["rag.retriever"]._bm25_cache.clear()
-    except Exception:
-        pass
     yield
-    if vs._client is not None:
-        try:
-            vs._client.close()
-        except Exception:
-            pass
+    with contextlib.suppress(Exception):
+        vs._client.close() if vs._client is not None else None
     vs._client = None
 
 
@@ -74,6 +68,7 @@ def isolated_api(tmp_path, monkeypatch):
     from config import settings
 
     db = UserDB(str(tmp_path / "users.db"))
+    db.create_material_schema()
     upload_dir = tmp_path / "upload"
     kb_files_root = tmp_path / "kb_files"
     document_versions_root = tmp_path / "document_versions"
