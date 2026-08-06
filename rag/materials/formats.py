@@ -72,7 +72,7 @@ def _cap(
     )
 
 
-def build_default_format_registry() -> "FormatCapabilityRegistry":
+def build_default_format_registry() -> FormatCapabilityRegistry:
     capabilities = [
         _cap("txt", ("txt", "md"), ("text/plain", "text/markdown"), ("text",), archive=False, preview=True, extract_text=True, semantic_index=True, citation_kind="paragraph"),
         _cap("pdf", ("pdf",), ("application/pdf",), ("pdf",), archive=False, preview=True, extract_text=True, local_ocr=True, semantic_index=True, citation_kind="page"),

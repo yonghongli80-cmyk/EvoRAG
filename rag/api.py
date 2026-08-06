@@ -86,12 +86,29 @@ def _run_document_version_migration() -> None:
         logger.exception("document version migration failed")
 
 
+def _run_material_metadata_migration() -> None:
+    """Backfill material FTS/metadata rows without re-embedding content."""
+    from rag.materials.migration import migrate_material_metadata
+
+    try:
+        report = migrate_material_metadata(user_db)
+        if report.migrated_documents:
+            logger.info(
+                "material metadata migration: migrated=%s missing=%s",
+                report.migrated_documents,
+                report.missing_sources,
+            )
+    except Exception:
+        logger.exception("material metadata migration failed")
+
+
 @app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
     log_security_mode()
     _run_document_version_migration()
+    _run_material_metadata_migration()
     if not DATA_DIR.is_dir():
         return
 

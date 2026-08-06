@@ -3,6 +3,26 @@
 工作分支：`codex/security-boundary-hardening`  
 工作目录：`RAGv3/.worktrees/security-boundary-hardening`
 
+## 增量资料生命周期（计划 2）— 已完成 11/11
+
+2026-08-06 完成剩余 T5–T11（接 T1–T4），逐任务 TDD（先写失败测试 → 实现 → 全绿 → 提交）：
+
+| 提交 | 任务 | 内容 | 验证 |
+| --- | --- | --- | --- |
+| `9d13a8b` | T5 | 安全压缩包清单/确认/子版本原子差异：`archives.py`，拒绝路径逃逸/超比/超层/加密，`BEGIN IMMEDIATE` 内切换容器+子版本指针，幂等结果 | 15 项 `test_archive_import` + 47 项回归通过 |
+| `92702a3` | T6 | 增量单元指纹 + 有界嵌入缓存（`embedding_cache.sqlite3`）+ 原子 worker（stale 取消、SQLite 失败仅删新点、FTS+指纹同事务激活） | 5 项 `test_incremental_material_index` + 54 项回归通过 |
+| `1cd295b` | T7 | 墓碑删除/30 天恢复/幂等清除：`recycle.py`，所有读路径同步拒绝已删文档，引用审计保留无预览 | 5 项 `test_material_recycle` + 19 项回归通过 |
+| `21de5ab` | T8 | ACL 优先定位 + 授权下载：`locator.py`，不可见文件名永不进模型输入，下载 URL 由后端生成且每次重查 ACL | 4 项 `test_material_locator` + 16 项回归通过 |
+| `9985975` | T9 | 类型化整理预览/确认/回滚：`organizer.py` + `generate_structured`（JSON-only、单对象解析、绝不用 eval），CAS + 幂等 + 回滚不覆盖手动改动 | 5 项 `test_material_organizer` + 40 项回归通过 |
+| `2bf9b82` | T10 | 材料 API 路由（upload 202 / archives / recycle / locate / organization）+ 4 个前端组件 + store/视图接线 | 5 项 `test_material_api` + 4 个前端组件测试通过，生产构建通过 |
+
+**验证基线（T11 Step 4）**：
+- 后端全量（`--ignore=tests/test_pipeline.py`）：**708 通过，0 失败**（接管基线 683 + 新增 ~25）。
+- 前端 Vitest：**132 通过 / 4 失败**（4 项均为既有 store 断言不一致，未新增）；`npm run build` 成功。
+- Ruff：新增文件仅剩与既有风格一致的 `B008`（FastAPI `Depends`）；`tests/test_folder_indexer.py` 因统一注册表将 csv 视为可索引格式而更新断言。
+- `git diff --check` 干净；`data/` 与 `qdrant_data/` 无测试残留。
+- 迁移 `migrate_material_metadata` 已接入启动流程（只回填 FTS 元数据，绝不重嵌入）。
+
 ## 已完成
 
 | 提交 | 内容 | 验证 |

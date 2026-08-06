@@ -23,6 +23,7 @@ from rag.materials.incremental import (
     unit_fingerprint,
 )
 from rag.materials.locator import MaterialLocator, material_result_response
+from rag.materials.migration import MaterialMigrationReport, migrate_material_metadata
 from rag.materials.models import (
     CitationLocation,
     FormatCapability,
@@ -70,6 +71,7 @@ __all__ = [
     "JobResult",
     "MaterialLimits",
     "MaterialLocator",
+    "MaterialMigrationReport",
     "MaterialState",
     "OrganizationBatchResult",
     "OrganizationInstruction",
@@ -86,6 +88,7 @@ __all__ = [
     "delete_to_recycle",
     "inspect_archive",
     "material_result_response",
+    "migrate_material_metadata",
     "plan_incremental_index",
     "process_index_job",
     "purge_document",

@@ -24,6 +24,7 @@ from rag.document_version_store import resolve_version_path
 from rag.materials.embedding_cache import EmbeddingCache
 from rag.materials.formats import FormatCapabilityRegistry
 from rag.materials.incremental import fingerprint_material
+from rag.materials.jobs import claim_material_jobs
 from rag.materials.models import ExtractedMaterial, FormatResolution
 from rag.models import Chunk
 from rag.user_db import UserDB
@@ -94,6 +95,74 @@ class WorkerServices:
     model_key: str = settings.bailian_embed_model
     dimension: int = settings.embed_dimension
     max_embedding_concurrency: int = 4
+
+
+class MaterialWorker:
+    """Bounded persistent worker with graceful lease release on shutdown.
+
+    ``start_one_job`` claims a single due job (test/drain hook); the production
+    loop claims with a bounded batch. ``shutdown`` stops new claims, releases
+    in-flight leases back to ``queued`` so jobs are never lost, and returns
+    them atomically per job.
+    """
+
+    def __init__(
+        self,
+        services: WorkerServices,
+        worker_id: str = "worker-1",
+        lease_seconds: int = 120,
+        max_attempts: int = 5,
+    ):
+        self.services = services
+        self.worker_id = worker_id
+        self.lease_seconds = lease_seconds
+        self.max_attempts = max_attempts
+        self._running = False
+        self._in_flight: list[int] = []
+
+    def claim_one(self, now: float | None = None) -> dict | None:
+        jobs = claim_material_jobs(
+            self.services.db,
+            self.worker_id,
+            now if now is not None else time.time(),
+            1,
+            self.lease_seconds,
+        )
+        return jobs[0] if jobs else None
+
+    def start_one_job(self, now: float | None = None) -> dict | None:
+        job = self.claim_one(now)
+        if job is not None:
+            self._in_flight.append(job["id"])
+            self._running = True
+        return job
+
+    def run(self, batch: int = 4) -> list[JobResult]:
+        """Claim and process up to ``batch`` due jobs synchronously."""
+        jobs = claim_material_jobs(
+            self.services.db, self.worker_id, time.time(), batch, self.lease_seconds
+        )
+        results = []
+        for job in jobs:
+            self._in_flight.append(job["id"])
+            results.append(process_index_job(job, self.services))
+            self._in_flight.remove(job["id"])
+        return results
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Stop claims and atomically return in-flight jobs to the queue."""
+        self._running = False
+        db = self.services.db
+        for job_id in list(self._in_flight):
+            with db._lock:
+                db._conn.execute(
+                    "UPDATE document_index_jobs "
+                    "SET status='queued', lease_owner=NULL, lease_expires_at=NULL, updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (time.time(), job_id),
+                )
+                db._conn.commit()
+        self._in_flight.clear()
 
 
 def _enqueue_repair(db: UserDB, document_id: int, version_id: int) -> None:

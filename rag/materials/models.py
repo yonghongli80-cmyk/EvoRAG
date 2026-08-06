@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Mapping
-from typing_extensions import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ExtractedUnit:
     unit_key: str
     text: str
-    location: "CitationLocation"
+    location: CitationLocation
     source: Literal["native_text", "local_ocr", "metadata"]
     confidence: float
     metadata: Mapping[str, str] = field(default_factory=dict)
@@ -24,7 +24,7 @@ class ExtractedUnit:
 class ExtractedMaterial:
     version_id: int
     parser_schema_version: str
-    units: tuple["ExtractedUnit", ...] = ()
+    units: tuple[ExtractedUnit, ...] = ()
     warnings: tuple[str, ...] = ()
 
 CitationKind = Literal[
