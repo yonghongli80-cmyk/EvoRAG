@@ -42,6 +42,52 @@ def generate(messages: list[dict], temperature: float = 0.3) -> str:
         raise
 
 
+class StructuredOutputError(Exception):
+    """Raised when a model response is not a single valid JSON object."""
+
+    def __init__(self, detail: str = "structured_output_invalid"):
+        self.detail = detail
+        super().__init__(detail)
+
+
+def _extract_json_object(text: str) -> dict:
+    import json
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("no json object in response")
+    return json.loads(text[start : end + 1])
+
+
+def generate_structured(messages: list[dict], response_model: type, temperature: float = 0.0):
+    """Ask the model for exactly one JSON object and validate it strictly.
+
+    The response is never evaluated as Python or repaired with ``eval``; any
+    parse/validation failure raises :class:`StructuredOutputError`.
+    """
+    import json
+
+    from pydantic import ValidationError
+
+    instruction = {
+        "role": "system",
+        "content": (
+            "只输出一个合法的 JSON 对象，不要输出任何其他文字、注释或 Markdown 代码块。"
+            "不要使用 eval 或执行代码。"
+        ),
+    }
+    text = generate([instruction, *messages], temperature=temperature)
+    try:
+        obj = _extract_json_object(text)
+    except (ValueError, json.JSONDecodeError):
+        raise StructuredOutputError() from None
+    try:
+        return response_model.model_validate(obj)
+    except ValidationError:
+        raise StructuredOutputError() from None
+
+
 _async_client = None
 _async_client_lock = threading.Lock()
 

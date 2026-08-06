@@ -2428,6 +2428,147 @@ class UserDB:
         return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # Organization proposals, batches, and rollback
+    # ------------------------------------------------------------------
+
+    def create_organization_proposal(
+        self, actor_id: int, instruction_hash: str, expires_at: float
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_proposals "
+                "(actor_id, instruction_hash, status, expires_at, created_at) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (actor_id, instruction_hash, expires_at, time.time()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_organization_proposal(self, proposal_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_proposals WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_organization_proposal_status(self, proposal_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_organization_proposals SET status = ? WHERE id = ?",
+                (status, proposal_id),
+            )
+            self._conn.commit()
+
+    def add_organization_item(
+        self,
+        proposal_id: int,
+        document_id: int,
+        target_path: str,
+        add_tags: str,
+        remove_tags: str,
+        document_type: str,
+        reason: str,
+        confidence: float,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_items "
+                "(proposal_id, document_id, target_path, add_tags, remove_tags, document_type, reason, confidence, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                (proposal_id, document_id, target_path, add_tags, remove_tags, document_type, reason, confidence),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_organization_items(self, proposal_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_organization_items WHERE proposal_id = ? ORDER BY id",
+                (proposal_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_organization_item_status(
+        self, item_id: int, status: str, reason_code: str = ""
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_organization_items SET status = ?, reason_code = ? WHERE id = ?",
+                (status, reason_code, item_id),
+            )
+            self._conn.commit()
+
+    def get_organization_batch(
+        self, proposal_id: int, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_batches "
+                "WHERE proposal_id = ? AND idempotency_key = ?",
+                (proposal_id, idempotency_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _create_organization_batch_in_tx(
+        self, proposal_id: int, actor_id: int, idempotency_key: str
+    ) -> int:
+        """Insert a batch row inside an already-open transaction."""
+        cur = self._conn.execute(
+            "INSERT INTO material_organization_batches "
+            "(proposal_id, actor_id, status, created_at, idempotency_key) "
+            "VALUES (?, ?, 'applied', ?, ?)",
+            (proposal_id, actor_id, time.time(), idempotency_key),
+        )
+        return int(cur.lastrowid)
+
+    def create_organization_batch(
+        self, proposal_id: int, actor_id: int, idempotency_key: str
+    ) -> int:
+        with self._lock:
+            return self._create_organization_batch_in_tx(proposal_id, actor_id, idempotency_key)
+
+    def add_organization_batch_item(
+        self,
+        batch_id: int,
+        document_id: int,
+        before_logical_path: str,
+        after_logical_path: str,
+        before_metadata_version: int,
+        after_metadata_version: int,
+        status: str,
+        reason_code: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_batch_items "
+                "(batch_id, document_id, before_logical_path, after_logical_path, "
+                "before_metadata_version, after_metadata_version, status, reason_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id, document_id, before_logical_path, after_logical_path,
+                    before_metadata_version, after_metadata_version, status, reason_code,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_organization_batch_items(self, batch_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_organization_batch_items WHERE batch_id = ? ORDER BY id",
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_organization_batch_by_id(self, batch_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
     # Incremental worker support
     # ------------------------------------------------------------------
 

@@ -31,6 +31,12 @@ from rag.materials.models import (
     MaterialLimits,
     MaterialState,
 )
+from rag.materials.organizer import (
+    OrganizationBatchResult,
+    OrganizationInstruction,
+    OrganizationPreview,
+    OrganizationService,
+)
 from rag.materials.recycle import (
     PurgeResult,
     RecycleError,
@@ -65,6 +71,10 @@ __all__ = [
     "MaterialLimits",
     "MaterialLocator",
     "MaterialState",
+    "OrganizationBatchResult",
+    "OrganizationInstruction",
+    "OrganizationPreview",
+    "OrganizationService",
     "PurgeResult",
     "RecycleError",
     "RecycleRecord",
