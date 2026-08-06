@@ -15,8 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from rag.materials.models import ExtractedMaterial
-
 
 @dataclass(frozen=True)
 class ConvertedArtifact:
