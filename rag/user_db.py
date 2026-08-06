@@ -1971,6 +1971,89 @@ class UserDB:
             rows = self._conn.execute("PRAGMA foreign_key_check").fetchall()
         return [tuple(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Material index jobs
+    # ------------------------------------------------------------------
+
+    def enqueue_latest_index_job(
+        self, document_id: int, version_id: int, content_hash: str, not_before: float
+    ) -> int:
+        """Enqueue the latest index job for a document, cancelling prior active ones.
+
+        Enqueue/cancel share one transaction so replacement debounces to the
+        newest version without a window for stale jobs to win.
+        """
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            self._conn.execute(
+                "UPDATE document_index_jobs SET status='cancelled', updated_at=? "
+                "WHERE document_id=? AND status IN ('queued','retry','running')",
+                (now, document_id),
+            )
+            cur = self._conn.execute(
+                "INSERT INTO document_index_jobs "
+                "(document_id, version_id, content_hash, status, available_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (document_id, version_id, content_hash, not_before, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def enqueue_material_job(self, document_id: int, version_id: int) -> int:
+        """Enqueue a job immediately (test and maintenance helper)."""
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            cur = self._conn.execute(
+                "INSERT INTO document_index_jobs "
+                "(document_id, version_id, content_hash, status, available_at, created_at, updated_at) "
+                "VALUES (?, ?, '', 'queued', 0, ?, ?)",
+                (document_id, version_id, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_index_job(self, job_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM document_index_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_material_jobs(
+        self,
+        worker_id: str,
+        now: float,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Claim due, unlocked jobs with one compare-and-set update each."""
+        lease_expires = now + lease_seconds
+        claimed: list[dict[str, Any]] = []
+        with self._lock, self.transaction(immediate=True):
+            candidates = self._conn.execute(
+                "SELECT id FROM document_index_jobs "
+                "WHERE status IN ('queued','retry','running') AND available_at <= ? "
+                "AND (lease_expires_at IS NULL OR lease_expires_at < ?) "
+                "ORDER BY available_at LIMIT ?",
+                (now, now, limit),
+            ).fetchall()
+            for row in candidates:
+                # Reclaim queued/retry jobs, or running jobs whose lease expired.
+                cur = self._conn.execute(
+                    "UPDATE document_index_jobs "
+                    "SET status='running', lease_owner=?, lease_expires_at=?, "
+                    "attempt=attempt+1, updated_at=? "
+                    "WHERE id=? AND available_at <= ? "
+                    "AND (status IN ('queued','retry') "
+                    "     OR (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
+                    (worker_id, lease_expires, now, row["id"], now, now),
+                )
+                if cur.rowcount == 1:
+                    job_row = self._conn.execute(
+                        "SELECT * FROM document_index_jobs WHERE id = ?",
+                        (row["id"],),
+                    ).fetchone()
+                    claimed.append(dict(job_row))
+        return claimed
+
     def create_material_schema(self) -> None:
         """Apply material-lifecycle schema migrations idempotently.
 
@@ -2015,9 +2098,11 @@ class UserDB:
                     attempt INTEGER NOT NULL DEFAULT 0,
                     error_code TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
-                    updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
-                    UNIQUE(document_id, version_id, job_type)
+                    updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_document_index_jobs_active
+                ON document_index_jobs(document_id, status);
 
                 CREATE TABLE IF NOT EXISTS material_archive_manifests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
