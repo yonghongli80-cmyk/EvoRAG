@@ -5,11 +5,20 @@ Extended by Tasks 5-7. Mounted exactly once by ``rag.api``.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
 from rag.api_security import require_doc_view, require_user
 
 router = APIRouter()
+
+
+class KnowledgeFeedbackRequest(BaseModel):
+    assistant_message_id: int
+    kind: str = Field(pattern="^(useful|not_useful|outdated)$")
+    citation_id: int | None = None
+    comment: str = ""
+    suggested_answer: str = ""
 
 
 def _serialize_version(db, version: dict, user: dict, document: dict) -> dict:
@@ -77,3 +86,42 @@ def download_document_version(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="版本文件缺失")
     return FileResponse(path, filename=version["original_filename"])
+
+
+@router.post("/feedback/knowledge")
+def submit_feedback_knowledge(
+    req: KnowledgeFeedbackRequest,
+    request: Request,
+    user: dict = Depends(require_user),
+) -> dict:
+    from rag.knowledge_feedback import (
+        FeedbackValidationError,
+        submit_knowledge_feedback,
+    )
+
+    db = request.app.state.user_db
+    try:
+        return submit_knowledge_feedback(
+            db,
+            user,
+            req.assistant_message_id,
+            req.kind,
+            req.citation_id,
+            req.comment,
+            req.suggested_answer,
+        )
+    except FeedbackValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/knowledge-operations/my-feedback")
+def my_feedback(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    user: dict = Depends(require_user),
+) -> dict:
+    """Return only the current user's own feedback rows."""
+    db = request.app.state.user_db
+    items, total = db.list_user_feedback(user["id"], page, page_size)
+    return {"items": items, "total": total, "page": page, "page_size": page_size}

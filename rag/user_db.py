@@ -381,6 +381,23 @@ class UserDB:
                 "ON chat_messages(conversation_id, persistence_key)"
             )
 
+            # Trusted knowledge loop migrations: structured feedback columns.
+            for column, ddl in (
+                ("kind", "TEXT NOT NULL DEFAULT 'not_useful'"),
+                ("question_text", "TEXT NOT NULL DEFAULT ''"),
+                ("question_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("citation_id", "INTEGER"),
+                ("suggested_answer", "TEXT NOT NULL DEFAULT ''"),
+                ("status", "TEXT NOT NULL DEFAULT 'submitted'"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM feedback LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE feedback ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
+
             # Trusted knowledge loop migrations: version pointers on kb_documents.
             try:
                 self._conn.execute("SELECT document_id FROM kb_documents LIMIT 1")
@@ -833,6 +850,78 @@ class UserDB:
                 (message_id, int(user_id)),
             ).fetchone()
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Structured knowledge feedback
+    # ------------------------------------------------------------------
+
+    def get_message_question(self, assistant_message_id: int) -> str:
+        """Return the user question preceding an assistant message, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT content FROM chat_messages "
+                "WHERE conversation_id = (SELECT conversation_id FROM chat_messages WHERE id = ?) "
+                "AND role = 'user' AND id < ? ORDER BY id DESC LIMIT 1",
+                (assistant_message_id, assistant_message_id),
+            ).fetchone()
+        return row["content"] if row else ""
+
+    def add_knowledge_feedback(
+        self,
+        message_id: int,
+        user_id: int | str,
+        kind: str,
+        question_text: str,
+        question_hash: str,
+        citation_id: int | None,
+        suggested_answer: str,
+        comment: str = "",
+    ) -> int:
+        """Insert or replace one structured feedback row and return its id."""
+        value = 1 if kind == "useful" else -1
+        with self._lock, self.transaction(immediate=True):
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feedback "
+                "(message_id, user_id, value, comment, kind, question_text, question_hash, "
+                "citation_id, suggested_answer, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted')",
+                (
+                    message_id,
+                    int(user_id),
+                    value,
+                    comment,
+                    kind,
+                    question_text,
+                    question_hash,
+                    citation_id,
+                    suggested_answer,
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT id FROM feedback WHERE message_id = ? AND user_id = ?",
+                (message_id, int(user_id)),
+            ).fetchone()
+            return int(row["id"])
+
+    def list_user_feedback(
+        self, user_id: int | str, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return the current user's feedback rows plus the total count."""
+        uid = int(user_id)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM feedback WHERE user_id = ?", (uid,)
+            ).fetchone()
+            rows = self._conn.execute(
+                "SELECT f.id, f.message_id, f.kind, f.question_text, f.question_hash, "
+                "f.citation_id, f.comment, f.suggested_answer, f.status, f.created_at, "
+                "u.username AS submitter_name "
+                "FROM feedback f JOIN users u ON u.id = f.user_id "
+                "WHERE f.user_id = ? ORDER BY f.created_at DESC LIMIT ? OFFSET ?",
+                (uid, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total_row["cnt"])
 
     # ------------------------------------------------------------------
     # Assistant answers with citations
