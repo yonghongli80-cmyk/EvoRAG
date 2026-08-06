@@ -2,14 +2,33 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Mapping
 from typing_extensions import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
+
+@dataclass(frozen=True)
+class ExtractedUnit:
+    unit_key: str
+    text: str
+    location: "CitationLocation"
+    source: Literal["native_text", "local_ocr", "metadata"]
+    confidence: float
+    metadata: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExtractedMaterial:
+    version_id: int
+    parser_schema_version: str
+    units: tuple["ExtractedUnit", ...] = ()
+    warnings: tuple[str, ...] = ()
+
 CitationKind = Literal[
-    "paragraph", "page", "slide", "cell_range", "metadata", "archive_entry"
+    "paragraph", "page", "page_region", "slide", "cell_range", "metadata", "archive_entry"
 ]
 
 

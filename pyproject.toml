@@ -25,6 +25,9 @@ dependencies = [
     "httpx>=0.28,<1",
     "python-jose[cryptography]>=3.3,<4",
     "filetype>=1.2,<2",
+    "python-pptx>=1.0,<2",
+    "PyMuPDF>=1.26,<2",
+    "rapidocr-onnxruntime>=1.4,<2",
 ]
 
 [project.optional-dependencies]
