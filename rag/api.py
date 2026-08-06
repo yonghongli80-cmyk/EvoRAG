@@ -65,11 +65,31 @@ def _versions_root() -> Path:
     return Path(getattr(app.state, "document_versions_root", settings.document_versions_root))
 
 
+def _run_document_version_migration() -> None:
+    """Create version-1 rows for documents created before versioning."""
+    from rag.document_versions import migrate_existing_document_versions
+
+    try:
+        report = migrate_existing_document_versions(
+            user_db, _versions_root(), DATA_DIR
+        )
+        if report.migrated or report.missing:
+            logger.info(
+                "document version migration: migrated=%s missing=%s unchanged=%s",
+                report.migrated,
+                report.missing,
+                report.unchanged,
+            )
+    except Exception:
+        logger.exception("document version migration failed")
+
+
 @app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
     log_security_mode()
+    _run_document_version_migration()
     if not DATA_DIR.is_dir():
         return
 

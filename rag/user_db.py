@@ -1919,6 +1919,23 @@ class UserDB:
             )
             self._conn.commit()
 
+    def set_version_status(self, version_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET status = ? WHERE id = ?",
+                (status, version_id),
+            )
+            self._conn.commit()
+
+    def list_document_permissions_all(self) -> list[dict[str, Any]]:
+        """Return every logical document for startup migration and metrics."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, current_version_id "
+                "FROM document_permissions ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------

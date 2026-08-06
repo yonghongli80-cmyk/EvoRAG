@@ -2,7 +2,7 @@
 
 import pytest
 
-from rag.user_db import UserDB
+from rag.user_db import UserDB, VersionConflict
 
 
 def make_versioned_document(tmp_path):
@@ -64,7 +64,7 @@ def test_activating_non_staging_version_raises_conflict(tmp_path):
     db2.activate_document_version(document_id, second_id, "rag_docs", "policy.pdf")
 
     # Re-activating an already-activated version must raise a version conflict.
-    with pytest.raises(Exception):
+    with pytest.raises(VersionConflict):
         db2.activate_document_version(document_id, second_id, "rag_docs", "policy.pdf")
 
 

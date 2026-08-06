@@ -52,8 +52,6 @@ def test_admin_task_listing_respects_status_filter(isolated_api, make_user):
 
 
 def test_admin_reassigns_task_assignee(isolated_api, make_user, monkeypatch):
-    import rag.knowledge_tasks
-
     owner_id = isolated_api.app.state.user_db.create_user("owner", "Password-123!")
     doc_id = isolated_api.app.state.user_db.create_document_permission(
         "policy.pdf", "rag_docs", owner_id

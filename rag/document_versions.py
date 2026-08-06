@@ -7,7 +7,9 @@ atomic activation stay in one place.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -137,7 +139,7 @@ def ingest_document_version(
         db.activate_document_version(document_id, version_id, kb_id, filename)
     except DuplicateDocument:
         raise
-    except Exception as exc:
+    except Exception:
         if indexed and not was_existing:
             try:
                 manager.remove_document(kb_id, filename)
@@ -165,3 +167,70 @@ def ingest_document_version(
     return IngestResult(
         document_id, version_id, filename, version_no, status, count
     )
+
+
+@dataclass(frozen=True)
+class MigrationReport:
+    migrated: int
+    missing: int
+    unchanged: int
+
+
+def migrate_existing_document_versions(
+    db: UserDB, versions_root: Path, default_upload_root: Path
+) -> MigrationReport:
+    """Create version-1 rows for documents created before versioning.
+
+    Legacy sources are copied, never moved or deleted. Each document commits
+    independently so one corrupt record cannot roll back completed records.
+    Missing sources become a ``failed`` version.
+    """
+    migrated = 0
+    missing = 0
+    unchanged = 0
+    for document in db.list_document_permissions_all():
+        if document.get("current_version_id") is not None:
+            unchanged += 1
+            continue
+
+        document_id = document["id"]
+        filename = document["doc_name"]
+        owner_id = document["owner_id"]
+
+        source = _resolve_legacy_source(db, document, default_upload_root)
+        if source is None:
+            version_id = db.create_document_version(
+                document_id, filename, str(versions_root / "missing"), "missing", owner_id
+            )
+            db.set_version_status(version_id, "failed")
+            missing += 1
+            logger.info(
+                "migration: missing source for document",
+                extra={"document_id": document_id, "document_filename": filename},
+            )
+            continue
+
+        final_path = final_version_path(versions_root, document_id, 1, filename)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, final_path)
+        digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        version_id = db.create_document_version(
+            document_id, filename, str(final_path), digest, owner_id
+        )
+        db.activate_document_version(document_id, version_id, document["kb_id"], filename)
+        migrated += 1
+
+    return MigrationReport(migrated=migrated, missing=missing, unchanged=unchanged)
+
+
+def _resolve_legacy_source(db: UserDB, document: dict, default_upload_root: Path) -> Path | None:
+    """Resolve a legacy source file from kb_documents or the upload root."""
+    kb_document = db.get_kb_document(document["kb_id"], document["doc_name"])
+    if kb_document and kb_document.get("file_path"):
+        candidate = Path(kb_document["file_path"])
+        if candidate.is_file():
+            return candidate
+    candidate = default_upload_root / document["doc_name"]
+    if candidate.is_file():
+        return candidate
+    return None

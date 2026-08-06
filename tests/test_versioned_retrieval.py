@@ -1,7 +1,5 @@
 """Task 4: version-aware vector payload and historical fallback."""
 
-from pathlib import Path
-
 import pytest
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams

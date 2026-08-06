@@ -325,6 +325,12 @@ df -h
 | `RAG_BAILIAN_EMBED_MODEL` | ✅ | 嵌入模型名称 |
 | `INIT_ADMIN_USERNAME` | ❌ | 首次启动时指定管理员用户名 |
 | `RAG_AUTH_ENABLED` | ❌ | 是否启用 API Key 认证（默认 false） |
+| `RAG_DOCUMENT_VERSIONS_ROOT` | ❌ | 不可变文档版本存储根目录（默认 `data/document_versions`） |
+| `RAG_FEEDBACK_CLUSTER_DAYS` | ❌ | 反馈聚合窗口天数（默认 30） |
+| `RAG_FEEDBACK_CLUSTER_USERS` | ❌ | 触发 not_useful 任务所需的不同用户数（默认 3） |
+| `RAG_KNOWLEDGE_TASK_DUE_DAYS` | ❌ | 知识任务到期天数（默认 7） |
+| `RAG_KNOWLEDGE_STALE_DAYS` | ❌ | 知识库过期判定天数（默认 180） |
+| `RAG_HISTORICAL_RESULT_WEIGHT` | ❌ | 历史资料检索权重（默认 0.35） |
 
 ---
 

@@ -28,9 +28,30 @@
 - 删除默认库文件后会重新构建内存流水线；新增回归测试覆盖此前被吞掉的 `NameError`。
 - 回归验证以两段执行：461 项 + 149 项，共 610 项 Python 测试通过。FastAPI/Starlette 的弃用警告仍存在，但没有测试失败。
 
+## 可信知识闭环（2026-07-27 计划，实施于 2026-08-06）
+
+| 提交 | 内容 | 验证 |
+| --- | --- | --- |
+| `c833c9e` | 文档版本 Schema：`document_versions`、`answer_citations` 表与原子激活 | Schema/用户库/生命周期测试通过 |
+| `234f19c` | 源中立 `SourceObject` 与版本文件存储（stage/promote/resolve） | 6 项存储测试通过 |
+| `9c86cee` | 统一版本化摄取服务与重复契约（reject/overwrite/keep + unchanged） | 重复/覆盖/补偿测试通过 |
+| `1a42653` | 版本感知向量载荷与当前优先检索、历史回退（权重 0.35） | 检索/向量回归通过 |
+| `14feddc` | 助手消息引用持久化与 `done.assistant_message_id`、版本下载 | 引用/会话/流式测试通过 |
+| `d27c454` | 结构化反馈（useful/not_useful/outdated）与确定性聚合键 | 反馈/聚合测试通过 |
+| `69222cb` | 知识任务规则（outdated 立即、not_useful 需 3 用户/30 天）、状态机、运营 API | 任务/运营/可见性测试通过 |
+| `4176d90` | 前端重复/引用/反馈弹窗、done 事件消息 ID | Vitest + 构建通过 |
+| `6c398d9` | 知识运营页与第三个导航入口 `/operations` | Vitest + 构建通过 |
+
+全量验证（排除需模型凭证的 `test_pipeline.py`）：**639 项 Python 测试通过，0 失败**。
+前端 Vitest：**122 通过 / 4 失败**（4 项均为既有 store 响应字段断言不一致，与本次改动无关），生产构建通过。
+Ruff：新增文件仅剩与既有 `rag/api.py` 一致的 `B008`（FastAPI `Depends` 默认参数）风格告警。
+`git diff --check` 干净，`data/` 与 `qdrant_data/` 无测试残留。
+
+明确推迟：NAS/SMB/WebDAV 连接器、组织权限继承、离职交接、外部通知、场景助手。最终答案缓存保持禁用。
+
 ## 正在进行
 
-- 审计、数据生命周期与最终验证。
+- 下一计划：增量资料生命周期（2026-07-28-incremental-material-lifecycle）。
 
 ## 回家后可执行的验证
 
