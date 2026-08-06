@@ -58,4 +58,8 @@ def submit_knowledge_feedback(
         suggested_answer=suggested_answer,
         comment=comment,
     )
+    # Trigger deterministic task rules in the same application call.
+    from rag.knowledge_tasks import TaskService
+
+    TaskService(db).record_feedback(feedback_id)
     return {"feedback_id": feedback_id, "kind": kind}

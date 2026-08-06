@@ -10,6 +10,8 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
+from config import settings
+
 
 class VersionConflict(Exception):
     """Raised when a version operation cannot proceed due to state conflict."""
@@ -232,6 +234,37 @@ class UserDB:
                     is_historical INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
                     FOREIGN KEY(assistant_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT NOT NULL CHECK(task_type IN (
+                        'outdated', 'not_useful', 'insufficient_evidence', 'evidence_conflict'
+                    )),
+                    cluster_key TEXT NOT NULL,
+                    active_key TEXT UNIQUE,
+                    document_id INTEGER,
+                    document_version_id INTEGER,
+                    assigned_to INTEGER,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'open', 'in_progress', 'resolved', 'dismissed', 'confirmed_expired'
+                    )),
+                    report_count INTEGER NOT NULL DEFAULT 1,
+                    resolution_note TEXT NOT NULL DEFAULT '',
+                    due_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    resolved_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    old_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
                 );
                 """
             )
@@ -922,6 +955,245 @@ class UserDB:
                 (uid, page_size, offset),
             ).fetchall()
         return [dict(r) for r in rows], int(total_row["cnt"])
+
+    # ------------------------------------------------------------------
+    # Knowledge correction tasks
+    # ------------------------------------------------------------------
+
+    def get_feedback(self, feedback_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, message_id, user_id, kind, question_text, question_hash, "
+                "citation_id, suggested_answer, comment, status, created_at "
+                "FROM feedback WHERE id = ?",
+                (feedback_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_answer_citation_by_id(self, citation_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM answer_citations WHERE id = ?", (citation_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_distinct_feedback_users(self, question_hash: str, days: int) -> int:
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT user_id) AS cnt FROM feedback "
+                "WHERE kind = 'not_useful' AND question_hash = ? AND created_at >= ?",
+                (question_hash, cutoff),
+            ).fetchone()
+        return int(row["cnt"])
+
+    def upsert_active_task(
+        self,
+        *,
+        task_type: str,
+        cluster_key: str,
+        active_key: str,
+        document_id: int | None,
+        document_version_id: int | None,
+        assigned_to: int | None,
+        report_count: int,
+    ) -> int:
+        now = time.time()
+        due_at = now + settings.knowledge_task_due_days * 86400
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT id FROM knowledge_tasks WHERE active_key = ? "
+                "AND status IN ('open', 'in_progress')",
+                (active_key,),
+            ).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE knowledge_tasks SET report_count = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (report_count, now, row["id"]),
+                )
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO knowledge_tasks "
+                "(task_type, cluster_key, active_key, document_id, document_version_id, "
+                "assigned_to, status, report_count, due_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
+                (
+                    task_type,
+                    cluster_key,
+                    active_key,
+                    document_id,
+                    document_version_id,
+                    assigned_to,
+                    report_count,
+                    due_at,
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_knowledge_task(self, task_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_tasks_for_user(
+        self, user_id: int | str, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int]:
+        uid = int(user_id)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE assigned_to = ?",
+                (uid,),
+            ).fetchone()
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge_tasks WHERE assigned_to = ? "
+                "ORDER BY due_at ASC LIMIT ? OFFSET ?",
+                (uid, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total["cnt"])
+
+    def list_tasks_admin(
+        self,
+        status: str | None = None,
+        assignee_id: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        offset = (page - 1) * page_size
+        conditions = []
+        params: list = []
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if assignee_id is not None:
+            conditions.append("assigned_to = ?")
+            params.append(assignee_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM knowledge_tasks {where}", params
+            ).fetchone()
+            rows = self._conn.execute(
+                f"SELECT * FROM knowledge_tasks {where} ORDER BY due_at ASC LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total["cnt"])
+
+    def transition_knowledge_task(
+        self,
+        task_id: int,
+        actor_id: int,
+        new_status: str,
+        note: str,
+        expected_updated_at: float,
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT status, updated_at FROM knowledge_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            old_status = row["status"]
+            resolved_at = now if new_status in {"resolved", "dismissed", "confirmed_expired"} else None
+            cur = self._conn.execute(
+                "UPDATE knowledge_tasks SET status = ?, active_key = NULL, "
+                "resolution_note = ?, updated_at = ?, resolved_at = ? "
+                "WHERE id = ? AND updated_at = ?",
+                (new_status, note, now, resolved_at, task_id, expected_updated_at),
+            )
+            if cur.rowcount == 0:
+                raise VersionConflict("task_state_conflict")
+            self._conn.execute(
+                "INSERT INTO knowledge_task_events "
+                "(task_id, actor_id, old_status, new_status, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (task_id, actor_id, old_status, new_status, note, now),
+            )
+        return self.get_knowledge_task(task_id)
+
+    def reassign_knowledge_task(self, task_id: int, assignee_id: int | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE knowledge_tasks SET assigned_to = ? WHERE id = ?",
+                (assignee_id, task_id),
+            )
+            self._conn.commit()
+
+    def set_document_owner(self, document_id: int, owner_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_permissions SET owner_id = ? WHERE id = ?",
+                (owner_id, document_id),
+            )
+            self._conn.commit()
+
+    def list_task_reporters(self, task_id: int) -> list[str]:
+        task = self.get_knowledge_task(task_id)
+        if task is None:
+            return []
+        cutoff = task["created_at"] - settings.feedback_cluster_days * 86400
+        with self._lock:
+            if task["task_type"] == "outdated":
+                rows = self._conn.execute(
+                    "SELECT DISTINCT u.username FROM feedback f "
+                    "JOIN answer_citations c ON c.id = f.citation_id "
+                    "JOIN users u ON u.id = f.user_id "
+                    "WHERE c.document_id = ? AND f.kind = 'outdated' AND f.created_at >= ?",
+                    (task["document_id"], cutoff),
+                ).fetchall()
+            else:
+                prefix = "not_useful:"
+                if task["cluster_key"].startswith(prefix):
+                    qh = task["cluster_key"].split(":")[1]
+                else:
+                    qh = None
+                if qh is None:
+                    return []
+                rows = self._conn.execute(
+                    "SELECT DISTINCT u.username FROM feedback f JOIN users u ON u.id = f.user_id "
+                    "WHERE f.kind = 'not_useful' AND f.question_hash = ? AND f.created_at >= ?",
+                    (qh, cutoff),
+                ).fetchall()
+        return [r["username"] for r in rows]
+
+    def task_summary(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            open_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE status = 'open'"
+            ).fetchone()["cnt"]
+            overdue_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks "
+                "WHERE status IN ('open', 'in_progress') AND due_at < ?",
+                (now,),
+            ).fetchone()["cnt"]
+            outdated_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE task_type = 'outdated' "
+                "AND status IN ('open', 'in_progress')"
+            ).fetchone()["cnt"]
+            not_useful_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE task_type = 'not_useful' "
+                "AND status IN ('open', 'in_progress')"
+            ).fetchone()["cnt"]
+            stale_cutoff = now - settings.knowledge_stale_days * 86400
+            stale_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM document_permissions "
+                "WHERE current_version_id IS NOT NULL AND updated_at < ?",
+                (stale_cutoff,),
+            ).fetchone()["cnt"]
+        return {
+            "open": int(open_count),
+            "overdue": int(overdue_count),
+            "outdated": int(outdated_count),
+            "not_useful": int(not_useful_count),
+            "stale_knowledge_bases": int(stale_count),
+        }
 
     # ------------------------------------------------------------------
     # Assistant answers with citations
