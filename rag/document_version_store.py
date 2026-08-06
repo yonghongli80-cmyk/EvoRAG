@@ -23,10 +23,15 @@ def _ensure_within(root: Path, candidate: Path) -> Path:
 
 
 def stage_version(root: Path, source: SourceObject) -> Path:
-    """Write a source object's content to a staging file and return its path."""
+    """Write a source object's content to a staging file and return its path.
+
+    The staged filename keeps the original extension so format loaders can
+    recognise the content before promotion.
+    """
     staging_dir = root / "staging"
     staging_dir.mkdir(parents=True, exist_ok=True)
-    stage = staging_dir / f"{source.source_key.replace(':', '-')}.bin"
+    token = source.source_key.replace(":", "-")
+    stage = staging_dir / f"{token}-{source.display_name}"
     stage.write_bytes(source.content)
     return stage
 

@@ -11,21 +11,27 @@ def test_anonymous_upload_is_rejected_before_body_is_persisted(isolated_api):
     assert list(Path(isolated_api.app.state.upload_dir).glob("*")) == []
 
 
-def test_existing_filename_returns_conflict_without_overwrite(isolated_api, make_user):
+def test_existing_filename_returns_conflict_without_overwrite(isolated_api, make_user, mock_embedding_indexing):
     _, headers = make_user("alice")
-    upload_dir = isolated_api.app.state.upload_dir
-    upload_dir.mkdir()
-    existing = upload_dir / "same.txt"
-    existing.write_bytes(b"old")
 
-    response = isolated_api.post(
+    first = isolated_api.post(
+        "/upload",
+        headers=headers,
+        files={"file": ("same.txt", b"old", "text/plain")},
+    )
+    second = isolated_api.post(
         "/upload",
         headers=headers,
         files={"file": ("same.txt", b"new", "text/plain")},
     )
 
-    assert response.status_code == 409
-    assert existing.read_bytes() == b"old"
+    assert first.status_code == 200
+    assert second.status_code == 409
+    # The default reject action must not overwrite the existing version.
+    db = isolated_api.app.state.user_db
+    document = db.get_document_permission("same.txt", "rag_docs")
+    current = db.get_current_document_version(document["id"])
+    assert current["content_hash"] != __import__("hashlib").sha256(b"new").hexdigest()
 
 
 def test_upload_directory_is_not_publicly_mounted(isolated_api):

@@ -6,10 +6,12 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from config import settings
 
 from rag.auth import create_token, decode_token, verify_api_key
 from rag.api_security import (
@@ -22,6 +24,12 @@ from rag.api_security import (
     require_kb_view,
     require_user,
 )
+from rag.document_versions import (
+    DuplicateDocument,
+    choose_document_name,
+    ingest_document_version,
+)
+from rag.document_sources.upload import UploadDocumentSource
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.kb_file_store import (
     final_document_path,
@@ -32,6 +40,7 @@ from rag.kb_file_store import (
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
+from rag.operations_api import router as operations_router
 from rag.permissions import filter_chunks_by_permission
 from rag.user_db import UserDB
 
@@ -45,6 +54,14 @@ from rag.concurrency import ReadWriteLock
 app = FastAPI(title="RAG 知识库 API", description="基于检索增强生成的智能知识库系统")
 pipeline = None
 _pipeline_lock = ReadWriteLock()
+
+# Versioned document ingest (trusted knowledge loop).
+app.include_router(operations_router)
+
+
+def _versions_root() -> Path:
+    """Resolve the configured document-versions root from app state."""
+    return Path(getattr(app.state, "document_versions_root", settings.document_versions_root))
 
 
 @app.on_event("startup")
@@ -742,77 +759,56 @@ def _human_size(size: int) -> str:
 
 
 async def _ingest_default_document(
-    *, content: bytes, filename: str, user: dict, db: UserDB
+    *, content: bytes, filename: str, user: dict, db: UserDB, duplicate_action: str = "reject"
 ) -> dict:
-    """Atomically index a private default-library document for its uploader."""
+    """Ingest a private default-library document through the version service."""
     filename = Path(filename or "upload.txt").name
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="不支持的文件格式")
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+    if duplicate_action not in ("reject", "overwrite", "keep"):
+        raise HTTPException(status_code=400, detail="无效的 duplicate_action")
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    dest = DATA_DIR / filename
-    if dest.exists() or db.get_document_permission(filename, "rag_docs"):
-        raise HTTPException(status_code=409, detail="同名文件已存在")
-
-    stage_dir = DATA_DIR / ".staging"
-    stage_dir.mkdir(exist_ok=True)
-    stage = stage_dir / f"{uuid.uuid4().hex}-{filename}"
-    perm_id: int | None = None
-    reserved = False
-    promoted = False
-    indexing_started = False
+    source = UploadDocumentSource.from_bytes(filename, content)
+    if duplicate_action == "overwrite" and db.get_document_permission(source.display_name, "rag_docs"):
+        require_doc_edit(db, source.display_name, "rag_docs", user)
+    manager = KnowledgeBaseManager()
     try:
-        # Reserve the final name before expensive work, preventing concurrent overwrite.
-        dest.touch(exist_ok=False)
-        reserved = True
-        stage.write_bytes(content)
-        await asyncio.to_thread(load_document, str(stage))
-        perm_id = await asyncio.to_thread(
-            db.create_document_permission, filename, "rag_docs", user["id"], 1, False
-        )
-        indexing_started = True
-        manager = KnowledgeBaseManager()
-        count = await asyncio.to_thread(
-            manager.add_document,
+        result = await asyncio.to_thread(
+            ingest_document_version,
+            db,
+            manager,
+            source,
             "rag_docs",
-            str(stage),
-            doc_name=filename,
-            doc_permission_id=perm_id,
+            user,
+            duplicate_action,
+            _versions_root(),
         )
-        os.replace(stage, dest)
-        promoted = True
-    except FileExistsError as exc:
-        raise HTTPException(status_code=409, detail="同名文件已存在") from exc
+    except DuplicateDocument as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "document_id": exc.document_id,
+                "current_version": exc.current_version,
+            },
+        ) from exc
     except HTTPException:
         raise
     except Exception as exc:
-        if indexing_started:
-            try:
-                await asyncio.to_thread(
-                    KnowledgeBaseManager().remove_document, "rag_docs", filename
-                )
-            except Exception:
-                logger.exception("upload vector rollback failed", extra={"upload_filename": filename})
-        if perm_id is not None:
-            try:
-                await asyncio.to_thread(db.delete_document_permission, perm_id)
-            except Exception:
-                logger.exception("upload permission rollback failed", extra={"upload_filename": filename})
         logger.exception("upload failed", extra={"user_id": user["id"], "upload_filename": filename})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
-    finally:
-        stage.unlink(missing_ok=True)
-        if reserved and not promoted:
-            dest.unlink(missing_ok=True)
-        try:
-            stage_dir.rmdir()
-        except OSError:
-            pass
 
-    return {"status": "uploaded", "filename": filename, "chunks": count}
+    return {
+        "status": result.status,
+        "filename": result.filename,
+        "chunks": result.chunks,
+        "document_id": result.document_id,
+        "version_id": result.version_id,
+        "version_no": result.version_no,
+    }
 
 
 @app.post(
@@ -822,6 +818,7 @@ async def _ingest_default_document(
 )
 async def upload_file(
     file: UploadFile = File(..., description="要上传的文件"),
+    duplicate_action: str = Form("reject"),
     user: dict = Depends(require_user),
 ):
     content = await file.read(MAX_FILE_SIZE + 1)
@@ -830,6 +827,7 @@ async def upload_file(
         filename=file.filename or "upload.txt",
         user=user,
         db=user_db,
+        duplicate_action=duplicate_action,
     )
 
     global pipeline
@@ -1057,6 +1055,7 @@ async def index_all(user: dict = Depends(require_user)):
 @app.post("/index", summary="索引文档", description="上传文档并添加到知识库，支持 txt/md/pdf/docx/xlsx 格式，最大 10MB")
 async def index(
     file: UploadFile = File(..., description="要索引的文档文件"),
+    duplicate_action: str = Form("reject"),
     user: dict = Depends(require_user),
 ):
     from rag.pipeline import RAGPipeline
@@ -1068,6 +1067,7 @@ async def index(
         filename=file.filename or "upload.txt",
         user=user,
         db=user_db,
+        duplicate_action=duplicate_action,
     )
     # 刷新 pipeline（冷启动时创建，运行时更新）
     with _pipeline_lock.write():
@@ -1407,6 +1407,7 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
 async def add_document_to_kb(
     kb_id: str,
     file: UploadFile = File(...),
+    duplicate_action: str = Form("reject"),
     user: dict = Depends(require_user),
 ):
     require_kb_edit(user_db, kb_id, user)
@@ -1417,63 +1418,77 @@ async def add_document_to_kb(
     filename = Path(file.filename or "unnamed.txt").name
     if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="不支持的文件格式")
-    if await asyncio.to_thread(user_db.get_kb_document, kb_id, filename):
-        raise HTTPException(status_code=409, detail="同名文件已存在")
+    if duplicate_action not in ("reject", "overwrite", "keep"):
+        raise HTTPException(status_code=400, detail="无效的 duplicate_action")
 
-    stage = None
-    destination = None
-    document_id = None
-    permission_id = None
-    indexed = False
-    completed = False
+    source = UploadDocumentSource.from_bytes(filename, content)
+    if duplicate_action == "overwrite" and user_db.get_document_permission(source.display_name, kb_id):
+        require_doc_edit(user_db, source.display_name, kb_id, user)
+    manager = KnowledgeBaseManager()
+    kb_document_id = None
     try:
-        stage = await asyncio.to_thread(stage_upload, KB_FILES_ROOT, filename, content)
-        parsed = await asyncio.to_thread(load_document, str(stage))
+        # Reserve the kb_documents lifecycle row for the resolved final name.
+        final_name = choose_document_name(user_db, kb_id, source.display_name, duplicate_action)
+        existing_kb_doc = await asyncio.to_thread(user_db.get_kb_document, kb_id, final_name)
+        if existing_kb_doc is None:
+            kb_document_id = await asyncio.to_thread(
+                user_db.create_kb_document_pending, kb_id, final_name
+            )
+        else:
+            kb_document_id = existing_kb_doc["id"]
+        result = await asyncio.to_thread(
+            ingest_document_version,
+            user_db,
+            manager,
+            source,
+            kb_id,
+            user,
+            duplicate_action,
+            _versions_root(),
+        )
+        version = await asyncio.to_thread(
+            user_db.get_document_version_by_id, result.version_id
+        )
+        parsed = await asyncio.to_thread(load_document, version["file_path"])
         toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
         summary = generate_summary(parsed)
-        document_id = await asyncio.to_thread(user_db.create_kb_document_pending, kb_id, filename)
-        permission_id = await asyncio.to_thread(
-            user_db.create_document_permission, filename, kb_id, user["id"], 1, False
-        )
-        count = await asyncio.to_thread(
-            KnowledgeBaseManager().add_document,
-            kb_id,
-            str(stage),
-            doc_name=filename,
-            doc_permission_id=permission_id,
-        )
-        indexed = True
-        destination = final_document_path(KB_FILES_ROOT, kb_id, document_id, filename)
-        await asyncio.to_thread(promote_stage, stage, destination)
-        stage = None
         await asyncio.to_thread(
-            user_db.finish_kb_document, document_id, str(destination), toc, summary, count
+            user_db.finish_kb_document,
+            kb_document_id,
+            version["file_path"],
+            toc,
+            summary,
+            result.chunks,
         )
-        completed = True
+    except DuplicateDocument as exc:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "document_id": exc.document_id,
+                "current_version": exc.current_version,
+            },
+        ) from exc
     except HTTPException:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise
     except Exception as exc:
-        if indexed:
-            try:
-                await asyncio.to_thread(KnowledgeBaseManager().remove_document, kb_id, filename)
-            except Exception:
-                logger.exception("KB vector rollback failed", extra={"kb_id": kb_id})
-        if permission_id is not None:
-            await asyncio.to_thread(user_db.delete_document_permission, permission_id)
-        if document_id is not None:
-            await asyncio.to_thread(user_db.delete_kb_document, document_id)
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         logger.exception("KB document upload failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
-    finally:
-        if stage is not None:
-            stage.unlink(missing_ok=True)
-            try:
-                stage.parent.rmdir()
-            except OSError:
-                pass
-        if destination is not None and not completed:
-            destination.unlink(missing_ok=True)
-    return {"status": "added", "kb_id": kb_id, "chunks": count}
+
+    return {
+        "status": "added",
+        "kb_id": kb_id,
+        "chunks": result.chunks,
+        "document_id": result.document_id,
+        "version_id": result.version_id,
+        "version_no": result.version_no,
+    }
 
 
 @app.delete("/knowledge-bases/{kb_id}/documents/{doc_name}", summary="删除文档", description="从知识库中删除指定文档")

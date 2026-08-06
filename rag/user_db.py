@@ -1395,6 +1395,31 @@ class UserDB:
             )
             self._conn.commit()
 
+    def get_document_version_by_id(self, version_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_version_file_path(self, version_id: int, file_path: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET file_path = ? WHERE id = ?",
+                (file_path, version_id),
+            )
+            self._conn.commit()
+
+    def delete_document_version(self, version_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM document_versions WHERE id = ?", (version_id,)
+            )
+            self._conn.commit()
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------

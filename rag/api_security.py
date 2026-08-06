@@ -121,6 +121,15 @@ def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     return doc
 
 
+def require_doc_version_edit(db: UserDB, document_id: int, user: dict) -> dict:
+    """Resolve a document by id and require edit access on its logical document."""
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise HTTPException(status_code=409, detail="文档权限记录缺失")
+    require_doc_edit(db, document["doc_name"], document["kb_id"], user)
+    return document
+
+
 def require_doc_edit(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
     if doc is None:

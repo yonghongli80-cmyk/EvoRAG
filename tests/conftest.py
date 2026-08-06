@@ -49,6 +49,25 @@ def reset_stream_state():
 
 
 @pytest.fixture
+def mock_embedding_indexing(monkeypatch):
+    """Replace the embedding model and vector writes so ingest tests run offline.
+
+    The local machine has no model API credentials, and tests must never write
+    to the repository ``qdrant_data``. This keeps the versioned ingest service
+    fully exercised while stubbing only the external embedding/write boundary.
+    """
+    import rag.embedder
+    import rag.vector_store
+
+    monkeypatch.setattr(
+        rag.embedder, "embed", lambda texts: [[0.1] * 1024 for _ in texts]
+    )
+    monkeypatch.setattr(
+        rag.vector_store, "add_to_collection", lambda *args, **kwargs: None
+    )
+
+
+@pytest.fixture
 def isolated_api(tmp_path, monkeypatch):
     """Give API tests a private database and upload root."""
     import rag.api as api
