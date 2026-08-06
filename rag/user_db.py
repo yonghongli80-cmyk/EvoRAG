@@ -6,7 +6,13 @@ import hashlib
 import os
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
 from typing import Any
+
+
+class VersionConflict(Exception):
+    """Raised when a version operation cannot proceed due to state conflict."""
 
 
 def _validate_password_strength(password: str) -> None:
@@ -32,6 +38,31 @@ class UserDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
+
+    # ------------------------------------------------------------------
+    # Transaction helpers
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def transaction(self, immediate: bool = False):
+        """Own exactly one BEGIN/COMMIT/ROLLBACK.
+
+        Callers must already hold ``self._lock``. Row-mutation helpers
+        decorated with ``_in_tx`` never begin, commit, or roll back a
+        transaction themselves; compound operations wrap them in one
+        public transaction so a failure rolls back all rows together.
+        """
+        if immediate:
+            self._conn.execute("BEGIN IMMEDIATE")
+        else:
+            self._conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Schema
@@ -169,6 +200,39 @@ class UserDB:
 
                 CREATE INDEX IF NOT EXISTS idx_kb_shares_user ON kb_shares(user_id);
                 CREATE INDEX IF NOT EXISTS idx_kb_shares_kb ON kb_shares(kb_id);
+
+                CREATE TABLE IF NOT EXISTS document_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    version_no INTEGER NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    uploaded_by INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('staging', 'current', 'historical', 'failed')),
+                    validity_status TEXT NOT NULL CHECK(validity_status IN (
+                        'valid', 'reported_outdated', 'confirmed_outdated'
+                    )) DEFAULT 'valid',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    superseded_at REAL,
+                    UNIQUE(document_id, version_no),
+                    FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(uploaded_by) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS answer_citations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assistant_message_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    document_version_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    section_title TEXT NOT NULL,
+                    text_preview TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    is_historical INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    FOREIGN KEY(assistant_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+                );
                 """
             )
             # Add permission_level column to users if it doesn't exist (idempotent)
@@ -280,6 +344,40 @@ class UserDB:
                 self._conn.execute("SELECT last_error FROM kb_documents LIMIT 1")
             except sqlite3.OperationalError:
                 self._conn.execute("ALTER TABLE kb_documents ADD COLUMN last_error TEXT DEFAULT ''")
+                self._conn.commit()
+
+            # Trusted knowledge loop migrations: version pointers on documents.
+            try:
+                self._conn.execute("SELECT current_version_id FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN current_version_id INTEGER")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT source_type FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN source_type TEXT NOT NULL DEFAULT 'upload'")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT source_key FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT updated_at FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
+                self._conn.commit()
+
+            # Trusted knowledge loop migrations: version pointers on kb_documents.
+            try:
+                self._conn.execute("SELECT document_id FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN document_id INTEGER")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT document_version_id FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN document_version_id INTEGER")
                 self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -945,7 +1043,8 @@ class UserDB:
     def get_document_permission(self, doc_name: str, kb_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, downloadable, created_at "
+                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
+                "downloadable, current_version_id, source_type, source_key, updated_at, created_at "
                 "FROM document_permissions WHERE doc_name = ? AND kb_id = ?",
                 (doc_name, kb_id),
             ).fetchone()
@@ -960,7 +1059,8 @@ class UserDB:
     def get_document_permission_by_id(self, doc_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, downloadable, created_at "
+                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
+                "downloadable, current_version_id, source_type, source_key, updated_at, created_at "
                 "FROM document_permissions WHERE id = ?",
                 (doc_id,),
             ).fetchone()
@@ -1194,6 +1294,106 @@ class UserDB:
                 (kb_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Document Versions (trusted knowledge loop)
+    # ------------------------------------------------------------------
+
+    def create_document_version(
+        self,
+        document_id: int,
+        original_filename: str,
+        file_path: str,
+        content_hash: str,
+        uploaded_by: int,
+    ) -> int:
+        """Reserve a staging version row and return its id.
+
+        The row is ``staging`` until ``activate_document_version`` promotes
+        it. ``version_no`` is derived per document as max+1.
+        """
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no "
+                "FROM document_versions WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            version_no = int(row["next_no"])
+            cur = self._conn.execute(
+                "INSERT INTO document_versions "
+                "(document_id, version_no, original_filename, file_path, content_hash, uploaded_by, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'staging')",
+                (document_id, version_no, original_filename, file_path, content_hash, uploaded_by),
+            )
+            return int(cur.lastrowid)
+
+    def _activate_document_version_in_tx(
+        self, document_id: int, version_id: int, kb_id: str, filename: str
+    ) -> None:
+        """Promote a staging version inside an already-open transaction.
+
+        This row-mutation primitive never begins, commits, or rolls back a
+        transaction; the caller owns exactly one.
+        """
+        now = time.time()
+        self._conn.execute(
+            "UPDATE document_versions SET status='historical', superseded_at=? "
+            "WHERE document_id=? AND status='current'",
+            (now, document_id),
+        )
+        activated = self._conn.execute(
+            "UPDATE document_versions SET status='current', validity_status='valid' "
+            "WHERE id=? AND document_id=? AND status='staging'",
+            (version_id, document_id),
+        )
+        if activated.rowcount != 1:
+            raise VersionConflict("version is no longer staging")
+        self._conn.execute(
+            "UPDATE document_permissions SET current_version_id=?, updated_at=? WHERE id=?",
+            (version_id, now, document_id),
+        )
+        self._conn.execute(
+            "UPDATE kb_documents SET document_id=?, document_version_id=? "
+            "WHERE kb_id=? AND filename=?",
+            (document_id, version_id, kb_id, filename),
+        )
+
+    def activate_document_version(
+        self, document_id: int, version_id: int, kb_id: str, filename: str
+    ) -> None:
+        """Atomically promote a staging version to current."""
+        with self._lock, self.transaction(immediate=True):
+            self._activate_document_version_in_tx(document_id, version_id, kb_id, filename)
+
+    def get_current_document_version(self, document_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE document_id = ? AND status = 'current'",
+                (document_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_document_versions(self, document_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE document_id = ? ORDER BY version_no DESC",
+                (document_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_version_validity(self, version_id: int, validity_status: str) -> None:
+        if validity_status not in {"valid", "reported_outdated", "confirmed_outdated"}:
+            raise ValueError(f"invalid validity status: {validity_status}")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET validity_status = ? WHERE id = ?",
+                (validity_status, version_id),
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Cleanup

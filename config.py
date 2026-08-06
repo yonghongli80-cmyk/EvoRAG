@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # Redis 缓存
     redis_url: str = "redis://localhost:6379/0"
 
+    # 文档版本存储（可信知识闭环）
+    document_versions_root: str = str(Path(__file__).resolve().parent / "data" / "document_versions")
+    feedback_cluster_days: int = 30
+    feedback_cluster_users: int = 3
+    knowledge_task_due_days: int = 7
+    knowledge_stale_days: int = 180
+    historical_result_weight: float = 0.35
+
     # 分块与检索
     chunk_size: int = 500
     chunk_overlap: int = 80
