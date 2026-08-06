@@ -29,6 +29,8 @@ dependencies = [
     "PyMuPDF>=1.26,<2",
     "rapidocr-onnxruntime>=1.4,<2",
     "xlrd>=2.0,<3",
+    "py7zr>=1.0,<2",
+    "rarfile>=4.2,<5",
 ]
 
 [project.optional-dependencies]

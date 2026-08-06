@@ -2188,6 +2188,211 @@ class UserDB:
                 );
                 """
             )
+            try:
+                self._conn.execute("SELECT source_path FROM material_archive_manifests LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute(
+                    "ALTER TABLE material_archive_manifests "
+                    "ADD COLUMN source_path TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.commit()
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS material_archive_import_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_id INTEGER NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    container_document_id INTEGER NOT NULL,
+                    container_version_id INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    UNIQUE(manifest_id, idempotency_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_archive_entries_key
+                ON material_archive_entries(child_source_key);
+
+                CREATE INDEX IF NOT EXISTS idx_doc_permissions_container
+                ON document_permissions(container_document_id);
+                """
+            )
+
+    # ------------------------------------------------------------------
+    # Archive manifest persistence
+    # ------------------------------------------------------------------
+
+    def create_material_archive_manifest(
+        self,
+        container_document_id: int,
+        container_version_id: int,
+        source_path: str,
+        created_by: int,
+        expires_at: float,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_manifests "
+                "(container_document_id, container_version_id, source_path, status, created_by, expires_at) "
+                "VALUES (?, ?, ?, 'pending_confirmation', ?, ?)",
+                (container_document_id, container_version_id, source_path, created_by, expires_at),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_material_archive_manifest(self, manifest_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_archive_manifests WHERE id = ?", (manifest_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_material_archive_manifest_status(self, manifest_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_archive_manifests SET status = ? WHERE id = ?",
+                (status, manifest_id),
+            )
+            self._conn.commit()
+
+    def add_material_archive_entry(
+        self,
+        manifest_id: int,
+        relative_path: str,
+        normalized_path: str,
+        child_source_key: str,
+        size_bytes: int,
+        state: str,
+        reason_code: str = "",
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_entries "
+                "(manifest_id, relative_path, normalized_path, child_source_key, size_bytes, content_hash, state, reason_code) "
+                "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
+                (manifest_id, relative_path, normalized_path, child_source_key, size_bytes, state, reason_code),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_material_archive_entries(self, manifest_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_archive_entries WHERE manifest_id = ? ORDER BY id",
+                (manifest_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_material_archive_entry_content(self, entry_id: int, content_hash: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_archive_entries SET content_hash = ? WHERE id = ?",
+                (content_hash, entry_id),
+            )
+            self._conn.commit()
+
+    def get_container_child(
+        self, container_document_id: int, relative_path: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, current_version_id, "
+                "container_document_id, container_relative_path "
+                "FROM document_permissions "
+                "WHERE container_document_id = ? AND container_relative_path = ?",
+                (container_document_id, relative_path),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_child_container(
+        self, document_id: int, container_document_id: int, relative_path: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_permissions "
+                "SET container_document_id = ?, container_relative_path = ? WHERE id = ?",
+                (container_document_id, relative_path, document_id),
+            )
+            self._conn.commit()
+
+    def list_container_children(self, container_document_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT dp.id AS document_id, dp.doc_name, dp.container_relative_path, "
+                "dv.id AS version_id, dv.version_no, dv.content_hash "
+                "FROM document_permissions dp "
+                "JOIN document_versions dv ON dv.id = dp.current_version_id AND dv.status = 'current' "
+                "WHERE dp.container_document_id = ? "
+                "ORDER BY dp.container_relative_path",
+                (container_document_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Archive confirmation results (idempotency) and material FTS
+    # ------------------------------------------------------------------
+
+    def get_archive_import_result(
+        self, manifest_id: int, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_archive_import_results "
+                "WHERE manifest_id = ? AND idempotency_key = ?",
+                (manifest_id, idempotency_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_archive_import_result(
+        self,
+        manifest_id: int,
+        idempotency_key: str,
+        container_document_id: int,
+        container_version_id: int,
+        result_json: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_import_results "
+                "(manifest_id, idempotency_key, container_document_id, container_version_id, result_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (manifest_id, idempotency_key, container_document_id, container_version_id, result_json),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def insert_material_search_fts(
+        self,
+        document_id: int,
+        version_id: int,
+        filename: str,
+        logical_path: str,
+        document_type: str,
+        tags: str,
+        extracted_text: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO material_search_fts "
+                "(document_id, version_id, filename, logical_path, document_type, tags, extracted_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (document_id, version_id, filename, logical_path, document_type, tags, extracted_text),
+            )
+            self._conn.commit()
+
+    def search_material_search_fts(self, text: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT f.document_id, f.version_id, f.filename, f.logical_path, f.document_type "
+                    "FROM material_search_fts f "
+                    "JOIN document_versions dv ON dv.id = f.version_id AND dv.status = 'current' "
+                    "JOIN document_permissions dp ON dp.id = f.document_id AND dp.deleted_at IS NULL "
+                    "WHERE material_search_fts MATCH ? LIMIT ?",
+                    (text, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
 
     def _rebuild_document_versions_status(self) -> None:
         """Widen the ``document_versions`` status CHECK for material states."""
