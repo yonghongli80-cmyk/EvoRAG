@@ -52,3 +52,6 @@ data/index_state.json
 
 # Isolated Codex implementation worktrees
 /.worktrees/
+
+# SDD workspace artifacts
+.superpowers/
