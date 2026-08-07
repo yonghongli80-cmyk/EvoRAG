@@ -29,6 +29,20 @@ class QueryResult(NamedTuple):
     sources: list[dict]
 
 
+def _agent_run_kwargs(prepared: dict) -> dict:
+    """从 prepared 中提取需要透传给 agent.run 的 user/kb_id。
+
+    只在调用方显式提供时才传递，避免改变旧的无权限调用签名
+    ``run(question)``（向后兼容）。
+    """
+    kwargs = {}
+    if prepared.get("user") is not None:
+        kwargs["user"] = prepared["user"]
+    if prepared.get("kb_id") is not None:
+        kwargs["kb_id"] = prepared["kb_id"]
+    return kwargs
+
+
 class RAGPipeline:
     def __init__(
         self, file_path: str = None, session_id: str = None, memory_db_path: str = settings.memory_db_path, kb_id: str = None, user_db=None
@@ -60,7 +74,7 @@ class RAGPipeline:
         self.reranker = Reranker()
         from rag.agent import RAGAgent
 
-        self.agent = RAGAgent(retriever=self.retriever)
+        self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._cache = RedisCache()
         self._agent_lock = threading.Lock()
@@ -91,7 +105,13 @@ class RAGPipeline:
         route = route_question(question)
 
         if route == "agent":
-            return {"route": "agent", "question": question}, None
+            prepared = {"route": "agent", "question": question}
+            # 透传当前用户/知识库，供 agent 的 retrieve 工具做权限过滤
+            if user is not None:
+                prepared["user"] = user
+            if kb_id is not None:
+                prepared["kb_id"] = kb_id
+            return prepared, None
 
         rewritten = rewrite_query(question)
         # Oversampling: 检索更多结果，过滤后再截取 top_k
@@ -163,7 +183,7 @@ class RAGPipeline:
             with self._agent_lock:
                 self._wrap_agent_tools(captured_calls)
                 try:
-                    answer = self.agent.run(prepared["question"])
+                    answer = self.agent.run(prepared["question"], **_agent_run_kwargs(prepared))
                 finally:
                     self._unwrap_agent_tools()
             context = []
@@ -224,7 +244,7 @@ class RAGPipeline:
             async with self._async_agent_lock:
                 self._wrap_agent_tools(captured_calls)
                 try:
-                    answer = await asyncio.to_thread(self.agent.run, prepared["question"])
+                    answer = await asyncio.to_thread(self.agent.run, prepared["question"], **_agent_run_kwargs(prepared))
                 finally:
                     self._unwrap_agent_tools()
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'

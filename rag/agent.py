@@ -9,25 +9,35 @@ from rag.prompt_manager import PromptManager
 _pm = PromptManager()
 
 
-def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts") -> list:
-    """Create the list of tools available to the Agent."""
+def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts", permission_filter=None) -> list:
+    """Create the list of tools available to the Agent.
+
+    ``permission_filter`` is an optional callable ``callable(list[Chunk]) -> list[Chunk]``
+    applied to the retrieval results before formatting. It is used by ``RAGAgent``
+    to drop chunks the current user is not allowed to see.
+    """
     from langchain_core.tools import Tool
 
     from rag.tools import calculate, create_sql_tool
 
     sql_tool = create_sql_tool(db_path)
 
+    def _retrieve(q: str) -> str:
+        """检索知识库并返回格式化片段，已应用权限过滤。"""
+        if not retriever:
+            return "无检索器"
+        results = retriever.retrieve(q, top_k=10)
+        if permission_filter is not None:
+            results = permission_filter(results)
+        return "\n".join(
+            f"[{i + 1}] {c.doc_name}(第{c.chunk_index + 1}段): {c.text}"
+            for i, c in enumerate(results)
+        )
+
     retrieve_tool = Tool(
         name="retrieve",
         description="从知识库中检索相关文档。输入为查询文本。返回最相关的文档片段。",
-        func=lambda q: (
-            "\n".join(
-                f"[{i + 1}] {c.doc_name}(第{c.chunk_index + 1}段): {c.text}"
-                for i, c in enumerate(retriever.retrieve(q, top_k=10))
-            )
-            if retriever
-            else "无检索器"
-        ),
+        func=_retrieve,
     )
     calc_tool = Tool(
         name="calculate",
@@ -116,7 +126,7 @@ def _extract_chart_paths(messages: list, output_dir: str) -> list[str]:
 class RAGAgent:
     """Wraps a LangChain Agent with tools."""
 
-    def __init__(self, retriever, db_path: str = ":memory:", max_iterations: int = 5, output_dir: str = "data/charts"):
+    def __init__(self, retriever, db_path: str = ":memory:", max_iterations: int = 5, output_dir: str = "data/charts", user: dict = None, kb_id: str = "rag_docs", user_db=None):
         from langchain.agents import create_agent
         from langchain_openai import ChatOpenAI
 
@@ -124,7 +134,13 @@ class RAGAgent:
 
         self.max_iterations = max_iterations
         self.output_dir = output_dir
-        self.tools = [_wrap_tool_with_reflection(t) for t in create_agent_tools(retriever, db_path, output_dir)]
+        self.user = user
+        self.kb_id = kb_id or "rag_docs"
+        self.user_db = user_db
+        self.tools = [
+            _wrap_tool_with_reflection(t)
+            for t in create_agent_tools(retriever, db_path, output_dir, permission_filter=self._make_permission_filter())
+        ]
 
         self.llm = ChatOpenAI(
             model=settings.deepseek_model,
@@ -141,9 +157,33 @@ class RAGAgent:
             system_prompt=system_prompt,
         )
 
-    def run(self, question: str) -> str:
-        """Run the agent on a question with answer quality reflection."""
+    def _make_permission_filter(self):
+        """构造 retrieve 工具结果的权限过滤回调。
+
+        闭包读取当前 ``self.user``/``self.kb_id``/``self.user_db``：
+        - user 或 user_db 缺省时不过滤（向后兼容）
+        - 否则复用 pipeline 的同一套 ``filter_chunks_by_permission`` 逻辑
+        """
+
+        def filter_fn(chunks: list) -> list:
+            if self.user is None or self.user_db is None:
+                return chunks
+            from rag.permissions import filter_chunks_by_permission
+
+            return filter_chunks_by_permission(self.user_db, self.kb_id, chunks, self.user)
+
+        return filter_fn
+
+    def run(self, question: str, user: dict = None, kb_id: str = None) -> str:
+        """Run the agent on a question with answer quality reflection.
+
+        ``user``/``kb_id`` 每次调用时写入实例，供 retrieve 工具在调用时刻做权限过滤。
+        """
         import os
+
+        self.user = user
+        if kb_id is not None:
+            self.kb_id = kb_id
 
         from langchain_core.messages import HumanMessage
 
@@ -254,4 +294,9 @@ def route_question(question: str) -> str:
         {"role": "user", "content": prompt},
     ]
     result = generate(messages)
-    return "agent" if "agent" in result.lower() else "rag"
+    normalized = (result or "").strip().lower()
+    # 精确白名单判定：仅 "agent" 走 agent，"rag" 走 rag，
+    # 其余（含空/异常/误命中词如 agency）默认 fail-closed 走 rag。
+    if normalized == "agent":
+        return "agent"
+    return "rag"
