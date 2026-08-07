@@ -55,3 +55,7 @@ data/index_state.json
 
 # SDD workspace artifacts
 .superpowers/
+
+# Python virtual environments
+.venv/
+venv/
