@@ -380,7 +380,7 @@ def test_prepare_context_returns_cached():
          patch("rag.pipeline.Reranker"):
         p = RAGPipeline("test.txt", kb_id="test_kb")
 
-    p._cache.set("cached question", "cached answer")
+    p._cache.set("cached question", "cached answer", kb_id="test_kb")
     result, error = p._prepare_context("cached question", "s1", None)
     assert error is None
     assert result["route"] == "cached"

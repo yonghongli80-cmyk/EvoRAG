@@ -22,7 +22,7 @@ def test_redis_cache_get_set(cache_with_mock_redis):
     cache, mock_redis = cache_with_mock_redis
     mock_redis.get.return_value = '{"answer": "test answer"}'
     result = cache.get("test question")
-    assert result == "test answer"
+    assert result["answer"] == "test answer"
     mock_redis.get.assert_called_once()
 
 
@@ -78,7 +78,7 @@ def test_redis_cache_connection_error_fallback():
     # 应该降级到内存缓存，不抛异常
     cache.set("question", "answer")
     result = cache.get("question")
-    assert result == "answer"
+    assert result["answer"] == "answer"
 
 
 def test_redis_cache_fallback_ttl():
@@ -91,7 +91,7 @@ def test_redis_cache_fallback_ttl():
     cache._connected = False
 
     cache.set("question", "answer")
-    assert cache.get("question") == "answer"
+    assert cache.get("question")["answer"] == "answer"
 
     # 等待 TTL 过期
     time.sleep(1.1)

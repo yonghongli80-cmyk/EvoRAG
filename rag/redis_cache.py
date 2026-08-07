@@ -43,20 +43,20 @@ class RedisCache:
                 self._connected = False
         return self._redis
 
-    def _key(self, question: str) -> str:
-        """生成缓存 key。"""
-        return f"rag:query:{hashlib.md5(question.encode()).hexdigest()}"
+    def _key(self, question: str, kb_id: str = "rag_docs", user_id: str = "__anon__") -> str:
+        """生成缓存 key，纳入知识库与用户维度，避免跨用户/跨库串答案。"""
+        return f"rag:query:{kb_id}:{user_id}:{hashlib.md5(question.encode()).hexdigest()}"
 
-    def get(self, question: str) -> str | None:
-        """获取缓存。未命中返回 None。"""
-        key = self._key(question)
+    def get(self, question: str, kb_id: str = "rag_docs", user_id: str = "__anon__") -> dict | None:
+        """获取缓存。未命中返回 None；命中返回 {"answer": ..., "sources": [...]}。"""
+        key = self._key(question, kb_id, user_id)
         redis = self._get_redis()
 
         if redis:
             try:
                 data = redis.get(key)
                 if data:
-                    return json.loads(data).get("answer")
+                    return json.loads(data)
                 return None
             except Exception as e:
                 logger.warning("Redis get 失败，降级到内存: %s", e)
@@ -64,10 +64,10 @@ class RedisCache:
         else:
             return self._fallback_get(key)
 
-    def set(self, question: str, answer: str) -> None:
-        """设置缓存，带 TTL。"""
-        key = self._key(question)
-        data = json.dumps({"answer": answer}, ensure_ascii=False)
+    def set(self, question: str, answer: str, kb_id: str = "rag_docs", user_id: str = "__anon__", sources: list | None = None) -> None:
+        """设置缓存，带 TTL。sources 一并存储，供缓存命中时做权限过滤。"""
+        key = self._key(question, kb_id, user_id)
+        data = json.dumps({"answer": answer, "sources": sources or []}, ensure_ascii=False)
 
         redis = self._get_redis()
         if redis:
@@ -79,9 +79,9 @@ class RedisCache:
 
         self._fallback_set(key, data)
 
-    def delete(self, question: str) -> None:
+    def delete(self, question: str, kb_id: str = "rag_docs", user_id: str = "__anon__") -> None:
         """删除缓存。"""
-        key = self._key(question)
+        key = self._key(question, kb_id, user_id)
         redis = self._get_redis()
         if redis:
             try:
@@ -110,13 +110,13 @@ class RedisCache:
         with self._lock:
             self._fallback.clear()
 
-    def _fallback_get(self, key: str) -> str | None:
+    def _fallback_get(self, key: str) -> dict | None:
         """内存降级获取。"""
         with self._lock:
             if key in self._fallback:
                 data, expire_time = self._fallback[key]
                 if time.time() < expire_time:
-                    return json.loads(data).get("answer")
+                    return json.loads(data)
                 else:
                     del self._fallback[key]
         return None

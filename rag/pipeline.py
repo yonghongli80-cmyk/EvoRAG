@@ -77,9 +77,15 @@ class RAGPipeline:
         if guard.blocked:
             return None, f"请求被安全策略拦截：{guard.reason}"
 
-        cached = self._cache.get(question)
+        cache_key_kb = kb_id or self._kb_id
+        cache_key_user = user["id"] if user else "__anon__"
+        cached = self._cache.get(question, cache_key_kb, cache_key_user)
         if cached:
-            return {"route": "cached", "answer": cached, "context": [], "sources": [{"doc_name": "缓存", "chunk_index": 0}]}, None
+            # 缓存命中时也要做权限过滤：sources 可能引用用户无权查看的文档
+            sources = cached.get("sources") or [{"doc_name": "缓存", "chunk_index": 0}]
+            if user is not None and self._user_db is not None:
+                sources = self._filter_sources_by_permission(sources, cache_key_kb, user)
+            return {"route": "cached", "answer": cached.get("answer", ""), "context": [], "sources": sources}, None
 
         from rag.agent import route_question
         route = route_question(question)
@@ -120,6 +126,25 @@ class RAGPipeline:
             "messages": messages, "sources": sources, "sid": sid,
             "chunk_hashes": chunk_hashes, "weights": weights,
         }, None
+
+    def _filter_sources_by_permission(self, sources: list, kb_id: str, user: dict) -> list:
+        """过滤缓存命中的 sources（dict 而非 Chunk 对象）中用户无权查看的文档来源。
+
+        将每个 source 包装成仅含 doc_name 的轻量对象，复用 filter_chunks_by_permission
+        的同一套权限逻辑（admin 不过滤 / 无权限记录视为公开保留 / 无权文档过滤）。
+        不使用 get_accessible_doc_names 直接过滤，因为后者只返回有权限记录的文档，
+        会误删“旧文档（无权限记录，视为公开）”的来源。
+        """
+        if not sources or self._user_db is None:
+            return sources
+        from types import SimpleNamespace
+
+        from rag.permissions import filter_chunks_by_permission
+
+        proxies = [SimpleNamespace(doc_name=s.get("doc_name")) for s in sources]
+        filtered = filter_chunks_by_permission(self._user_db, kb_id, proxies, user)
+        allowed_names = {p.doc_name for p in filtered}
+        return [s for s in sources if s.get("doc_name") in allowed_names]
 
     def query(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None) -> QueryResult:
         sid = session_id or self.session_id or "default"
@@ -174,7 +199,7 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer)
+        self._cache.set(question, answer, kb_id or self._kb_id, user["id"] if user else "__anon__", sources=sources)
         return QueryResult(answer=answer, context=context, sources=sources)
 
     async def query_stream(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
@@ -246,7 +271,7 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer)
+        self._cache.set(question, answer, kb_id or self._kb_id, user["id"] if user else "__anon__", sources=sources)
 
         yield 'data: {"type": "done"}\n\n'
 
