@@ -14,7 +14,7 @@ RAG 系统极致压测脚本
 运行方式：
     locust -f scripts/locustfile.py --host http://39.105.89.99:8000
     或
-    locust -f scripts/locustfile.py --host http://localhost:8000 --headless -u 50 -r 10 -t 5m
+    locust -f scripts/locustfile.py --host http://localhost:8080 --headless -u 50 -r 10 -t 5m
 """
 
 import random

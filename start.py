@@ -23,7 +23,7 @@ def main():
 
     # 启动 API
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "rag.api:app", "--host", host, "--port", "8000"],
+        [sys.executable, "-m", "uvicorn", "rag.api:app", "--host", host, "--port", "8080"],
         cwd=str(project_root),
     )
 
@@ -32,7 +32,7 @@ def main():
 
     for i in range(60):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:8000/health", timeout=1)
+            urllib.request.urlopen(f"http://127.0.0.1:8080/health", timeout=1)
             break
         except Exception:
             time.sleep(0.5)
@@ -41,7 +41,7 @@ def main():
 
     print("  ╔══════════════════════════════════╗")
     print("  ║   服务已就绪！                    ║")
-    print(f"  ║   http://{host}:8000              ║")
+    print(f"  ║   http://{host}:8080              ║")
     print("  ║   关闭此窗口停止服务              ║")
     print("  ╚══════════════════════════════════╝")
     print()
@@ -49,7 +49,7 @@ def main():
     # Docker 环境不打开浏览器
     if host == "127.0.0.1":
         import webbrowser
-        webbrowser.open("http://localhost:8000")
+        webbrowser.open("http://localhost:8080")
 
     try:
         proc.wait()

@@ -4,7 +4,7 @@ RAG 系统评估脚本
 加载评估数据集，对每个问题调用 RAG API，计算 Hit Rate。
 
 用法：
-    python scripts/run_eval.py                          # 默认 localhost:8000
+    python scripts/run_eval.py                          # 默认 localhost:8080
     python scripts/run_eval.py --host http://39.105.89.99:8000
     python scripts/run_eval.py --dataset data/eval/eval_dataset.jsonl
 """
@@ -159,7 +159,7 @@ def run_eval(host: str, dataset_path: str, username: str, password: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RAG 系统评估")
-    parser.add_argument("--host", default="http://localhost:8000", help="API 地址")
+    parser.add_argument("--host", default="http://localhost:8080", help="API 地址")
     parser.add_argument("--dataset", default="data/eval/eval_dataset.jsonl", help="数据集路径")
     parser.add_argument("--username", default="admin", help="登录用户名")
     parser.add_argument("--password", default="admin123", help="登录密码")
