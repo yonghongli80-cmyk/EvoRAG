@@ -50,7 +50,6 @@ def test_add_stores_chunk_metadata(mock_client_class):
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.collection_exists.return_value = True
-
     chunks = [Chunk(text="doc1", doc_name="test.txt", chunk_index=0)]
     add(chunks, [[0.1] * 1024])
 
@@ -85,6 +84,7 @@ def test_add_to_collection(mock_client_class):
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.collection_exists.return_value = True
+    mock_client.scroll.return_value = ([], None)
 
     chunks = [Chunk(text="doc1", doc_name="test.txt", chunk_index=0)]
     add_to_collection("my_kb", chunks, [[0.1] * 1024])
@@ -160,6 +160,7 @@ def test_add_to_collection_includes_tags_in_payload(mock_client_class):
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.collection_exists.return_value = True
+    mock_client.scroll.return_value = ([], None)
 
     chunks = [Chunk(text="doc1", doc_name="test.txt", chunk_index=0)]
     add_to_collection("my_kb", chunks, [[0.1] * 1024], tags=["finance", "q3"])
@@ -175,6 +176,7 @@ def test_add_to_collection_empty_tags_default(mock_client_class):
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.collection_exists.return_value = True
+    mock_client.scroll.return_value = ([], None)
 
     chunks = [Chunk(text="doc1", doc_name="test.txt", chunk_index=0)]
     add_to_collection("my_kb", chunks, [[0.1] * 1024])

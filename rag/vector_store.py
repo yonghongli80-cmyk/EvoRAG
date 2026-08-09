@@ -174,13 +174,41 @@ def _ensure_collection_name(collection_name: str):
 
 
 def add_to_collection(collection_name: str, chunks: list[Chunk], embeddings: list[list[float]], tags: list[str] = None, doc_permission_id: int = None):
+    if len(chunks) != len(embeddings):
+        raise ValueError("chunks and embeddings must have the same length")
+
+    from qdrant_client.models import FieldCondition, MatchValue, PointIdsList
+
     with _write_lock.write():
         client = _get_client()
         if not client.collection_exists(collection_name):
             raise ValueError(f"集合 {collection_name} 不存在，请先创建知识库")
+
+        existing_ids = set()
+        for doc_name in {chunk.doc_name for chunk in chunks}:
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=collection_name,
+                    limit=10000,
+                    offset=offset,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))]
+                    ),
+                    with_payload=False,
+                )
+                existing_ids.update(record.id for record in records)
+                if offset is None:
+                    break
+
         points = [
             PointStruct(
-                id=str(uuid.uuid4()),
+                id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{collection_name}:{chunks[i].doc_name}:{chunks[i].chunk_index}",
+                    )
+                ),
                 vector=embeddings[i],
                 payload={
                     "text": chunks[i].text,
@@ -193,6 +221,13 @@ def add_to_collection(collection_name: str, chunks: list[Chunk], embeddings: lis
             for i in range(len(chunks))
         ]
         client.upsert(collection_name=collection_name, points=points)
+        new_ids = {point.id for point in points}
+        stale_ids = existing_ids - new_ids
+        if stale_ids:
+            client.delete(
+                collection_name=collection_name,
+                points_selector=PointIdsList(points=list(stale_ids)),
+            )
     _invalidate_bm25(collection_name)
 
 
