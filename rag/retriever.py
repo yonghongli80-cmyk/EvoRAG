@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 # Module-level BM25 cache to avoid rebuilding on every query
 _bm25_cache: dict[str, tuple[list[Chunk], BM25Okapi]] = {}
 _bm25_cache_lock = threading.Lock()
+_bm25_cache_versions: dict[str, int] = {}
+_bm25_global_version = 0
 
 
 def _tokenize(text: str) -> list[str]:
@@ -85,15 +87,23 @@ def _load_all_chunks(collection_name: str) -> list[Chunk]:
 
 def invalidate_bm25_cache(collection_name: str = None):
     """Clear BM25 cache for a specific collection or all collections."""
+    global _bm25_global_version
     with _bm25_cache_lock:
         if collection_name:
             _bm25_cache.pop(collection_name, None)
+            _bm25_cache_versions[collection_name] = _bm25_cache_versions.get(collection_name, 0) + 1
         else:
             _bm25_cache.clear()
+            _bm25_global_version += 1
+
+
+def _bm25_version(collection_name: str) -> tuple[int, int]:
+    return _bm25_global_version, _bm25_cache_versions.get(collection_name, 0)
 
 
 class Retriever:
     def __init__(self, chunks: list[Chunk], collection_name: str = None):
+        self._bm25_version = _bm25_version(collection_name) if collection_name else None
         if not chunks and collection_name:
             # Check module-level cache first
             with _bm25_cache_lock:
@@ -102,6 +112,7 @@ class Retriever:
                     self.chunks = cached_chunks
                     self.collection_name = collection_name
                     self.bm25 = cached_bm25
+                    self._bm25_version = _bm25_version(collection_name)
                     return
             store = BM25Store()
             if store.has_chunks(collection_name):
@@ -119,10 +130,39 @@ class Retriever:
             if collection_name:
                 with _bm25_cache_lock:
                     _bm25_cache[collection_name] = (self.chunks, self.bm25)
+                    self._bm25_version = _bm25_version(collection_name)
         else:
             self.bm25 = None
 
+    def _refresh_bm25_if_stale(self) -> None:
+        if not self.collection_name:
+            return
+
+        while True:
+            with _bm25_cache_lock:
+                target_version = _bm25_version(self.collection_name)
+                if self._bm25_version == target_version:
+                    return
+                cached = _bm25_cache.get(self.collection_name)
+                if cached is not None:
+                    self.chunks, self.bm25 = cached
+                    self._bm25_version = target_version
+                    return
+
+            chunks = _load_all_chunks(self.collection_name)
+            bm25 = BM25Okapi([_tokenize(c.text) for c in chunks]) if chunks else None
+            with _bm25_cache_lock:
+                if _bm25_version(self.collection_name) != target_version:
+                    continue
+                if bm25 is not None:
+                    _bm25_cache[self.collection_name] = (chunks, bm25)
+                self.chunks = chunks
+                self.bm25 = bm25
+                self._bm25_version = target_version
+                return
+
     def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None) -> list[Chunk]:
+        self._refresh_bm25_if_stale()
         dense_hits = []
         try:
             query_vec = embed([query])[0]

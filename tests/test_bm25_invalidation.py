@@ -28,10 +28,12 @@ def test_bm25_rebuilds_after_document_add_and_delete(tmp_path, monkeypatch):
         assert [c.doc_name for c in before_delete.retrieve("legacytoken")] == ["old.md"]
 
         vector_store.delete_doc(collection, "old.md")
+        assert before_delete.retrieve("legacytoken") == []
         after_delete = retriever_module.Retriever([], collection_name=collection)
         assert after_delete.retrieve("legacytoken") == []
 
         vector_store.add_to_collection(collection, [new_chunk], [[0.2] * 1024])
+        assert [c.doc_name for c in before_delete.retrieve("freshterm")] == ["new.md"]
         after_add = retriever_module.Retriever([], collection_name=collection)
         assert [c.doc_name for c in after_add.retrieve("freshterm")] == ["new.md"]
     finally:

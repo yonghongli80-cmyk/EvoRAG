@@ -109,9 +109,8 @@ def index_folder(folder_path: str) -> dict:
     if not all_chunks:
         return {"files": loaded, "chunks": 0, "seconds": round(time.time() - start, 2)}
 
-    # 新索引已全部准备好后才替换旧集合，避免 embedding 失败先清空数据。
-    _vs.clear()
-    _vs.add(all_chunks, all_embeddings)
+    # 新索引已全部准备好后再替换；写入失败时 vector_store 会恢复旧集合。
+    _vs.replace(all_chunks, all_embeddings)
 
     elapsed = round(time.time() - start, 2)
     return {"files": loaded, "chunks": len(all_chunks), "seconds": elapsed}

@@ -38,6 +38,18 @@ import { ElMessage } from 'element-plus'
 import axios from 'axios'
 
 describe('api base URL', () => {
+  it('uses same-origin root for production builds', async () => {
+    const { resolveApiBase } = await import('../api')
+
+    expect(resolveApiBase(undefined, false)).toBe('')
+  })
+
+  it('honors an explicitly configured base URL', async () => {
+    const { resolveApiBase } = await import('../api')
+
+    expect(resolveApiBase('https://api.example.test', false)).toBe('https://api.example.test')
+  })
+
   it('uses the /api dev-proxy prefix by default', async () => {
     vi.resetModules()
     await import('../api')

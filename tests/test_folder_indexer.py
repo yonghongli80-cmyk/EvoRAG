@@ -54,11 +54,10 @@ from unittest.mock import patch
 
 
 @patch("rag.embedder.embed")
-@patch("rag.vector_store.add")
-@patch("rag.vector_store.clear")
+@patch("rag.vector_store.replace")
 @patch("rag.chunker.chunk")
 @patch("rag.loader.load")
-def test_index_folder_returns_stats(mock_load, mock_chunk, mock_clear, mock_add, mock_embed, tmp_path):
+def test_index_folder_returns_stats(mock_load, mock_chunk, mock_replace, mock_embed, tmp_path):
     from rag.folder_indexer import index_folder
     from rag.models import Chunk
 
@@ -74,15 +73,14 @@ def test_index_folder_returns_stats(mock_load, mock_chunk, mock_clear, mock_add,
     assert result["files"] == 2
     assert result["chunks"] == 2
     assert result["seconds"] >= 0
-    mock_clear.assert_called_once()
+    mock_replace.assert_called_once()
 
 
 @patch("rag.embedder.embed")
-@patch("rag.vector_store.add")
-@patch("rag.vector_store.clear")
+@patch("rag.vector_store.replace")
 @patch("rag.chunker.chunk")
 @patch("rag.loader.load")
-def test_index_folder_skips_unsupported(mock_load, mock_chunk, mock_clear, mock_add, mock_embed, tmp_path):
+def test_index_folder_skips_unsupported(mock_load, mock_chunk, mock_replace, mock_embed, tmp_path):
     from rag.folder_indexer import index_folder
     from rag.models import Chunk
 

@@ -1,7 +1,11 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
+export function resolveApiBase(configured: string | undefined, isDev: boolean): string {
+  return configured ?? (isDev ? '/api' : '')
+}
+
+const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE, import.meta.env.DEV)
 
 const api = axios.create({
   baseURL: API_BASE

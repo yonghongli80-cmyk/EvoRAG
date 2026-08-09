@@ -63,6 +63,73 @@ def add(chunks: list[Chunk], embeddings: list[list[float]]):
     _invalidate_bm25(COLLECTION_NAME)
 
 
+def replace(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+    """Replace the default collection and restore the old points if writing fails."""
+    if len(chunks) != len(embeddings):
+        raise ValueError("chunks and embeddings must have the same length")
+
+    new_points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            payload={
+                "text": chunk.text,
+                "doc_name": chunk.doc_name,
+                "chunk_index": chunk.chunk_index,
+            },
+        )
+        for chunk, embedding in zip(chunks, embeddings)
+    ]
+
+    with _write_lock.write():
+        client = _get_client()
+        had_collection = client.collection_exists(COLLECTION_NAME)
+        old_points: list[PointStruct] = []
+
+        if had_collection:
+            offset = None
+            while True:
+                records, offset = client.scroll(
+                    collection_name=COLLECTION_NAME,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                old_points.extend(
+                    PointStruct(
+                        id=record.id,
+                        vector=record.vector,
+                        payload=record.payload or {},
+                    )
+                    for record in records
+                )
+                if offset is None:
+                    break
+
+        try:
+            if had_collection:
+                client.delete_collection(COLLECTION_NAME)
+            _ensure_collection()
+            if new_points:
+                client.upsert(collection_name=COLLECTION_NAME, points=new_points)
+        except Exception as write_error:
+            try:
+                if client.collection_exists(COLLECTION_NAME):
+                    client.delete_collection(COLLECTION_NAME)
+                if had_collection:
+                    _ensure_collection()
+                    if old_points:
+                        client.upsert(collection_name=COLLECTION_NAME, points=old_points)
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "vector collection replacement failed and rollback failed"
+                ) from rollback_error
+            raise write_error
+
+    _invalidate_bm25(COLLECTION_NAME)
+
+
 def clear():
     """Delete all points from the collection, then recreate it fresh."""
     with _write_lock.write():

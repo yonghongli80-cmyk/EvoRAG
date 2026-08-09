@@ -161,10 +161,9 @@ class RAGPipeline:
     def _filter_sources_by_permission(self, sources: list, kb_id: str, user: dict) -> list:
         """过滤缓存命中的 sources（dict 而非 Chunk 对象）中用户无权查看的文档来源。
 
-        将每个 source 包装成仅含 doc_name 的轻量对象，复用 filter_chunks_by_permission
-        的同一套权限逻辑（admin 不过滤 / 无权限记录视为公开保留 / 无权文档过滤）。
-        不使用 get_accessible_doc_names 直接过滤，因为后者只返回有权限记录的文档，
-        会误删“旧文档（无权限记录，视为公开）”的来源。
+        将每个 source 包装成仅含 doc_name 的轻量对象，复用
+        filter_chunks_by_permission 的同一套权限逻辑：admin 不过滤；普通用户
+        仅保留显式授权的文档；没有权限记录的文档默认拒绝。
         """
         if not sources or self._user_db is None:
             return sources
