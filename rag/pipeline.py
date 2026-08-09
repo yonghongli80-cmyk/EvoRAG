@@ -60,9 +60,9 @@ class RAGPipeline:
         else:
             # 索引新文档到默认集合
             text = load(file_path)
-            text, _metadata = clean_document(text)
+            text, metadata = clean_document(text)
             doc_name = file_path.split("/")[-1].split("\\")[-1]
-            self.chunks = chunk(text, doc_name=doc_name)
+            self.chunks = chunk(text, doc_name=doc_name, metadata=metadata)
             # 去重（SequenceMatcher 相似度 > 0.95 的段落被去除）
             chunk_texts = [c.text for c in self.chunks]
             unique_texts = deduplicate_chunks(chunk_texts)

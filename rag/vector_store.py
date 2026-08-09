@@ -55,6 +55,7 @@ def add(chunks: list[Chunk], embeddings: list[list[float]]):
                     "text": chunks[i].text,
                     "doc_name": chunks[i].doc_name,
                     "chunk_index": chunks[i].chunk_index,
+                    "metadata": chunks[i].metadata,
                 },
             )
             for i in range(len(chunks))
@@ -76,6 +77,7 @@ def replace(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
                 "text": chunk.text,
                 "doc_name": chunk.doc_name,
                 "chunk_index": chunk.chunk_index,
+                "metadata": chunk.metadata,
             },
         )
         for chunk, embedding in zip(chunks, embeddings)
@@ -172,6 +174,7 @@ def search(
                 text=h.payload["text"],
                 doc_name=h.payload.get("doc_name", ""),
                 chunk_index=h.payload.get("chunk_index", 0),
+                metadata=h.payload.get("metadata", {}),
             )
             for h in hits.points
             if h.payload
@@ -232,6 +235,7 @@ def add_to_collection(collection_name: str, chunks: list[Chunk], embeddings: lis
                     "doc_name": chunks[i].doc_name,
                     "chunk_index": chunks[i].chunk_index,
                     "tags": tags or [],
+                    "metadata": chunks[i].metadata,
                     **({"doc_permission_id": doc_permission_id} if doc_permission_id is not None else {}),
                 },
             )
@@ -278,6 +282,7 @@ def search_collection(collection_name: str, query_embedding: list[float], top_k:
                 doc_name=h.payload.get("doc_name", ""),
                 chunk_index=h.payload.get("chunk_index", 0),
                 doc_permission_id=h.payload.get("doc_permission_id"),
+                metadata=h.payload.get("metadata", {}),
             )
             for h in hits.points
             if h.payload
