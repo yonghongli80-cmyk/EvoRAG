@@ -109,5 +109,14 @@ def verify_api_key(api_key: str = Security(api_key_header), authorization: str =
         token = authorization.replace("Bearer ", "")
         payload = decode_token(token)
         if payload and "user_id" in payload:
+            # Import lazily to avoid the api.py -> auth.py import cycle.
+            from rag.api import user_db
+
+            user = user_db.get_user_by_id(payload["user_id"])
+            if not user:
+                payload = None
+            else:
+                payload = decode_token(token, user.get("password_changed_at"))
+        if payload and "user_id" in payload:
             return str(payload["user_id"])
     raise HTTPException(status_code=403, detail="认证失败，请提供有效的 API Key 或 JWT Token")
