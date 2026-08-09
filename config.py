@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     knowledge_stale_days: int = 180
     historical_result_weight: float = 0.35
 
+    # 回答可靠性
+    reliability_min_score: float = 0.35
+    comparison_max_documents: int = 5
+
     # 增量资料生命周期
     material_file_max_bytes: int = 50 * 1024 * 1024
     material_archive_max_bytes: int = 200 * 1024 * 1024

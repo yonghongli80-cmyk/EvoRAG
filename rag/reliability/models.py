@@ -1,0 +1,94 @@
+"""Immutable contracts for evidence-aware answer reliability."""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+ValidityStatus = Literal["valid", "reported_outdated", "confirmed_outdated"]
+AuthorityLevel = Literal["authoritative", "supporting", "unknown"]
+AnswerabilityKind = Literal[
+    "answerable",
+    "answerable_with_warning",
+    "clarification_required",
+    "insufficient_evidence",
+    "permission_limited",
+]
+ConfidenceLevel = Literal["high", "medium", "low", "unavailable"]
+
+
+class EvidenceRef(BaseModel):
+    """A permission-checked reference to one retrievable evidence unit."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    document_id: int
+    document_version_id: int
+    version_no: int | None = None
+    citation_id: int | None = None
+    kb_id: str = ""
+    section_title: str = ""
+    chunk_index: int | None = None
+    score: float
+    rank: int | None = None
+    is_current: bool
+    validity_status: ValidityStatus
+    acl_checked: bool
+    authority_level: AuthorityLevel = "unknown"
+    updated_at: float | None = None
+
+
+class RetrievalMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    visible_candidates: int = Field(ge=0)
+    top_score: float | None = None
+    average_score: float | None = None
+    permission_limited: bool = False
+
+
+class EvidenceBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    question: str
+    current_evidence: tuple[EvidenceRef, ...]
+    historical_evidence: tuple[EvidenceRef, ...]
+    structured_results: tuple[dict[str, Any], ...]
+    conflicts: tuple[dict[str, Any], ...]
+    retrieval_metrics: RetrievalMetrics
+
+    @model_validator(mode="after")
+    def require_acl_checks(self) -> EvidenceBundle:
+        evidence = self.current_evidence + self.historical_evidence
+        if any(not item.acl_checked for item in evidence):
+            raise ValueError("acl_checked evidence required")
+        if any(not item.is_current for item in self.current_evidence):
+            raise ValueError("current_evidence requires current evidence")
+        if any(item.is_current for item in self.historical_evidence):
+            raise ValueError("historical_evidence requires historical evidence")
+        return self
+
+
+class AnswerabilityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: AnswerabilityKind
+    reasons: tuple[str, ...] = ()
+
+
+class ConfidenceAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    level: ConfidenceLevel
+    reasons: tuple[str, ...] = ()
+
+
+class ComparisonScope(BaseModel):
+    """Immutable, pre-authorized document scope passed to comparison tools."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    actor_id: int
+    allowed_document_ids: frozenset[int]
+    permission_scope_fingerprint: str
