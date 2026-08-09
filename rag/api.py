@@ -1288,20 +1288,27 @@ async def query_stream(
         session_id = f"conv_{req.conversation_id}"
 
     async def event_generator():
+        import json as _json
+
         answer_buffer = ""
-        async for event in current_pipeline.query_stream(
-            req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
-            user=user, kb_id="rag_docs",
-        ):
-            # 从 token 事件中提取 answer 用于持久化
-            if '"type": "token"' in event:
-                try:
-                    import json as _json
-                    data = _json.loads(event.removeprefix("data: ").strip())
-                    answer_buffer += data.get("content", "")
-                except Exception:
-                    pass
-            yield event
+        try:
+            async for event in current_pipeline.query_stream(
+                req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
+                user=user, kb_id="rag_docs",
+            ):
+                # 从 token 事件中提取 answer 用于持久化
+                if '"type": "token"' in event:
+                    try:
+                        data = _json.loads(event.removeprefix("data: ").strip())
+                        answer_buffer += data.get("content", "")
+                    except Exception:
+                        pass
+                yield event
+        except Exception:
+            logger.exception("流式查询中途失败")
+            payload = {"type": "error", "reason": "流式生成失败，请稍后重试"}
+            yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+            return
         # 流式完成后持久化到 chat_messages
         if user and req.conversation_id is not None and answer_buffer:
             # 验证 conversation 归属
