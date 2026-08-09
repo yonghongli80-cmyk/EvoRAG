@@ -461,15 +461,14 @@ def test_pipeline_gap_analysis_triggered_on_gap_answer(
     # Answer contains gap keyword
     mock_generate.return_value = "文档中未提及该信息"
 
-    pipeline = RAGPipeline("test.txt", session_id="s1", memory_db_path=":memory:")
-    with patch("rag.gap_analyzer.GapAnalyzer") as mock_ga_cls:
-        mock_ga = MagicMock()
-        mock_ga_cls.return_value = mock_ga
-        # Make is_gap return True for this answer
-        mock_ga_cls.is_gap.return_value = True
-        result = pipeline.query("question about missing info")
-        mock_ga.record_gap.assert_called_once()
-        mock_ga.close.assert_called_once()
+    mock_ga = MagicMock()
+    mock_ga.is_gap.return_value = True
+    pipeline = RAGPipeline(
+        "test.txt", session_id="s1", memory_db_path=":memory:", gap_analyzer=mock_ga
+    )
+    pipeline.query("question about missing info")
+    mock_ga.record_gap.assert_called_once()
+    mock_ga.close.assert_not_called()
 
 
 @patch("rag.agent.route_question", return_value="rag")
@@ -502,11 +501,13 @@ def test_pipeline_no_gap_analysis_when_answer_is_normal(
 
     mock_generate.return_value = "RAG is a retrieval augmented generation technique"
 
-    pipeline = RAGPipeline("test.txt", session_id="s1", memory_db_path=":memory:")
-    with patch("rag.gap_analyzer.GapAnalyzer") as mock_ga_cls:
-        mock_ga_cls.is_gap.return_value = False
-        result = pipeline.query("what is RAG")
-        mock_ga_cls.return_value.record_gap.assert_not_called()
+    mock_ga = MagicMock()
+    mock_ga.is_gap.return_value = False
+    pipeline = RAGPipeline(
+        "test.txt", session_id="s1", memory_db_path=":memory:", gap_analyzer=mock_ga
+    )
+    pipeline.query("what is RAG")
+    mock_ga.record_gap.assert_not_called()
 
 
 @patch("rag.agent.route_question", return_value="rag")

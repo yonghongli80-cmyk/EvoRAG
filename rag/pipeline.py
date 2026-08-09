@@ -44,7 +44,14 @@ def _agent_run_kwargs(prepared: dict) -> dict:
 
 class RAGPipeline:
     def __init__(
-        self, file_path: str = None, session_id: str = None, memory_db_path: str = settings.memory_db_path, kb_id: str = None, user_db=None
+        self,
+        file_path: str = None,
+        session_id: str = None,
+        memory_db_path: str = settings.memory_db_path,
+        kb_id: str = None,
+        user_db=None,
+        feedback_processor=None,
+        gap_analyzer=None,
     ):
         if kb_id:
             # 查询已有知识库，不重新索引
@@ -76,6 +83,17 @@ class RAGPipeline:
         self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._cache = RedisCache()
+
+        if feedback_processor is None:
+            from rag.feedback_processor import FeedbackProcessor
+
+            feedback_processor = FeedbackProcessor(memory_db_path)
+        if gap_analyzer is None:
+            from rag.gap_analyzer import GapAnalyzer
+
+            gap_analyzer = GapAnalyzer(memory_db_path)
+        self._feedback_processor = feedback_processor
+        self._gap_analyzer = gap_analyzer
 
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
@@ -138,14 +156,8 @@ class RAGPipeline:
 
         # Compute feedback weights for reranked chunks
         import hashlib
-        from rag.feedback_processor import FeedbackProcessor
-
         chunk_hashes = [hashlib.md5(c.text.encode()).hexdigest() for c in context]
-        fp = FeedbackProcessor(settings.memory_db_path)
-        try:
-            weights = fp.get_weights(chunk_hashes)
-        finally:
-            fp.close()
+        weights = self._feedback_processor.get_weights(chunk_hashes)
 
         sid = session_id or self.session_id or "default"
         messages = self.memory.build_messages(sid, question, context)
@@ -217,13 +229,10 @@ class RAGPipeline:
 
         # Gap analysis: check if this is a retrieval gap
         if prepared["route"] == "rag" and chunk_hashes:
-            from rag.gap_analyzer import GapAnalyzer
             weights = prepared.get("weights", {})
             best_weight = max(weights.values()) if weights else 1.0
-            if GapAnalyzer.is_gap(best_weight, answer):
-                ga = GapAnalyzer(settings.memory_db_path)
-                ga.record_gap(question, best_weight)
-                ga.close()
+            if self._gap_analyzer.is_gap(best_weight, answer):
+                self._gap_analyzer.record_gap(question, best_weight)
 
         output_check = check_output(answer)
         if output_check.filtered:
@@ -304,14 +313,10 @@ class RAGPipeline:
         # Gap analysis for stream
         if prepared["route"] == "rag" and chunk_hashes:
             def record_gap():
-                from rag.gap_analyzer import GapAnalyzer
-
                 weights = prepared.get("weights", {})
                 best_weight = max(weights.values()) if weights else 1.0
-                if GapAnalyzer.is_gap(best_weight, answer):
-                    ga = GapAnalyzer(settings.memory_db_path)
-                    ga.record_gap(question, best_weight)
-                    ga.close()
+                if self._gap_analyzer.is_gap(best_weight, answer):
+                    self._gap_analyzer.record_gap(question, best_weight)
 
             await asyncio.to_thread(record_gap)
 

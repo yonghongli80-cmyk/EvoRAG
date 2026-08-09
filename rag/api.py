@@ -3,6 +3,7 @@ import contextvars
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 
@@ -38,8 +39,6 @@ def auto_index_on_startup():
         return
 
     from rag.folder_indexer import compute_file_hash, load_index_state, save_index_state, diff_index, index_folder
-    from rag.pipeline import RAGPipeline
-
     state_path = str(DATA_DIR.parent / "index_state.json")
     stored_state = load_index_state(state_path)
 
@@ -120,7 +119,7 @@ def auto_index_on_startup():
     if not changed and not deleted:
         logger.info("索引无需更新（%d 文件）", len(current_hashes))
         with _pipeline_lock.write():
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         _init_admin()
         _sync_repo_files()
         return
@@ -140,7 +139,7 @@ def auto_index_on_startup():
         save_index_state(state_path, new_state)
 
         with _pipeline_lock.write():
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
     except Exception as e:
         logger.warning("启动索引失败: %s", e)
 
@@ -297,17 +296,56 @@ _DB_PATH = Path(_settings.users_db_path)
 user_db = UserDB(str(_DB_PATH))
 
 
-# ── FeedbackProcessor 单例 ──────────────────────────────────────────────
+# ── Pipeline 数据处理器单例 ─────────────────────────────────────────────
 _feedback_processor = None
+_gap_analyzer = None
+_processor_lock = threading.Lock()
 
 
 def get_feedback_processor():
     """返回模块级 FeedbackProcessor 单例，避免每次查询都创建新实例。"""
     global _feedback_processor
-    if _feedback_processor is None:
-        from rag.feedback_processor import FeedbackProcessor
-        _feedback_processor = FeedbackProcessor(str(_DB_PATH))
+    with _processor_lock:
+        if _feedback_processor is None:
+            from rag.feedback_processor import FeedbackProcessor
+
+            _feedback_processor = FeedbackProcessor(_settings.memory_db_path)
     return _feedback_processor
+
+
+def get_gap_analyzer():
+    """返回模块级 GapAnalyzer 单例，避免每次查询都创建新实例。"""
+    global _gap_analyzer
+    with _processor_lock:
+        if _gap_analyzer is None:
+            from rag.gap_analyzer import GapAnalyzer
+
+            _gap_analyzer = GapAnalyzer(_settings.memory_db_path)
+    return _gap_analyzer
+
+
+def _make_pipeline(**kwargs):
+    """构造使用 API 共享数据库连接的 pipeline。"""
+    from rag.pipeline import RAGPipeline
+
+    kwargs.setdefault("user_db", user_db)
+    if "feedback_processor" not in kwargs:
+        kwargs["feedback_processor"] = get_feedback_processor()
+    if "gap_analyzer" not in kwargs:
+        kwargs["gap_analyzer"] = get_gap_analyzer()
+    return RAGPipeline(**kwargs)
+
+
+@app.on_event("shutdown")
+def close_pipeline_processors():
+    """关闭由 API 生命周期持有的共享处理器。"""
+    global _feedback_processor, _gap_analyzer
+    with _processor_lock:
+        for processor in (_feedback_processor, _gap_analyzer):
+            if processor is not None:
+                processor.close()
+        _feedback_processor = None
+        _gap_analyzer = None
 
 
 @app.get("/health", summary="健康检查", description="检查服务是否正常运行")
@@ -778,8 +816,6 @@ async def upload_file(
     file: UploadFile = File(..., description="要上传的文件"),
     user: dict | None = Depends(_resolve_upload_user),
 ):
-    from rag.pipeline import RAGPipeline
-
     global pipeline
 
     content = await file.read()
@@ -835,7 +871,7 @@ async def upload_file(
     # Refresh pipeline
     with _pipeline_lock.write():
         try:
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（上传后）: %s", e)
 
@@ -892,7 +928,7 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
     # 刷新 pipeline
     with _pipeline_lock.write():
         try:
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（删除后）: %s", e)
 
@@ -1038,8 +1074,6 @@ async def list_tags(user_id: str = Security(verify_api_key)):
 @app.post("/index-all", summary="索引全部文件", description="索引 data/upload/ 目录下的所有文件")
 async def index_all(user_id: str = Security(verify_api_key)):
     from rag.folder_indexer import index_folder
-    from rag.pipeline import RAGPipeline
-
     global pipeline
     if not DATA_DIR.is_dir():
         raise HTTPException(status_code=400, detail="data/upload/ 目录不存在")
@@ -1049,7 +1083,7 @@ async def index_all(user_id: str = Security(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
     with _pipeline_lock.write():
         try:
-            pipeline = await asyncio.to_thread(RAGPipeline, kb_id="rag_docs", user_db=user_db)
+            pipeline = await asyncio.to_thread(_make_pipeline, kb_id="rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（全量索引后）: %s", e)
     return {"status": "indexed", **stats}
@@ -1057,8 +1091,6 @@ async def index_all(user_id: str = Security(verify_api_key)):
 
 @app.post("/index", summary="索引文档", description="上传文档并添加到知识库，支持 txt/md/pdf/docx/xlsx 格式，最大 10MB")
 async def index(file: UploadFile = File(..., description="要索引的文档文件"), user_id: str = Security(verify_api_key)):
-    from rag.pipeline import RAGPipeline
-
     global pipeline
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
@@ -1083,7 +1115,7 @@ async def index(file: UploadFile = File(..., description="要索引的文档文�
     # 刷新 pipeline（冷启动时创建，运行时更新）
     with _pipeline_lock.write():
         try:
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（索引后）: %s", e)
     return {"status": "indexed", "chunks": count}
@@ -1136,10 +1168,9 @@ async def batch_import(
 
         # 刷新 pipeline
         global pipeline
-        from rag.pipeline import RAGPipeline
         with _pipeline_lock.write():
             try:
-                pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+                pipeline = _make_pipeline(kb_id="rag_docs")
             except Exception as e:
                 logger.error("Pipeline 刷新失败: %s", e)
 
@@ -2026,28 +2057,12 @@ async def set_user_role(uid: int, req: UpdateRoleRequest, authorization: str = H
 
 @app.get("/analytics/gaps/summary", summary="检索空白分析统计")
 async def get_gap_summary(user_id: str = Security(verify_api_key)):
-    def _get():
-        from rag.gap_analyzer import GapAnalyzer
-        from config import settings as _settings
-        ga = GapAnalyzer(_settings.memory_db_path)
-        try:
-            return ga.get_summary()
-        finally:
-            ga.close()
-    return await asyncio.to_thread(_get)
+    return await asyncio.to_thread(get_gap_analyzer().get_summary)
 
 
 @app.get("/analytics/gaps", summary="未解答问题列表")
 async def get_gaps(limit: int = 50, user_id: str = Security(verify_api_key)):
-    def _get():
-        from rag.gap_analyzer import GapAnalyzer
-        from config import settings as _settings
-        ga = GapAnalyzer(_settings.memory_db_path)
-        try:
-            return ga.get_gaps(limit=limit)
-        finally:
-            ga.close()
-    return await asyncio.to_thread(_get)
+    return await asyncio.to_thread(get_gap_analyzer().get_gaps, limit=limit)
 
 
 # ── 分析卡片 ────────────────────────────────────────────────────────
