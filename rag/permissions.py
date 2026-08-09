@@ -28,23 +28,25 @@ def check_doc_permission(
     """校验用户对指定文档的操作权限。
 
     规则：
-    - 无权限记录（旧文档）→ 放行
+    - 无权限记录（旧文档/未归属文件）→ 默认拒绝（安全收敛）；admin 放行
     - admin → 放行
     - 查看：owner / scope='public' / scope='shared' 且在 shares 表中 → 放行
     - 编辑/删除：仅 owner / scope='shared' 且 permission='edit' → 放行
 
     Returns:
         document_permission 记录 dict（有记录时）
-        None（无权限记录 — 旧文档，放行）
+        None（管理员访问无记录文档时）
 
     Raises:
-        HTTPException 403: 无权操作
+        HTTPException 403: 无权操作（含无权限记录的文档）
     """
     doc = db.get_document_permission(doc_name, kb_id)
 
-    # 无权限记录 = 旧文档，视为公开，放行
+    # 无权限记录 = 旧文档/未归属文件，安全收敛：默认拒绝（管理员除外）
     if not doc:
-        return None
+        if user.get("is_admin"):
+            return None
+        raise HTTPException(status_code=403, detail="文件无权限记录，禁止操作")
 
     # 管理员绕过
     if user.get("is_admin"):
@@ -82,21 +84,23 @@ def check_kb_permission(
     """校验用户对知识库的操作权限。
 
     规则：
-    - 无元数据（旧 KB）→ 放行
+    - 无元数据（旧 KB）→ 默认拒绝（安全收敛）；admin 放行
     - admin → 放行
     - 查看：owner / scope='public' / scope='shared' 且在 kb_shares 表中 → 放行
     - 编辑/删除：仅 owner / scope='shared' 且 permission='edit' → 放行
 
     Returns:
         kb_metadata dict（有记录时）
-        None（无记录 — 旧 KB，放行）
+        None（管理员访问无记录 KB 时）
 
     Raises:
-        HTTPException 403: 无权操作
+        HTTPException 403: 无权操作（含无元数据记录的 KB）
     """
     meta = db.get_kb_metadata(kb_id)
     if not meta:
-        return None  # 旧 KB，放行
+        if user.get("is_admin"):
+            return None
+        raise HTTPException(status_code=403, detail="知识库无元数据记录，禁止操作")
 
     if user.get("is_admin"):
         return meta

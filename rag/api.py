@@ -6,7 +6,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -388,6 +388,18 @@ async def _require_auth(authorization: str) -> dict:
     return user_dict
 
 
+async def _resolve_upload_user(authorization: str = Header(default="")) -> dict | None:
+    """upload 端点鉴权依赖：认证开启时强制登录，认证关闭时允许匿名上传。
+
+    Returns:
+        认证开启：完整 user dict（缺失/无效 token 抛 401）
+        认证关闭：None（匿名上传，兼容既有行为，不创建权限记录）
+    """
+    if not _settings.auth_enabled:
+        return None
+    return await _require_auth(authorization)
+
+
 def _get_current_user(token: str) -> dict | None:
     """从 JWT token 获取当前用户。返回 None 表示认证失败。
 
@@ -734,6 +746,29 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} TB"
 
 
+def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bool:
+    """同名覆盖保护：目标文件已存在时，仅 owner 或公开文件可被覆盖。
+
+    - admin：可覆盖任意文件
+    - owner（权限记录 owner_id == user.id）：可覆盖
+    - 公开文件（is_public）：可覆盖
+    - 无权限记录的既有文件（非 admin、有认证身份）：禁止覆盖
+    - 认证关闭下的匿名上传（user 为 None）：仅可覆盖同样无权限记录的既有文件
+      （保持认证关闭时的匿名覆盖兼容；不得覆盖有归属/公开记录的文件）
+    """
+    if user is None:
+        return existing_perm is None
+    if user.get("is_admin"):
+        return True
+    if existing_perm is None:
+        return False
+    if existing_perm["owner_id"] == user["id"]:
+        return True
+    if existing_perm.get("is_public"):
+        return True
+    return False
+
+
 @app.post(
     "/upload",
     summary="上传文件",
@@ -741,7 +776,7 @@ def _human_size(size: int) -> str:
 )
 async def upload_file(
     file: UploadFile = File(..., description="要上传的文件"),
-    authorization: str = Header(default=""),
+    user: dict | None = Depends(_resolve_upload_user),
 ):
     from rag.pipeline import RAGPipeline
 
@@ -763,28 +798,27 @@ async def upload_file(
     # Ensure DATA_DIR exists
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Save file to DATA_DIR
+    # 同名覆盖保护（防越权覆盖他人/受保护文件）
     dest = DATA_DIR / filename
+    existing_perm = user_db.get_document_permission(filename, "rag_docs") if dest.exists() else None
+    if dest.exists() and not _can_overwrite_existing(user, existing_perm):
+        raise HTTPException(status_code=409, detail=f"文件 {filename} 已存在，仅所有者或公开文件可覆盖")
+
+    # Save file to DATA_DIR
     try:
         dest.write_bytes(content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存文件失败: {e}")
 
-    # 获取当前用户
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
-
-    # 先创建权限记录（默认私有，索引失败时回滚）
+    # 认证开启时先创建权限记录（默认私有，索引失败时回滚）
     perm_id = None
-    if user_dict:
+    if user:
         def _create_perm():
             # 检查是否已有权限记录（避免重复上传同名文件时冲突）
             existing = user_db.get_document_permission(filename, "rag_docs")
             if existing:
                 return existing["id"]
-            return user_db.create_document_permission(filename, "rag_docs", user_dict["id"], is_public=False)
+            return user_db.create_document_permission(filename, "rag_docs", user["id"], is_public=False)
         perm_id = await asyncio.to_thread(_create_perm)
 
     # Index the file
@@ -898,21 +932,24 @@ async def download_file(filename: str, authorization: str = Header(default="")):
 
     # 权限检查
     perm = user_db.get_document_permission(safe_name, "rag_docs")
-    if perm:
-        # admin 可下载所有文件
+    if not perm:
+        # 无权限记录 = 未归属/旧文档，默认拒绝下载（无法证明公开）；admin 除外
         if not user_dict.get("is_admin"):
-            scope = perm.get("scope", "private")
-            is_owner = perm["owner_id"] == user_dict["id"]
+            raise HTTPException(status_code=403, detail="无权下载该文件")
+    elif not user_dict.get("is_admin"):
+        # admin 可下载所有文件
+        scope = perm.get("scope", "private")
+        is_owner = perm["owner_id"] == user_dict["id"]
 
-            # 检查可见权限
-            if scope == "private" and not is_owner:
-                raise HTTPException(status_code=403, detail="无权下载该文件")
-            if scope == "shared" and not is_owner and not user_db.is_document_shared(perm["id"], user_dict["id"]):
-                raise HTTPException(status_code=403, detail="无权下载该文件")
+        # 检查可见权限
+        if scope == "private" and not is_owner:
+            raise HTTPException(status_code=403, detail="无权下载该文件")
+        if scope == "shared" and not is_owner and not user_db.is_document_shared(perm["id"], user_dict["id"]):
+            raise HTTPException(status_code=403, detail="无权下载该文件")
 
-            # 检查 downloadable（owner 总是可下载）
-            if not perm.get("downloadable", True) and not is_owner:
-                raise HTTPException(status_code=403, detail="该文件不允许下载")
+        # 检查 downloadable（owner 总是可下载）
+        if not perm.get("downloadable", True) and not is_owner:
+            raise HTTPException(status_code=403, detail="该文件不允许下载")
 
     return FileResponse(
         path=str(file_path),

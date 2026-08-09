@@ -74,17 +74,19 @@ def test_admin_bypass_all_permissions(db):
     assert result["doc_name"] == "secret.pdf"
 
 
-def test_old_doc_without_permission_record_passes(db):
-    """旧文档无权限记录时，所有操作放行（返回 None，不抛异常）。"""
+def test_old_doc_without_permission_record_denied(db):
+    """旧文档无权限记录时，默认拒绝（安全收敛）；仅 admin 放行。"""
     user = _make_user(db, "alice")
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="view")
-    assert result is None
+    admin = _make_user(db, "root", is_admin=True)
 
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="delete")
-    assert result is None
+    # 普通用户：view / delete / edit 一律 403
+    for action in ("view", "delete", "edit"):
+        with pytest.raises(HTTPException) as exc_info:
+            check_doc_permission(db, "old_file.pdf", "rag_docs", user, action=action)
+        assert exc_info.value.status_code == 403
 
-    result = check_doc_permission(db, "old_file.pdf", "rag_docs", user, action="edit")
-    assert result is None
+    # 管理员放行（返回 None，不抛异常）
+    assert check_doc_permission(db, "old_file.pdf", "rag_docs", admin, action="delete") is None
 
 
 # -- check_doc_permission: edit / delete -----------------------------------
