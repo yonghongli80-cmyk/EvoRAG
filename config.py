@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     top_k: int = 5
     rrf_k: int = 60
 
+    # 文件导入防护
+    max_upload_bytes: int = 50 * 1024 * 1024
+    max_chunk_chars: int = 8000
+
     model_config = {
         "env_prefix": "RAG_",
         "env_file": str(Path(__file__).resolve().parent / ".env"),

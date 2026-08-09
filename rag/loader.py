@@ -4,6 +4,7 @@ import tempfile
 import warnings
 from pathlib import Path
 
+from config import settings
 from rag.cleaner import clean_text, detect_and_decode
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx"}
@@ -12,6 +13,8 @@ SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx"}
 def load(file_path: str) -> str:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件不存在: {file_path}")
+    if os.path.getsize(file_path) > settings.max_upload_bytes:
+        raise ValueError(f"文件大小超过 {settings.max_upload_bytes} 字节限制")
     ext = os.path.splitext(file_path)[1].lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"不支持的文件格式: {ext}")
@@ -23,7 +26,9 @@ def load(file_path: str) -> str:
         return load_excel(file_path)
     # .txt, .md files: detect encoding + clean
     with open(file_path, "rb") as f:
-        raw = f.read()
+        raw = f.read(settings.max_upload_bytes + 1)
+    if len(raw) > settings.max_upload_bytes:
+        raise ValueError(f"文件大小超过 {settings.max_upload_bytes} 字节限制")
     text = detect_and_decode(raw)
     return clean_text(text)
 

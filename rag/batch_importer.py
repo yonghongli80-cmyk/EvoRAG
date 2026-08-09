@@ -3,6 +3,7 @@ import csv
 import logging
 from pathlib import Path
 
+from config import settings
 from rag.models import Chunk
 
 logger = logging.getLogger(__name__)
@@ -95,4 +96,11 @@ class BatchImporter:
         for row in rows:
             lines.append("\t".join(str(row.get(h, "")) for h in headers))
         text = "\n".join(lines)
+        if len(text) > settings.max_chunk_chars:
+            logger.warning(
+                "表格导入内容超过 %s 字符，已截断: %s",
+                settings.max_chunk_chars,
+                file_path,
+            )
+            text = text[: settings.max_chunk_chars]
         return [Chunk(text=text, doc_name=doc_name, chunk_index=0)]
