@@ -175,7 +175,12 @@ class Retriever:
                     tags=tags,
                 )
             else:
-                dense_hits = dense_search(query_vec, top_k=top_k * 2)
+                dense_hits = dense_search(
+                    query_vec,
+                    top_k=top_k * 2,
+                    doc_name=doc_name,
+                    tags=tags,
+                )
         except Exception as exc:
             logger.warning("Embedding/dense 检索失败，降级为纯 BM25: %s", exc)
 
@@ -192,6 +197,7 @@ class Retriever:
 
         # 如果指定了文档名，过滤 BM25 结果
         if doc_name:
+            dense_hits = [c for c in dense_hits if c.doc_name == doc_name]
             sparse_hits = [c for c in sparse_hits if c.doc_name == doc_name]
 
         return self._rrf_fuse(dense_hits, sparse_hits, top_k, rrf_k=settings.rrf_k, weights=weights)

@@ -140,15 +140,32 @@ def clear():
     _invalidate_bm25(COLLECTION_NAME)
 
 
-def search(query_embedding: list[float], top_k: int = 5) -> list[Chunk]:
+def search(
+    query_embedding: list[float],
+    top_k: int = 5,
+    doc_name: str = None,
+    tags: list[str] = None,
+) -> list[Chunk]:
     with _write_lock.read():
         client = _get_client()
         _ensure_collection()
+        conditions = []
+        if doc_name:
+            from qdrant_client.models import FieldCondition, MatchValue
+
+            conditions.append(FieldCondition(key="doc_name", match=MatchValue(value=doc_name)))
+        if tags:
+            from qdrant_client.models import FieldCondition, MatchValue
+
+            conditions.extend(
+                FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in tags
+            )
         hits = client.query_points(
             collection_name=COLLECTION_NAME,
             query=query_embedding,
             limit=top_k,
             with_payload=True,
+            query_filter=Filter(must=conditions) if conditions else None,
         )
         return [
             Chunk(
