@@ -1,11 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import api from '../utils/api'
+import api, { streamRequest } from '../utils/api'
 import { useAuthStore } from './auth'
 
 export type ChatMode = 'file' | 'kb' | 'analysis'
-
-const API = import.meta.env.VITE_API_BASE ?? '/api'
 
 interface Conversation {
   id: number
@@ -162,7 +160,7 @@ export const useChatStore = defineStore('chat', () => {
         payload.doc_name = selectedFile.value
       }
 
-      const response = await fetch(`${API}/query/stream`, {
+      const response = await streamRequest('/query/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -170,12 +168,6 @@ export const useChatStore = defineStore('chat', () => {
         },
         body: JSON.stringify(payload)
       })
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ detail: '请求失败' }))
-        assistantMsg.content = err.detail || '请求失败'
-        return
-      }
 
       if (!response.body) {
         assistantMsg.content = '响应为空，请重试'
@@ -235,18 +227,12 @@ export const useChatStore = defineStore('chat', () => {
       const currentConv = conversations.value.find(c => c.id === currentConvId.value)
       if (currentConv && (!currentConv.title || currentConv.title === '新对话')) {
         try {
-          const titleRes = await fetch(`${API}/conversations/${currentConvId.value}/generate-title`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...auth.getAuthHeaders()
-            },
-            body: JSON.stringify({ question })
+          const titleRes = await api.post(`/conversations/${currentConvId.value}/generate-title`, {
+            question
+          }, {
+            headers: auth.getAuthHeaders()
           })
-          if (titleRes.ok) {
-            const titleData = await titleRes.json()
-            currentConv.title = titleData.title
-          }
+          currentConv.title = titleRes.data.title
         } catch {
           // Fallback: use first 20 chars
           currentConv.title = question.slice(0, 20)
@@ -256,25 +242,17 @@ export const useChatStore = defineStore('chat', () => {
       // Fetch suggested follow-up questions after streaming completes
       if (answer) {
         try {
-          const suggestRes = await fetch(`${API}/suggest`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...auth.getAuthHeaders()
-            },
-            body: JSON.stringify({ question, answer })
+          const suggestRes = await api.post('/suggest', { question, answer }, {
+            headers: auth.getAuthHeaders()
           })
-          if (suggestRes.ok) {
-            const suggestData = await suggestRes.json()
-            suggestedQuestions.value = suggestData.questions || []
-          }
+          suggestedQuestions.value = suggestRes.data.questions || []
         } catch {
           // Suggestions are non-critical, ignore errors
         }
       }
 
-    } catch (err) {
-      assistantMsg.content = '请求失败，请稍后重试。'
+    } catch (err: any) {
+      assistantMsg.content = err?.response?.data?.detail || '请求失败，请稍后重试。'
     } finally {
       isStreaming.value = false
     }

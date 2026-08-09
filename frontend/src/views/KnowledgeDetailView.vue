@@ -304,9 +304,10 @@ async function addFileToKB() {
   addingFile.value = true
   try {
     const formData = new FormData()
-    const res = await fetch(`/data/upload/${encodeURIComponent(selectedFile.value.name)}`)
-    if (!res.ok) throw new Error('无法读取文件')
-    const blob = await res.blob()
+    const res = await api.get(`/data/upload/${encodeURIComponent(selectedFile.value.name)}`, {
+      responseType: 'blob'
+    })
+    const blob = res.data
     formData.append('file', blob, selectedFile.value.name)
 
     await api.post(`/knowledge-bases/${kbId}/documents`, formData, {

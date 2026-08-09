@@ -7,7 +7,17 @@ vi.mock('../../utils/api', () => ({
     get: vi.fn(),
     post: vi.fn(),
     delete: vi.fn()
-  }
+  },
+  streamRequest: vi.fn(async (path: string, init: RequestInit) => {
+    const response = await fetch(`/api${path}`, init)
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({ detail: '请求失败' }))
+      const error: any = new Error(data.detail || '请求失败')
+      error.response = { status: response.status, data }
+      throw error
+    }
+    return response
+  })
 }))
 
 vi.mock('../auth', () => ({
@@ -17,7 +27,7 @@ vi.mock('../auth', () => ({
   }))
 }))
 
-import api from '../../utils/api'
+import api, { streamRequest } from '../../utils/api'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -215,7 +225,7 @@ describe('chat store', () => {
   })
 
   // ── sendMessage ─────────────────────────────────────────
-  it('sendMessage calls /query/stream via fetch', async () => {
+  it('sendMessage routes /query/stream through the unified stream client', async () => {
     const mockResponse = {
       ok: true,
       body: {
@@ -237,6 +247,10 @@ describe('chat store', () => {
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
       '/api/query/stream',
+      expect.objectContaining({ method: 'POST' })
+    )
+    expect(streamRequest).toHaveBeenCalledWith(
+      '/query/stream',
       expect.objectContaining({ method: 'POST' })
     )
     expect(store.messages).toHaveLength(2)
@@ -374,13 +388,10 @@ describe('chat store', () => {
         })
       }
     }
-    const mockSuggestResponse = {
-      ok: true,
-      json: vi.fn().mockResolvedValue({ questions: ['Follow-up 1', 'Follow-up 2'] })
-    }
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(mockStreamResponse as any)
-      .mockResolvedValueOnce(mockSuggestResponse as any)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockStreamResponse as any)
+    vi.mocked(api.post).mockResolvedValue({
+      data: { questions: ['Follow-up 1', 'Follow-up 2'] }
+    } as any)
     vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
 
     const store = useChatStore()
@@ -404,18 +415,10 @@ describe('chat store', () => {
         })
       }
     }
-    const mockTitleResponse = {
-      ok: true,
-      json: vi.fn().mockResolvedValue({ title: 'Question' })
-    }
-    const mockSuggestResponse = {
-      ok: true,
-      json: vi.fn().mockResolvedValue({ questions: [] })
-    }
-    vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(mockStreamResponse as any)
-      .mockResolvedValueOnce(mockTitleResponse as any)
-      .mockResolvedValueOnce(mockSuggestResponse as any)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockStreamResponse as any)
+    vi.mocked(api.post)
+      .mockResolvedValueOnce({ data: { title: 'Question' } } as any)
+      .mockResolvedValueOnce({ data: { questions: [] } } as any)
 
     const store = useChatStore()
     // Set up a current conversation with empty title

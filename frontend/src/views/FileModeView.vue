@@ -10,6 +10,7 @@ import MessageBubble from '../components/MessageBubble.vue'
 import ChatInput from '../components/ChatInput.vue'
 import AddToAnalysisDialog from '../components/AddToAnalysisDialog.vue'
 import ConversationSearch from '../components/ConversationSearch.vue'
+import api from '../utils/api'
 
 import { computed } from 'vue'
 
@@ -54,12 +55,10 @@ async function handleFileAction(command: string, fileName: string) {
 // Visibility toggle
 async function toggleVisibility(fileName: string) {
   try {
-    const resp = await fetch(`/files/${encodeURIComponent(fileName)}/visibility`, {
-      method: 'PUT',
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('rag_token')}` }
+    const resp = await api.put(`/files/${encodeURIComponent(fileName)}/visibility`, undefined, {
+      headers: authStore.getAuthHeaders()
     })
-    if (!resp.ok) throw new Error('切换失败')
-    const data = await resp.json()
+    const data = resp.data
     const file = filesStore.files.find(f => f.name === fileName)
     if (file) file.is_public = data.is_public
     ElMessage.success(data.is_public ? '已切换为共享' : '已切换为私有')
@@ -112,15 +111,11 @@ async function handleDelete(name: string) {
 
 async function downloadFile(name: string) {
   try {
-    const auth = useAuthStore()
-    const response = await fetch(`/files/${encodeURIComponent(name)}/download`, {
-      headers: auth.getAuthHeaders()
+    const response = await api.get(`/files/${encodeURIComponent(name)}/download`, {
+      headers: authStore.getAuthHeaders(),
+      responseType: 'blob'
     })
-    if (!response.ok) {
-      const data = await response.json()
-      throw new Error(data.detail || '下载失败')
-    }
-    const blob = await response.blob()
+    const blob = response.data
     const url = window.URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

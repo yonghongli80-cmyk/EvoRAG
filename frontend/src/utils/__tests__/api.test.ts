@@ -42,6 +42,16 @@ describe('api base URL', () => {
 
     expect(axios.create).toHaveBeenCalledWith({ baseURL: '/api' })
   })
+
+  it('routes streaming fetches through the same base URL', async () => {
+    const response = { ok: true }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const { streamRequest } = await import('../api')
+
+    await streamRequest('/query/stream', { method: 'POST' })
+
+    expect(fetch).toHaveBeenCalledWith('/api/query/stream', { method: 'POST' })
+  })
 })
 
 describe('api interceptor', () => {
