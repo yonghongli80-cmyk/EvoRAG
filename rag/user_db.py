@@ -136,6 +136,9 @@ class UserDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
+        from rag.db_migrations import run_migrations
+
+        run_migrations(self._conn)
 
     # ------------------------------------------------------------------
     # Schema
