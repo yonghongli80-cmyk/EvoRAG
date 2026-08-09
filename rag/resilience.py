@@ -5,7 +5,6 @@ from __future__ import annotations
 import functools
 import hashlib
 import math
-import random
 import threading
 import time
 
@@ -110,57 +109,3 @@ class BloomFilter:
             return all(self._bits[pos // 8] & (1 << (pos % 8)) for pos in self._hashes(key))
 
 
-class ResultCache:
-    """缓存：防穿透（布隆）+ 防雪崩（TTL 抖动）+ 防热点（热点永不过期）。"""
-
-    def __init__(self, ttl_seconds: float = 300.0, max_size: int = 1000, hot_threshold: int = 10):
-        self.ttl = ttl_seconds
-        self.max_size = max_size
-        self.hot_threshold = hot_threshold
-        self._store: dict[str, tuple[str, float]] = {}  # key -> (answer, expire_time)
-        self._access_count: dict[str, int] = {}
-        self._stale_keys: set[str] = set()
-        self._bloom = BloomFilter(capacity=max_size * 2)
-        self._lock = threading.Lock()
-
-    def _key(self, question: str) -> str:
-        return hashlib.md5(question.encode()).hexdigest()
-
-    def get(self, question: str):
-        key = self._key(question)
-        if key not in self._bloom:
-            return None
-        with self._lock:
-            self._access_count[key] = self._access_count.get(key, 0) + 1
-            if key in self._store:
-                answer, expire_time = self._store[key]
-                if time.time() < expire_time:
-                    return answer
-                # Expired — check if hot key
-                if self._access_count[key] >= self.hot_threshold:
-                    self._stale_keys.add(key)
-                    return answer  # Return stale value for hot keys
-                del self._store[key]
-        return None
-
-    def set(self, question: str, answer: str):
-        key = self._key(question)
-        self._bloom.add(key)
-        with self._lock:
-            if len(self._store) >= self.max_size:
-                oldest_key = min(self._store, key=lambda k: self._store[k][1])
-                del self._store[oldest_key]
-            jitter = random.uniform(-0.1, 0.1) * self.ttl
-            self._store[key] = (answer, time.time() + self.ttl + jitter)
-
-    def get_stale_keys(self) -> set[str]:
-        """返回需要刷新的热点 key 集合。
-
-        热点 key 在过期后仍返回旧值（serve-stale），防止缓存击穿。
-        调用方可根据返回的 key 集合决定是否触发异步刷新。
-        注意：当前 pipeline 未集成异步刷新，热点 key 持续返回旧值直到被 set() 覆盖。
-        """
-        with self._lock:
-            stale = self._stale_keys.copy()
-            self._stale_keys.clear()
-        return stale

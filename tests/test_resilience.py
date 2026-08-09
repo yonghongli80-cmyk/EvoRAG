@@ -99,27 +99,6 @@ def test_circuit_breaker_closes_on_success():
     assert cb.state == "closed"
 
 
-from rag.resilience import ResultCache
-
-
-def test_cache_returns_cached_result():
-    cache = ResultCache(ttl_seconds=1.0)
-    cache.set("question1", "answer1")
-    assert cache.get("question1") == "answer1"
-
-
-def test_cache_returns_none_on_miss():
-    cache = ResultCache(ttl_seconds=1.0)
-    assert cache.get("nonexistent") is None
-
-
-def test_cache_expires_after_ttl():
-    cache = ResultCache(ttl_seconds=0.01)
-    cache.set("q", "a")
-    time.sleep(0.02)
-    assert cache.get("q") is None
-
-
 from unittest.mock import patch, MagicMock
 
 
@@ -165,53 +144,3 @@ def test_bloom_filter_allows_known_keys():
     bf.add("known")
     assert ("known" in bf) is True
 
-
-def test_cache_bloom_filter_integration():
-    """缓存布隆过滤器集成：未 set 的 key 快速返回 None。"""
-    cache = ResultCache(ttl_seconds=1.0)
-    # Never set "unknown_q" — bloom filter should block it
-    assert cache.get("unknown_q") is None
-
-
-def test_cache_ttl_jitter():
-    """同时 set 的 key，TTL 有随机偏移。"""
-    cache = ResultCache(ttl_seconds=10.0)
-    cache.set("q1", "a1")
-    cache.set("q2", "a2")
-    # Both should be retrievable immediately
-    assert cache.get("q1") == "a1"
-    assert cache.get("q2") == "a2"
-
-
-def test_cache_hot_key_returns_stale():
-    """热点 key 过期后仍返回旧值。"""
-    cache = ResultCache(ttl_seconds=0.01, hot_threshold=3)
-    cache.set("hot_q", "hot_answer")
-    # Access enough times to become hot
-    for _ in range(5):
-        cache.get("hot_q")
-    time.sleep(0.02)  # Let it expire
-    # Should still return stale value because it's hot
-    assert cache.get("hot_q") == "hot_answer"
-
-
-def test_cache_stale_keys_tracked():
-    """过期的热点 key 被加入 stale_keys 集合。"""
-    cache = ResultCache(ttl_seconds=0.01, hot_threshold=2)
-    cache.set("stale_q", "stale_answer")
-    cache.get("stale_q")
-    cache.get("stale_q")  # Now hot
-    time.sleep(0.02)
-    cache.get("stale_q")  # Triggers stale tracking
-    stale = cache.get_stale_keys()
-    key = cache._key("stale_q")
-    assert key in stale
-
-
-def test_pipeline_uses_cache():
-    """相同问题第二次查询应命中缓存。"""
-    from rag.resilience import ResultCache
-
-    cache = ResultCache(ttl_seconds=60.0)
-    cache.set("test question", "cached answer")
-    assert cache.get("test question") == "cached answer"
