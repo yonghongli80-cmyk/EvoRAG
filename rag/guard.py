@@ -75,14 +75,20 @@ def sanitize_input(text: str) -> str:
     return "".join(c for c in text if c == "\n" or (ord(c) >= 32))
 
 
-OUTPUT_LEAK_PATTERNS = ["system prompt", "系统提示", "内部路径", "api key", "sk-"]
+OUTPUT_LEAK_PATTERNS = [
+    re.compile(re.escape(pattern), re.IGNORECASE)
+    for pattern in ("system prompt", "系统提示", "内部路径", "api key")
+]
+OUTPUT_LEAK_PATTERNS.append(
+    re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b", re.IGNORECASE)
+)
 
 
 def check_output(text: str) -> OutputResult:
     """检查 LLM 输出是否泄露敏感信息。"""
-    lower = text.lower()
+    filtered_text = text
+    total_matches = 0
     for pattern in OUTPUT_LEAK_PATTERNS:
-        if pattern in lower:
-            filtered = re.sub(re.escape(pattern), "[已过滤]", text, flags=re.IGNORECASE)
-            return OutputResult(filtered=True, text=filtered)
-    return OutputResult(filtered=False, text=text)
+        filtered_text, count = pattern.subn("[已过滤]", filtered_text)
+        total_matches += count
+    return OutputResult(filtered=total_matches > 0, text=filtered_text)
