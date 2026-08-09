@@ -46,7 +46,7 @@ _async_client = None
 _async_client_lock = threading.Lock()
 
 
-async def generate_stream(messages: list[dict], max_attempts: int = 3):
+async def generate_stream(messages: list[dict], temperature: float = 0.3, max_attempts: int = 3):
     """流式生成，逐个 yield token。连接失败时自动重试。"""
     global _async_client
     if not _breaker.allow_request():
@@ -68,6 +68,7 @@ async def generate_stream(messages: list[dict], max_attempts: int = 3):
             stream = await _async_client.chat.completions.create(
                 model=settings.deepseek_model,
                 messages=clean_msgs,
+                temperature=temperature,
                 extra_body={"thinking": {"type": "disabled"}},
                 stream=True,
             )
@@ -78,6 +79,7 @@ async def generate_stream(messages: list[dict], max_attempts: int = 3):
             return  # 成功，退出重试循环
         except (TimeoutError, ConnectionError, OSError) as e:
             last_exc = e
+            _breaker.record_failure()
             if attempt < max_attempts - 1:
                 import asyncio
                 delay = 1.0 * (2 ** attempt) + random.uniform(0, 0.5)
@@ -88,5 +90,4 @@ async def generate_stream(messages: list[dict], max_attempts: int = 3):
             raise
 
     # 所有重试都失败
-    _breaker.record_failure()
     raise last_exc
