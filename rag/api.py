@@ -1018,7 +1018,7 @@ async def download_file(filename: str, authorization: str = Header(default="")):
 
 @app.post("/files/{filename}/tags", summary="为文档添加标签", description="为指定文档的所有分块添加标签")
 async def add_tags_to_file(filename: str, tags: list[str], authorization: str = Header(default="")):
-    from qdrant_client.models import FieldCondition, Filter, MatchValue, PointIdsList, UpdateOperation
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
     from rag.vector_store import _get_client, COLLECTION_NAME
 
     safe_name = Path(filename).name
@@ -1033,37 +1033,47 @@ async def add_tags_to_file(filename: str, tags: list[str], authorization: str = 
     from rag.permissions import check_doc_permission
     await asyncio.to_thread(check_doc_permission, user_db, safe_name, "rag_docs", user_dict, "edit")
 
-    client = _get_client()
-    if not client.collection_exists(COLLECTION_NAME):
-        raise HTTPException(status_code=404, detail="集合不存在")
+    def _bulk_update_tags():
+        client = _get_client()
+        if not client.collection_exists(COLLECTION_NAME):
+            raise HTTPException(status_code=404, detail="集合不存在")
 
-    # Find all points for this document
-    search_filter = Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=safe_name))])
-    results = client.scroll(
-        collection_name=COLLECTION_NAME,
-        limit=10000,
-        scroll_filter=search_filter,
-        with_payload=False,
-    )
-    points = results[0] if isinstance(results, tuple) else results
-    if not points:
-        raise HTTPException(status_code=404, detail=f"文档 {safe_name} 不存在")
+        search_filter = Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=safe_name))])
+        points = []
+        offset = None
+        while True:
+            batch, offset = client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=10000,
+                offset=offset,
+                scroll_filter=search_filter,
+                with_payload=False,
+            )
+            points.extend(batch)
+            if offset is None:
+                break
+        if not points:
+            raise HTTPException(status_code=404, detail=f"文档 {safe_name} 不存在")
 
-    point_ids = [p.id for p in points]
-    # Merge with existing tags
-    for pid in point_ids:
-        existing = client.retrieve(collection_name=COLLECTION_NAME, ids=[pid], with_payload=True)
-        if existing and existing[0].payload:
-            existing_tags = existing[0].payload.get("tags", [])
-        else:
-            existing_tags = []
-        merged = list(set(existing_tags + tags))
+        point_ids = [point.id for point in points]
+        existing_points = client.retrieve(
+            collection_name=COLLECTION_NAME,
+            ids=point_ids,
+            with_payload=True,
+        )
+        merged_tags = set(tags)
+        for point in existing_points:
+            if point.payload:
+                merged_tags.update(point.payload.get("tags") or [])
+        merged = sorted(merged_tags)
         client.set_payload(
             collection_name=COLLECTION_NAME,
             payload={"tags": merged},
-            points=[pid],
+            points=point_ids,
         )
+        return point_ids
 
+    point_ids = await asyncio.to_thread(_bulk_update_tags)
     return {"status": "updated", "filename": safe_name, "tags": tags, "points_updated": len(point_ids)}
 
 
