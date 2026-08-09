@@ -18,6 +18,10 @@ SAFE_OPS = {
 }
 
 
+class _CalculationOverflow(ValueError):
+    """指数或计算结果超出安全范围时抛出（继承 ValueError，可按 ValueError 捕获）。"""
+
+
 def _eval_node(node):
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return node.value
@@ -26,7 +30,14 @@ def _eval_node(node):
     if isinstance(node, ast.BinOp) and type(node.op) in SAFE_OPS:
         left = _eval_node(node.left)
         right = _eval_node(node.right)
-        return SAFE_OPS[type(node.op)](left, right)
+        # DoS 防护：指数绝对值超过 1000 直接拒绝，避免 ast.Pow 算出天文数字
+        if type(node.op) is ast.Pow and isinstance(right, (int, float)) and abs(right) > 1000:
+            raise _CalculationOverflow("指数过大")
+        result = SAFE_OPS[type(node.op)](left, right)
+        # DoS 防护：对任何二元运算结果做数值上限检查（整数/浮点/无穷大均覆盖）
+        if isinstance(result, (int, float)) and abs(result) > 10**6:
+            raise _CalculationOverflow("结果超出安全范围")
+        return result
     raise ValueError(f"不允许的表达式: {ast.dump(node)}")
 
 
@@ -37,6 +48,8 @@ def calculate(expression: str) -> str:
         result = _eval_node(tree.body)
     except ZeroDivisionError:
         return "错误：除数不能为零"
+    except _CalculationOverflow:
+        return "计算被拒绝：指数或结果超出安全范围"
     # Round floats to avoid excessive precision
     if isinstance(result, float):
         result = round(result, 2)
