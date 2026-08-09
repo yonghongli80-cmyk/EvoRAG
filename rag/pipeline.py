@@ -187,6 +187,10 @@ class RAGPipeline:
             return QueryResult(answer=error, context=[], sources=[])
 
         if prepared["route"] == "cached":
+            self.memory.add_message(sid, "user", question)
+            self.memory.add_message(sid, "assistant", prepared["answer"])
+            if self.memory.should_summarize(sid):
+                self.memory.summarize_old_rounds(sid)
             return QueryResult(answer=prepared["answer"], context=[], sources=prepared["sources"])
 
         if prepared["route"] == "agent":
@@ -250,6 +254,10 @@ class RAGPipeline:
         if prepared["route"] == "cached":
             yield f'data: {_json.dumps({"type": "token", "content": prepared["answer"]}, ensure_ascii=False)}\n\n'
             yield f'data: {_json.dumps({"type": "sources", "sources": prepared["sources"]}, ensure_ascii=False)}\n\n'
+            await asyncio.to_thread(self.memory.add_message, sid, "user", question)
+            await asyncio.to_thread(self.memory.add_message, sid, "assistant", prepared["answer"])
+            if await asyncio.to_thread(self.memory.should_summarize, sid):
+                await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
             yield 'data: {"type": "done"}\n\n'
             return
 
