@@ -224,13 +224,13 @@ class Retriever:
             base = 1 / (rrf_k + rank + 1)
             if weights:
                 h = _hashlib.md5(doc.text.encode()).hexdigest()
-                base *= weights.get(h, 1.0)
+                base *= weights(h) if callable(weights) else weights.get(h, 1.0)
             add_score(doc, base)
         for rank, doc in enumerate(sparse):
             base = 1 / (rrf_k + rank + 1)
             if weights:
                 h = _hashlib.md5(doc.text.encode()).hexdigest()
-                base *= weights.get(h, 1.0)
+                base *= weights(h) if callable(weights) else weights.get(h, 1.0)
             add_score(doc, base)
         return [
             representatives[key]

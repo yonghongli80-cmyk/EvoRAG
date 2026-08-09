@@ -146,7 +146,21 @@ class RAGPipeline:
         rewritten = rewrite_query(question)
         # Oversampling: 检索更多结果，过滤后再截取 top_k
         oversample_factor = 3
-        raw_context = self.retriever.retrieve(rewritten, top_k=top_k * oversample_factor, doc_name=doc_name, tags=tags)
+        feedback_weight_cache: dict[str, float] = {}
+
+        def feedback_weight(chunk_hash: str) -> float:
+            if chunk_hash not in feedback_weight_cache:
+                weight = self._feedback_processor.get_weight(chunk_hash)
+                feedback_weight_cache[chunk_hash] = 1.0 if weight is None else weight
+            return feedback_weight_cache[chunk_hash]
+
+        raw_context = self.retriever.retrieve(
+            rewritten,
+            top_k=top_k * oversample_factor,
+            doc_name=doc_name,
+            tags=tags,
+            weights=feedback_weight,
+        )
         context = self.reranker.rerank(rewritten, raw_context)
 
         # 权限过滤：移除无权文档的 chunks（user is not None 且有 user_db 时才过滤）

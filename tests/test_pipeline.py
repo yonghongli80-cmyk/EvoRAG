@@ -62,7 +62,13 @@ def test_pipeline_queries(
 
     assert result.answer == "answer"
     mock_rewrite.assert_called_once_with("question")
-    mock_retriever.retrieve.assert_called_once_with("rewritten question", top_k=24, doc_name=None, tags=None)
+    mock_retriever.retrieve.assert_called_once()
+    retrieve_args, retrieve_kwargs = mock_retriever.retrieve.call_args
+    assert retrieve_args == ("rewritten question",)
+    assert retrieve_kwargs["top_k"] == 24
+    assert retrieve_kwargs["doc_name"] is None
+    assert retrieve_kwargs["tags"] is None
+    assert callable(retrieve_kwargs["weights"])
     mock_generate.assert_called_once()
     msgs = mock_generate.call_args[0][0]
     assert isinstance(msgs, list)
@@ -105,7 +111,13 @@ def test_pipeline_reranks_context(
     result = pipeline.query("question")
 
     assert result.answer == "answer"
-    mock_retriever.retrieve.assert_called_once_with("rewritten question", top_k=24, doc_name=None, tags=None)
+    mock_retriever.retrieve.assert_called_once()
+    retrieve_args, retrieve_kwargs = mock_retriever.retrieve.call_args
+    assert retrieve_args == ("rewritten question",)
+    assert retrieve_kwargs["top_k"] == 24
+    assert retrieve_kwargs["doc_name"] is None
+    assert retrieve_kwargs["tags"] is None
+    assert callable(retrieve_kwargs["weights"])
     mock_reranker.rerank.assert_called_once_with(
         "rewritten question", [c1, c2, c3]
     )
