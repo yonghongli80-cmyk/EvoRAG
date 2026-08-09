@@ -72,7 +72,7 @@ fi
 # ── 5. 构建并启动 ─────────────────────────────────────
 echo "[5/5] 构建并启动服务..."
 cd "$APP_DIR"
-docker compose build --no-cache
+docker compose build
 docker compose up -d
 
 echo ""

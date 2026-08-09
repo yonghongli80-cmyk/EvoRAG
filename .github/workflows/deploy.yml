@@ -17,6 +17,6 @@ jobs:
           script: |
             cd ~/RAG
             git pull origin main
-            docker compose build --no-cache rag-app
+            docker compose build rag-app
             docker compose up -d
             echo "Deploy completed at $(date)"

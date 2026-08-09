@@ -1,5 +1,5 @@
 #!/bin/bash
-# 部署脚本：拉取最新代码 + 强制重建（避免缓存问题）
+# 部署脚本：拉取最新代码 + 使用缓存重建
 set -e
 
 cd "$(dirname "$0")/.."
@@ -7,8 +7,8 @@ cd "$(dirname "$0")/.."
 echo "=== 拉取最新代码 ==="
 git pull
 
-echo "=== 强制重建（--no-cache）==="
-docker compose build --no-cache rag-app
+echo "=== 使用缓存重建 ==="
+docker compose build rag-app
 
 echo "=== 启动容器 ==="
 docker compose up -d

@@ -9,7 +9,7 @@ RUN npm run build
 
 
 # ── Stage 2: 运行后端 ─────────────────────────────────
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
@@ -31,8 +31,8 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 ENV DOCKER_CONTAINER=1
 
 # Python 依赖
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -r requirements.txt
+COPY requirements.lock ./
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.lock
 
 # 项目代码
 COPY . .
