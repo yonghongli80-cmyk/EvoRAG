@@ -114,6 +114,34 @@ class TestConfigMasking:
         assert cfg["headers"]["Authorization"] == "***"
         assert sources[0]["has_secret"] is True
 
+    def test_list_masks_url_embedded_credentials(self, db):
+        """任意 url 值内嵌的 userinfo 口令与敏感 query 参数都应脱敏（Important #2）。"""
+        db.create_data_source(
+            name="API",
+            source_type="api",
+            config='{"url": "https://user:toksecret@api.example.com/data?password=qp&x=1", "headers": {}}',
+            owner_id="A",
+        )
+        sources = db.list_data_sources("A")
+        cfg = sources[0]["config"]
+        assert "toksecret" not in json.dumps(cfg)
+        assert "qp" not in json.dumps(cfg)
+        assert sources[0]["has_secret"] is True
+        # 主机与路径保留，query 中的敏感参数被掩、非敏感参数保留
+        assert "api.example.com" in cfg["url"]
+        assert "password=***" in cfg["url"]
+        assert "x=1" in cfg["url"]
+
+    def test_list_does_not_mask_plain_url(self, db):
+        db.create_data_source(
+            name="RSS", source_type="rss",
+            config='{"url": "https://example.com/feed.xml"}', owner_id="A",
+        )
+        sources = db.list_data_sources("A")
+        cfg = sources[0]["config"]
+        assert cfg["url"] == "https://example.com/feed.xml"
+        assert sources[0]["has_secret"] is False
+
     def test_list_masks_password_key(self, db):
         db.create_data_source(
             name="DB",
@@ -163,6 +191,9 @@ class TestReadOnlySQLEnforcement:
             "SELECT 1; DROP TABLE t",
             "WITH x AS (SELECT 1) DELETE FROM t",
             "  -- comment\nDELETE FROM t",
+            "EXECUTE my_proc",
+            "PREPARE stmt FROM 'SELECT 1'",
+            "DEALLOCATE PREPARE stmt",
         ):
             with pytest.raises(ValueError):
                 validate_read_only_sql(bad)
@@ -294,7 +325,7 @@ class TestMigration:
 
 
 def test_api_list_masks_config_and_cleans_up():
-    """GET /sources 返回脱敏 config + has_secret（认证关闭 → owner='admin'）。"""
+    """GET /sources 返回脱敏 config + has_secret（认证关闭 → owner='anonymous'）。"""
     from fastapi.testclient import TestClient
 
     from rag.api import app, user_db
@@ -303,7 +334,7 @@ def test_api_list_masks_config_and_cleans_up():
         name="DB",
         source_type="database",
         config='{"connection_string": "mysql://u:supersecret@h:3306/d", "query": "SELECT 1"}',
-        owner_id="admin",
+        owner_id="anonymous",
     )
     try:
         client = TestClient(app)
@@ -314,4 +345,94 @@ def test_api_list_masks_config_and_cleans_up():
         assert src["has_secret"] is True
         assert src["config"]["connection_string"] != "mysql://u:supersecret@h:3306/d"
     finally:
+        user_db.delete_data_source(sid, "anonymous")
+
+
+# ── auth 开启下的 API 级 per-user 隔离 ─────────────────────────────────
+
+
+def test_api_per_user_isolation_with_auth_enabled(monkeypatch):
+    """auth 开启：用户 B 看不到/删不了/同步不了用户 A 的数据源。"""
+    import uuid as _uuid
+
+    from fastapi.testclient import TestClient
+
+    from config import settings
+    from rag.api import app, user_db
+    from rag.auth import create_token
+
+    uniq = _uuid.uuid4().hex[:8]
+    a_id = user_db.create_user(f"alice_{uniq}", "StrongPass1")
+    b_id = user_db.create_user(f"bob_{uniq}", "StrongPass1")
+    sid = user_db.create_data_source(name="A-only", source_type="rss", config="{}", owner_id=str(a_id))
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    token_a = create_token({"user_id": a_id})
+    token_b = create_token({"user_id": b_id})
+
+    client = TestClient(app)
+    try:
+        # B 看不到 A 的数据源
+        resp_b = client.get("/sources", headers={"Authorization": f"Bearer {token_b}"})
+        assert resp_b.status_code == 200
+        assert all(s["id"] != sid for s in resp_b.json()["sources"])
+        # B 删除 A 的数据源 → 404（非属主视为不存在）
+        resp_del = client.delete(f"/sources/{sid}", headers={"Authorization": f"Bearer {token_b}"})
+        assert resp_del.status_code in (403, 404)
+        # B 同步 A 的数据源 → 404
+        resp_sync = client.post(f"/sources/{sid}/sync", headers={"Authorization": f"Bearer {token_b}"})
+        assert resp_sync.status_code in (403, 404)
+        # A 自己可见、可删
+        resp_a = client.get("/sources", headers={"Authorization": f"Bearer {token_a}"})
+        assert any(s["id"] == sid for s in resp_a.json()["sources"])
+        assert (
+            client.delete(f"/sources/{sid}", headers={"Authorization": f"Bearer {token_a}"}).status_code
+            == 200
+        )
+    finally:
+        user_db.delete_data_source(sid, str(a_id))
+
+
+# ── auth 关闭下匿名越权收敛（Important #1）───────────────────────────────
+
+
+def test_anonymous_cannot_manage_admin_owned_source():
+    """认证关闭时匿名（owner='anonymous'）不能 list/delete/sync admin 拥有的数据源。"""
+    from fastapi.testclient import TestClient
+
+    from rag.api import app, user_db
+
+    sid = user_db.create_data_source(name="Admin-only", source_type="rss", config="{}", owner_id="admin")
+    try:
+        client = TestClient(app)
+        resp = client.get("/sources")
+        assert resp.status_code == 200
+        assert all(s["id"] != sid for s in resp.json()["sources"])
+        assert client.delete(f"/sources/{sid}").status_code == 404
+        assert client.post(f"/sources/{sid}/sync").status_code == 404
+    finally:
         user_db.delete_data_source(sid, "admin")
+
+
+# ── sync 对非只读 SQL 返回 400（Minor #4）───────────────────────────────
+
+
+def test_api_sync_rejects_non_select_with_400():
+    """sync 对非只读 SQL 返回 400（而非 500），并回显中文校验消息。"""
+    from fastapi.testclient import TestClient
+
+    from rag.api import app, user_db
+
+    sid = user_db.create_data_source(
+        name="BadSQL",
+        source_type="database",
+        config='{"connection_string": "sqlite:///nonexistent.db", "query": "DELETE FROM t"}',
+        owner_id="anonymous",
+    )
+    try:
+        client = TestClient(app)
+        resp = client.post(f"/sources/{sid}/sync")
+        assert resp.status_code == 400
+        assert "只读" in resp.json()["detail"]
+    finally:
+        user_db.delete_data_source(sid, "anonymous")

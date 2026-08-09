@@ -2337,9 +2337,10 @@ def _resolve_source_owner(user_id: str, authorization: str) -> str:
 
     - 优先用 JWT（Authorization: Bearer）解析真实用户 id（含 admin 判定）。
     - 否则退回 ``verify_api_key`` 返回的 user_id 字符串（API key 路径）。
-    - 认证关闭 / 匿名（user_id 为 'anonymous' 或空）时默认视为 ``'admin'``，
-      即系统级拥有者（可见/可操作全部数据源）。此时 config 已脱敏、
-      SQL 已限制只读，风险被收敛为“匿名者可管理全部数据源”。
+    - 认证关闭 / 匿名（user_id 为 'anonymous' 或空）时视为独立的非 admin
+      owner ``'anonymous'``：匿名者只能看到/删除/同步自己（认证关闭期间）
+      创建的、owner 为 ``'anonymous'`` 的数据源；预置的 ``'admin'``/他人数据源
+      对匿名者不可见、不可删、不可同步。
     """
     token = (
         authorization.replace("Bearer ", "")
@@ -2352,7 +2353,7 @@ def _resolve_source_owner(user_id: str, authorization: str) -> str:
             return str(user["id"])
     if user_id and user_id not in ("", "anonymous"):
         return str(user_id)
-    return "admin"
+    return "anonymous"
 
 
 @app.post("/sources", summary="创建数据源", description="创建新的数据源（RSS / 数据库 / API）")
@@ -2493,7 +2494,11 @@ async def sync_source(
     source = await asyncio.to_thread(user_db.get_data_source, source_id, owner)
     if source is None:
         raise HTTPException(status_code=404, detail="数据源不存在")
-    result = await asyncio.to_thread(_sync_source, source_id)
+    try:
+        result = await asyncio.to_thread(_sync_source, source_id)
+    except ValueError as exc:
+        # 只读 SQL 白名单等业务校验失败 → 400，而不是 500
+        raise HTTPException(status_code=400, detail=str(exc))
     return result
 
 

@@ -41,23 +41,57 @@ _SENSITIVE_CONFIG_HINTS = (
     "signature",
 )
 
+_QUERY_SECRET_PARAMS = (
+    "password",
+    "token",
+    "access_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "signature",
+    "key",
+    "credential",
+)
 
-def _mask_connection_string(value: str) -> tuple[str, bool]:
-    """脱敏连接串中的口令。返回 (脱敏后的连接串, 是否有敏感信息被掩掉)。"""
-    if "://" not in value or "@" not in value:
+
+def _mask_url_credentials(value: str) -> tuple[str, bool]:
+    """脱敏任意 URL 中的凭据：userinfo（``user:pass@host``）与敏感 query 参数。
+
+    返回 (脱敏后的 URL, 是否有敏感信息被掩掉)。非 URL 或无可脱敏内容时原样返回。
+    """
+    if not isinstance(value, str) or "://" not in value:
         return value, False
+    redacted = False
     try:
         parts = _urlsplit(value)
-        userinfo, host = parts.netloc.rsplit("@", 1)
-        if ":" in userinfo:
-            user = userinfo.split(":", 1)[0]
-            masked_netloc = f"{user}:***@{host}"
-        else:
-            # 只有用户名没有口令 → 也一并掩掉，避免泄露用户名
-            masked_netloc = f"***@{host}"
+        # 1) userinfo：user:pass@host → user:***@host；仅 user@host → ***@host
+        netloc = parts.netloc
+        if "@" in netloc:
+            userinfo, host = netloc.rsplit("@", 1)
+            if ":" in userinfo:
+                user = userinfo.split(":", 1)[0]
+                netloc = f"{user}:***@{host}"
+            else:
+                netloc = f"***@{host}"
+            redacted = True
+        # 2) query 参数：?password=.. & ?token=.. 等敏感键值替换为 ***
+        query = parts.query
+        if query:
+            pairs = []
+            for pair in query.split("&"):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    if v and any(s in k.lower() for s in _QUERY_SECRET_PARAMS):
+                        pairs.append(f"{k}=***")
+                        redacted = True
+                    else:
+                        pairs.append(pair)
+                else:
+                    pairs.append(pair)
+            query = "&".join(pairs)
         return (
-            _urlunsplit((parts.scheme, masked_netloc, parts.path, parts.query, parts.fragment)),
-            True,
+            _urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment)),
+            redacted,
         )
     except Exception:
         return value, True
@@ -66,8 +100,10 @@ def _mask_connection_string(value: str) -> tuple[str, bool]:
 def mask_data_source_config(config: dict) -> tuple[dict, bool]:
     """递归脱敏数据源 config，返回 (脱敏后的 config, has_secret)。
 
-    ``password``、``connection_string``、``token``、``api_key`` 等敏感字段
-    替换为 ``"***"``；嵌套 dict（如 API 的 headers）同样处理。
+    - 任意含 ``://`` 的 URL 值（``url`` / ``connection_string`` 等键名不限）
+      统一走 ``_mask_url_credentials``，掩掉 userinfo 口令与敏感 query 参数；
+    - ``password``/``token``/``api_key`` 等敏感键值替换为 ``"***"``；
+    - 嵌套 dict（如 API 的 ``headers``）同样处理。
     """
     masked: dict = {}
     has_secret = False
@@ -77,8 +113,8 @@ def mask_data_source_config(config: dict) -> tuple[dict, bool]:
             sub_masked, sub_has = mask_data_source_config(value)
             masked[key] = sub_masked
             has_secret = has_secret or sub_has
-        elif low == "connection_string" and isinstance(value, str):
-            masked_val, redacted = _mask_connection_string(value)
+        elif isinstance(value, str) and "://" in value:
+            masked_val, redacted = _mask_url_credentials(value)
             masked[key] = masked_val
             has_secret = has_secret or redacted
         elif any(hint in low for hint in _SENSITIVE_CONFIG_HINTS) and value not in (None, ""):
