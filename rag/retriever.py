@@ -1,3 +1,4 @@
+import logging
 import re
 import threading
 
@@ -9,6 +10,8 @@ from rag.embedder import embed
 from rag.models import Chunk
 from rag.vector_store import search as dense_search
 from rag.vector_store import search_collection
+
+logger = logging.getLogger(__name__)
 
 # Module-level BM25 cache to avoid rebuilding on every query
 _bm25_cache: dict[str, tuple[list[Chunk], BM25Okapi]] = {}
@@ -120,11 +123,21 @@ class Retriever:
             self.bm25 = None
 
     def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None) -> list[Chunk]:
-        query_vec = embed([query])[0]
-        if self.collection_name:
-            dense_hits = search_collection(self.collection_name, query_vec, top_k=top_k * 2, doc_name=doc_name, tags=tags)
-        else:
-            dense_hits = dense_search(query_vec, top_k=top_k * 2)
+        dense_hits = []
+        try:
+            query_vec = embed([query])[0]
+            if self.collection_name:
+                dense_hits = search_collection(
+                    self.collection_name,
+                    query_vec,
+                    top_k=top_k * 2,
+                    doc_name=doc_name,
+                    tags=tags,
+                )
+            else:
+                dense_hits = dense_search(query_vec, top_k=top_k * 2)
+        except Exception as exc:
+            logger.warning("Embedding/dense 检索失败，降级为纯 BM25: %s", exc)
 
         sparse_hits = []
         if self.bm25 is not None and self.chunks:
