@@ -13,7 +13,10 @@ def detect_and_decode(raw_bytes: bytes) -> str:
     """自动检测编码并解码。尝试 chardet 检测结果，失败则依次尝试常见编码。"""
     detected = chardet.detect(raw_bytes)
     encoding = detected.get("encoding")
-    if encoding:
+    # Low-confidence guesses can decode successfully into the wrong script
+    # (for example GBK bytes as TIS-620), so leave them to the deterministic
+    # UTF-8/Chinese-encoding fallback below.
+    if encoding and (detected.get("confidence") or 0) >= 0.7:
         try:
             return raw_bytes.decode(encoding)
         except (UnicodeDecodeError, LookupError):
