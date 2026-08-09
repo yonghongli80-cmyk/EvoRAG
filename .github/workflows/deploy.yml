@@ -1,15 +1,18 @@
 name: Deploy to Server
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@a8952ebe2a1428de1644645b937cea45ed655b67
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -19,4 +22,13 @@ jobs:
             git pull origin main
             docker compose build rag-app
             docker compose up -d
+            for i in $(seq 1 12); do
+              if curl --fail --silent http://127.0.0.1:8080/health; then
+                echo "Deploy healthy"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "Deploy health check failed; manual rollback required" >&2
+            exit 1
             echo "Deploy completed at $(date)"
