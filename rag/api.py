@@ -1465,16 +1465,24 @@ async def add_document_to_kb(
             return user_db.create_document_permission(filename, kb_id, user_dict["id"], is_public=False)
         perm_id = await asyncio.to_thread(_create_perm)
 
+    persisted_path = DATA_DIR / filename
+    persisted = False
     try:
         manager = KnowledgeBaseManager()
         count = manager.add_document(kb_id, tmp_path, doc_name=filename, doc_permission_id=perm_id)
+        import shutil
+
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.move(tmp_path, persisted_path)
+        persisted = True
     except Exception as e:
         # 回滚权限记录
         if perm_id:
             await asyncio.to_thread(user_db.delete_document_permission, perm_id)
         raise HTTPException(status_code=400, detail=str(e))
     finally:
-        os.unlink(tmp_path)
+        if not persisted and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
     # Insert into kb_documents
     def _insert_doc():
         import sqlite3
@@ -1482,7 +1490,7 @@ async def add_document_to_kb(
         conn = sqlite3.connect(db_path)
         try:
             # Generate TOC and summary for the document
-            file_path = DATA_DIR / filename
+            file_path = persisted_path
             toc_str = ""
             summary_str = ""
             if file_path.is_file():
@@ -1494,7 +1502,7 @@ async def add_document_to_kb(
                     pass
             conn.execute(
                 "INSERT OR REPLACE INTO kb_documents (kb_id, filename, file_path, toc, summary, chunk_count, status) VALUES (?, ?, ?, ?, ?, ?, 'indexed')",
-                (kb_id, filename, str(DATA_DIR / filename), toc_str, summary_str, count)
+                (kb_id, filename, str(persisted_path), toc_str, summary_str, count)
             )
             # Derive human-readable name from kb_id (format: kb_slug_hex)
             readable_name = kb_id.split("_")[1] if "_" in kb_id else kb_id
