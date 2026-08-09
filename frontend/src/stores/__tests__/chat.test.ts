@@ -35,6 +35,39 @@ beforeEach(() => {
 })
 
 describe('chat store', () => {
+  it('resetModeState clears conversation state only when mode changes', () => {
+    const store = useChatStore()
+    store.resetModeState('file')
+    store.currentConvId = 7
+    store.messages = [{ role: 'user', content: 'file question' }]
+    store.selectFile('file.pdf')
+
+    store.resetModeState('file')
+    expect(store.currentConvId).toBe(7)
+    expect(store.messages).toHaveLength(1)
+    expect(store.selectedFile).toBe('file.pdf')
+
+    store.resetModeState('kb')
+    expect(store.currentMode).toBe('kb')
+    expect(store.currentConvId).toBeNull()
+    expect(store.messages).toEqual([])
+    expect(store.selectedFile).toBeNull()
+  })
+
+  it('selectConversation failure keeps the previous conversation and file selection', async () => {
+    const store = useChatStore()
+    store.currentConvId = 1
+    store.messages = [{ role: 'assistant', content: 'existing answer' }]
+    store.selectFile('existing.pdf')
+    vi.mocked(api.get).mockRejectedValue(new Error('network'))
+
+    await store.selectConversation(2)
+
+    expect(store.currentConvId).toBe(1)
+    expect(store.messages).toEqual([{ role: 'assistant', content: 'existing answer' }])
+    expect(store.selectedFile).toBe('existing.pdf')
+  })
+
   // ── loadConversations ──────────────────────────────────
   it('loadConversations fills the list', async () => {
     const convos = [

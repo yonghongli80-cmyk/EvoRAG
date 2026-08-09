@@ -27,18 +27,27 @@ export const useChatStore = defineStore('chat', () => {
   const isStreaming = ref(false)
   const suggestedQuestions = ref<string[]>([])
   const selectedFile = ref<string | null>(null)
+  const activeMode = ref<ChatMode>('file')
   const _selectedFilesByConv = new Map<number, string | null>()
 
   const currentConversation = computed(() =>
     conversations.value.find(c => c.id === currentConvId.value)
   )
 
-  /** Backward-compatible alias used by some tests */
-  const currentMode = computed(() => 'file' as ChatMode)
+  const currentMode = computed(() => activeMode.value)
 
   /** Backward-compatible filter (kept for existing test compatibility) */
   function conversationsByMode(mode: ChatMode) {
     return computed(() => conversations.value.filter(c => c.mode === mode))
+  }
+
+  function resetModeState(mode: ChatMode) {
+    if (activeMode.value === mode) return
+    activeMode.value = mode
+    conversations.value = []
+    currentConvId.value = null
+    messages.value = []
+    selectedFile.value = null
   }
 
   /**
@@ -48,6 +57,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function loadConversations(mode?: ChatMode) {
     const auth = useAuthStore()
+    if (mode) resetModeState(mode)
     try {
       const params: Record<string, string> = {}
       if (mode) params.mode = mode
@@ -75,6 +85,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function createConversation(mode: ChatMode = 'file') {
     const auth = useAuthStore()
+    resetModeState(mode)
     // Save current selection before switching
     if (currentConvId.value !== null) {
       _selectedFilesByConv.set(currentConvId.value, selectedFile.value)
@@ -83,6 +94,7 @@ export const useChatStore = defineStore('chat', () => {
       headers: auth.getAuthHeaders()
     })
     conversations.value.unshift(res.data)
+    _selectedFilesByConv.delete(res.data.id)
     currentConvId.value = res.data.id
     messages.value = []
     selectedFile.value = null
@@ -91,16 +103,18 @@ export const useChatStore = defineStore('chat', () => {
 
   async function selectConversation(id: number) {
     const auth = useAuthStore()
-    // Save current selection for the previous conversation
-    if (currentConvId.value !== null) {
-      _selectedFilesByConv.set(currentConvId.value, selectedFile.value)
-    }
-    // Restore selection for this conversation
-    selectedFile.value = _selectedFilesByConv.has(id) ? _selectedFilesByConv.get(id)! : null
+    const previousId = currentConvId.value
+    const nextSelectedFile = id === previousId
+      ? selectedFile.value
+      : (_selectedFilesByConv.get(id) ?? null)
     try {
       const res = await api.get(`/conversations/${id}/messages`, {
         headers: auth.getAuthHeaders()
       })
+      if (previousId !== null && previousId !== id) {
+        _selectedFilesByConv.set(previousId, selectedFile.value)
+      }
+      selectedFile.value = nextSelectedFile
       currentConvId.value = id
       messages.value = res.data.map((m: any) => ({
         id: m.id,
@@ -309,6 +323,7 @@ export const useChatStore = defineStore('chat', () => {
     selectedFile,
     currentConversation,
     conversationsByMode,
+    resetModeState,
     loadConversations,
     createConversation,
     selectConversation,
