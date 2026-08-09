@@ -17,6 +17,10 @@
 - No visible current evidence means refusal, not a low-confidence generated answer.
 - ACL filtering happens before evidence counts, conflict detection, confidence, and comparison.
 - Historical evidence never raises confidence and always carries a warning.
+- `reliability_min_score` compares only a real reranker `relevance_score`; RRF and rank are never substituted.
+- Enterprise `kb_id` requests without both `user` and `user_db` stop before retrieval or model calls.
+- Empty visible-version sets return no chunks; unfiltered chunks never reach the external reranker.
+- Legacy `RAGAgent` cannot answer until it returns typed evidence tied to the final answer.
 - LlamaIndex receives tool contracts and ACL-filtered results, never file paths, SQLite connections, or Qdrant clients.
 - Spreadsheet calculation is implemented by `2026-07-27-spreadsheet-knowledge.md`, not duplicated here.
 - Every backend task follows red-green-refactor and uses temporary databases/collections.
@@ -30,6 +34,7 @@
 
 - `rag/reliability/__init__.py` — public reliability interfaces.
 - `rag/reliability/models.py` — evidence, decision, confidence, and comparison types.
+- `rag/reliability/bundle.py` — builds bundles only from ACL-filtered versioned chunks.
 - `rag/reliability/answerability.py` — refusal and clarification gate.
 - `rag/reliability/confidence.py` — deterministic confidence evaluator.
 - `rag/reliability/conflicts.py` — candidate normalization, persistence, and resolution.
@@ -37,6 +42,7 @@
 - `rag/reliability/llama_workflow.py` — LlamaIndex Workflow adapter.
 - `rag/reliability/api.py` — reliability and comparison router.
 - `tests/test_answerability.py`
+- `tests/test_reliability_scoring.py`
 - `tests/test_confidence.py`
 - `tests/test_conflicts.py`
 - `tests/test_document_comparison.py`
@@ -48,6 +54,7 @@
 - `config.py`
 - `rag/models.py`
 - `rag/retriever.py`
+- `rag/reranker.py`
 - `rag/pipeline.py`
 - `rag/user_db.py`
 - `rag/api.py`
@@ -157,17 +164,111 @@ git commit -m "feat: add reliability evidence types"
 
 ---
 
+### Task 1.5: Preserve Real Retrieval Score Provenance
+
+**Files:**
+- Modify: `rag/models.py`
+- Modify: `rag/retriever.py`
+- Modify: `rag/reranker.py`
+- Modify: `rag/reliability/models.py`
+- Test: `tests/test_reliability_scoring.py`
+- Modify: `tests/test_reranker.py`
+- Modify: `tests/test_retriever.py`
+
+**Interfaces:**
+- Produces: `Chunk.retrieval_score: float | None` for RRF ordering diagnostics.
+- Produces: `Chunk.rerank_score: float | None` from the reranker API only.
+- Changes: `EvidenceRef.score: float | None` and `score_source: Literal["reranker", "unavailable"]`.
+- Guarantees: `reliability_min_score` is never compared with RRF, rank, or a fabricated fallback score.
+
+- [ ] **Step 1: Write failing score-provenance tests**
+
+```python
+def test_reranker_preserves_real_relevance_score(reranker, chunks):
+    reranker._call_rerank_api = lambda *_args, **_kwargs: [
+        {"index": 1, "relevance_score": 0.82},
+    ]
+    result = reranker.rerank("年假", chunks)
+    assert result[0].rerank_score == 0.82
+
+
+def test_reranker_fallback_does_not_fabricate_score(reranker, chunks):
+    def failing_reranker(*_args, **_kwargs):
+        raise TimeoutError("reranker unavailable")
+
+    reranker._call_rerank_api = failing_reranker
+    result = reranker.rerank("年假", chunks)
+    assert result[0].rerank_score is None
+
+
+def test_evidence_ref_requires_consistent_score_source():
+    with pytest.raises(ValueError, match="score_source"):
+        EvidenceRef(
+            document_id=7,
+            document_version_id=11,
+            score=None,
+            score_source="reranker",
+            is_current=True,
+            validity_status="valid",
+            acl_checked=True,
+        )
+```
+
+- [ ] **Step 2: Run and verify RED**
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests\test_reliability_scoring.py tests\test_reranker.py tests\test_retriever.py -v -p no:cacheprovider
+```
+
+Expected: FAIL because score fields and provenance validation are absent.
+
+- [ ] **Step 3: Implement score propagation without normalization**
+
+Use `dataclasses.replace` so frozen `Chunk` values remain immutable. `_rrf_fuse` sets only `retrieval_score`; a successful reranker response sets only the matching chunk's `rerank_score`. Validate reranker scores are finite and within `[0.0, 1.0]`; invalid values follow the existing fallback path and leave `rerank_score=None`.
+
+```python
+@model_validator(mode="after")
+def require_score_provenance(self):
+    if (self.score is None) != (self.score_source == "unavailable"):
+        raise ValueError("score_source must match score availability")
+    return self
+```
+
+- [ ] **Step 4: Run focused scoring and regression tests**
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest tests\test_reliability_scoring.py tests\test_reranker.py tests\test_retriever.py tests\test_versioned_retrieval.py -v -p no:cacheprovider
+& .\.venv\Scripts\python.exe -m ruff check rag/models.py rag/retriever.py rag/reranker.py rag/reliability/models.py tests/test_reliability_scoring.py tests/test_reranker.py tests/test_retriever.py
+```
+
+Expected: PASS; fallback tests assert no substitute rerank score exists.
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add rag/models.py rag/retriever.py rag/reranker.py rag/reliability/models.py tests/test_reliability_scoring.py tests/test_reranker.py tests/test_retriever.py
+git commit -m "feat: preserve reliability score provenance"
+```
+
+---
+
 ### Task 2: Answerability Gate
 
 **Files:**
 - Create: `rag/reliability/answerability.py`
+- Create: `rag/reliability/bundle.py`
 - Test: `tests/test_answerability.py`
 - Modify: `rag/pipeline.py`
+- Modify: `rag/versioned_retrieval.py`
+- Modify: `tests/test_versioned_retrieval.py`
+- Modify: `tests/test_document_security_boundaries.py`
 
 **Interfaces:**
 - Consumes: `EvidenceBundle`.
+- Consumes: real `Chunk.rerank_score` values from Task 1.5.
 - Produces: `decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision`.
 - Produces decision kinds: `answerable | answerable_with_warning | clarification_required | insufficient_evidence | permission_limited`.
+- Guarantees: enterprise KB calls without both `user` and `user_db` stop before retrieval; legacy agent calls stop before `agent.run()`.
 
 - [ ] **Step 1: Write failing refusal tests**
 
@@ -183,6 +284,27 @@ git commit -m "feat: add reliability evidence types"
 )
 def test_answerability_decisions(bundle, kind):
     assert decide_answerability(bundle).kind == kind
+
+
+def test_unscoped_enterprise_query_stops_before_external_calls(pipeline):
+    result = pipeline.query("年假是多少", kb_id="rag_docs", user=None)
+    assert result.answer == PERMISSION_LIMITED_COPY
+    assert pipeline.retriever.retrieve.call_count == 0
+    assert pipeline.reranker.rerank.call_count == 0
+    assert pipeline.agent.run.call_count == 0
+
+
+def test_legacy_agent_route_returns_fixed_clarification(pipeline, visible_user):
+    pipeline.route_question.return_value = "agent"
+    result = pipeline.query("计算增长率", kb_id="rag_docs", user=visible_user)
+    assert result.answer == LEGACY_AGENT_CLARIFICATION_COPY
+    assert pipeline.agent.run.call_count == 0
+
+
+def test_invisible_chunks_never_reach_reranker(scoped_pipeline, visible_user):
+    scoped_pipeline.retriever.retrieve.return_value = [invisible_chunk()]
+    scoped_pipeline.query("年假是多少", kb_id="rag_docs", user=visible_user)
+    assert scoped_pipeline.reranker.rerank.call_args.args[1] == []
 ```
 
 - [ ] **Step 2: Run and verify RED**
@@ -201,7 +323,10 @@ def decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision:
         return AnswerabilityDecision(kind="permission_limited", reasons=("visible evidence is insufficient",))
     if bundle.conflicts:
         return AnswerabilityDecision(kind="clarification_required", reasons=("unresolved evidence conflict",))
-    qualified = [item for item in bundle.current_evidence if item.score >= settings.reliability_min_score]
+    qualified = [
+        item for item in bundle.current_evidence
+        if item.score is not None and item.score >= settings.reliability_min_score
+    ]
     if qualified:
         return AnswerabilityDecision(kind="answerable", reasons=("current evidence available",))
     if bundle.historical_evidence:
@@ -209,20 +334,26 @@ def decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision:
     return AnswerabilityDecision(kind="insufficient_evidence", reasons=("no qualifying evidence",))
 ```
 
-Integrate the decision before prompt generation. Refusal responses use fixed backend copy and persist the decision; they do not call the generator.
+Integrate the decision before prompt generation. Refusal responses use fixed backend copy and carry the decision plus bundle forward for Task 3 persistence; they do not call the final generator. Task 3 adds the message columns and atomic persistence.
+
+`build_evidence_bundle` runs only after ACL and document-injection filtering. It derives current/history membership from the SQLite-selected retrieval path, never Qdrant `is_current`, and computes metrics only from visible evidence. Enterprise `kb_id` calls missing `user` or `user_db` return `permission_limited` before route classification, rewriting, embedding, reranking, generation, or agent execution. Direct local-file CLI mode without `kb_id` remains an explicit compatibility mode and does not emit enterprise reliability metadata.
+
+Change `retrieve_current_then_history` so an empty set of SQLite-visible current and historical version IDs returns `[]`; it must not call unrestricted `retriever.retrieve`. Preserve the pipeline's later ACL filter as defense in depth, and add an integration assertion that invisible chunks never appear in reranker arguments.
+
+Until a typed agent evidence result exists, `prepared["route"] == "agent"` returns `clarification_required` fixed copy before `agent.run()`. Streaming emits the same decision and fixed copy followed by visible sources and `done`; it never enters `generate_stream` for refusal decisions.
 
 - [ ] **Step 4: Run gate and pipeline tests**
 
 ```powershell
-& .\.venv\Scripts\python.exe -m pytest tests\test_answerability.py tests\test_pipeline.py tests\test_pipeline_stream.py -v
+& .\.venv\Scripts\python.exe -m pytest tests\test_answerability.py tests\test_pipeline.py tests\test_pipeline_stream.py tests\test_regenerate.py tests\test_versioned_retrieval.py tests\test_document_security_boundaries.py -v -p no:cacheprovider
 ```
 
-Expected: PASS; refusal tests assert the generator mock has zero calls.
+Expected: PASS; fixed refusal tests assert zero calls to retrieval for unscoped enterprise requests, and zero calls to the final generator, stream generator, and agent where applicable.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add rag/reliability/answerability.py rag/pipeline.py tests/test_answerability.py tests/test_pipeline.py
+git add rag/reliability/answerability.py rag/reliability/bundle.py rag/pipeline.py rag/versioned_retrieval.py tests/test_answerability.py tests/test_pipeline.py tests/test_pipeline_stream.py tests/test_regenerate.py tests/test_versioned_retrieval.py tests/test_document_security_boundaries.py
 git commit -m "feat: refuse answers without evidence"
 ```
 

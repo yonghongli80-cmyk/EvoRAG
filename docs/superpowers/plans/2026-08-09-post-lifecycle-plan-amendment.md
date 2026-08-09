@@ -38,6 +38,10 @@
 
 - 保留为下一项工作，但 Task 1 的 `EvidenceRef` 必须容纳既有的 `document_id`、`document_version_id`、当前/历史状态与引用信息；历史证据不得视作当前证据。
 - 先做 `llama-index-core>=0.14.23,<0.15` 的隔离兼容性验证和 `pip check`，再把它接入主路径；不以“安装成功”代替兼容结论。
+- 在 Task 2 前增加 Task 1.5：分别传播 RRF `retrieval_score` 与真实 `rerank_score`；可靠性阈值只读取后者。reranker 降级时分数为 `None`，不得用排名、常量或归一化 RRF 冒充。
+- 企业知识库请求缺少 `user` 或 `user_db` 时在检索前返回 `permission_limited`。仅直接本地文件 CLI 保留为可信兼容模式，FastAPI 不得启用该旁路。
+- SQLite ACL 没有选出可见版本 ID 时，版本化检索必须返回空集，不能退回无版本限制检索；外部 reranker 只能看到已按可见版本缩小的 chunk。
+- legacy `RAGAgent` 在能返回类型化、逐项可引用证据前默认进入 `clarification_required`，不得绕过可靠性判断或产生无引用答案。
 - Task 7 迁移前必须读取当前 `knowledge_tasks` 的实际 DDL 和索引/触发器。不得假定旧的两值 `CHECK` 仍存在。
 - 不恢复任何最终答案缓存；回答、流式回答、再生成和 API 引用都必须走同一可靠性决策边界。
 
@@ -73,4 +77,3 @@
 2. 运行 `git status --short` 与 `git log -1 --oneline`，确认仍在预期基线；保留所有用户未跟踪文件。
 3. 对当前计划先做一次只读的“现有接口与迁移”核对；发现计划与代码冲突时更新本修订说明或提出阻塞，而不是静默按旧假设实现。
 4. 按任务逐个 TDD，并在计划的验证检查点运行相应的后端、前端和静态检查。全量测试受运行时限影响时，记录未覆盖范围，不能宣称全量通过。
-

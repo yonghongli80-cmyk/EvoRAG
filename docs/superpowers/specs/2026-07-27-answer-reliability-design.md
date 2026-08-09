@@ -64,6 +64,19 @@ EvidenceBundle
 
 外部 API 不返回物理路径、原始 SQL、向量 ID 或无权限候选数量。
 
+### 3.1 检索分数与版本状态来源
+
+回答可靠性不得用排名、固定常量或归一化后的 RRF 值伪装成 reranker 相关度。现有检索链改为保留两个不同语义的分数：
+
+- `retrieval_score`：RRF 融合分数，只用于排序和诊断，不与回答阈值比较。
+- `rerank_score`：reranker 返回的原始 `relevance_score`，是 `reliability_min_score` 的唯一比较对象。
+
+reranker 熔断、超时或返回无效分数时，`rerank_score` 为 `None`。系统保留证据和 RRF 顺序用于可解释降级，但不得生成一个替代分数。`EvidenceRef.score` 因此允许为 `None`，并携带 `score_source = reranker | unavailable`；有分数时来源必须是 `reranker`，无分数时来源必须是 `unavailable`。
+
+当前/历史状态不得信任 Qdrant 的 `is_current`。证据构建只接受 SQLite `document_permissions.current_version_id` 选出的当前版本，以及由同一 SQLite 版本查询得到的历史回退；Qdrant 标志只参与修复与诊断。
+
+若 SQLite ACL 查询没有得到任何可见当前或历史版本 ID，版本化检索必须直接返回空集，不能退回无版本限制检索。外部 reranker 只能接收已经按可见版本 ID 缩小过的 chunk；pipeline 中后置 ACL 过滤保留为纵深防御，但不能作为阻止不可见文本进入 reranker 的第一道边界。
+
 ## 4. 无答案决策
 
 回答生成前执行 `AnswerabilityGate`。以下任一条件成立时不得生成普通肯定答案：
@@ -85,6 +98,16 @@ EvidenceBundle
 - `permission_limited`：仅说明当前可访问资料不足，不透露是否存在无权限文件。
 
 拒答仍保存问题、已使用证据和原因；高频无答案按归一化问题聚合后进入知识运营，不为每次失败单独建任务。
+
+### 4.1 所有回答路径的统一边界
+
+企业知识库请求按固定顺序执行：输入防护 → 用户/知识库范围确认 → 当前及历史检索 → ACL 过滤 → rerank → 文档注入过滤 → `EvidenceBundle` → `AnswerabilityGate` → 生成或固定拒答。证据计数、最高分、冲突和置信度只能读取 ACL 过滤后的证据。
+
+同步回答、流式回答、再生成及 API 引用复用同一个已决策结果。拒答和澄清使用后端固定文案，不调用最终答案生成器，也不调用 `agent.run()`；流式接口只发送固定 token、空或可见引用及完成事件。
+
+现有 `RAGAgent` 尚不能返回与最终答案逐项绑定的类型化证据，因此在该契约完成前，企业知识库中的 legacy agent 路径默认返回 `clarification_required`，不能绕过可靠性边界。表格等确定性工具以后通过 `structured_results` 进入同一边界，而不是恢复无引用 agent 答案。
+
+企业知识库路径缺少 `user` 或 `user_db` 时返回 `permission_limited`，且不得先检索或调用模型。直接传入单个本地文件、未指定 `kb_id` 且未连接企业 `UserDB` 的 CLI 模式视为显式可信本地兼容模式；它不产生企业可靠性字段，也不得由 FastAPI 企业端点启用。
 
 ## 5. 置信度
 
@@ -261,6 +284,10 @@ Excel/CSV 同时进入：
 ## 10. 失败与降级
 
 - LlamaIndex Workflow 超时：返回已完成的逐文档证据，不生成完整比较。
+- reranker 超时、熔断或返回非法分数：保留 RRF 排序供诊断，`rerank_score=None`，当前证据不能通过分数阈值。
+- 企业知识库请求缺少用户或权限数据库：固定返回 `permission_limited`，不执行检索、最终生成或 agent。
+- ACL 后没有任何可见版本：检索返回空集，不把未过滤 chunk 发送给外部 reranker。
+- legacy agent 无类型化证据契约：固定返回 `clarification_required`，不调用 `agent.run()`。
 - 一份文档解析失败：标记对应对象失败，其他结果可继续展示。
 - 结构化类型推断失败：要求负责人确认表头和类型，不退化为猜测数值。
 - 查询超限：提示缩小时间、部门或字段范围。
@@ -287,6 +314,8 @@ Excel/CSV 同时进入：
 ## 12. 完成标准
 
 - 无证据问题不再生成貌似确定的回答。
+- 可靠性阈值只读取真实 reranker 分数；reranker 降级时不存在伪分数。
+- 同步、流式、再生成与 legacy agent 入口都不能绕过同一决策边界。
 - 置信度理由可由测试稳定复现。
 - 跨文档比较任何结论都能追溯到具体版本和章节。
 - Excel/CSV 数值由确定性工具计算而非语言模型心算。
