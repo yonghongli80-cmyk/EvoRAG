@@ -9,9 +9,16 @@ import random
 import threading
 import time
 
+import openai
 
-def retry(max_attempts: int = 3, backoff_base: float = 1.0, retryable_exceptions: tuple = (Exception,)):
-    """重试装饰器，指数退避 + 随机抖动。"""
+
+def retry(
+    max_attempts: int = 3,
+    backoff_base: float = 1.0,
+    retryable_exceptions: tuple = (TimeoutError, ConnectionError, OSError, openai.APIStatusError),
+    max_delay: float = 10.0,
+):
+    """重试装饰器，使用有上限的指数退避。"""
 
     def decorator(func):
         @functools.wraps(func)
@@ -23,7 +30,7 @@ def retry(max_attempts: int = 3, backoff_base: float = 1.0, retryable_exceptions
                 except retryable_exceptions as e:
                     last_exc = e
                     if attempt < max_attempts - 1:
-                        delay = backoff_base * (2**attempt) + random.uniform(0, 0.5)
+                        delay = min(backoff_base * (2**attempt), max_delay)
                         time.sleep(delay)
             raise last_exc
 
