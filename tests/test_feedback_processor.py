@@ -72,7 +72,21 @@ def test_feedback_processor_dedup_user():
         fp.record_feedback("abc123", "negative", user_id=1)
         fp.record_feedback("abc123", "negative", user_id=1)
         weight = fp.get_weight("abc123")
-        assert weight > 0.2
+        assert weight == 0.9
+        fp.close()
+    finally:
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+def test_feedback_processor_counts_distinct_user_feedback():
+    from rag.feedback_processor import FeedbackProcessor
+    db_path = tempfile.mktemp(suffix=".db")
+    try:
+        fp = FeedbackProcessor(db_path)
+        fp.record_feedback("abc123", "negative", user_id=1)
+        fp.record_feedback("abc123", "negative", user_id=2)
+        assert fp.get_weight("abc123") == 0.8
         fp.close()
     finally:
         if os.path.exists(db_path):

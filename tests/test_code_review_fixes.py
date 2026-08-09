@@ -27,7 +27,7 @@ def test_data_upload_not_accessible_without_auth(client):
     """C26: 直接访问 /data/upload/ 下的文件应返回 404（不挂载）或 401/403。"""
     response = client.get("/data/upload/nonexistent.txt")
     # 不应返回 200（直接下载）
-    assert response.status_code != 200, "C26: /data/upload 不应绕过鉴权直接返回文件"
+    assert response.status_code == 404
 
 
 # ── C8: delete_file 未登录可删除文件 ──────────────────────────────
@@ -42,7 +42,7 @@ def test_delete_file_rejects_no_auth(client):
 def test_delete_file_rejects_invalid_token(client):
     """C8: 无效 token 删除文件应返回 401。"""
     response = client.delete("/files/test.txt", headers={"Authorization": "Bearer invalid_token"})
-    assert response.status_code in (401, 403), f"C8: 无效 token 应返回 401/403，实际 {response.status_code}"
+    assert response.status_code == 401, f"C8: 无效 token 应返回 401，实际 {response.status_code}"
 
 
 # ── I19: delete_file 不清理权限记录 ────────────────────────────────

@@ -80,11 +80,14 @@ def test_vector_store_uses_lock_for_writes():
     from rag.vector_store import add
     from rag.models import Chunk
 
-    with patch("rag.vector_store._get_client") as mock_get_client:
+    with patch("rag.vector_store._get_client") as mock_get_client, \
+         patch("rag.vector_store._write_lock") as mock_write_lock, \
+         patch("rag.vector_store._invalidate_bm25"):
         mock_client = MagicMock()
         mock_client.collection_exists.return_value = True
         mock_get_client.return_value = mock_client
 
         chunks = [Chunk(text="test", doc_name="t.txt", chunk_index=0)]
         add(chunks, [[0.1] * 1024])
+        mock_write_lock.write.assert_called_once_with()
         mock_client.upsert.assert_called_once()
