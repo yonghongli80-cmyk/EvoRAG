@@ -70,7 +70,7 @@ def scan_folder(folder_path: str) -> list[str]:
 def index_folder(folder_path: str) -> dict:
     """全量索引文件夹内所有文件到默认向量库集合。
 
-    流程：清空集合 → 逐文件 load+chunk → 批量 embed+add。
+    流程：逐文件 load+chunk+embed → 至少一个文件成功后再清空并写入。
     """
     import rag.chunker as _chunker
     import rag.embedder as _embedder
@@ -80,23 +80,28 @@ def index_folder(folder_path: str) -> dict:
     start = time.time()
     files = scan_folder(folder_path)
 
-    # 清空默认集合
-    _vs.clear()
-
     if not files:
+        _vs.clear()
         return {"files": 0, "chunks": 0, "seconds": round(time.time() - start, 2)}
 
-    # 逐文件 load + chunk，收集所有 chunks
+    # 先准备完整的新索引；单个文件失败时跳过，旧集合此时完全不动。
     from rag.models import Chunk
 
     all_chunks: list[Chunk] = []
+    all_embeddings: list[list[float]] = []
     loaded = 0
     for fpath in files:
         try:
             text = _loader.load(fpath)
             doc_name = os.path.basename(fpath)
             file_chunks = _chunker.chunk(text, doc_name=doc_name)
+            if not file_chunks:
+                continue
+            file_embeddings = _embedder.embed([c.text for c in file_chunks])
+            if len(file_embeddings) != len(file_chunks):
+                raise ValueError("embedding 数量与 chunk 数量不一致")
             all_chunks.extend(file_chunks)
+            all_embeddings.extend(file_embeddings)
             loaded += 1
         except Exception as e:
             logger.warning("跳过 %s: %s", os.path.basename(fpath), e)
@@ -104,10 +109,9 @@ def index_folder(folder_path: str) -> dict:
     if not all_chunks:
         return {"files": loaded, "chunks": 0, "seconds": round(time.time() - start, 2)}
 
-    # 批量 embed + add
-    texts = [c.text for c in all_chunks]
-    embeddings = _embedder.embed(texts)
-    _vs.add(all_chunks, embeddings)
+    # 新索引已全部准备好后才替换旧集合，避免 embedding 失败先清空数据。
+    _vs.clear()
+    _vs.add(all_chunks, all_embeddings)
 
     elapsed = round(time.time() - start, 2)
     return {"files": loaded, "chunks": len(all_chunks), "seconds": elapsed}
