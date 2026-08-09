@@ -1,0 +1,70 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mount, flushPromises } from '@vue/test-utils'
+import { createTestingPinia } from '@pinia/testing'
+import { createMemoryHistory, createRouter } from 'vue-router'
+
+vi.mock('../../utils/api', () => ({
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
+}))
+
+vi.mock('../../composables/useAnalysis', () => ({
+  useAnalysis: () => ({
+    addToAnalysis: vi.fn(),
+    dialogVisible: { value: false },
+    dialogQuestion: { value: '' },
+    dialogAnswer: { value: '' },
+    handleConfirm: vi.fn(),
+  })
+}))
+
+vi.mock('element-plus', () => ({
+  ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+  ElMessageBox: { confirm: vi.fn() },
+}))
+
+import api from '../../utils/api'
+import KnowledgeDetailView from '../KnowledgeDetailView.vue'
+
+describe('KnowledgeDetailView', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve({
+      data: { name: `KB ${url.split('/').pop()}`, documents: [] }
+    }) as any)
+  })
+
+  it('reloads detail when the reused route component receives a new id', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/kb/:id', component: KnowledgeDetailView }]
+    })
+    await router.push('/kb/first')
+    await router.isReady()
+
+    mount(KnowledgeDetailView, {
+      global: {
+        plugins: [router, createTestingPinia({ createSpy: vi.fn })],
+        stubs: {
+          MessageBubble: true,
+          ChatInput: true,
+          AddToAnalysisDialog: true,
+          'el-button': true,
+          'el-icon': true,
+          'el-dropdown': true,
+          'el-dropdown-menu': true,
+          'el-dropdown-item': true,
+          'el-tag': true,
+          'el-dialog': true,
+          'el-input': true,
+        }
+      }
+    })
+    await flushPromises()
+    expect(api.get).toHaveBeenCalledWith('/knowledge-bases/first')
+
+    await router.push('/kb/second')
+    await flushPromises()
+
+    expect(api.get).toHaveBeenCalledWith('/knowledge-bases/second')
+  })
+})

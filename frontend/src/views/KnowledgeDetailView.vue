@@ -25,7 +25,7 @@ const router = useRouter()
 const chatStore = useChatStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 
-const kbId = route.params.id as string
+const getKbId = () => route.params.id as string
 const loading = ref(true)
 const messagesContainer = ref<HTMLElement>()
 
@@ -71,6 +71,10 @@ watch(() => chatStore.messages[chatStore.messages.length - 1]?.content, () => {
   nextTick(() => { messagesContainer.value?.scrollTo({ top: messagesContainer.value.scrollHeight, behavior: 'smooth' }) })
 })
 
+watch(() => route.params.id, () => {
+  loadDetail()
+})
+
 onMounted(async () => {
   await chatStore.loadConversations('kb')
   // Auto-select the most recent conversation if exists
@@ -83,7 +87,7 @@ onMounted(async () => {
 async function loadDetail() {
   loading.value = true
   try {
-    const res = await api.get(`/knowledge-bases/${kbId}`)
+    const res = await api.get(`/knowledge-bases/${getKbId()}`)
     const data = res.data
     kbName.value = data.name || ''
     kbDescription.value = data.description || ''
@@ -149,7 +153,7 @@ async function renameKB() {
   if (!name) return ElMessage.warning('请输入名称')
   renaming.value = true
   try {
-    await api.put(`/knowledge-bases/${kbId}/name`, { name })
+    await api.put(`/knowledge-bases/${getKbId()}/name`, { name })
     kbName.value = name
     showRenameDialog.value = false
     ElMessage.success('已重命名')
@@ -164,7 +168,7 @@ async function generateTOC() {
   showSettingsMenu.value = false
   generatingToc.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${kbId}/toc/generate`, {})
+    const res = await api.post(`/knowledge-bases/${getKbId()}/toc/generate`, {})
     // Update local document state with generated TOC
     const tocData = res.data.toc || {}
     for (const doc of documents.value) {
@@ -184,7 +188,7 @@ async function generateOverview() {
   showSettingsMenu.value = false
   generatingOverview.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${kbId}/overview/generate`, {})
+    const res = await api.post(`/knowledge-bases/${getKbId()}/overview/generate`, {})
     kbOverview.value = res.data.overview || ''
     ElMessage.success('概述生成完成')
   } catch (err: any) {
@@ -202,7 +206,7 @@ async function deleteKB() {
       '删除知识库',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'error' }
     )
-    await api.delete(`/knowledge-bases/${kbId}`)
+    await api.delete(`/knowledge-bases/${getKbId()}`)
     ElMessage.success('知识库已删除')
     router.push('/kb')
   } catch (err: any) {
@@ -226,7 +230,7 @@ function cancelEditOverview() {
 async function saveOverview() {
   savingOverview.value = true
   try {
-    await api.put(`/knowledge-bases/${kbId}/overview`, { overview: overviewDraft.value })
+    await api.put(`/knowledge-bases/${getKbId()}/overview`, { overview: overviewDraft.value })
     kbOverview.value = overviewDraft.value
     editingOverview.value = false
     ElMessage.success('概述已更新')
@@ -246,7 +250,7 @@ async function removeFromKB(doc: any) {
       { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
     )
     removingDoc.value = doc.filename
-    await api.delete(`/knowledge-bases/${kbId}/documents/${encodeURIComponent(doc.filename)}`)
+    await api.delete(`/knowledge-bases/${getKbId()}/documents/${encodeURIComponent(doc.filename)}`)
     ElMessage.success('已从知识库移除')
     await loadDetail()
   } catch (err: any) {
@@ -292,7 +296,7 @@ async function addFileToKB() {
     const blob = res.data
     formData.append('file', blob, selectedFile.value.name)
 
-    await api.post(`/knowledge-bases/${kbId}/documents`, formData)
+    await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
     ElMessage.success('文件已添加到知识库')
     showAddDialog.value = false
     await loadDetail()
