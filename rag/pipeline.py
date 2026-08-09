@@ -120,6 +120,20 @@ class RAGPipeline:
         if user is not None and self._user_db is not None:
             from rag.permissions import filter_chunks_by_permission
             context = filter_chunks_by_permission(self._user_db, kb_id or self._kb_id, context, user)
+
+        safe_context = []
+        for candidate in context:
+            document_guard = check_injection(candidate.text)
+            if document_guard.blocked:
+                logger.warning(
+                    "检索文档注入命中并排除: doc=%s chunk=%s reason=%s",
+                    candidate.doc_name,
+                    candidate.chunk_index,
+                    document_guard.reason,
+                )
+                continue
+            safe_context.append(candidate)
+        context = safe_context
         context = context[:top_k]
 
         # Compute feedback weights for reranked chunks
