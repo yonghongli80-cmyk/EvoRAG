@@ -131,12 +131,19 @@ class DialogueMemory:
                 (session_id,),
             ).fetchone()
             already_summarized = last[0] if last else 0
-            new_to_summarize = total - already_summarized
-            if new_to_summarize <= 0:
+            # Keep the most recent MAX_ROUNDS user turns.  A round may contain
+            # multiple assistant/tool messages, so derive the message boundary
+            # from the first retained user-message ID rather than multiplying by 2.
+            first_retained = self._conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' "
+                "ORDER BY id ASC LIMIT 1 OFFSET ?",
+                (session_id, total - MAX_ROUNDS),
+            ).fetchone()
+            if first_retained is None:
                 return
             rows = self._conn.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT ?",
-                (session_id, (already_summarized + new_to_summarize - MAX_ROUNDS) * 2),
+                "SELECT role, content FROM messages WHERE session_id = ? AND id < ? ORDER BY id ASC",
+                (session_id, first_retained[0]),
             ).fetchall()
         if not rows:
             return
