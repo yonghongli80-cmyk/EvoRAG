@@ -23,9 +23,9 @@ services:
     environment:
       - RAG_REDIS_URL=redis://redis:6379/0
     volumes:
-      # 数据持久化（SQLite 数据库 + 上传文件 + Qdrant 向量 + 索引状态）
-      - ./data:/app/data
-      - ./qdrant_data:/app/qdrant_data
+      # 命名卷首次挂载时继承镜像内 rag 用户的目录属主，非 root 进程可写
+      - rag_data:/app/data
+      - qdrant_data:/app/qdrant_data
     depends_on:
       redis:
         condition: service_healthy
@@ -38,3 +38,5 @@ services:
 
 volumes:
   redis_data:
+  rag_data:
+  qdrant_data:

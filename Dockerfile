@@ -49,8 +49,12 @@ RUN mkdir -p /app/repo_upload && \
       done < /app/data/upload/.repo_files; \
     fi
 
-# 数据目录（运行时挂载卷）
-RUN mkdir -p /app/data/upload /app/qdrant_data
+# 数据目录（运行时挂载卷）与非特权运行用户
+RUN useradd -m -u 10001 rag && \
+    mkdir -p /app/data/upload /app/qdrant_data && \
+    chown -R rag:rag /app
+
+USER rag
 
 # 暴露端口
 EXPOSE 8000
