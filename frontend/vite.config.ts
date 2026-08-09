@@ -17,7 +17,8 @@ export default defineConfig({
   },
   build: {
     outDir: '../static',
-    emptyOutDir: true
+    // static also contains hand-maintained assets served by FastAPI.
+    emptyOutDir: false
   },
   test: {
     globals: true,
