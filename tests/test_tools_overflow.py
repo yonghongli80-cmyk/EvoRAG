@@ -44,6 +44,18 @@ class TestCalculateOverflow:
         result = _quick_calculate("2**1000")
         assert any(m in result for m in OVERFLOW_MARKERS)
 
+    def test_huge_literal_base_pow_precheck_rejected(self):
+        # 4300 位底数字面量 ** 1000：指数恰为 1000 放行，但求值前位数预估
+        # （bit_length * 指数）应直接拒绝，不构造 ~430 万位整数，耗时 < 1s
+        result = _quick_calculate("9" * 4300 + "**1000", timeout=1.0)
+        assert isinstance(result, str)
+        assert any(m in result for m in OVERFLOW_MARKERS)
+
+    def test_hundred_digit_base_pow_rejected(self):
+        # 100 位底数 ** 1000：位数预估未超限但结果位数超限，求值后被拒（快速）
+        result = _quick_calculate("9" * 100 + "**1000", timeout=1.0)
+        assert any(m in result for m in OVERFLOW_MARKERS)
+
     def test_normal_computation_still_works(self):
         result = calculate("(1200-1068)/1068*100")
         assert "12.36" in result

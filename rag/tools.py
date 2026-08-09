@@ -30,11 +30,22 @@ def _eval_node(node):
     if isinstance(node, ast.BinOp) and type(node.op) in SAFE_OPS:
         left = _eval_node(node.left)
         right = _eval_node(node.right)
-        # DoS 防护：指数绝对值超过 1000 直接拒绝，避免 ast.Pow 算出天文数字
+        # DoS 防护 1：指数绝对值超过 1000 直接拒绝，避免 ast.Pow 算出天文数字
         if type(node.op) is ast.Pow and isinstance(right, (int, float)) and abs(right) > 1000:
             raise _CalculationOverflow("指数过大")
+        # DoS 防护 2：求值前 O(1) 位数预估（底数位数 × 指数），堵住"大底数字面量 ** 1000"放大
+        # （bit_length 是巨整数的内部字段读取，O(1)；int(left) 对字面量即为 int/float）
+        if type(node.op) is ast.Pow:
+            size_est = None
+            try:
+                size_est = int(left).bit_length() * abs(right)
+            except (TypeError, OverflowError, ValueError):
+                # 非 int/float 底数（如 complex/inf/nan）不适用预估，交给求值与下方结果检查
+                size_est = None
+            if size_est is not None and size_est > 2_000_000:
+                raise _CalculationOverflow("结果超出安全范围")
         result = SAFE_OPS[type(node.op)](left, right)
-        # DoS 防护：对任何二元运算结果做数值上限检查（整数/浮点/无穷大均覆盖）
+        # DoS 防护 3：对任何二元运算结果做数值上限检查（整数/浮点/无穷大均覆盖）
         if isinstance(result, (int, float)) and abs(result) > 10**6:
             raise _CalculationOverflow("结果超出安全范围")
         return result
