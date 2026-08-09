@@ -163,7 +163,12 @@ def test_pipeline_agent_route_passes_user_kb_to_run(mock_route):
          patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率", user=user, kb_id="kb1")
     assert result.answer == "agent answer"
-    mock_run.assert_called_once_with("算一下增长率", user=user, kb_id="kb1")
+    mock_run.assert_called_once()
+    args, kwargs = mock_run.call_args
+    assert args == ("算一下增长率",)
+    assert kwargs["user"] == user
+    assert kwargs["kb_id"] == "kb1"
+    assert kwargs["tool_calls"] == []
 
 
 @patch("rag.agent.route_question", return_value="agent")
@@ -174,7 +179,10 @@ def test_pipeline_agent_route_without_user_backward_compat(mock_route):
          patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率")
     assert result.answer == "agent answer"
-    mock_run.assert_called_once_with("算一下增长率")
+    mock_run.assert_called_once()
+    args, kwargs = mock_run.call_args
+    assert args == ("算一下增长率",)
+    assert kwargs == {"tool_calls": []}
 
 
 # ---------------------------------------------------------------------------

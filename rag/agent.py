@@ -3,6 +3,7 @@
 import json as _json
 import re as _re
 import threading as _threading
+import time as _time
 
 from rag.generator import generate
 from rag.prompt_manager import PromptManager
@@ -141,7 +142,7 @@ class RAGAgent:
         # per-invocation 权限上下文：run 时写入线程局部，避免写进共享实例
         self._run_ctx = _threading.local()
         self.tools = [
-            _wrap_tool_with_reflection(t)
+            _wrap_tool_with_reflection(t, recorder=self._record_tool_call)
             for t in create_agent_tools(retriever, db_path, output_dir, permission_filter=self._make_permission_filter())
         ]
 
@@ -184,7 +185,26 @@ class RAGAgent:
 
         return filter_fn
 
-    def run(self, question: str, user: dict = None, kb_id: str = None) -> str:
+    def _record_tool_call(self, tool_name: str, inp, output, duration_ms: float) -> None:
+        """Record a tool call into the current invocation's private list."""
+        captured_calls = getattr(self._run_ctx, "tool_calls", None)
+        if captured_calls is not None:
+            captured_calls.append(
+                {
+                    "tool_name": tool_name,
+                    "input": str(inp),
+                    "output": str(output)[:500],
+                    "duration_ms": duration_ms,
+                }
+            )
+
+    def run(
+        self,
+        question: str,
+        user: dict = None,
+        kb_id: str = None,
+        tool_calls: list | None = None,
+    ) -> str:
         """Run the agent on a question with answer quality reflection.
 
         权限上下文按 invocation 捕获在线程局部（``self._run_ctx``），不写入共享实例，
@@ -197,11 +217,13 @@ class RAGAgent:
         effective_kb_id = kb_id if kb_id is not None else self.kb_id
         self._run_ctx.user = effective_user
         self._run_ctx.kb_id = effective_kb_id
+        self._run_ctx.tool_calls = tool_calls
         try:
             answer, chart_paths = self._run_reflection(question)
         finally:
             self._run_ctx.user = None
             self._run_ctx.kb_id = None
+            self._run_ctx.tool_calls = None
 
         # 如果生成了图表但回答中没有路径，自动注入
         if chart_paths:
@@ -258,27 +280,34 @@ def _is_empty_or_error(result: str) -> bool:
     return any(ind in result for ind in error_indicators)
 
 
-def _wrap_tool_with_reflection(tool) -> "Tool":
+def _wrap_tool_with_reflection(tool, recorder=None) -> "Tool":
     """包装工具，失败时自动重试一次。"""
     original_func = tool.func
     tool_name = tool.name
 
     def reflective_func(inp: str) -> str:
+        started = _time.perf_counter()
+
+        def finish(output):
+            if recorder is not None:
+                recorder(tool_name, inp, output, (_time.perf_counter() - started) * 1000)
+            return output
+
         try:
             result = original_func(inp)
         except Exception as e:
             try:
-                return original_func(inp)
+                return finish(original_func(inp))
             except Exception:
-                return f"工具 {tool_name} 执行失败: {e}"
+                return finish(f"工具 {tool_name} 执行失败: {e}")
         if _is_empty_or_error(result):
             try:
                 retry_result = original_func(inp)
                 if not _is_empty_or_error(retry_result):
-                    return retry_result
+                    return finish(retry_result)
             except Exception:
                 pass
-        return result
+        return finish(result)
 
     tool.func = reflective_func
     return tool

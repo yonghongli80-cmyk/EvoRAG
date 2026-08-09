@@ -136,7 +136,10 @@ def test_pipeline_uses_agent_for_complex_question(
         result = pipeline.query("计算增长率")
         assert result.answer == "agent answer"
         assert result.sources == []
-        mock_agent_run.assert_called_once_with("计算增长率")
+        mock_agent_run.assert_called_once()
+        args, kwargs = mock_agent_run.call_args
+        assert args == ("计算增长率",)
+        assert kwargs == {"tool_calls": []}
         mock_route.assert_called_once()
 
 

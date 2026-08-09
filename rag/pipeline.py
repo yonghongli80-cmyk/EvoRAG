@@ -1,7 +1,6 @@
 import asyncio
 import json as _json
 import logging
-import threading
 import time
 from typing import NamedTuple
 
@@ -77,8 +76,6 @@ class RAGPipeline:
         self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._cache = RedisCache()
-        self._agent_lock = threading.Lock()
-        self._async_agent_lock = asyncio.Lock()
 
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
@@ -180,12 +177,11 @@ class RAGPipeline:
 
         if prepared["route"] == "agent":
             captured_calls = []
-            with self._agent_lock:
-                self._wrap_agent_tools(captured_calls)
-                try:
-                    answer = self.agent.run(prepared["question"], **_agent_run_kwargs(prepared))
-                finally:
-                    self._unwrap_agent_tools()
+            answer = self.agent.run(
+                prepared["question"],
+                tool_calls=captured_calls,
+                **_agent_run_kwargs(prepared),
+            )
             context = []
             sources = []
             tool_calls = [ToolCall(**c) for c in captured_calls]
@@ -245,12 +241,12 @@ class RAGPipeline:
 
         if prepared["route"] == "agent":
             captured_calls = []
-            async with self._async_agent_lock:
-                self._wrap_agent_tools(captured_calls)
-                try:
-                    answer = await asyncio.to_thread(self.agent.run, prepared["question"], **_agent_run_kwargs(prepared))
-                finally:
-                    self._unwrap_agent_tools()
+            answer = await asyncio.to_thread(
+                self.agent.run,
+                prepared["question"],
+                tool_calls=captured_calls,
+                **_agent_run_kwargs(prepared),
+            )
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
             context = []
             sources = []
@@ -312,41 +308,6 @@ class RAGPipeline:
         )
 
         yield 'data: {"type": "done"}\n\n'
-
-    def _wrap_agent_tools(self, captured_calls: list):
-        """Wrap each agent tool's func to capture input/output/timing."""
-        self._original_funcs = {}
-        for tool in self.agent.tools:
-            original_func = tool.func
-            self._original_funcs[tool.name] = original_func
-            tool_name = tool.name
-
-            def make_wrapper(name, func):
-                def wrapper(inp):
-                    t0 = time.time()
-                    output = func(inp)
-                    duration_ms = (time.time() - t0) * 1000
-                    captured_calls.append(
-                        {
-                            "tool_name": name,
-                            "input": str(inp),
-                            "output": str(output)[:500],
-                            "duration_ms": duration_ms,
-                        }
-                    )
-                    return output
-
-                return wrapper
-
-            tool.func = make_wrapper(tool_name, original_func)
-
-    def _unwrap_agent_tools(self):
-        """Restore original tool functions."""
-        for tool in self.agent.tools:
-            if tool.name in self._original_funcs:
-                tool.func = self._original_funcs[tool.name]
-        self._original_funcs = {}
-
 
 def main():
     import argparse
