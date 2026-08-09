@@ -1,7 +1,8 @@
 """Tests for reranker module."""
-from unittest.mock import patch, MagicMock
-from rag.reranker import Reranker
+from unittest.mock import MagicMock, patch
+
 from rag.models import Chunk
+from rag.reranker import Reranker
 
 
 def test_rerank_returns_top_k():

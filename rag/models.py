@@ -16,3 +16,5 @@ class Chunk:
     section_title: str | None = None
     updated_at: float | None = None
     historical_weight: float = 1.0
+    retrieval_score: float | None = field(default=None, compare=False)
+    rerank_score: float | None = field(default=None, compare=False)

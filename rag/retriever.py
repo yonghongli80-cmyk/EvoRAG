@@ -1,6 +1,7 @@
 import logging
 import re
 import threading
+from dataclasses import replace
 
 from rank_bm25 import BM25Okapi
 
@@ -256,6 +257,10 @@ class Retriever:
                 base *= weights(h) if callable(weights) else weights.get(h, 1.0)
             add_score(doc, base)
         return [
-            representatives[key]
+            replace(
+                representatives[key],
+                retrieval_score=scores[key],
+                rerank_score=None,
+            )
             for key in sorted(scores, key=lambda key: -scores[key])[:top_k]
         ]

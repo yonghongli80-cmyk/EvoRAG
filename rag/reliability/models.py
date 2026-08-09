@@ -16,6 +16,7 @@ AnswerabilityKind = Literal[
     "permission_limited",
 ]
 ConfidenceLevel = Literal["high", "medium", "low", "unavailable"]
+ScoreSource = Literal["reranker", "unavailable"]
 
 
 class EvidenceRef(BaseModel):
@@ -30,13 +31,20 @@ class EvidenceRef(BaseModel):
     kb_id: str = ""
     section_title: str = ""
     chunk_index: int | None = None
-    score: float
+    score: float | None = Field(ge=0.0, le=1.0)
+    score_source: ScoreSource = "reranker"
     rank: int | None = None
     is_current: bool
     validity_status: ValidityStatus
     acl_checked: bool
     authority_level: AuthorityLevel = "unknown"
     updated_at: float | None = None
+
+    @model_validator(mode="after")
+    def require_score_provenance(self) -> EvidenceRef:
+        if (self.score is None) != (self.score_source == "unavailable"):
+            raise ValueError("score_source must match score availability")
+        return self
 
 
 class RetrievalMetrics(BaseModel):

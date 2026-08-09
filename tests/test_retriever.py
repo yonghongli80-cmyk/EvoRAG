@@ -1,7 +1,8 @@
-from unittest.mock import patch, MagicMock
 import hashlib
-from rag.retriever import Retriever
+from unittest.mock import patch
+
 from rag.models import Chunk
+from rag.retriever import Retriever
 
 
 @patch("rag.retriever.embed")

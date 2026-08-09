@@ -1,6 +1,8 @@
 """Re-ranking module using SiliconFlow Rerank API."""
 
 import logging
+import math
+from dataclasses import replace
 
 import requests
 
@@ -59,14 +61,19 @@ class Reranker:
             top_k = settings.rerank_top_k
         if not _breaker.allow_request():
             logger.warning("Circuit breaker open — falling back to original document order")
-            return documents[:top_k]
+            return [replace(document, rerank_score=None) for document in documents[:top_k]]
         texts = [c.text for c in documents]
         try:
             results = self._call_rerank_api(query, texts, min(top_k, len(documents)))
+            ranked = []
+            for result in results:
+                score = float(result["relevance_score"])
+                if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+                    raise ValueError("reranker relevance_score must be finite and within [0, 1]")
+                ranked.append(replace(documents[result["index"]], rerank_score=score))
             _breaker.record_success()
-            indexed = {i: documents[i] for i in range(len(documents))}
-            return [indexed[r["index"]] for r in sorted(results, key=lambda x: -x["relevance_score"])][:top_k]
+            return sorted(ranked, key=lambda document: -document.rerank_score)[:top_k]
         except Exception:
             _breaker.record_failure()
             logger.warning("Rerank failed — falling back to original document order", exc_info=True)
-            return documents[:top_k]
+            return [replace(document, rerank_score=None) for document in documents[:top_k]]
