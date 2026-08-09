@@ -2,8 +2,6 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../utils/api'
 
-const API = ''
-
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('rag_token') || '')
   const user = ref<{ id: number; username: string; is_admin?: boolean } | null>(null)
@@ -11,7 +9,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isAuthenticated = computed(() => !!token.value)
 
   async function login(username: string, password: string) {
-    const res = await api.post(`${API}/login`, { username, password })
+    const res = await api.post('/login', { username, password })
     token.value = res.data.token
     localStorage.setItem('rag_token', token.value)
     // Fetch user info immediately after login
@@ -21,7 +19,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function register(username: string, password: string) {
-    const res = await api.post(`${API}/register`, { username, password })
+    const res = await api.post('/register', { username, password })
     token.value = res.data.token
     localStorage.setItem('rag_token', token.value)
     // Fetch user info immediately after register
@@ -35,7 +33,7 @@ export const useAuthStore = defineStore('auth', () => {
     // Allow re-fetch if user is null (e.g. after page refresh)
     if (user.value) return
     try {
-      const res = await api.get(`${API}/me`, {
+      const res = await api.get('/me', {
         headers: { Authorization: `Bearer ${token.value}` }
       })
       user.value = res.data

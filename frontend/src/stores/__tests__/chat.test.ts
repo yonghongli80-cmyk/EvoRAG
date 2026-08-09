@@ -194,8 +194,12 @@ describe('chat store', () => {
     await store.selectConversation(1)
 
     expect(store.messages).toHaveLength(2)
-    expect(store.messages[0]).toEqual({ id: 1, role: 'user', content: 'Hello' })
-    expect(store.messages[1]).toEqual({ id: 2, role: 'assistant', content: 'Hi there' })
+    expect(store.messages[0]).toEqual({
+      id: 1, role: 'user', content: 'Hello', sources: [], feedback: undefined
+    })
+    expect(store.messages[1]).toEqual({
+      id: 2, role: 'assistant', content: 'Hi there', sources: [], feedback: undefined
+    })
   })
 
   it('selectConversation calls GET /conversations/{id}/messages', async () => {
@@ -232,7 +236,7 @@ describe('chat store', () => {
     await store.sendMessage('Hello')
 
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      '/query/stream',
+      '/api/query/stream',
       expect.objectContaining({ method: 'POST' })
     )
     expect(store.messages).toHaveLength(2)
@@ -400,12 +404,17 @@ describe('chat store', () => {
         })
       }
     }
+    const mockTitleResponse = {
+      ok: true,
+      json: vi.fn().mockResolvedValue({ title: 'Question' })
+    }
     const mockSuggestResponse = {
       ok: true,
       json: vi.fn().mockResolvedValue({ questions: [] })
     }
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(mockStreamResponse as any)
+      .mockResolvedValueOnce(mockTitleResponse as any)
       .mockResolvedValueOnce(mockSuggestResponse as any)
 
     const store = useChatStore()

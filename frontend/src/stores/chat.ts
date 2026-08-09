@@ -5,7 +5,7 @@ import { useAuthStore } from './auth'
 
 export type ChatMode = 'file' | 'kb' | 'analysis'
 
-const API = ''
+const API = import.meta.env.VITE_API_BASE ?? '/api'
 
 interface Conversation {
   id: number
@@ -53,7 +53,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const params: Record<string, string> = {}
       if (mode) params.mode = mode
-      const res = await api.get(`${API}/conversations`, {
+      const res = await api.get('/conversations', {
         headers: auth.getAuthHeaders(),
         params
       })
@@ -81,7 +81,7 @@ export const useChatStore = defineStore('chat', () => {
     if (currentConvId.value !== null) {
       _selectedFilesByConv.set(currentConvId.value, selectedFile.value)
     }
-    const res = await api.post(`${API}/conversations`, { mode }, {
+    const res = await api.post('/conversations', { mode }, {
       headers: auth.getAuthHeaders()
     })
     conversations.value.unshift(res.data)
@@ -100,7 +100,7 @@ export const useChatStore = defineStore('chat', () => {
     // Restore selection for this conversation
     selectedFile.value = _selectedFilesByConv.has(id) ? _selectedFilesByConv.get(id)! : null
     try {
-      const res = await api.get(`${API}/conversations/${id}/messages`, {
+      const res = await api.get(`/conversations/${id}/messages`, {
         headers: auth.getAuthHeaders()
       })
       currentConvId.value = id
@@ -118,7 +118,7 @@ export const useChatStore = defineStore('chat', () => {
 
   async function deleteConversation(id: number) {
     const auth = useAuthStore()
-    await api.delete(`${API}/conversations/${id}`, {
+    await api.delete(`/conversations/${id}`, {
       headers: auth.getAuthHeaders()
     })
     conversations.value = conversations.value.filter(c => c.id !== id)
@@ -292,7 +292,7 @@ export const useChatStore = defineStore('chat', () => {
     if (newValue && msg.id) {
       const auth = useAuthStore()
       try {
-        await api.post(`${API}/feedback`, {
+        await api.post('/feedback', {
           message_id: msg.id,
           value: newValue
         }, { headers: auth.getAuthHeaders() })
@@ -309,7 +309,7 @@ export const useChatStore = defineStore('chat', () => {
     const auth = useAuthStore()
     isStreaming.value = true
     try {
-      const res = await api.post(`${API}/regenerate`, {
+      const res = await api.post('/regenerate', {
         conversation_id: currentConvId.value,
         message_id: msg.id
       }, { headers: auth.getAuthHeaders() })

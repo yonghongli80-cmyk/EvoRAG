@@ -3,8 +3,6 @@ import { ref } from 'vue'
 import api from '../utils/api'
 import { useAuthStore } from './auth'
 
-const API = ''
-
 interface FileInfo {
   name: string
   size: number
@@ -28,7 +26,7 @@ export const useFilesStore = defineStore('files', () => {
     loading.value = true
     try {
       const auth = useAuthStore()
-      const res = await api.get(`${API}/files`, {
+      const res = await api.get('/files', {
         headers: auth.getAuthHeaders()
       })
       files.value = Array.isArray(res.data?.files) ? res.data.files : []
@@ -47,7 +45,7 @@ export const useFilesStore = defineStore('files', () => {
     const formData = new FormData()
     formData.append('file', file)
 
-    const res = await api.post(`${API}/upload`, formData, {
+    const res = await api.post('/upload', formData, {
       headers: auth.getAuthHeaders()
     })
 
@@ -57,7 +55,7 @@ export const useFilesStore = defineStore('files', () => {
 
   async function deleteFile(name: string) {
     const auth = useAuthStore()
-    await api.delete(`${API}/files/${encodeURIComponent(name)}`, {
+    await api.delete(`/files/${encodeURIComponent(name)}`, {
       headers: auth.getAuthHeaders()
     })
     await loadFiles(true)

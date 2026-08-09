@@ -33,6 +33,16 @@ vi.mock('element-plus', () => ({
 }))
 
 import { ElMessage } from 'element-plus'
+import axios from 'axios'
+
+describe('api base URL', () => {
+  it('uses the /api dev-proxy prefix by default', async () => {
+    vi.resetModules()
+    await import('../api')
+
+    expect(axios.create).toHaveBeenCalledWith({ baseURL: '/api' })
+  })
+})
 
 describe('api interceptor', () => {
   let responseErrorInterceptor: (error: any) => Promise<never>

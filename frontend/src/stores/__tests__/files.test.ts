@@ -129,7 +129,7 @@ describe('files store', () => {
     await store.uploadFile(fakeFile)
 
     // loadFiles is called with force=true after upload
-    expect(api.get).toHaveBeenCalledWith('/files')
+    expect(api.get).toHaveBeenCalledWith('/files', expect.anything())
     expect(store.files).toEqual(refreshedFiles)
   })
 
@@ -171,7 +171,7 @@ describe('files store', () => {
     const store = useFilesStore()
     await store.deleteFile('to-delete.txt')
 
-    expect(api.get).toHaveBeenCalledWith('/files')
+    expect(api.get).toHaveBeenCalledWith('/files', expect.anything())
   })
 
   it('deleteFile URL-encodes special characters in filename', async () => {
