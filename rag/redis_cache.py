@@ -26,21 +26,27 @@ class RedisCache:
         self._fallback: dict[str, tuple[str, float]] = {}  # 内存降级缓存
         self._lock = threading.Lock()
         self._connected = False
+        self._redis_retry_after = 0.0
+        self._redis_cooldown_seconds = 30.0
 
     def _get_redis(self):
         """延迟初始化 Redis 连接。"""
         if self._redis is None:
+            if time.monotonic() < self._redis_retry_after:
+                return None
             try:
                 import redis
                 self._redis = redis.from_url(settings.redis_url, decode_responses=True)
                 # 测试连接
                 self._redis.ping()
                 self._connected = True
+                self._redis_retry_after = 0.0
                 logger.info("Redis 连接成功: %s", settings.redis_url)
             except Exception as e:
                 logger.warning("Redis 连接失败，降级到内存缓存: %s", e)
                 self._redis = None
                 self._connected = False
+                self._redis_retry_after = time.monotonic() + self._redis_cooldown_seconds
         return self._redis
 
     def _key(self, question: str, kb_id: str = "rag_docs", user_id: str = "__anon__") -> str:
@@ -57,7 +63,7 @@ class RedisCache:
                 data = redis.get(key)
                 if data:
                     return json.loads(data)
-                return None
+                return self._fallback_get(key)
             except Exception as e:
                 logger.warning("Redis get 失败，降级到内存: %s", e)
                 return self._fallback_get(key)
