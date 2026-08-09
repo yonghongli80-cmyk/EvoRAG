@@ -280,7 +280,7 @@ def _is_empty_or_error(result: str) -> bool:
     return any(ind in result for ind in error_indicators)
 
 
-def _wrap_tool_with_reflection(tool, recorder=None) -> "Tool":
+def _wrap_tool_with_reflection(tool, recorder=None):
     """包装工具，失败时自动重试一次。"""
     original_func = tool.func
     tool_name = tool.name
