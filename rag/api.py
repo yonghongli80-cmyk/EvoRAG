@@ -1700,20 +1700,7 @@ async def update_kb_overview(kb_id: str, req: KBOverviewRequest, authorization: 
     _check_kb_edit_permission(kb_id, user_dict)
 
     def _update():
-        import sqlite3
-        from config import settings as _settings
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute(
-                "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
-                "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
-                (kb_id, req.overview, req.overview)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        user_db.update_kb_overview(kb_id, req.overview)
 
     await asyncio.to_thread(_update)
     return {"status": "updated"}
@@ -1750,22 +1737,8 @@ async def update_doc_toc(kb_id: str, doc_name: str, req: KBTocRequest, authoriza
 
     import json
     def _update():
-        import sqlite3
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            toc_str = json.dumps(req.toc, ensure_ascii=False)
-            cur = conn.execute(
-                "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
-                (toc_str, kb_id, doc_name)
-            )
-            if cur.rowcount == 0:
-                return False
-            conn.commit()
-            return True
-        finally:
-            conn.close()
+        toc_str = json.dumps(req.toc, ensure_ascii=False)
+        return user_db.update_kb_document_toc(kb_id, doc_name, toc_str)
 
     result = await asyncio.to_thread(_update)
     if not result:

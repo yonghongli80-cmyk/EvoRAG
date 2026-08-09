@@ -494,6 +494,26 @@ class UserDB:
             return None
         return dict(row)
 
+    def update_kb_overview(self, kb_id: str, overview: str) -> None:
+        """Persist a KB overview through the shared, lock-protected connection."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
+                "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
+                (kb_id, overview, overview),
+            )
+            self._conn.commit()
+
+    def update_kb_document_toc(self, kb_id: str, filename: str, toc: str) -> bool:
+        """Update a document TOC without opening a competing SQLite connection."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
+                (toc, kb_id, filename),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def update_kb_scope(self, kb_id: str, scope: str) -> None:
         """更新 KB 的 scope 字段。scope 必须是 'private' 或 'public'。
 
