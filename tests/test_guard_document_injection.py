@@ -20,12 +20,12 @@ def test_prepare_context_excludes_injected_document_chunk_from_prompt():
     pipeline._user_db = None
     pipeline.retriever = MagicMock()
     pipeline.retriever.retrieve.return_value = [malicious, safe]
-        pipeline.reranker = MagicMock()
-        pipeline.reranker.rerank.return_value = [malicious, safe]
-        pipeline._feedback_processor = MagicMock()
-        pipeline._feedback_processor.get_weights.return_value = {}
-        pipeline._feedback_processor.get_weight.return_value = 1.0
-        pipeline.memory = MagicMock()
+    pipeline.reranker = MagicMock()
+    pipeline.reranker.rerank.return_value = [malicious, safe]
+    pipeline._feedback_processor = MagicMock()
+    pipeline._feedback_processor.get_weights.return_value = {}
+    pipeline._feedback_processor.get_weight.return_value = 1.0
+    pipeline.memory = MagicMock()
     pipeline.memory.build_messages.side_effect = (
         lambda _sid, question, context: [
             {"role": "user", "content": question + "\n" + "\n".join(c.text for c in context)}
