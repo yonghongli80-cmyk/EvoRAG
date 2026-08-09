@@ -620,7 +620,13 @@ async def regenerate(req: RegenerateRequest, authorization: str = Header(default
         raise HTTPException(status_code=400, detail=error)
 
     if prepared["route"] == "agent":
-        new_answer = await asyncio.to_thread(current_pipeline.agent.run, user_question)
+        from rag.pipeline import _agent_run_kwargs
+
+        # 透传当前用户/kb_id 并持锁：否则 agent 路由 fail-open 且跨请求串写
+        async with current_pipeline._async_agent_lock:
+            new_answer = await asyncio.to_thread(
+                current_pipeline.agent.run, user_question, **_agent_run_kwargs(prepared)
+            )
     else:
         from rag.generator import generate
         new_answer = await asyncio.to_thread(generate, prepared["messages"], 0.7)

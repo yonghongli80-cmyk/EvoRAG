@@ -2,6 +2,7 @@
 
 import json as _json
 import re as _re
+import threading as _threading
 
 from rag.generator import generate
 from rag.prompt_manager import PromptManager
@@ -137,6 +138,8 @@ class RAGAgent:
         self.user = user
         self.kb_id = kb_id or "rag_docs"
         self.user_db = user_db
+        # per-invocation 权限上下文：run 时写入线程局部，避免写进共享实例
+        self._run_ctx = _threading.local()
         self.tools = [
             _wrap_tool_with_reflection(t)
             for t in create_agent_tools(retriever, db_path, output_dir, permission_filter=self._make_permission_filter())
@@ -160,31 +163,58 @@ class RAGAgent:
     def _make_permission_filter(self):
         """构造 retrieve 工具结果的权限过滤回调。
 
-        闭包读取当前 ``self.user``/``self.kb_id``/``self.user_db``：
+        权限上下文按 invocation 从线程局部（``self._run_ctx``）读取；
+        未调用 run 直接使用工具（如单测）时回退到构造参数 ``self.user``/``self.kb_id``。
         - user 或 user_db 缺省时不过滤（向后兼容）
         - 否则复用 pipeline 的同一套 ``filter_chunks_by_permission`` 逻辑
         """
 
         def filter_fn(chunks: list) -> list:
-            if self.user is None or self.user_db is None:
+            user = getattr(self._run_ctx, "user", None)
+            if user is None:
+                user = self.user
+            kb_id = getattr(self._run_ctx, "kb_id", None)
+            if kb_id is None:
+                kb_id = self.kb_id
+            if user is None or self.user_db is None:
                 return chunks
             from rag.permissions import filter_chunks_by_permission
 
-            return filter_chunks_by_permission(self.user_db, self.kb_id, chunks, self.user)
+            return filter_chunks_by_permission(self.user_db, kb_id, chunks, user)
 
         return filter_fn
 
     def run(self, question: str, user: dict = None, kb_id: str = None) -> str:
         """Run the agent on a question with answer quality reflection.
 
-        ``user``/``kb_id`` 每次调用时写入实例，供 retrieve 工具在调用时刻做权限过滤。
+        权限上下文按 invocation 捕获在线程局部（``self._run_ctx``），不写入共享实例，
+        彻底消除并发请求跨请求串写（A 的 user 被 B 清空）导致的过滤失效。
+        ``user``/``kb_id`` 未显式传入时回退到构造时的默认值（向后兼容）。
         """
         import os
 
-        self.user = user
-        if kb_id is not None:
-            self.kb_id = kb_id
+        effective_user = user if user is not None else self.user
+        effective_kb_id = kb_id if kb_id is not None else self.kb_id
+        self._run_ctx.user = effective_user
+        self._run_ctx.kb_id = effective_kb_id
+        try:
+            answer, chart_paths = self._run_reflection(question)
+        finally:
+            self._run_ctx.user = None
+            self._run_ctx.kb_id = None
 
+        # 如果生成了图表但回答中没有路径，自动注入
+        if chart_paths:
+            existing = [p for p in chart_paths if os.path.exists(p)]
+            if existing:
+                latest = existing[-1]
+                if latest not in answer:
+                    answer = f"{answer}\n\n图表已保存为 {latest}"
+
+        return answer
+
+    def _run_reflection(self, question: str) -> tuple[str, list[str]]:
+        """agent 主循环 + 答案质量自检。返回 (answer, chart_paths)。"""
         from langchain_core.messages import HumanMessage
 
         max_reflection = 2
@@ -216,15 +246,7 @@ class RAGAgent:
             else:
                 break
 
-        # 如果生成了图表但回答中没有路径，自动注入
-        if chart_paths:
-            existing = [p for p in chart_paths if os.path.exists(p)]
-            if existing:
-                latest = existing[-1]
-                if latest not in answer:
-                    answer = f"{answer}\n\n图表已保存为 {latest}"
-
-        return answer
+        return answer, chart_paths
 
 
 def _is_empty_or_error(result: str) -> bool:
