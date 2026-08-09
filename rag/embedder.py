@@ -1,6 +1,7 @@
 import threading
 from functools import lru_cache
 
+import openai
 from openai import OpenAI
 
 from config import settings
@@ -10,7 +11,18 @@ client = None
 _client_lock = threading.Lock()
 
 
-@retry(max_attempts=3, backoff_base=1.0, retryable_exceptions=(TimeoutError, ConnectionError, OSError))
+@retry(
+    max_attempts=3,
+    backoff_base=1.0,
+    retryable_exceptions=(
+        openai.APIConnectionError,
+        openai.APITimeoutError,
+        openai.RateLimitError,
+        openai.APIStatusError,
+        TimeoutError,
+        ConnectionError,
+    ),
+)
 @lru_cache(maxsize=512)
 def _embed_single(text: str) -> tuple:
     """Cache a single text embedding. Returns tuple (hashable)."""
