@@ -51,8 +51,6 @@ async function handleSubmit() {
       old_password: oldPassword.value,
       new_password: newPassword.value,
       confirm_password: confirmPassword.value
-    }, {
-      headers: authStore.getAuthHeaders()
     })
     ElMessage.success('密码已修改，请重新登录')
     authStore.logout()

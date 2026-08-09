@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '../utils/api'
-import { useAuthStore } from './auth'
 
 interface FileInfo {
   name: string
@@ -25,10 +24,7 @@ export const useFilesStore = defineStore('files', () => {
     if (_loaded && !force) return
     loading.value = true
     try {
-      const auth = useAuthStore()
-      const res = await api.get('/files', {
-        headers: auth.getAuthHeaders()
-      })
+      const res = await api.get('/files')
       files.value = Array.isArray(res.data?.files) ? res.data.files : []
       _loaded = true
     } catch (err: any) {
@@ -41,23 +37,17 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   async function uploadFile(file: File) {
-    const auth = useAuthStore()
     const formData = new FormData()
     formData.append('file', file)
 
-    const res = await api.post('/upload', formData, {
-      headers: auth.getAuthHeaders()
-    })
+    const res = await api.post('/upload', formData)
 
     await loadFiles(true)
     return res.data
   }
 
   async function deleteFile(name: string) {
-    const auth = useAuthStore()
-    await api.delete(`/files/${encodeURIComponent(name)}`, {
-      headers: auth.getAuthHeaders()
-    })
+    await api.delete(`/files/${encodeURIComponent(name)}`)
     await loadFiles(true)
   }
 

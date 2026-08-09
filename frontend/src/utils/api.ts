@@ -7,6 +7,20 @@ const api = axios.create({
   baseURL: API_BASE
 })
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('rag_token')
+  if (!token) return config
+  if (typeof config.headers?.set === 'function') {
+    config.headers.set('Authorization', `Bearer ${token}`)
+  } else {
+    config.headers = {
+      ...config.headers,
+      Authorization: `Bearer ${token}`
+    } as any
+  }
+  return config
+})
+
 async function rejectRequest(error: any): Promise<never> {
   if (error.response) {
     const { status, data } = error.response
@@ -35,9 +49,15 @@ api.interceptors.response.use(
 
 export async function streamRequest(path: string, init: RequestInit): Promise<Response> {
   const url = `${API_BASE.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
+  const headers = new Headers(init.headers)
+  const token = localStorage.getItem('rag_token')
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  const requestInit = { ...init, headers }
   let response: Response
   try {
-    response = await fetch(url, init)
+    response = await fetch(url, requestInit)
   } catch (error: any) {
     if (!error.code) error.code = 'ERR_NETWORK'
     return rejectRequest(error)

@@ -161,8 +161,7 @@ describe('chat store', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/conversations',
-      { mode: 'kb' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { mode: 'kb' }
     )
   })
 
@@ -251,10 +250,7 @@ describe('chat store', () => {
     const store = useChatStore()
     await store.selectConversation(7)
 
-    expect(api.get).toHaveBeenCalledWith(
-      '/conversations/7/messages',
-      expect.objectContaining({ headers: expect.any(Object) })
-    )
+    expect(api.get).toHaveBeenCalledWith('/conversations/7/messages')
   })
 
   // ── sendMessage ─────────────────────────────────────────
@@ -477,8 +473,7 @@ describe('chat store', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/feedback',
-      { message_id: 10, value: 'positive' },
-      expect.anything()
+      { message_id: 10, value: 'positive' }
     )
     expect(store.messages[0].feedback).toBe('positive')
   })
@@ -515,8 +510,7 @@ describe('chat store', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/regenerate',
-      { conversation_id: 7, message_id: 20 },
-      expect.anything()
+      { conversation_id: 7, message_id: 20 }
     )
     expect(store.messages[0].content).toBe('New answer')
   })

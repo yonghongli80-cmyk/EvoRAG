@@ -2,7 +2,6 @@
 import { ref, watch } from 'vue'
 import { ElDialog, ElRadio, ElRadioGroup, ElInput, ElButton } from 'element-plus'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 
 interface CardInfo {
   id: number
@@ -19,8 +18,6 @@ const emit = defineEmits<{
   (e: 'update:visible', value: boolean): void
   (e: 'confirm', cardId: number | null, newCardName?: string): void
 }>()
-
-const authStore = useAuthStore()
 
 const cards = ref<CardInfo[]>([])
 const selectedCardId = ref<number | undefined>(undefined)
@@ -47,7 +44,7 @@ watch(() => props.visible, async (val) => {
 
 async function loadCards() {
   try {
-    const res = await api.get('/analysis/cards', { headers: authStore.getAuthHeaders() })
+    const res = await api.get('/analysis/cards')
     cards.value = res.data || []
   } catch {
     cards.value = []
@@ -61,7 +58,7 @@ async function suggestCard() {
     const res = await api.post('/analysis/suggest-card', {
       question: props.question,
       answer: props.answer,
-    }, { headers: authStore.getAuthHeaders() })
+    })
     const data = res.data
     suggestedCardId.value = data.suggested_card_id
     suggestedCardName.value = data.suggested_card_name || ''

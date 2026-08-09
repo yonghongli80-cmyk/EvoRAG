@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import { Search } from '@element-plus/icons-vue'
 
 interface SearchResult {
@@ -15,7 +14,6 @@ const emit = defineEmits<{
   (e: 'select', id: number): void
 }>()
 
-const authStore = useAuthStore()
 const query = ref('')
 const results = ref<SearchResult[]>([])
 const searching = ref(false)
@@ -34,8 +32,7 @@ watch(query, (val) => {
     searching.value = true
     try {
       const res = await api.get('/conversations/search', {
-        params: { q: val, page: 1, size: 20 },
-        headers: authStore.getAuthHeaders()
+        params: { q: val, page: 1, size: 20 }
       })
       results.value = res.data?.results || []
       showResults.value = true

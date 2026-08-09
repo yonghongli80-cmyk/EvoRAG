@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api, { streamRequest } from '../utils/api'
-import { useAuthStore } from './auth'
 
 export type ChatMode = 'file' | 'kb' | 'analysis'
 
@@ -56,15 +55,11 @@ export const useChatStore = defineStore('chat', () => {
    * The store is effectively scoped to the last-loaded mode.
    */
   async function loadConversations(mode?: ChatMode) {
-    const auth = useAuthStore()
     if (mode) resetModeState(mode)
     try {
       const params: Record<string, string> = {}
       if (mode) params.mode = mode
-      const res = await api.get('/conversations', {
-        headers: auth.getAuthHeaders(),
-        params
-      })
+      const res = await api.get('/conversations', { params })
 
       // Validate response is an array
       const data = Array.isArray(res.data) ? res.data : []
@@ -84,15 +79,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function createConversation(mode: ChatMode = 'file') {
-    const auth = useAuthStore()
     resetModeState(mode)
     // Save current selection before switching
     if (currentConvId.value !== null) {
       _selectedFilesByConv.set(currentConvId.value, selectedFile.value)
     }
-    const res = await api.post('/conversations', { mode }, {
-      headers: auth.getAuthHeaders()
-    })
+    const res = await api.post('/conversations', { mode })
     conversations.value.unshift(res.data)
     _selectedFilesByConv.delete(res.data.id)
     currentConvId.value = res.data.id
@@ -102,15 +94,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function selectConversation(id: number) {
-    const auth = useAuthStore()
     const previousId = currentConvId.value
     const nextSelectedFile = id === previousId
       ? selectedFile.value
       : (_selectedFilesByConv.get(id) ?? null)
     try {
-      const res = await api.get(`/conversations/${id}/messages`, {
-        headers: auth.getAuthHeaders()
-      })
+      const res = await api.get(`/conversations/${id}/messages`)
       if (previousId !== null && previousId !== id) {
         _selectedFilesByConv.set(previousId, selectedFile.value)
       }
@@ -129,10 +118,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function deleteConversation(id: number) {
-    const auth = useAuthStore()
-    await api.delete(`/conversations/${id}`, {
-      headers: auth.getAuthHeaders()
-    })
+    await api.delete(`/conversations/${id}`)
     conversations.value = conversations.value.filter(c => c.id !== id)
     _selectedFilesByConv.delete(id)
     if (currentConvId.value === id) {
@@ -147,8 +133,6 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function sendMessage(question: string, mode?: ChatMode) {
-    const auth = useAuthStore()
-
     // Auto-create conversation if none exists
     if (!currentConvId.value && mode) {
       await createConversation(mode)
@@ -177,8 +161,7 @@ export const useChatStore = defineStore('chat', () => {
       const response = await streamRequest('/query/stream', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...auth.getAuthHeaders()
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload)
       })
@@ -243,8 +226,6 @@ export const useChatStore = defineStore('chat', () => {
         try {
           const titleRes = await api.post(`/conversations/${currentConvId.value}/generate-title`, {
             question
-          }, {
-            headers: auth.getAuthHeaders()
           })
           currentConv.title = titleRes.data.title
         } catch {
@@ -256,9 +237,7 @@ export const useChatStore = defineStore('chat', () => {
       // Fetch suggested follow-up questions after streaming completes
       if (answer) {
         try {
-          const suggestRes = await api.post('/suggest', { question, answer }, {
-            headers: auth.getAuthHeaders()
-          })
+          const suggestRes = await api.post('/suggest', { question, answer })
           suggestedQuestions.value = suggestRes.data.questions || []
         } catch {
           // Suggestions are non-critical, ignore errors
@@ -282,12 +261,11 @@ export const useChatStore = defineStore('chat', () => {
 
     // Only send to API if giving feedback (not cancelling)
     if (newValue && msg.id) {
-      const auth = useAuthStore()
       try {
         await api.post('/feedback', {
           message_id: msg.id,
           value: newValue
-        }, { headers: auth.getAuthHeaders() })
+        })
       } catch {
         // Ignore feedback API errors
       }
@@ -298,13 +276,12 @@ export const useChatStore = defineStore('chat', () => {
     const msg = messages.value[messageIndex]
     if (!msg || msg.role !== 'assistant' || !msg.id || !currentConvId.value) return
 
-    const auth = useAuthStore()
     isStreaming.value = true
     try {
       const res = await api.post('/regenerate', {
         conversation_id: currentConvId.value,
         message_id: msg.id
-      }, { headers: auth.getAuthHeaders() })
+      })
       msg.content = res.data.answer
     } catch {
       // Ignore

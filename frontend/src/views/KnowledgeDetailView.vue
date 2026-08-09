@@ -2,7 +2,6 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
 import MessageBubble from '../components/MessageBubble.vue'
@@ -23,7 +22,6 @@ import {
 
 const route = useRoute()
 const router = useRouter()
-const authStore = useAuthStore()
 const chatStore = useChatStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 
@@ -85,9 +83,7 @@ onMounted(async () => {
 async function loadDetail() {
   loading.value = true
   try {
-    const res = await api.get(`/knowledge-bases/${kbId}`, {
-      headers: authStore.getAuthHeaders()
-    })
+    const res = await api.get(`/knowledge-bases/${kbId}`)
     const data = res.data
     kbName.value = data.name || ''
     kbDescription.value = data.description || ''
@@ -153,9 +149,7 @@ async function renameKB() {
   if (!name) return ElMessage.warning('请输入名称')
   renaming.value = true
   try {
-    await api.put(`/knowledge-bases/${kbId}/name`, { name }, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.put(`/knowledge-bases/${kbId}/name`, { name })
     kbName.value = name
     showRenameDialog.value = false
     ElMessage.success('已重命名')
@@ -170,9 +164,7 @@ async function generateTOC() {
   showSettingsMenu.value = false
   generatingToc.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${kbId}/toc/generate`, {}, {
-      headers: authStore.getAuthHeaders()
-    })
+    const res = await api.post(`/knowledge-bases/${kbId}/toc/generate`, {})
     // Update local document state with generated TOC
     const tocData = res.data.toc || {}
     for (const doc of documents.value) {
@@ -192,9 +184,7 @@ async function generateOverview() {
   showSettingsMenu.value = false
   generatingOverview.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${kbId}/overview/generate`, {}, {
-      headers: authStore.getAuthHeaders()
-    })
+    const res = await api.post(`/knowledge-bases/${kbId}/overview/generate`, {})
     kbOverview.value = res.data.overview || ''
     ElMessage.success('概述生成完成')
   } catch (err: any) {
@@ -212,9 +202,7 @@ async function deleteKB() {
       '删除知识库',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'error' }
     )
-    await api.delete(`/knowledge-bases/${kbId}`, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.delete(`/knowledge-bases/${kbId}`)
     ElMessage.success('知识库已删除')
     router.push('/kb')
   } catch (err: any) {
@@ -238,9 +226,7 @@ function cancelEditOverview() {
 async function saveOverview() {
   savingOverview.value = true
   try {
-    await api.put(`/knowledge-bases/${kbId}/overview`, { overview: overviewDraft.value }, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.put(`/knowledge-bases/${kbId}/overview`, { overview: overviewDraft.value })
     kbOverview.value = overviewDraft.value
     editingOverview.value = false
     ElMessage.success('概述已更新')
@@ -260,9 +246,7 @@ async function removeFromKB(doc: any) {
       { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
     )
     removingDoc.value = doc.filename
-    await api.delete(`/knowledge-bases/${kbId}/documents/${encodeURIComponent(doc.filename)}`, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.delete(`/knowledge-bases/${kbId}/documents/${encodeURIComponent(doc.filename)}`)
     ElMessage.success('已从知识库移除')
     await loadDetail()
   } catch (err: any) {
@@ -285,9 +269,7 @@ async function openAddDialog() {
 async function loadAvailableFiles() {
   loadingFiles.value = true
   try {
-    const res = await api.get('/files', {
-      headers: authStore.getAuthHeaders()
-    })
+    const res = await api.get('/files')
     const kbFileNames = new Set(documents.value.map(d => d.filename))
     availableFiles.value = (res.data.files || []).filter(
       (f: any) => !f.in_kb && !kbFileNames.has(f.name)
@@ -310,9 +292,7 @@ async function addFileToKB() {
     const blob = res.data
     formData.append('file', blob, selectedFile.value.name)
 
-    await api.post(`/knowledge-bases/${kbId}/documents`, formData, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.post(`/knowledge-bases/${kbId}/documents`, formData)
     ElMessage.success('文件已添加到知识库')
     showAddDialog.value = false
     await loadDetail()

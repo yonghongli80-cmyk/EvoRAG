@@ -1,6 +1,5 @@
 import { ref } from 'vue'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
 
 /**
@@ -24,7 +23,6 @@ export function useAnalysis() {
   }
 
   async function handleConfirm(cardId: number | null, newCardName?: string) {
-    const auth = useAuthStore()
     loading.value = true
 
     try {
@@ -34,7 +32,7 @@ export function useAnalysis() {
         // Create a new card
         const createRes = await api.post('/analysis/cards', {
           name: newCardName,
-        }, { headers: auth.getAuthHeaders() })
+        })
         targetCardId = createRes.data.id
       }
 
@@ -44,7 +42,7 @@ export function useAnalysis() {
       await api.post(`/analysis/cards/${targetCardId}/questions`, {
         question: dialogQuestion.value,
         answer: dialogAnswer.value,
-      }, { headers: auth.getAuthHeaders() })
+      })
 
       ElMessage.success('已添加到分析卡片')
       dialogVisible.value = false

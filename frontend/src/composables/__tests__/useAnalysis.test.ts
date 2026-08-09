@@ -48,8 +48,7 @@ describe('useAnalysis composable', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/analysis/cards/42/questions',
-      { question: 'What is RAG?', answer: 'Retrieval-Augmented Generation' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { question: 'What is RAG?', answer: 'Retrieval-Augmented Generation' }
     )
     expect(dialogVisible.value).toBe(false)
   })
@@ -70,13 +69,11 @@ describe('useAnalysis composable', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/analysis/cards',
-      { name: 'New Card Group' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { name: 'New Card Group' }
     )
     expect(api.post).toHaveBeenCalledWith(
       '/analysis/cards/99/questions',
-      { question: 'How does it work?', answer: 'It works by retrieving relevant documents.' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { question: 'How does it work?', answer: 'It works by retrieving relevant documents.' }
     )
     expect(dialogVisible.value).toBe(false)
   })

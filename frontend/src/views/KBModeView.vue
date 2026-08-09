@@ -2,13 +2,11 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Collection, Delete, Share } from '@element-plus/icons-vue'
 import ShareDialog from '../components/ShareDialog.vue'
 
 const router = useRouter()
-const authStore = useAuthStore()
 
 interface SharedUser {
   username: string
@@ -45,7 +43,7 @@ onMounted(async () => {
 async function loadKBs() {
   loading.value = true
   try {
-    const res = await api.get('/knowledge-bases', { headers: authStore.getAuthHeaders() })
+    const res = await api.get('/knowledge-bases')
     knowledgeBases.value = res.data
   } catch {
     ElMessage.error('加载知识库列表失败')
@@ -64,7 +62,7 @@ async function createKB() {
   if (!name) return ElMessage.warning('请输入知识库名称')
   creating.value = true
   try {
-    await api.post('/knowledge-bases', { name, scope: newKBScope.value }, { headers: authStore.getAuthHeaders() })
+    await api.post('/knowledge-bases', { name, scope: newKBScope.value })
     ElMessage.success('知识库创建成功')
     showCreateDialog.value = false
     await loadKBs()
@@ -82,7 +80,7 @@ async function deleteKB(kb: KnowledgeBase) {
       '删除知识库',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
     )
-    await api.delete(`/knowledge-bases/${kb.kb_id}`, { headers: authStore.getAuthHeaders() })
+    await api.delete(`/knowledge-bases/${kb.kb_id}`)
     ElMessage.success('知识库已删除')
     await loadKBs()
   } catch (err: any) {

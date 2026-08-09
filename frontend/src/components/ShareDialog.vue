@@ -56,7 +56,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 
@@ -78,7 +77,6 @@ const props = defineProps<{
 }>()
 
 const visible = defineModel<boolean>('visible')
-const authStore = useAuthStore()
 
 const localScope = ref('private')
 const sharedUsers = ref<SharedUser[]>([])
@@ -98,9 +96,7 @@ watch(visible, async (v) => {
 async function loadScope() {
   try {
     if (props.itemType === 'kb') {
-      const res = await api.get(`/knowledge-bases/${props.itemId}`, {
-        headers: authStore.getAuthHeaders()
-      })
+      const res = await api.get(`/knowledge-bases/${props.itemId}`)
       localScope.value = res.data.scope || 'private'
     }
     // 文档 scope 暂不支持单独切换
@@ -114,9 +110,7 @@ async function loadSharedUsers() {
     const endpoint = props.itemType === 'kb'
       ? `/knowledge-bases/${props.itemId}/shares`
       : `/documents/${props.itemId}/shares`
-    const res = await api.get(endpoint, {
-      headers: authStore.getAuthHeaders()
-    })
+    const res = await api.get(endpoint)
     sharedUsers.value = res.data || []
   } catch (err: any) {
     console.error('加载共享列表失败:', err)
@@ -126,10 +120,7 @@ async function loadSharedUsers() {
 async function updateScope(newScope: string) {
   try {
     if (props.itemType === 'kb') {
-      await api.put(`/knowledge-bases/${props.itemId}/scope`,
-        { scope: newScope },
-        { headers: authStore.getAuthHeaders() }
-      )
+      await api.put(`/knowledge-bases/${props.itemId}/scope`, { scope: newScope })
     }
     ElMessage.success('可见范围已更新')
     if (newScope === 'shared') {
@@ -152,8 +143,7 @@ function onSearch() {
     searching.value = true
     try {
       const res = await api.get('/users', {
-        params: { q: searchQuery.value },
-        headers: authStore.getAuthHeaders()
+        params: { q: searchQuery.value }
       })
       searchResults.value = res.data || []
     } catch (err: any) {
@@ -169,10 +159,7 @@ async function addShare(user: SearchResult) {
     const endpoint = props.itemType === 'kb'
       ? `/knowledge-bases/${props.itemId}/share`
       : `/documents/${props.itemId}/share`
-    await api.post(endpoint,
-      { user_id: user.id, permission: 'view' },
-      { headers: authStore.getAuthHeaders() }
-    )
+    await api.post(endpoint, { user_id: user.id, permission: 'view' })
     ElMessage.success(`已共享给 ${user.username}`)
     searchQuery.value = ''
     searchResults.value = []
@@ -187,9 +174,7 @@ async function unshare(userId: number) {
     const endpoint = props.itemType === 'kb'
       ? `/knowledge-bases/${props.itemId}/share/${userId}`
       : `/documents/${props.itemId}/share/${userId}`
-    await api.delete(endpoint, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.delete(endpoint)
     ElMessage.success('已取消共享')
     await loadSharedUsers()
   } catch (err: any) {
@@ -203,15 +188,12 @@ async function updatePermission(user: SharedUser) {
     const endpoint = props.itemType === 'kb'
       ? `/knowledge-bases/${props.itemId}/share/${user.id}`
       : `/documents/${props.itemId}/share/${user.id}`
-    await api.delete(endpoint, {
-      headers: authStore.getAuthHeaders()
-    })
+    await api.delete(endpoint)
     await api.post(
       props.itemType === 'kb'
         ? `/knowledge-bases/${props.itemId}/share`
         : `/documents/${props.itemId}/share`,
-      { user_id: user.id, permission: user.permission },
-      { headers: authStore.getAuthHeaders() }
+      { user_id: user.id, permission: user.permission }
     )
     ElMessage.success('权限已更新')
   } catch (err: any) {

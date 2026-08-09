@@ -35,8 +35,7 @@ describe('FileModeView auto-create conversation behavior', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/conversations',
-      { mode: 'file' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { mode: 'file' }
     )
     expect(result.mode).toBe('file')
     expect(store.currentConvId).toBe(1)
@@ -52,8 +51,7 @@ describe('FileModeView auto-create conversation behavior', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/conversations',
-      { mode: 'kb' },
-      expect.objectContaining({ headers: expect.any(Object) })
+      { mode: 'kb' }
     )
     expect(result.mode).toBe('kb')
   })

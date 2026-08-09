@@ -1,12 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue'
 import api from '../utils/api'
-import { useAuthStore } from '../stores/auth'
 import AnalysisCard from '../components/AnalysisCard.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, DataAnalysis, Document } from '@element-plus/icons-vue'
-
-const authStore = useAuthStore()
 
 interface Question {
   id: number
@@ -31,14 +28,14 @@ onMounted(async () => {
 async function loadCards() {
   loading.value = true
   try {
-    const res = await api.get('/analysis/cards', { headers: authStore.getAuthHeaders() })
+    const res = await api.get('/analysis/cards')
     const cardList: CardGroup[] = res.data || []
     // Fetch all questions and summaries in parallel to avoid N+1
     await Promise.all(
       cardList.map(async (card) => {
         const [qRes, sRes] = await Promise.all([
-          api.get(`/analysis/cards/${card.id}/questions`, { headers: authStore.getAuthHeaders() }).catch(() => ({ data: [] })),
-          api.get(`/analysis/cards/${card.id}/summary`, { headers: authStore.getAuthHeaders() }).catch(() => ({ data: { summary: '' } })),
+          api.get(`/analysis/cards/${card.id}/questions`).catch(() => ({ data: [] })),
+          api.get(`/analysis/cards/${card.id}/summary`).catch(() => ({ data: { summary: '' } })),
         ])
         card.questions = qRes.data || []
         card.summary = sRes.data?.summary || ''
@@ -54,7 +51,7 @@ async function loadCards() {
 
 async function createCard() {
   try {
-    const res = await api.post('/analysis/cards', { name: '新建卡片组' }, { headers: authStore.getAuthHeaders() })
+    const res = await api.post('/analysis/cards', { name: '新建卡片组' })
     cards.value.push({ ...res.data, questions: [], summary: '' })
     ElMessage.success('卡片组已创建')
   } catch {
@@ -65,7 +62,7 @@ async function createCard() {
 async function updateCardTitle(card: CardGroup, newTitle: string) {
   card.name = newTitle
   try {
-    await api.put(`/analysis/cards/${card.id}/name`, { name: card.name }, { headers: authStore.getAuthHeaders() })
+    await api.put(`/analysis/cards/${card.id}/name`, { name: card.name })
   } catch {
     ElMessage.error('保存失败')
   }
@@ -73,7 +70,7 @@ async function updateCardTitle(card: CardGroup, newTitle: string) {
 
 async function addQuestion(card: CardGroup, question: string) {
   try {
-    const res = await api.post(`/analysis/cards/${card.id}/questions`, { question }, { headers: authStore.getAuthHeaders() })
+    const res = await api.post(`/analysis/cards/${card.id}/questions`, { question })
     card.questions.push({ id: res.data.id, question })
   } catch {
     ElMessage.error('保存失败')
@@ -82,7 +79,7 @@ async function addQuestion(card: CardGroup, question: string) {
 
 async function removeQuestion(card: CardGroup, questionId: number) {
   try {
-    await api.delete(`/analysis/cards/${card.id}/questions/${questionId}`, { headers: authStore.getAuthHeaders() })
+    await api.delete(`/analysis/cards/${card.id}/questions/${questionId}`)
     card.questions = card.questions.filter(q => q.id !== questionId)
   } catch {
     ElMessage.error('保存失败')
@@ -92,7 +89,7 @@ async function removeQuestion(card: CardGroup, questionId: number) {
 async function deleteCard(card: CardGroup) {
   try {
     await ElMessageBox.confirm(`确定删除卡片组「${card.name}」吗？`, '删除卡片组', { type: 'warning' })
-    await api.delete(`/analysis/cards/${card.id}`, { headers: authStore.getAuthHeaders() })
+    await api.delete(`/analysis/cards/${card.id}`)
     cards.value = cards.value.filter(c => c.id !== card.id)
     ElMessage.success('已删除')
   } catch {}
@@ -100,7 +97,7 @@ async function deleteCard(card: CardGroup) {
 
 async function generateSummary(card: CardGroup) {
   try {
-    const res = await api.post(`/analysis/cards/${card.id}/summary/generate`, {}, { headers: authStore.getAuthHeaders() })
+    const res = await api.post(`/analysis/cards/${card.id}/summary/generate`, {})
     card.summary = res.data.summary
     ElMessage.success('摘要已生成')
   } catch (err: any) {
@@ -111,7 +108,7 @@ async function generateSummary(card: CardGroup) {
 
 async function updateSummary(card: CardGroup, summary: string) {
   try {
-    await api.put(`/analysis/cards/${card.id}/summary`, { summary }, { headers: authStore.getAuthHeaders() })
+    await api.put(`/analysis/cards/${card.id}/summary`, { summary })
     card.summary = summary
   } catch {
     ElMessage.error('保存摘要失败')
@@ -120,7 +117,7 @@ async function updateSummary(card: CardGroup, summary: string) {
 
 async function deleteSummary(card: CardGroup) {
   try {
-    await api.put(`/analysis/cards/${card.id}/summary`, { summary: '' }, { headers: authStore.getAuthHeaders() })
+    await api.put(`/analysis/cards/${card.id}/summary`, { summary: '' })
     card.summary = ''
     ElMessage.success('摘要已删除')
   } catch {
@@ -131,7 +128,6 @@ async function deleteSummary(card: CardGroup) {
 async function exportCard(card: CardGroup) {
   try {
     const resp = await api.get(`/analysis/cards/${card.id}/export?format=markdown`, {
-      headers: authStore.getAuthHeaders(),
       responseType: 'blob',
     })
     const blob = new Blob([resp.data], { type: 'text/markdown;charset=utf-8' })

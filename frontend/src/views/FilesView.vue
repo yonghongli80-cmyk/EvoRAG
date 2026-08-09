@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useFilesStore } from '../stores/files'
-import { useAuthStore } from '../stores/auth'
 import api from '../utils/api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
@@ -117,10 +116,8 @@ async function submitBatchImport() {
   formData.append('config', JSON.stringify(config))
 
   try {
-    const auth = useAuthStore()
     const res = await api.post('/batch-import', formData, {
       headers: {
-        ...auth.getAuthHeaders(),
         'Content-Type': 'multipart/form-data',
       },
     })

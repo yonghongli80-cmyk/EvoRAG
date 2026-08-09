@@ -55,9 +55,7 @@ async function handleFileAction(command: string, fileName: string) {
 // Visibility toggle
 async function toggleVisibility(fileName: string) {
   try {
-    const resp = await api.put(`/files/${encodeURIComponent(fileName)}/visibility`, undefined, {
-      headers: authStore.getAuthHeaders()
-    })
+    const resp = await api.put(`/files/${encodeURIComponent(fileName)}/visibility`)
     const data = resp.data
     const file = filesStore.files.find(f => f.name === fileName)
     if (file) file.is_public = data.is_public
@@ -112,7 +110,6 @@ async function handleDelete(name: string) {
 async function downloadFile(name: string) {
   try {
     const response = await api.get(`/files/${encodeURIComponent(name)}/download`, {
-      headers: authStore.getAuthHeaders(),
       responseType: 'blob'
     })
     const blob = response.data

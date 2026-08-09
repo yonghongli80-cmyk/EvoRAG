@@ -112,8 +112,7 @@ describe('files store', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/upload',
-      expect.any(FormData),
-      expect.anything()
+      expect.any(FormData)
     )
   })
 
@@ -129,11 +128,11 @@ describe('files store', () => {
     await store.uploadFile(fakeFile)
 
     // loadFiles is called with force=true after upload
-    expect(api.get).toHaveBeenCalledWith('/files', expect.anything())
+    expect(api.get).toHaveBeenCalledWith('/files')
     expect(store.files).toEqual(refreshedFiles)
   })
 
-  it('uploadFile passes auth headers', async () => {
+  it('uploadFile leaves authorization to the shared interceptor', async () => {
     vi.mocked(api.post).mockResolvedValue({ data: {} } as any)
     vi.mocked(api.get).mockResolvedValue({ data: { files: [] } } as any)
 
@@ -141,13 +140,7 @@ describe('files store', () => {
     const fakeFile = new File([''], 'f.txt', { type: 'text/plain' })
     await store.uploadFile(fakeFile)
 
-    expect(api.post).toHaveBeenCalledWith(
-      '/upload',
-      expect.any(FormData),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer test-token' })
-      })
-    )
+    expect(vi.mocked(api.post).mock.calls[0]).toHaveLength(2)
   })
 
   // ── deleteFile ──────────────────────────────────────────
@@ -158,10 +151,7 @@ describe('files store', () => {
     const store = useFilesStore()
     await store.deleteFile('my document.pdf')
 
-    expect(api.delete).toHaveBeenCalledWith(
-      '/files/my%20document.pdf',
-      expect.anything()
-    )
+    expect(api.delete).toHaveBeenCalledWith('/files/my%20document.pdf')
   })
 
   it('deleteFile refreshes file list after deletion', async () => {
@@ -171,7 +161,7 @@ describe('files store', () => {
     const store = useFilesStore()
     await store.deleteFile('to-delete.txt')
 
-    expect(api.get).toHaveBeenCalledWith('/files', expect.anything())
+    expect(api.get).toHaveBeenCalledWith('/files')
   })
 
   it('deleteFile URL-encodes special characters in filename', async () => {
@@ -181,24 +171,16 @@ describe('files store', () => {
     const store = useFilesStore()
     await store.deleteFile('file (1).pdf')
 
-    expect(api.delete).toHaveBeenCalledWith(
-      '/files/file%20(1).pdf',
-      expect.anything()
-    )
+    expect(api.delete).toHaveBeenCalledWith('/files/file%20(1).pdf')
   })
 
-  it('deleteFile passes auth headers', async () => {
+  it('deleteFile leaves authorization to the shared interceptor', async () => {
     vi.mocked(api.delete).mockResolvedValue({} as any)
     vi.mocked(api.get).mockResolvedValue({ data: { files: [] } } as any)
 
     const store = useFilesStore()
     await store.deleteFile('doc.txt')
 
-    expect(api.delete).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: 'Bearer test-token' })
-      })
-    )
+    expect(vi.mocked(api.delete).mock.calls[0]).toHaveLength(1)
   })
 })

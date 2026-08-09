@@ -33,9 +33,7 @@ export const useAuthStore = defineStore('auth', () => {
     // Allow re-fetch if user is null (e.g. after page refresh)
     if (user.value) return
     try {
-      const res = await api.get('/me', {
-        headers: { Authorization: `Bearer ${token.value}` }
-      })
+      const res = await api.get('/me')
       user.value = res.data
     } catch (err: any) {
       if (err.response?.status === 401) {

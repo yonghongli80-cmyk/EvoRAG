@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockInterceptorUse, mockAxiosInstance } = vi.hoisted(() => {
+const { mockRequestInterceptorUse, mockInterceptorUse, mockAxiosInstance } = vi.hoisted(() => {
+  const mockRequestInterceptorUse = vi.fn()
   const mockInterceptorUse = vi.fn()
   const mockAxiosInstance = {
     get: vi.fn(),
@@ -8,10 +9,11 @@ const { mockInterceptorUse, mockAxiosInstance } = vi.hoisted(() => {
     put: vi.fn(),
     delete: vi.fn(),
     interceptors: {
+      request: { use: mockRequestInterceptorUse },
       response: { use: mockInterceptorUse }
     }
   }
-  return { mockInterceptorUse, mockAxiosInstance }
+  return { mockRequestInterceptorUse, mockInterceptorUse, mockAxiosInstance }
 })
 
 vi.mock('axios', () => ({
@@ -46,15 +48,20 @@ describe('api base URL', () => {
   it('routes streaming fetches through the same base URL', async () => {
     const response = { ok: true }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    localStorage.setItem('rag_token', 'stream-token')
     const { streamRequest } = await import('../api')
 
     await streamRequest('/query/stream', { method: 'POST' })
 
-    expect(fetch).toHaveBeenCalledWith('/api/query/stream', { method: 'POST' })
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(url).toBe('/api/query/stream')
+    expect(init?.method).toBe('POST')
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer stream-token')
   })
 })
 
 describe('api interceptor', () => {
+  let requestInterceptor: (config: any) => any
   let responseErrorInterceptor: (error: any) => Promise<never>
 
   beforeEach(async () => {
@@ -62,8 +69,17 @@ describe('api interceptor', () => {
     vi.resetModules()
     localStorage.clear()
     await import('../api')
+    requestInterceptor = mockRequestInterceptorUse.mock.calls[0]?.[0]
     const calls = mockInterceptorUse.mock.calls
     responseErrorInterceptor = calls[0]?.[1]
+  })
+
+  it('injects the current token into every axios request', () => {
+    localStorage.setItem('rag_token', 'current-token')
+
+    const config = requestInterceptor({ headers: {} })
+
+    expect(config.headers.Authorization).toBe('Bearer current-token')
   })
 
   it('401 response clears token and rejects', async () => {
