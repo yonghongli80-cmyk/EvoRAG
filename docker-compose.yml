@@ -2,13 +2,14 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ragv3-redis
-    ports:
-      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
     volumes:
       - redis_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -21,7 +22,7 @@ services:
     env_file:
       - .env
     environment:
-      - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
     volumes:
       # 命名卷首次挂载时继承镜像内 rag 用户的目录属主，非 root 进程可写
       - rag_data:/app/data

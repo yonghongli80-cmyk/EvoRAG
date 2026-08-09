@@ -17,6 +17,8 @@ services:
         value: "true"
       - key: INIT_ADMIN_USERNAME
         sync: false
+      - key: RAG_REDIS_URL
+        sync: false
     disk:
       name: ragv3-data
       mountPath: /app/data
