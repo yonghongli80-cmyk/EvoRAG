@@ -389,8 +389,10 @@ def health():
         from config import settings as _settings
 
         conn = sqlite3.connect(_settings.analysis_db_path)
-        conn.execute("SELECT 1")
-        conn.close()
+        try:
+            conn.execute("SELECT 1")
+        finally:
+            conn.close()
         components["sqlite"] = "ok"
     except Exception as e:
         logger.error("SQLite 健康检查失败: %s", e)

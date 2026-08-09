@@ -31,10 +31,13 @@ def _load_or_create_secret(secret_file: Path = _JWT_SECRET_FILE) -> str:
     secret = secrets.token_urlsafe(32)
     secret_file.parent.mkdir(parents=True, exist_ok=True)
     secret_file.write_text(secret)
+    os.chmod(secret_file, 0o600)
     return secret
 
 
 _JWT_SECRET: str = _load_or_create_secret()
+_PBKDF2_ITERATIONS = 600_000
+_LEGACY_PBKDF2_ITERATIONS = 260_000
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +49,7 @@ def hash_password(password: str) -> str:
     Returns ``salt_hex$hash_hex``.
     """
     salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations=260_000)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations=_PBKDF2_ITERATIONS)
     return f"{salt.hex()}${dk.hex()}"
 
 
@@ -57,8 +60,11 @@ def verify_password(password: str, stored: str) -> bool:
         salt = bytes.fromhex(salt_hex)
     except (ValueError, AttributeError):
         return False
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations=260_000)
-    return hmac.compare_digest(dk.hex(), hash_hex)
+    for iterations in (_PBKDF2_ITERATIONS, _LEGACY_PBKDF2_ITERATIONS):
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations=iterations)
+        if hmac.compare_digest(dk.hex(), hash_hex):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

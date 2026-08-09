@@ -131,10 +131,11 @@ class UserDB:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._create_tables()
         from rag.db_migrations import run_migrations
 
