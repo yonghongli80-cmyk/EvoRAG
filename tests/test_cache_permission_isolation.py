@@ -132,7 +132,7 @@ def test_pipeline_cache_hit_filters_unauthorized_sources():
 
 
 def test_pipeline_cache_hit_real_userdb_filters(tmp_path):
-    """真实 UserDB：缓存命中的 private 文档 source 被过滤，public / 无权限记录保留。"""
+    """真实 UserDB：缓存仅保留当前用户可查看的公开 source。"""
     db = UserDB(str(tmp_path / "users.db"))
     try:
         owner = db.create_user("owner_user", "Password1")
@@ -147,7 +147,7 @@ def test_pipeline_cache_hit_real_userdb_filters(tmp_path):
                 sources=[
                     {"doc_name": "secret.txt", "chunk_index": 0},
                     {"doc_name": "public.txt", "chunk_index": 1},
-                    {"doc_name": "legacy.txt", "chunk_index": 2},  # 无权限记录 → 旧文档，保留
+                    {"doc_name": "legacy.txt", "chunk_index": 2},  # 无权限记录 → 拒绝
                 ],
             )
             user = {"id": other, "is_admin": False}
@@ -155,6 +155,6 @@ def test_pipeline_cache_hit_real_userdb_filters(tmp_path):
 
         assert error is None
         assert result["route"] == "cached"
-        assert [s["doc_name"] for s in result["sources"]] == ["public.txt", "legacy.txt"]
+        assert [s["doc_name"] for s in result["sources"]] == ["public.txt"]
     finally:
         db.close()

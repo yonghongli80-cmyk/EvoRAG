@@ -358,6 +358,15 @@ class UserDB:
                 """)
                 self._conn.commit()
 
+            # scope is the canonical visibility value; keep the legacy display
+            # field synchronized for existing rows created before that rule.
+            self._conn.execute("""
+                UPDATE document_permissions
+                SET is_public = CASE WHEN scope = 'public' THEN 1 ELSE 0 END
+                WHERE is_public != CASE WHEN scope = 'public' THEN 1 ELSE 0 END
+            """)
+            self._conn.commit()
+
             # Phase 2 migration: add permission to document_shares if missing
             try:
                 self._conn.execute("SELECT permission FROM document_shares LIMIT 1")
@@ -1031,6 +1040,7 @@ class UserDB:
         """创建文档权限记录。scope 不传时根据 is_public 自动推断。"""
         if scope is None:
             scope = "public" if is_public else "private"
+        is_public = scope == "public"
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO document_permissions (doc_name, kb_id, owner_id, permission_level, is_public, protected, scope) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1049,7 +1059,7 @@ class UserDB:
         if row is None:
             return None
         d = dict(row)
-        d["is_public"] = bool(d.get("is_public", 0))
+        d["is_public"] = d.get("scope") == "public"
         d["protected"] = bool(d.get("protected", 0))
         d["downloadable"] = bool(d.get("downloadable", 1))
         return d
@@ -1064,26 +1074,27 @@ class UserDB:
         if row is None:
             return None
         d = dict(row)
-        d["is_public"] = bool(d.get("is_public", 0))
+        d["is_public"] = d.get("scope") == "public"
         d["protected"] = bool(d.get("protected", 0))
         d["downloadable"] = bool(d.get("downloadable", 1))
         return d
 
-    def toggle_document_visibility(self, doc_id: int) -> bool:
+    def toggle_document_visibility(self, doc_id: int, is_public: bool | None = None) -> bool:
         """切换文档公开/私有状态，返回新的 is_public 值。"""
         with self._lock:
             row = self._conn.execute(
-                "SELECT is_public FROM document_permissions WHERE id = ?", (doc_id,)
+                "SELECT scope FROM document_permissions WHERE id = ?", (doc_id,)
             ).fetchone()
             if not row:
                 return False
-            new_val = 0 if row["is_public"] else 1
+            new_val = row["scope"] != "public" if is_public is None else bool(is_public)
+            scope = "public" if new_val else "private"
             self._conn.execute(
-                "UPDATE document_permissions SET is_public = ? WHERE id = ?",
-                (new_val, doc_id),
+                "UPDATE document_permissions SET is_public = ?, scope = ? WHERE id = ?",
+                (int(new_val), scope, doc_id),
             )
             self._conn.commit()
-            return bool(new_val)
+            return new_val
 
     def delete_document_permission(self, doc_id: int) -> None:
         with self._lock:
@@ -1099,7 +1110,8 @@ class UserDB:
             rows = self._conn.execute(
                 "SELECT DISTINCT dp.doc_name FROM document_permissions dp "
                 "WHERE dp.kb_id = ? AND (dp.owner_id = ? OR dp.scope = 'public' "
-                "OR dp.id IN (SELECT doc_id FROM document_shares WHERE user_id = ?))",
+                "OR (dp.scope = 'shared' AND dp.id IN "
+                "(SELECT doc_id FROM document_shares WHERE user_id = ?)))",
                 (kb_id, user_id, user_id),
             ).fetchall()
         return [r["doc_name"] for r in rows]
@@ -1118,7 +1130,7 @@ class UserDB:
         perm_map = {}
         for r in rows:
             d = dict(r)
-            d["is_public"] = bool(d.get("is_public", 0))
+            d["is_public"] = d.get("scope") == "public"
             d["protected"] = bool(d.get("protected", 0))
             perm_map[d["doc_name"]] = d
         return {name: perm_map.get(name) for name in doc_names}
@@ -1130,14 +1142,14 @@ class UserDB:
         with self._lock:
             placeholders = ",".join("?" for _ in doc_ids)
             rows = self._conn.execute(
-                f"SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, created_at "
+                f"SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, created_at "
                 f"FROM document_permissions WHERE id IN ({placeholders})",
                 doc_ids,
             ).fetchall()
         result = {}
         for r in rows:
             d = dict(r)
-            d["is_public"] = bool(d.get("is_public", 0))
+            d["is_public"] = d.get("scope") == "public"
             d["protected"] = bool(d.get("protected", 0))
             result[d["id"]] = d
         return result
@@ -1167,15 +1179,28 @@ class UserDB:
                 "INSERT INTO document_shares (doc_id, user_id, granted_by, permission) VALUES (?, ?, ?, ?)",
                 (doc_id, user_id, granted_by, permission),
             )
+            self._conn.execute(
+                "UPDATE document_permissions SET scope = 'shared', is_public = 0 WHERE id = ?",
+                (doc_id,),
+            )
             self._conn.commit()
             return cur.lastrowid
 
     def unshare_document(self, doc_id: int, user_id: int) -> None:
         with self._lock:
-            self._conn.execute(
+            cur = self._conn.execute(
                 "DELETE FROM document_shares WHERE doc_id = ? AND user_id = ?",
                 (doc_id, user_id),
             )
+            if cur.rowcount:
+                has_remaining_shares = self._conn.execute(
+                    "SELECT 1 FROM document_shares WHERE doc_id = ? LIMIT 1", (doc_id,)
+                ).fetchone()
+                if not has_remaining_shares:
+                    self._conn.execute(
+                        "UPDATE document_permissions SET scope = 'private', is_public = 0 WHERE id = ?",
+                        (doc_id,),
+                    )
             self._conn.commit()
 
     def is_document_shared(self, doc_id: int, user_id: int, permission: str = None) -> bool:

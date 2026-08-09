@@ -194,13 +194,13 @@ def test_filter_chunks_removes_private_non_owned(db):
 
 
 def test_filter_chunks_old_doc_no_permission_record(db):
-    """旧文档无权限记录，视为公开，保留。"""
+    """旧文档无权限记录时默认拒绝，避免检索泄露。"""
     from rag.models import Chunk
     from rag.permissions import filter_chunks_by_permission
     viewer = _make_user(db, "bob")
     chunks = [Chunk(text="a", doc_name="old_file.pdf", chunk_index=0)]
     result = filter_chunks_by_permission(db, "kb1", chunks, viewer)
-    assert len(result) == 1
+    assert result == []
 
 
 def test_filter_chunks_shared_doc_included(db):

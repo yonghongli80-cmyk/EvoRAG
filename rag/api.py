@@ -107,11 +107,11 @@ def auto_index_on_startup():
                     is_public=True, protected=True
                 )
                 logger.info("创建受保护权限: %s (owner=system)", fname)
-            elif existing.get("owner_id") == SYSTEM_OWNER_ID and (not existing.get("protected") or not existing.get("is_public")):
+            elif existing.get("owner_id") == SYSTEM_OWNER_ID and (not existing.get("protected") or existing.get("scope") != "public"):
                 # 只修复系统所有者(仓库文件)的记录，不修改用户上传的文件
                 with user_db._lock:
                     user_db._conn.execute(
-                        "UPDATE document_permissions SET protected = 1, is_public = 1 WHERE id = ?",
+                        "UPDATE document_permissions SET protected = 1, is_public = 1, scope = 'public' WHERE id = ?",
                         (existing["id"],)
                     )
                     user_db._conn.commit()
@@ -678,20 +678,24 @@ async def list_files(user_id: str = Security(verify_api_key), authorization: str
         perm_map = await asyncio.to_thread(
             user_db.get_document_permissions_by_names, filenames, "rag_docs"
         )
+        accessible_names = set()
+        if user_dict:
+            accessible_names = set(await asyncio.to_thread(
+                user_db.get_accessible_doc_names, "rag_docs", user_dict["id"]
+            ))
         repo_files = _get_repo_file_names()  # 只读一次
         filtered_files = []
         for f in files:
             perm = perm_map.get(f["name"])
             if perm:
-                f["is_public"] = perm.get("is_public", False)
+                scope = perm.get("scope", "private")
+                f["is_public"] = scope == "public"
                 f["protected"] = perm.get("protected", False)
                 f["owner_id"] = perm.get("owner_id")
                 f["is_owner"] = user_dict and perm["owner_id"] == user_dict["id"]
-                # 过滤：私有文件只对 owner 可见
-                if user_dict and not f["is_public"] and not f["protected"] and not f["is_owner"]:
+                if user_dict and f["name"] not in accessible_names:
                     continue
-                # 未登录用户只能看到公开和受保护文件
-                if not user_dict and not f["is_public"] and not f["protected"]:
+                if not user_dict and scope != "public":
                     continue
             else:
                 # 无权限记录：检查是否为仓库文件
@@ -701,11 +705,8 @@ async def list_files(user_id: str = Security(verify_api_key), authorization: str
                     f["owner_id"] = 0
                     f["is_owner"] = False
                 else:
-                    # 用户文件无权限记录，视为公开（向后兼容）
-                    f["is_public"] = True
-                    f["protected"] = False
-                    f["owner_id"] = None
-                    f["is_owner"] = True
+                    # A user file without a permission row cannot be proven public.
+                    continue
             filtered_files.append(f)
         files = filtered_files
 
@@ -751,7 +752,7 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
 
     - admin：可覆盖任意文件
     - owner（权限记录 owner_id == user.id）：可覆盖
-    - 公开文件（is_public）：可覆盖
+    - 公开文件（scope='public'）：可覆盖
     - 无权限记录的既有文件（非 admin、有认证身份）：禁止覆盖
     - 认证关闭下的匿名上传（user 为 None）：仅可覆盖同样无权限记录的既有文件
       （保持认证关闭时的匿名覆盖兼容；不得覆盖有归属/公开记录的文件）
@@ -764,7 +765,7 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
         return False
     if existing_perm["owner_id"] == user["id"]:
         return True
-    if existing_perm.get("is_public"):
+    if existing_perm.get("scope") == "public":
         return True
     return False
 
@@ -1910,15 +1911,16 @@ async def get_document_permissions(doc_id: int, authorization: str = Header(defa
         # 检查查看权限：admin / owner / 共享用户 / 公开文档
         if (not user_dict.get("is_admin")
                 and perm["owner_id"] != user_dict["id"]
-                and not user_db.is_document_shared(doc_id, user_dict["id"])
-                and not perm.get("is_public")):
+                and not (perm.get("scope") == "shared"
+                         and user_db.is_document_shared(doc_id, user_dict["id"]))
+                and perm.get("scope") != "public"):
             raise HTTPException(status_code=403, detail="无权查看该文档权限信息")
         shared_users = user_db.list_shared_users(doc_id)
         owner = user_db.get_user_by_id(perm["owner_id"])
         return {
             "doc_id": doc_id,
             "doc_name": perm["doc_name"],
-            "is_public": perm.get("is_public", False),
+            "is_public": perm.get("scope") == "public",
             "protected": perm.get("protected", False),
             "owner": {"id": owner["id"], "username": owner["username"]} if owner else None,
             "shared_with": shared_users,

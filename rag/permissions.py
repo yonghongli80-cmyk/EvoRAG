@@ -58,8 +58,8 @@ def check_doc_permission(
         # owner / public → 可查看
         if doc["owner_id"] == user["id"] or scope == "public":
             return doc
-        # 共享检查：只要在共享列表里就放行（不依赖 scope 值）
-        if db.is_document_shared(doc["id"], user["id"]):
+        # Shared access is valid only while scope remains shared.
+        if scope == "shared" and db.is_document_shared(doc["id"], user["id"]):
             return doc
         raise HTTPException(status_code=403, detail="无权查看该文档")
 
@@ -129,7 +129,7 @@ def check_kb_permission(
 def get_accessible_doc_names(db: UserDB, kb_id: str, user: dict) -> list[str]:
     """返回用户在指定知识库中有权查看的文档名列表。
 
-    规则：owner 或 is_public 的文档可见。admin 返回 None（不过滤）。
+    规则：owner / scope='public' / scope='shared' 中的被共享用户可见；admin 返回 None（不过滤）。
     """
     if user.get("is_admin"):
         return None  # None 表示不过滤
@@ -150,8 +150,8 @@ def filter_chunks_by_permission(
 
     规则：
     - 管理员：不过滤
-    - 旧文档无权限记录：视为公开，保留
-    - owner 或 is_public：保留
+    - 无权限记录：默认拒绝
+    - owner / scope='public' / scope='shared' 中的被共享用户：保留
     - 其他：过滤掉
     """
     if user.get("is_admin"):
@@ -171,12 +171,9 @@ def filter_chunks_by_permission(
     result = []
     for c in chunks:
         perm = perm_map.get(c.doc_name)
-        if perm is None:
-            # 无权限记录 = 旧文档，视为公开
-            result.append(c)
-        elif c.doc_name in allowed_set:
+        if perm is not None and c.doc_name in allowed_set:
             # 有权限记录且用户有权查看
             result.append(c)
-        # else: 有权限记录但用户无权，过滤掉
+        # else: 无权限记录或用户无权，过滤掉
 
     return result
