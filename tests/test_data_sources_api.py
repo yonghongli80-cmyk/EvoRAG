@@ -5,7 +5,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from config import settings
 from rag.api import app, user_db
+from rag.auth import create_token
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +23,25 @@ def _clean_data_sources():
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _enable_sources_for_admin_tests(monkeypatch):
+    """Exercise source management only with its explicit feature flag and admin."""
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "data_sources_enabled", True)
+    try:
+        user_id = user_db.create_user("_data_source_test_admin", "Password-123!")
+    except ValueError:
+        user_id = user_db.get_user_by_username("_data_source_test_admin")["id"]
+    user_db.set_user_admin(user_id, True)
+    previous_headers = dict(client.headers)
+    client.headers.update({
+        "Authorization": f"Bearer {create_token({'user_id': user_id, 'username': '_data_source_test_admin'})}"
+    })
+    yield
+    client.headers.clear()
+    client.headers.update(previous_headers)
 
 
 # ── POST /sources ────────────────────────────────────────────────────────────

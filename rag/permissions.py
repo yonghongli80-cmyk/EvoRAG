@@ -47,6 +47,9 @@ def check_doc_permission(
         if user.get("is_admin"):
             return None
         raise HTTPException(status_code=403, detail="文件无权限记录，禁止操作")
+    # Tombstoned documents are denied synchronously on every action.
+    if doc.get("deleted_at") is not None:
+        raise HTTPException(status_code=404, detail="文档已删除")
 
     # 管理员绕过
     if user.get("is_admin"):
@@ -58,7 +61,7 @@ def check_doc_permission(
         # owner / public → 可查看
         if doc["owner_id"] == user["id"] or scope == "public":
             return doc
-        # Shared access is valid only while scope remains shared.
+    # Shared access is valid only while scope remains shared.
         if scope == "shared" and db.is_document_shared(doc["id"], user["id"]):
             return doc
         raise HTTPException(status_code=403, detail="无权查看该文档")
@@ -110,16 +113,14 @@ def check_kb_permission(
     if action == "view":
         if meta["owner_id"] == user["id"] or scope == "public":
             return meta
-        # 共享检查：只要在共享列表里就放行（不依赖 scope 值）
-        if db.is_kb_shared(kb_id, user["id"]):
+        if scope == "shared" and db.is_kb_shared(kb_id, user["id"]):
             return meta
         raise HTTPException(status_code=403, detail="无权查看该知识库")
 
     if action in ("edit", "delete"):
         if meta["owner_id"] == user["id"]:
             return meta
-        # 共享检查：需要 edit 权限
-        if db.is_kb_shared(kb_id, user["id"], permission="edit"):
+        if scope == "shared" and db.is_kb_shared(kb_id, user["id"], permission="edit"):
             return meta
         raise HTTPException(status_code=403, detail="无权操作该知识库")
 

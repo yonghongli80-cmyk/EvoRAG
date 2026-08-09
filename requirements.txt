@@ -15,6 +15,7 @@ matplotlib>=3.9,<4
 openpyxl>=3.1,<4
 chardet>=5.2,<6
 requests>=2.33,<3
+feedparser>=6.0,<7
 httpx>=0.28,<1
 python-jose[cryptography]>=3.3,<4
 python-multipart>=0.0.18,<1

@@ -4,6 +4,7 @@ import { useChatStore, type ChatMode } from '../stores/chat'
 
 const props = defineProps<{
   mode?: ChatMode
+  kbId?: string
 }>()
 
 const chatStore = useChatStore()
@@ -13,7 +14,7 @@ async function handleSend() {
   const q = inputText.value.trim()
   if (!q || chatStore.isStreaming) return
   inputText.value = ''
-  await chatStore.sendMessage(q, props.mode)
+  await chatStore.sendMessage(q, props.mode, props.kbId)
 }
 
 function handleKeydown(e: KeyboardEvent) {

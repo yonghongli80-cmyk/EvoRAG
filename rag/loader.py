@@ -7,30 +7,57 @@ from pathlib import Path
 from config import settings
 from rag.cleaner import clean_text, detect_and_decode
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx"}
-
 
 def load(file_path: str) -> str:
+    """Join normalized extraction units for legacy callers.
+
+    The unified format-capability registry routes clean files through the
+    extractors; legacy per-format loaders remain as a lenient fallback so
+    existing callers keep their historical behavior. Strict signature/MIME
+    enforcement lives in the material staging boundary.
+    """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件不存在: {file_path}")
     if os.path.getsize(file_path) > settings.max_upload_bytes:
         raise ValueError(f"文件大小超过 {settings.max_upload_bytes} 字节限制")
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"不支持的文件格式: {ext}")
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    from rag.materials.formats import build_default_format_registry
+    from rag.materials.extraction import extract_material
+
+    with path.open("rb") as source:
+        signature = source.read(16)
+    resolution = build_default_format_registry().resolve(path.name, None, signature)
+    if resolution.can_index:
+        material = extract_material(path, version_id=0, resolution=resolution)
+        return "\n\n".join(unit.text for unit in material.units if unit.text)
     if ext == ".pdf":
         return load_pdf(file_path)
     if ext == ".docx":
         return load_docx(file_path)
     if ext == ".xlsx":
         return load_excel(file_path)
-    # .txt, .md files: detect encoding + clean
     with open(file_path, "rb") as f:
         raw = f.read(settings.max_upload_bytes + 1)
     if len(raw) > settings.max_upload_bytes:
         raise ValueError(f"文件大小超过 {settings.max_upload_bytes} 字节限制")
     text = detect_and_decode(raw)
     return clean_text(text)
+
+
+def _supported_extensions() -> set[str]:
+    """Compatibility set derived from the unified format registry."""
+    from rag.materials.formats import build_default_format_registry
+
+    registry = build_default_format_registry()
+    extensions: set[str] = set()
+    for capability in registry._by_key.values():
+        if capability.extract_text or capability.structured_query or capability.semantic_index:
+            extensions.update(f".{ext}" for ext in capability.extensions)
+    return extensions
+
+
+SUPPORTED_EXTENSIONS = _supported_extensions()
 
 
 def _ensure_java_on_path():

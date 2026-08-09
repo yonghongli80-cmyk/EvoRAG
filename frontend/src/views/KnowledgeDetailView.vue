@@ -2,6 +2,8 @@
 import { ref, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../utils/api'
+import { downloadLibraryFile } from '../api/files'
+import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
 import MessageBubble from '../components/MessageBubble.vue'
@@ -23,6 +25,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
+const authStore = useAuthStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 
 const getKbId = () => route.params.id as string
@@ -138,7 +141,7 @@ function formatTime(ts: string | number) {
 }
 
 function askSuggested(q: string) {
-  chatStore.sendMessage(q)
+  chatStore.sendMessage(q, 'kb', getKbId())
 }
 
 // ── Settings menu actions ──
@@ -290,10 +293,10 @@ async function addFileToKB() {
   addingFile.value = true
   try {
     const formData = new FormData()
-    const res = await api.get(`/data/upload/${encodeURIComponent(selectedFile.value.name)}`, {
-      responseType: 'blob'
-    })
-    const blob = res.data
+    const blob = await downloadLibraryFile(
+      selectedFile.value.name,
+      authStore.getAuthHeaders()
+    )
     formData.append('file', blob, selectedFile.value.name)
 
     await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
@@ -551,7 +554,7 @@ function parseToc(toc: string | object): any {
         </button>
       </div>
 
-      <ChatInput v-if="chatStore.currentConvId" mode="kb" />
+      <ChatInput v-if="chatStore.currentConvId" mode="kb" :kb-id="getKbId()" />
     </div>
 
     <!-- Dialogs -->

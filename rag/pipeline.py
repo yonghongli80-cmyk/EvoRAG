@@ -1,6 +1,7 @@
 import asyncio
 import json as _json
 import logging
+import threading
 import time
 from typing import NamedTuple
 
@@ -14,8 +15,8 @@ from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
 from rag.reranker import Reranker
-from rag.redis_cache import RedisCache
 from rag.retriever import Retriever
+from rag.redis_cache import RedisCache  # Kept as a public compatibility import; final answers are not cached.
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
 from rag.vector_store import add, clear
 
@@ -82,8 +83,6 @@ class RAGPipeline:
 
         self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
-        self._cache = RedisCache()
-
         self._owns_feedback_processor = feedback_processor is None
         self._owns_gap_analyzer = gap_analyzer is None
         if feedback_processor is None:
@@ -97,6 +96,8 @@ class RAGPipeline:
         self._feedback_processor = feedback_processor
         self._gap_analyzer = gap_analyzer
         self._closed = False
+        self._agent_lock = threading.Lock()
+        self._async_agent_lock = asyncio.Lock()
 
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
@@ -115,7 +116,7 @@ class RAGPipeline:
             self._gap_analyzer.close()
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
-        """公共逻辑：guard -> cache -> route -> retrieve -> rerank -> build_messages。"""
+        """公共逻辑：guard -> route -> retrieve -> rerank -> build_messages。"""
         question = sanitize_input(question)
         guard = check_injection(question)
         if guard.blocked:
@@ -123,14 +124,13 @@ class RAGPipeline:
 
         cache_key_kb = kb_id or self._kb_id
         cache_key_user = user["id"] if user else "__anon__"
-        cached = self._cache.get(question, cache_key_kb, cache_key_user)
+        cached = None  # Final-answer caching is disabled until ACL versioning is end-to-end.
         if cached:
             # 缓存命中时也要做权限过滤：sources 可能引用用户无权查看的文档
             sources = cached.get("sources") or [{"doc_name": "缓存", "chunk_index": 0}]
             if user is not None and self._user_db is not None:
                 sources = self._filter_sources_by_permission(sources, cache_key_kb, user)
             return {"route": "cached", "answer": cached.get("answer", ""), "context": [], "sources": sources}, None
-
         from rag.agent import route_question
         route = route_question(question)
 
@@ -154,13 +154,28 @@ class RAGPipeline:
                 feedback_weight_cache[chunk_hash] = 1.0 if weight is None else weight
             return feedback_weight_cache[chunk_hash]
 
-        raw_context = self.retriever.retrieve(
-            rewritten,
-            top_k=top_k * oversample_factor,
-            doc_name=doc_name,
-            tags=tags,
-            weights=feedback_weight,
-        )
+        if user is not None and self._user_db is not None:
+            from rag.versioned_retrieval import retrieve_current_then_history
+
+            raw_context = retrieve_current_then_history(
+                self.retriever,
+                rewritten,
+                top_k=top_k * oversample_factor,
+                user=user,
+                user_db=self._user_db,
+                kb_id=kb_id or self._kb_id,
+                doc_name=doc_name,
+                tags=tags,
+                weights=feedback_weight,
+            )
+        else:
+            raw_context = self.retriever.retrieve(
+                rewritten,
+                top_k=top_k * oversample_factor,
+                doc_name=doc_name,
+                tags=tags,
+                weights=feedback_weight,
+            )
         context = self.reranker.rerank(rewritten, raw_context)
 
         # 权限过滤：移除无权文档的 chunks（user is not None 且有 user_db 时才过滤）
@@ -191,7 +206,17 @@ class RAGPipeline:
         sid = session_id or self.session_id or "default"
         messages = self.memory.build_messages(sid, question, context)
         sources = [
-            {"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text_preview": c.text[:100]} for c in context
+            {
+                "doc_name": c.doc_name,
+                "chunk_index": c.chunk_index,
+                "text_preview": c.text[:100],
+                "document_id": c.document_id,
+                "document_version_id": c.document_version_id,
+                "section_title": c.section_title,
+                "is_historical": c.historical_weight < 1.0,
+                "rank": i,
+            }
+            for i, c in enumerate(context)
         ]
         return {
             "route": "rag", "question": question, "context": context,
@@ -270,7 +295,6 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer, kb_id or self._kb_id, user["id"] if user else "__anon__", sources=sources)
         return QueryResult(answer=answer, context=context, sources=sources)
 
     async def query_stream(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
@@ -353,15 +377,6 @@ class RAGPipeline:
         await asyncio.to_thread(self.memory.add_message, sid, "assistant", answer)
         if await asyncio.to_thread(self.memory.should_summarize, sid):
             await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
-        await asyncio.to_thread(
-            self._cache.set,
-            question,
-            answer,
-            kb_id or self._kb_id,
-            user["id"] if user else "__anon__",
-            sources=sources,
-        )
-
         yield 'data: {"type": "done"}\n\n'
 
 def main():

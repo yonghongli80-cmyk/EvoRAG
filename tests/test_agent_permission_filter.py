@@ -159,8 +159,7 @@ def test_pipeline_agent_route_passes_user_kb_to_run(mock_route):
     """agent 分支把 user/kb_id 透传给 agent.run。"""
     p = _make_pipeline()
     user = {"id": 1, "is_admin": False}
-    with patch.object(p._cache, "get", return_value=None) as mock_get, \
-         patch.object(p.agent, "run", return_value="agent answer") as mock_run:
+    with patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率", user=user, kb_id="kb1")
     assert result.answer == "agent answer"
     mock_run.assert_called_once()
@@ -175,8 +174,7 @@ def test_pipeline_agent_route_passes_user_kb_to_run(mock_route):
 def test_pipeline_agent_route_without_user_backward_compat(mock_route):
     """无 user/kb_id 时保持旧调用签名 run(question)。"""
     p = _make_pipeline()
-    with patch.object(p._cache, "get", return_value=None) as mock_get, \
-         patch.object(p.agent, "run", return_value="agent answer") as mock_run:
+    with patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率")
     assert result.answer == "agent answer"
     mock_run.assert_called_once()
@@ -206,6 +204,7 @@ def test_run_captures_user_per_invocation_and_filters_private_chunk(mock_check, 
         retriever.retrieve.return_value = [secret_chunk, public_chunk]
 
         agent = _make_agent(retriever, kb_id="kb1", user_db=db)
+        agent._ensure_agent()
         retrieve_tool = _find_retrieve_tool(agent)
 
         def fake_invoke(messages, config=None):
@@ -313,6 +312,7 @@ def test_regenerate_agent_route_filters_private_chunk(mock_check, tmp_path):
         retriever.retrieve.return_value = [secret_chunk, public_chunk]
 
         p = _make_regenerate_pipeline(db, retriever)
+        p.agent._ensure_agent()
         retrieve_tool = _find_retrieve_tool(p.agent)
 
         def fake_invoke(messages, config=None):

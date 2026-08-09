@@ -7,9 +7,17 @@ import json
 import os
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit as _urlsplit
 from urllib.parse import urlunsplit as _urlunsplit
+
+from config import settings
+
+
+class VersionConflict(Exception):
+    """Raised when a version operation cannot proceed due to state conflict."""
 
 
 def _validate_password_strength(password: str) -> None:
@@ -142,6 +150,31 @@ class UserDB:
         run_migrations(self._conn)
 
     # ------------------------------------------------------------------
+    # Transaction helpers
+    # ------------------------------------------------------------------
+
+    @contextmanager
+    def transaction(self, immediate: bool = False):
+        """Own exactly one BEGIN/COMMIT/ROLLBACK.
+
+        Callers must already hold ``self._lock``. Row-mutation helpers
+        decorated with ``_in_tx`` never begin, commit, or roll back a
+        transaction themselves; compound operations wrap them in one
+        public transaction so a failure rolls back all rows together.
+        """
+        if immediate:
+            self._conn.execute("BEGIN IMMEDIATE")
+        else:
+            self._conn.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
 
@@ -202,6 +235,7 @@ class UserDB:
                     summary TEXT DEFAULT '',
                     chunk_count INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'pending',
+                    last_error TEXT DEFAULT '',
                     added_at TEXT DEFAULT (datetime('now')),
                     UNIQUE(kb_id, filename)
                 );
@@ -277,6 +311,70 @@ class UserDB:
 
                 CREATE INDEX IF NOT EXISTS idx_kb_shares_user ON kb_shares(user_id);
                 CREATE INDEX IF NOT EXISTS idx_kb_shares_kb ON kb_shares(kb_id);
+
+                CREATE TABLE IF NOT EXISTS document_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    version_no INTEGER NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    uploaded_by INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('staging', 'current', 'historical', 'failed')),
+                    validity_status TEXT NOT NULL CHECK(validity_status IN (
+                        'valid', 'reported_outdated', 'confirmed_outdated'
+                    )) DEFAULT 'valid',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    superseded_at REAL,
+                    UNIQUE(document_id, version_no),
+                    FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,
+                    FOREIGN KEY(uploaded_by) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS answer_citations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assistant_message_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    document_version_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    section_title TEXT NOT NULL,
+                    text_preview TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    is_historical INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    FOREIGN KEY(assistant_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT NOT NULL CHECK(task_type IN (
+                        'outdated', 'not_useful', 'insufficient_evidence', 'evidence_conflict'
+                    )),
+                    cluster_key TEXT NOT NULL,
+                    active_key TEXT UNIQUE,
+                    document_id INTEGER,
+                    document_version_id INTEGER,
+                    assigned_to INTEGER,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'open', 'in_progress', 'resolved', 'dismissed', 'confirmed_expired'
+                    )),
+                    report_count INTEGER NOT NULL DEFAULT 1,
+                    resolution_note TEXT NOT NULL DEFAULT '',
+                    due_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    resolved_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    old_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
                 """
             )
             # Add permission_level column to users if it doesn't exist (idempotent)
@@ -403,6 +501,98 @@ class UserDB:
                 "UPDATE data_sources SET owner_id = 'admin' WHERE owner_id IS NULL OR owner_id = ''"
             )
             self._conn.commit()
+            # Persist only a bounded diagnostic for retryable KB document work.
+            try:
+                self._conn.execute("SELECT last_error FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN last_error TEXT DEFAULT ''")
+                self._conn.commit()
+
+            # Trusted knowledge loop migrations: version pointers on documents.
+            try:
+                self._conn.execute("SELECT current_version_id FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN current_version_id INTEGER")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT source_type FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN source_type TEXT NOT NULL DEFAULT 'upload'")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT source_key FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT updated_at FROM document_permissions LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE document_permissions ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
+                self._conn.commit()
+
+            # Trusted knowledge loop migrations: citation persistence columns.
+            try:
+                self._conn.execute("SELECT persistence_key FROM chat_messages LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN persistence_key TEXT")
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN citations_hash TEXT")
+                self._conn.execute("ALTER TABLE chat_messages ADD COLUMN citation_count INTEGER DEFAULT 0")
+                self._conn.commit()
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_persistence "
+                "ON chat_messages(conversation_id, persistence_key)"
+            )
+
+            # Trusted knowledge loop migrations: structured feedback columns.
+            for column, ddl in (
+                ("kind", "TEXT NOT NULL DEFAULT 'not_useful'"),
+                ("question_text", "TEXT NOT NULL DEFAULT ''"),
+                ("question_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("citation_id", "INTEGER"),
+                ("suggested_answer", "TEXT NOT NULL DEFAULT ''"),
+                ("status", "TEXT NOT NULL DEFAULT 'submitted'"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM feedback LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE feedback ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
+
+            # Trusted knowledge loop migrations: version pointers on kb_documents.
+            try:
+                self._conn.execute("SELECT document_id FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN document_id INTEGER")
+                self._conn.commit()
+            try:
+                self._conn.execute("SELECT document_version_id FROM kb_documents LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE kb_documents ADD COLUMN document_version_id INTEGER")
+                self._conn.commit()
+
+            # Material lifecycle migrations: logical metadata columns.
+            for column, ddl in (
+                ("logical_path", "TEXT NOT NULL DEFAULT ''"),
+                ("document_type", "TEXT NOT NULL DEFAULT ''"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("subject_user_id", "INTEGER"),
+                ("metadata_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("deleted_at", "REAL"),
+                ("deleted_by", "INTEGER"),
+                ("restore_until", "REAL"),
+                ("container_document_id", "INTEGER"),
+                ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+                ("purge_state", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE document_permissions ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
 
     # ------------------------------------------------------------------
     # User Search (Phase 2)
@@ -514,6 +704,65 @@ class UserDB:
             self._conn.commit()
             return cur.rowcount > 0
 
+    # ------------------------------------------------------------------
+    # KB Documents (durable source-file lifecycle)
+    # ------------------------------------------------------------------
+
+    def create_kb_document_pending(self, kb_id: str, filename: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO kb_documents (kb_id, filename, status) VALUES (?, ?, 'pending')",
+                (kb_id, filename),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_kb_document(
+        self, document_id: int, file_path: str, toc: str, summary: str, chunk_count: int
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE kb_documents SET file_path = ?, toc = ?, summary = ?, "
+                "chunk_count = ?, status = 'indexed', last_error = '' WHERE id = ?",
+                (file_path, toc, summary, chunk_count, document_id),
+            )
+            self._conn.commit()
+
+    def set_kb_document_state(
+        self, document_id: int, status: str, last_error: str = ""
+    ) -> None:
+        if status not in {"pending", "indexed", "deleting", "delete_failed"}:
+            raise ValueError("invalid kb document status")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE kb_documents SET status = ?, last_error = ? WHERE id = ?",
+                (status, last_error[:500], document_id),
+            )
+            self._conn.commit()
+
+    def get_kb_document(self, kb_id: str, filename: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, kb_id, filename, file_path, toc, summary, chunk_count, status "
+                "FROM kb_documents WHERE kb_id = ? AND filename = ?",
+                (kb_id, filename),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_kb_documents(self, kb_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, kb_id, filename, file_path, toc, summary, chunk_count, status "
+                "FROM kb_documents WHERE kb_id = ? ORDER BY id",
+                (kb_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_kb_document(self, document_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM kb_documents WHERE id = ?", (document_id,))
+            self._conn.commit()
+
     def update_kb_scope(self, kb_id: str, scope: str) -> None:
         """更新 KB 的 scope 字段。scope 必须是 'private' 或 'public'。
 
@@ -532,6 +781,34 @@ class UserDB:
                 (kb_id,),
             )
             self._conn.commit()
+
+    def update_kb_overview(self, kb_id: str, overview: str) -> bool:
+        """Update an existing knowledge base overview through the shared connection."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_metadata SET overview = ? WHERE kb_id = ?",
+                (overview, kb_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_kb_document_toc(self, kb_id: str, filename: str, toc: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
+                (toc, kb_id, filename),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def update_kb_document_summary(self, kb_id: str, filename: str, summary: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE kb_documents SET summary = ? WHERE kb_id = ? AND filename = ?",
+                (summary, kb_id, filename),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     def get_kb_metadata_by_names(self, kb_ids: list[str]) -> dict[str, dict[str, Any] | None]:
         """批量查询 KB 元数据。返回 {kb_id: meta_dict_or_None}。"""
@@ -707,16 +984,27 @@ class UserDB:
             self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
 
-    def get_messages(self, conversation_id: int, user_id: int | str) -> list[dict[str, Any]]:
-        """Return all messages in a conversation (only if owned by user_id)."""
+    def get_messages(self, conversation_id: int, user_id: int | str | None = None) -> list[dict[str, Any]]:
+        """Return all messages in a conversation.
+
+        When ``user_id`` is given, ownership is verified; otherwise all
+        messages for the conversation are returned.
+        """
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
-                "FROM chat_messages m "
-                "JOIN conversations c ON m.conversation_id = c.id "
-                "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.created_at",
-                (conversation_id, int(user_id)),
-            ).fetchall()
+            if user_id is not None:
+                rows = self._conn.execute(
+                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "FROM chat_messages m "
+                    "JOIN conversations c ON m.conversation_id = c.id "
+                    "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.created_at",
+                    (conversation_id, int(user_id)),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "FROM chat_messages m WHERE m.conversation_id = ? ORDER BY m.created_at",
+                    (conversation_id,),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def update_message(self, message_id: int, new_content: str, user_id: int = None):
@@ -776,6 +1064,431 @@ class UserDB:
                 (message_id, int(user_id)),
             ).fetchone()
         return row is not None
+
+    # ------------------------------------------------------------------
+    # Structured knowledge feedback
+    # ------------------------------------------------------------------
+
+    def get_message_question(self, assistant_message_id: int) -> str:
+        """Return the user question preceding an assistant message, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT content FROM chat_messages "
+                "WHERE conversation_id = (SELECT conversation_id FROM chat_messages WHERE id = ?) "
+                "AND role = 'user' AND id < ? ORDER BY id DESC LIMIT 1",
+                (assistant_message_id, assistant_message_id),
+            ).fetchone()
+        return row["content"] if row else ""
+
+    def add_knowledge_feedback(
+        self,
+        message_id: int,
+        user_id: int | str,
+        kind: str,
+        question_text: str,
+        question_hash: str,
+        citation_id: int | None,
+        suggested_answer: str,
+        comment: str = "",
+    ) -> int:
+        """Insert or replace one structured feedback row and return its id."""
+        value = 1 if kind == "useful" else -1
+        with self._lock, self.transaction(immediate=True):
+            self._conn.execute(
+                "INSERT OR REPLACE INTO feedback "
+                "(message_id, user_id, value, comment, kind, question_text, question_hash, "
+                "citation_id, suggested_answer, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted')",
+                (
+                    message_id,
+                    int(user_id),
+                    value,
+                    comment,
+                    kind,
+                    question_text,
+                    question_hash,
+                    citation_id,
+                    suggested_answer,
+                ),
+            )
+            row = self._conn.execute(
+                "SELECT id FROM feedback WHERE message_id = ? AND user_id = ?",
+                (message_id, int(user_id)),
+            ).fetchone()
+            return int(row["id"])
+
+    def list_user_feedback(
+        self, user_id: int | str, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return the current user's feedback rows plus the total count."""
+        uid = int(user_id)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total_row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM feedback WHERE user_id = ?", (uid,)
+            ).fetchone()
+            rows = self._conn.execute(
+                "SELECT f.id, f.message_id, f.kind, f.question_text, f.question_hash, "
+                "f.citation_id, f.comment, f.suggested_answer, f.status, f.created_at, "
+                "u.username AS submitter_name "
+                "FROM feedback f JOIN users u ON u.id = f.user_id "
+                "WHERE f.user_id = ? ORDER BY f.created_at DESC LIMIT ? OFFSET ?",
+                (uid, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total_row["cnt"])
+
+    # ------------------------------------------------------------------
+    # Knowledge correction tasks
+    # ------------------------------------------------------------------
+
+    def get_feedback(self, feedback_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, message_id, user_id, kind, question_text, question_hash, "
+                "citation_id, suggested_answer, comment, status, created_at "
+                "FROM feedback WHERE id = ?",
+                (feedback_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_answer_citation_by_id(self, citation_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM answer_citations WHERE id = ?", (citation_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def count_distinct_feedback_users(self, question_hash: str, days: int) -> int:
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT user_id) AS cnt FROM feedback "
+                "WHERE kind = 'not_useful' AND question_hash = ? AND created_at >= ?",
+                (question_hash, cutoff),
+            ).fetchone()
+        return int(row["cnt"])
+
+    def upsert_active_task(
+        self,
+        *,
+        task_type: str,
+        cluster_key: str,
+        active_key: str,
+        document_id: int | None,
+        document_version_id: int | None,
+        assigned_to: int | None,
+        report_count: int,
+    ) -> int:
+        now = time.time()
+        due_at = now + settings.knowledge_task_due_days * 86400
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT id FROM knowledge_tasks WHERE active_key = ? "
+                "AND status IN ('open', 'in_progress')",
+                (active_key,),
+            ).fetchone()
+            if row is not None:
+                self._conn.execute(
+                    "UPDATE knowledge_tasks SET report_count = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (report_count, now, row["id"]),
+                )
+                return int(row["id"])
+            cur = self._conn.execute(
+                "INSERT INTO knowledge_tasks "
+                "(task_type, cluster_key, active_key, document_id, document_version_id, "
+                "assigned_to, status, report_count, due_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
+                (
+                    task_type,
+                    cluster_key,
+                    active_key,
+                    document_id,
+                    document_version_id,
+                    assigned_to,
+                    report_count,
+                    due_at,
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_knowledge_task(self, task_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_tasks_for_user(
+        self, user_id: int | str, page: int = 1, page_size: int = 20
+    ) -> tuple[list[dict[str, Any]], int]:
+        uid = int(user_id)
+        offset = (page - 1) * page_size
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE assigned_to = ?",
+                (uid,),
+            ).fetchone()
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge_tasks WHERE assigned_to = ? "
+                "ORDER BY due_at ASC LIMIT ? OFFSET ?",
+                (uid, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total["cnt"])
+
+    def list_tasks_admin(
+        self,
+        status: str | None = None,
+        assignee_id: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        offset = (page - 1) * page_size
+        conditions = []
+        params: list = []
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if assignee_id is not None:
+            conditions.append("assigned_to = ?")
+            params.append(assignee_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM knowledge_tasks {where}", params
+            ).fetchone()
+            rows = self._conn.execute(
+                f"SELECT * FROM knowledge_tasks {where} ORDER BY due_at ASC LIMIT ? OFFSET ?",
+                (*params, page_size, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], int(total["cnt"])
+
+    def transition_knowledge_task(
+        self,
+        task_id: int,
+        actor_id: int,
+        new_status: str,
+        note: str,
+        expected_updated_at: float,
+    ) -> dict[str, Any] | None:
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT status, updated_at FROM knowledge_tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            old_status = row["status"]
+            resolved_at = now if new_status in {"resolved", "dismissed", "confirmed_expired"} else None
+            cur = self._conn.execute(
+                "UPDATE knowledge_tasks SET status = ?, active_key = NULL, "
+                "resolution_note = ?, updated_at = ?, resolved_at = ? "
+                "WHERE id = ? AND updated_at = ?",
+                (new_status, note, now, resolved_at, task_id, expected_updated_at),
+            )
+            if cur.rowcount == 0:
+                raise VersionConflict("task_state_conflict")
+            self._conn.execute(
+                "INSERT INTO knowledge_task_events "
+                "(task_id, actor_id, old_status, new_status, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (task_id, actor_id, old_status, new_status, note, now),
+            )
+        return self.get_knowledge_task(task_id)
+
+    def reassign_knowledge_task(self, task_id: int, assignee_id: int | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE knowledge_tasks SET assigned_to = ? WHERE id = ?",
+                (assignee_id, task_id),
+            )
+            self._conn.commit()
+
+    def set_document_owner(self, document_id: int, owner_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_permissions SET owner_id = ? WHERE id = ?",
+                (owner_id, document_id),
+            )
+            self._conn.commit()
+
+    def list_task_reporters(self, task_id: int) -> list[str]:
+        task = self.get_knowledge_task(task_id)
+        if task is None:
+            return []
+        cutoff = task["created_at"] - settings.feedback_cluster_days * 86400
+        with self._lock:
+            if task["task_type"] == "outdated":
+                rows = self._conn.execute(
+                    "SELECT DISTINCT u.username FROM feedback f "
+                    "JOIN answer_citations c ON c.id = f.citation_id "
+                    "JOIN users u ON u.id = f.user_id "
+                    "WHERE c.document_id = ? AND f.kind = 'outdated' AND f.created_at >= ?",
+                    (task["document_id"], cutoff),
+                ).fetchall()
+            else:
+                prefix = "not_useful:"
+                if task["cluster_key"].startswith(prefix):
+                    qh = task["cluster_key"].split(":")[1]
+                else:
+                    qh = None
+                if qh is None:
+                    return []
+                rows = self._conn.execute(
+                    "SELECT DISTINCT u.username FROM feedback f JOIN users u ON u.id = f.user_id "
+                    "WHERE f.kind = 'not_useful' AND f.question_hash = ? AND f.created_at >= ?",
+                    (qh, cutoff),
+                ).fetchall()
+        return [r["username"] for r in rows]
+
+    def task_summary(self) -> dict[str, Any]:
+        now = time.time()
+        with self._lock:
+            open_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE status = 'open'"
+            ).fetchone()["cnt"]
+            overdue_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks "
+                "WHERE status IN ('open', 'in_progress') AND due_at < ?",
+                (now,),
+            ).fetchone()["cnt"]
+            outdated_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE task_type = 'outdated' "
+                "AND status IN ('open', 'in_progress')"
+            ).fetchone()["cnt"]
+            not_useful_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM knowledge_tasks WHERE task_type = 'not_useful' "
+                "AND status IN ('open', 'in_progress')"
+            ).fetchone()["cnt"]
+            stale_cutoff = now - settings.knowledge_stale_days * 86400
+            stale_count = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM document_permissions "
+                "WHERE current_version_id IS NOT NULL AND updated_at < ?",
+                (stale_cutoff,),
+            ).fetchone()["cnt"]
+        return {
+            "open": int(open_count),
+            "overdue": int(overdue_count),
+            "outdated": int(outdated_count),
+            "not_useful": int(not_useful_count),
+            "stale_knowledge_bases": int(stale_count),
+        }
+
+    # ------------------------------------------------------------------
+    # Assistant answers with citations
+    # ------------------------------------------------------------------
+
+    def _insert_message_in_tx(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        persistence_key: str | None = None,
+        citations_hash: str | None = None,
+        citation_count: int = 0,
+    ) -> int:
+        """Insert one message row inside an already-open transaction."""
+        cur = self._conn.execute(
+            "INSERT INTO chat_messages "
+            "(conversation_id, role, content, persistence_key, citations_hash, citation_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (conversation_id, role, content, persistence_key, citations_hash, citation_count),
+        )
+        return int(cur.lastrowid)
+
+    def _insert_answer_citations_in_tx(self, assistant_message_id: int, citations: list) -> None:
+        """Insert citation rows inside an already-open transaction."""
+        for citation in citations:
+            self._conn.execute(
+                "INSERT INTO answer_citations "
+                "(assistant_message_id, document_id, document_version_id, chunk_index, "
+                "section_title, text_preview, rank, is_historical) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    assistant_message_id,
+                    citation.document_id,
+                    citation.document_version_id,
+                    citation.chunk_index,
+                    citation.section_title,
+                    citation.text_preview,
+                    citation.rank,
+                    int(citation.is_historical),
+                ),
+            )
+
+    def persist_assistant_answer_with_citations(
+        self,
+        conversation_id: int,
+        answer: str,
+        citations: list,
+        persistence_key: str,
+    ) -> int:
+        """Persist one assistant answer and its citations atomically.
+
+        Retrying with the same ``persistence_key`` returns the existing
+        message only when content, citation hash, and count all match;
+        otherwise a :class:`VersionConflict` is raised instead of silently
+        storing different content.
+        """
+        citations_hash = self._citations_hash(citations)
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT id, content, citations_hash, citation_count FROM chat_messages "
+                "WHERE conversation_id = ? AND persistence_key = ?",
+                (conversation_id, persistence_key),
+            ).fetchone()
+            if row is not None:
+                if (
+                    row["content"] == answer
+                    and row["citations_hash"] == citations_hash
+                    and row["citation_count"] == len(citations)
+                ):
+                    return int(row["id"])
+                raise VersionConflict("answer persistence idempotency conflict")
+            message_id = self._insert_message_in_tx(
+                conversation_id,
+                "assistant",
+                answer,
+                persistence_key,
+                citations_hash,
+                len(citations),
+            )
+            self._insert_answer_citations_in_tx(message_id, citations)
+            return message_id
+
+    @staticmethod
+    def _citations_hash(citations: list) -> str:
+        import json as _json
+
+        rows = sorted(
+            (
+                c.document_id,
+                c.document_version_id,
+                c.chunk_index,
+                c.section_title,
+                c.text_preview,
+                c.rank,
+                int(c.is_historical),
+            )
+            for c in citations
+        )
+        digest = hashlib.sha256(_json.dumps(rows, ensure_ascii=False).encode("utf-8"))
+        return digest.hexdigest()
+
+    def get_answer_citations(self, assistant_message_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT c.id, c.document_id, c.document_version_id, c.chunk_index, "
+                "c.section_title, c.text_preview, c.rank, c.is_historical, c.created_at, "
+                "v.version_no, v.original_filename, v.created_at AS version_created_at "
+                "FROM answer_citations c "
+                "LEFT JOIN document_versions v ON v.id = c.document_version_id "
+                "WHERE c.assistant_message_id = ? ORDER BY c.rank",
+                (assistant_message_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Data Sources
@@ -1083,10 +1796,18 @@ class UserDB:
             self._conn.commit()
             return cur.lastrowid
 
+    _DOCUMENT_PERMISSION_COLUMNS = (
+        "id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, "
+        "downloadable, current_version_id, source_type, source_key, updated_at, created_at, "
+        "logical_path, document_type, tags_json, subject_user_id, metadata_version, "
+        "deleted_at, deleted_by, restore_until, container_document_id, container_relative_path, "
+        "purge_state"
+    )
+
     def get_document_permission(self, doc_name: str, kb_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, downloadable, created_at "
+                f"SELECT {self._DOCUMENT_PERMISSION_COLUMNS} "
                 "FROM document_permissions WHERE doc_name = ? AND kb_id = ?",
                 (doc_name, kb_id),
             ).fetchone()
@@ -1101,7 +1822,7 @@ class UserDB:
     def get_document_permission_by_id(self, doc_id: int) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT id, doc_name, kb_id, owner_id, permission_level, is_public, protected, scope, downloadable, created_at "
+                f"SELECT {self._DOCUMENT_PERMISSION_COLUMNS} "
                 "FROM document_permissions WHERE id = ?",
                 (doc_id,),
             ).fetchone()
@@ -1214,7 +1935,8 @@ class UserDB:
                 (doc_id, user_id, granted_by, permission),
             )
             self._conn.execute(
-                "UPDATE document_permissions SET scope = 'shared', is_public = 0 WHERE id = ?",
+                "UPDATE document_permissions SET scope = 'shared', is_public = 0 "
+                "WHERE id = ? AND scope = 'private'",
                 (doc_id,),
             )
             self._conn.commit()
@@ -1232,7 +1954,8 @@ class UserDB:
                 ).fetchone()
                 if not has_remaining_shares:
                     self._conn.execute(
-                        "UPDATE document_permissions SET scope = 'private', is_public = 0 WHERE id = ?",
+                        "UPDATE document_permissions SET scope = 'private', is_public = 0 "
+                        "WHERE id = ?",
                         (doc_id,),
                     )
             self._conn.commit()
@@ -1270,7 +1993,7 @@ class UserDB:
     def list_shared_users(self, doc_id: int) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT u.id, u.username, ds.granted_by, ds.created_at AS granted_at "
+                "SELECT u.id, u.username, ds.permission, ds.granted_by, ds.created_at AS granted_at "
                 "FROM document_shares ds JOIN users u ON ds.user_id = u.id "
                 "WHERE ds.doc_id = ? ORDER BY ds.created_at",
                 (doc_id,),
@@ -1336,6 +2059,907 @@ class UserDB:
                 (kb_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Document Versions (trusted knowledge loop)
+    # ------------------------------------------------------------------
+
+    def create_document_version(
+        self,
+        document_id: int,
+        original_filename: str,
+        file_path: str,
+        content_hash: str,
+        uploaded_by: int,
+    ) -> int:
+        """Reserve a staging version row and return its id.
+
+        The row is ``staging`` until ``activate_document_version`` promotes
+        it. ``version_no`` is derived per document as max+1.
+        """
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no "
+                "FROM document_versions WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            version_no = int(row["next_no"])
+            cur = self._conn.execute(
+                "INSERT INTO document_versions "
+                "(document_id, version_no, original_filename, file_path, content_hash, uploaded_by, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'staging')",
+                (document_id, version_no, original_filename, file_path, content_hash, uploaded_by),
+            )
+            return int(cur.lastrowid)
+
+    def _activate_document_version_in_tx(
+        self, document_id: int, version_id: int, kb_id: str, filename: str
+    ) -> None:
+        """Promote a staging version inside an already-open transaction.
+
+        This row-mutation primitive never begins, commits, or rolls back a
+        transaction; the caller owns exactly one.
+        """
+        now = time.time()
+        self._conn.execute(
+            "UPDATE document_versions SET status='historical', superseded_at=? "
+            "WHERE document_id=? AND status='current'",
+            (now, document_id),
+        )
+        activated = self._conn.execute(
+            "UPDATE document_versions SET status='current', validity_status='valid' "
+            "WHERE id=? AND document_id=? AND status='staging'",
+            (version_id, document_id),
+        )
+        if activated.rowcount != 1:
+            raise VersionConflict("version is no longer staging")
+        self._conn.execute(
+            "UPDATE document_permissions SET current_version_id=?, updated_at=? WHERE id=?",
+            (version_id, now, document_id),
+        )
+        self._conn.execute(
+            "UPDATE kb_documents SET document_id=?, document_version_id=? "
+            "WHERE kb_id=? AND filename=?",
+            (document_id, version_id, kb_id, filename),
+        )
+
+    def activate_document_version(
+        self, document_id: int, version_id: int, kb_id: str, filename: str
+    ) -> None:
+        """Atomically promote a staging version to current."""
+        with self._lock, self.transaction(immediate=True):
+            self._activate_document_version_in_tx(document_id, version_id, kb_id, filename)
+
+    def get_current_document_version(self, document_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE document_id = ? AND status = 'current'",
+                (document_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_document_versions(self, document_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE document_id = ? ORDER BY version_no DESC",
+                (document_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_version_validity(self, version_id: int, validity_status: str) -> None:
+        if validity_status not in {"valid", "reported_outdated", "confirmed_outdated"}:
+            raise ValueError(f"invalid validity status: {validity_status}")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET validity_status = ? WHERE id = ?",
+                (validity_status, version_id),
+            )
+            self._conn.commit()
+
+    def get_document_version_by_id(self, version_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_version_file_path(self, version_id: int, file_path: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET file_path = ? WHERE id = ?",
+                (file_path, version_id),
+            )
+            self._conn.commit()
+
+    def delete_document_version(self, version_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM document_versions WHERE id = ?", (version_id,)
+            )
+            self._conn.commit()
+
+    def set_version_status(self, version_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_versions SET status = ? WHERE id = ?",
+                (status, version_id),
+            )
+            self._conn.commit()
+
+    def list_document_permissions_all(self) -> list[dict[str, Any]]:
+        """Return every logical document for startup migration and metrics."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, current_version_id "
+                "FROM document_permissions ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Material lifecycle schema (incremental material plan)
+    # ------------------------------------------------------------------
+
+    def foreign_key_check(self) -> list[tuple]:
+        with self._lock:
+            rows = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+        return [tuple(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Material index jobs
+    # ------------------------------------------------------------------
+
+    def enqueue_latest_index_job(
+        self, document_id: int, version_id: int, content_hash: str, not_before: float
+    ) -> int:
+        """Enqueue the latest index job for a document, cancelling prior active ones.
+
+        Enqueue/cancel share one transaction so replacement debounces to the
+        newest version without a window for stale jobs to win.
+        """
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            self._conn.execute(
+                "UPDATE document_index_jobs SET status='cancelled', updated_at=? "
+                "WHERE document_id=? AND status IN ('queued','retry','running')",
+                (now, document_id),
+            )
+            cur = self._conn.execute(
+                "INSERT INTO document_index_jobs "
+                "(document_id, version_id, content_hash, status, available_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (document_id, version_id, content_hash, not_before, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def enqueue_material_job(self, document_id: int, version_id: int) -> int:
+        """Enqueue a job immediately (test and maintenance helper)."""
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            cur = self._conn.execute(
+                "INSERT INTO document_index_jobs "
+                "(document_id, version_id, content_hash, status, available_at, created_at, updated_at) "
+                "VALUES (?, ?, '', 'queued', 0, ?, ?)",
+                (document_id, version_id, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def get_index_job(self, job_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM document_index_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_material_jobs(
+        self,
+        worker_id: str,
+        now: float,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Claim due, unlocked jobs with one compare-and-set update each."""
+        lease_expires = now + lease_seconds
+        claimed: list[dict[str, Any]] = []
+        with self._lock, self.transaction(immediate=True):
+            candidates = self._conn.execute(
+                "SELECT id FROM document_index_jobs "
+                "WHERE status IN ('queued','retry','running') AND available_at <= ? "
+                "AND (lease_expires_at IS NULL OR lease_expires_at < ?) "
+                "ORDER BY available_at LIMIT ?",
+                (now, now, limit),
+            ).fetchall()
+            for row in candidates:
+                # Reclaim queued/retry jobs, or running jobs whose lease expired.
+                cur = self._conn.execute(
+                    "UPDATE document_index_jobs "
+                    "SET status='running', lease_owner=?, lease_expires_at=?, "
+                    "attempt=attempt+1, updated_at=? "
+                    "WHERE id=? AND available_at <= ? "
+                    "AND (status IN ('queued','retry') "
+                    "     OR (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?))",
+                    (worker_id, lease_expires, now, row["id"], now, now),
+                )
+                if cur.rowcount == 1:
+                    job_row = self._conn.execute(
+                        "SELECT * FROM document_index_jobs WHERE id = ?",
+                        (row["id"],),
+                    ).fetchone()
+                    claimed.append(dict(job_row))
+        return claimed
+
+    def create_material_schema(self) -> None:
+        """Apply material-lifecycle schema migrations idempotently.
+
+        Adds logical metadata columns, rebuilds ``document_versions`` to widen
+        its status CHECK for recycle/purge states, and creates the job, archive,
+        organization, and FTS tables.
+        """
+        with self._lock:
+            for column, ddl in (
+                ("logical_path", "TEXT NOT NULL DEFAULT ''"),
+                ("document_type", "TEXT NOT NULL DEFAULT ''"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("subject_user_id", "INTEGER"),
+                ("metadata_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("deleted_at", "REAL"),
+                ("deleted_by", "INTEGER"),
+                ("restore_until", "REAL"),
+                ("container_document_id", "INTEGER"),
+                ("container_relative_path", "TEXT NOT NULL DEFAULT ''"),
+                ("purge_state", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                try:
+                    self._conn.execute(f"SELECT {column} FROM document_permissions LIMIT 1")
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE document_permissions ADD COLUMN {column} {ddl}"
+                    )
+                    self._conn.commit()
+            self._rebuild_document_versions_status()
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS document_index_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    version_id INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    job_type TEXT NOT NULL DEFAULT 'material_index',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    payload_hash TEXT NOT NULL DEFAULT '',
+                    available_at REAL NOT NULL,
+                    lease_owner TEXT,
+                    lease_expires_at REAL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_document_index_jobs_active
+                ON document_index_jobs(document_id, status);
+
+                CREATE TABLE IF NOT EXISTS material_archive_manifests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    container_document_id INTEGER NOT NULL,
+                    container_version_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending_confirmation',
+                    entry_count INTEGER NOT NULL DEFAULT 0,
+                    total_bytes INTEGER NOT NULL DEFAULT 0,
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    created_by INTEGER NOT NULL,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    expires_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS material_archive_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_id INTEGER NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    normalized_path TEXT NOT NULL,
+                    child_source_key TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(manifest_id) REFERENCES material_archive_manifests(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_proposals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id INTEGER NOT NULL,
+                    instruction_hash TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    target_path TEXT NOT NULL,
+                    add_tags TEXT NOT NULL DEFAULT '[]',
+                    remove_tags TEXT NOT NULL DEFAULT '[]',
+                    document_type TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(proposal_id) REFERENCES material_organization_proposals(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    proposal_id INTEGER,
+                    actor_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'applied',
+                    created_at REAL NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    UNIQUE(proposal_id, idempotency_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS material_organization_batch_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    before_logical_path TEXT NOT NULL DEFAULT '',
+                    after_logical_path TEXT NOT NULL DEFAULT '',
+                    before_metadata_version INTEGER NOT NULL DEFAULT 0,
+                    after_metadata_version INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'applied',
+                    reason_code TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(batch_id) REFERENCES material_organization_batches(id) ON DELETE CASCADE
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS material_search_fts USING fts5(
+                    document_id UNINDEXED,
+                    version_id UNINDEXED,
+                    filename,
+                    logical_path,
+                    document_type,
+                    tags,
+                    extracted_text
+                );
+                """
+            )
+            try:
+                self._conn.execute("SELECT source_path FROM material_archive_manifests LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute(
+                    "ALTER TABLE material_archive_manifests "
+                    "ADD COLUMN source_path TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.commit()
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS material_archive_import_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    manifest_id INTEGER NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    container_document_id INTEGER NOT NULL,
+                    container_version_id INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    UNIQUE(manifest_id, idempotency_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_archive_entries_key
+                ON material_archive_entries(child_source_key);
+
+                CREATE INDEX IF NOT EXISTS idx_doc_permissions_container
+                ON document_permissions(container_document_id);
+
+                CREATE TABLE IF NOT EXISTS material_unit_fingerprints (
+                    document_id INTEGER NOT NULL,
+                    version_id INTEGER NOT NULL,
+                    unit_key TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    PRIMARY KEY (version_id, unit_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_unit_fp_doc
+                ON material_unit_fingerprints(document_id, version_id);
+
+                CREATE TABLE IF NOT EXISTS material_audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    actor_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_material_audit_doc
+                ON material_audit_log(document_id);
+                """
+            )
+            try:
+                self._conn.execute("SELECT state FROM answer_citations LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute(
+                    "ALTER TABLE answer_citations "
+                    "ADD COLUMN state TEXT NOT NULL DEFAULT 'available'"
+                )
+                self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Archive manifest persistence
+    # ------------------------------------------------------------------
+
+    def create_material_archive_manifest(
+        self,
+        container_document_id: int,
+        container_version_id: int,
+        source_path: str,
+        created_by: int,
+        expires_at: float,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_manifests "
+                "(container_document_id, container_version_id, source_path, status, created_by, expires_at) "
+                "VALUES (?, ?, ?, 'pending_confirmation', ?, ?)",
+                (container_document_id, container_version_id, source_path, created_by, expires_at),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_material_archive_manifest(self, manifest_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_archive_manifests WHERE id = ?", (manifest_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_material_archive_manifest_status(self, manifest_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_archive_manifests SET status = ? WHERE id = ?",
+                (status, manifest_id),
+            )
+            self._conn.commit()
+
+    def add_material_archive_entry(
+        self,
+        manifest_id: int,
+        relative_path: str,
+        normalized_path: str,
+        child_source_key: str,
+        size_bytes: int,
+        state: str,
+        reason_code: str = "",
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_entries "
+                "(manifest_id, relative_path, normalized_path, child_source_key, size_bytes, content_hash, state, reason_code) "
+                "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
+                (manifest_id, relative_path, normalized_path, child_source_key, size_bytes, state, reason_code),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_material_archive_entries(self, manifest_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_archive_entries WHERE manifest_id = ? ORDER BY id",
+                (manifest_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_material_archive_entry_content(self, entry_id: int, content_hash: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_archive_entries SET content_hash = ? WHERE id = ?",
+                (content_hash, entry_id),
+            )
+            self._conn.commit()
+
+    def get_container_child(
+        self, container_document_id: int, relative_path: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, current_version_id, "
+                "container_document_id, container_relative_path "
+                "FROM document_permissions "
+                "WHERE container_document_id = ? AND container_relative_path = ?",
+                (container_document_id, relative_path),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_child_container(
+        self, document_id: int, container_document_id: int, relative_path: str
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE document_permissions "
+                "SET container_document_id = ?, container_relative_path = ? WHERE id = ?",
+                (container_document_id, relative_path, document_id),
+            )
+            self._conn.commit()
+
+    def list_container_children(self, container_document_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT dp.id AS document_id, dp.doc_name, dp.container_relative_path, "
+                "dv.id AS version_id, dv.version_no, dv.content_hash "
+                "FROM document_permissions dp "
+                "JOIN document_versions dv ON dv.id = dp.current_version_id AND dv.status = 'current' "
+                "WHERE dp.container_document_id = ? "
+                "ORDER BY dp.container_relative_path",
+                (container_document_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Archive confirmation results (idempotency) and material FTS
+    # ------------------------------------------------------------------
+
+    def get_archive_import_result(
+        self, manifest_id: int, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_archive_import_results "
+                "WHERE manifest_id = ? AND idempotency_key = ?",
+                (manifest_id, idempotency_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_archive_import_result(
+        self,
+        manifest_id: int,
+        idempotency_key: str,
+        container_document_id: int,
+        container_version_id: int,
+        result_json: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_archive_import_results "
+                "(manifest_id, idempotency_key, container_document_id, container_version_id, result_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (manifest_id, idempotency_key, container_document_id, container_version_id, result_json),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def insert_material_search_fts(
+        self,
+        document_id: int,
+        version_id: int,
+        filename: str,
+        logical_path: str,
+        document_type: str,
+        tags: str,
+        extracted_text: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO material_search_fts "
+                "(document_id, version_id, filename, logical_path, document_type, tags, extracted_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (document_id, version_id, filename, logical_path, document_type, tags, extracted_text),
+            )
+            self._conn.commit()
+
+    def search_material_search_fts(self, text: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT f.document_id, f.version_id, f.filename, f.logical_path, f.document_type "
+                    "FROM material_search_fts f "
+                    "JOIN document_versions dv ON dv.id = f.version_id AND dv.status = 'current' "
+                    "JOIN document_permissions dp ON dp.id = f.document_id AND dp.deleted_at IS NULL "
+                    "WHERE material_search_fts MATCH ? LIMIT ?",
+                    (text, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Organization proposals, batches, and rollback
+    # ------------------------------------------------------------------
+
+    def create_organization_proposal(
+        self, actor_id: int, instruction_hash: str, expires_at: float
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_proposals "
+                "(actor_id, instruction_hash, status, expires_at, created_at) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (actor_id, instruction_hash, expires_at, time.time()),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_organization_proposal(self, proposal_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_proposals WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_organization_proposal_status(self, proposal_id: int, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_organization_proposals SET status = ? WHERE id = ?",
+                (status, proposal_id),
+            )
+            self._conn.commit()
+
+    def add_organization_item(
+        self,
+        proposal_id: int,
+        document_id: int,
+        target_path: str,
+        add_tags: str,
+        remove_tags: str,
+        document_type: str,
+        reason: str,
+        confidence: float,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_items "
+                "(proposal_id, document_id, target_path, add_tags, remove_tags, document_type, reason, confidence, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                (proposal_id, document_id, target_path, add_tags, remove_tags, document_type, reason, confidence),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_organization_items(self, proposal_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_organization_items WHERE proposal_id = ? ORDER BY id",
+                (proposal_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_organization_item_status(
+        self, item_id: int, status: str, reason_code: str = ""
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE material_organization_items SET status = ?, reason_code = ? WHERE id = ?",
+                (status, reason_code, item_id),
+            )
+            self._conn.commit()
+
+    def get_organization_batch(
+        self, proposal_id: int, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_batches "
+                "WHERE proposal_id = ? AND idempotency_key = ?",
+                (proposal_id, idempotency_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _create_organization_batch_in_tx(
+        self, proposal_id: int, actor_id: int, idempotency_key: str
+    ) -> int:
+        """Insert a batch row inside an already-open transaction."""
+        cur = self._conn.execute(
+            "INSERT INTO material_organization_batches "
+            "(proposal_id, actor_id, status, created_at, idempotency_key) "
+            "VALUES (?, ?, 'applied', ?, ?)",
+            (proposal_id, actor_id, time.time(), idempotency_key),
+        )
+        return int(cur.lastrowid)
+
+    def create_organization_batch(
+        self, proposal_id: int, actor_id: int, idempotency_key: str
+    ) -> int:
+        with self._lock:
+            return self._create_organization_batch_in_tx(proposal_id, actor_id, idempotency_key)
+
+    def add_organization_batch_item(
+        self,
+        batch_id: int,
+        document_id: int,
+        before_logical_path: str,
+        after_logical_path: str,
+        before_metadata_version: int,
+        after_metadata_version: int,
+        status: str,
+        reason_code: str,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO material_organization_batch_items "
+                "(batch_id, document_id, before_logical_path, after_logical_path, "
+                "before_metadata_version, after_metadata_version, status, reason_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id, document_id, before_logical_path, after_logical_path,
+                    before_metadata_version, after_metadata_version, status, reason_code,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def list_organization_batch_items(self, batch_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM material_organization_batch_items WHERE batch_id = ? ORDER BY id",
+                (batch_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_organization_batch_by_id(self, batch_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM material_organization_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Incremental worker support
+    # ------------------------------------------------------------------
+
+    def current_version_id(self, document_id: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT current_version_id FROM document_permissions WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        return row["current_version_id"] if row else None
+
+    def get_latest_version_id(self, document_id: int) -> int | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM document_versions "
+                "WHERE document_id = ? ORDER BY version_no DESC LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return row["id"] if row else None
+
+    def store_unit_fingerprints(
+        self, document_id: int, version_id: int, fingerprints: dict[str, str]
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM material_unit_fingerprints WHERE version_id = ?",
+                (version_id,),
+            )
+            self._conn.executemany(
+                "INSERT INTO material_unit_fingerprints "
+                "(document_id, version_id, unit_key, digest) VALUES (?, ?, ?, ?)",
+                [(document_id, version_id, key, digest) for key, digest in fingerprints.items()],
+            )
+            self._conn.commit()
+
+    def load_unit_fingerprints(self, document_id: int, version_id: int) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT unit_key, digest FROM material_unit_fingerprints WHERE version_id = ?",
+                (version_id,),
+            ).fetchall()
+        return {r["unit_key"]: r["digest"] for r in rows}
+
+    # ------------------------------------------------------------------
+    # Recycle support
+    # ------------------------------------------------------------------
+
+    def is_document_deleted(self, document_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT deleted_at FROM document_permissions WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+        return bool(row and row["deleted_at"] is not None)
+
+    def list_recycled_documents(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, doc_name, kb_id, owner_id, deleted_at, deleted_by, restore_until "
+                "FROM document_permissions WHERE deleted_at IS NOT NULL "
+                "ORDER BY deleted_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_citation_state(self, document_id: int) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state FROM answer_citations WHERE document_id = ? "
+                "ORDER BY CASE state WHEN 'purged_by_retention_policy' THEN 0 ELSE 1 END "
+                "LIMIT 1",
+                (document_id,),
+            ).fetchone()
+        return row["state"] if row else "available"
+
+    def _rebuild_document_versions_status(self) -> None:
+        """Widen the ``document_versions`` status CHECK for material states."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='document_versions'"
+        ).fetchone()
+        if row is None or "recycle_pending" in (row["sql"] or ""):
+            return
+        indexes = [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='document_versions' AND sql IS NOT NULL"
+            ).fetchall()
+        ]
+        triggers = [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='trigger' AND tbl_name='document_versions'"
+            ).fetchall()
+        ]
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "ALTER TABLE document_versions RENAME TO document_versions_old"
+            )
+            self._conn.execute(
+                "CREATE TABLE document_versions ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " document_id INTEGER NOT NULL,"
+                " version_no INTEGER NOT NULL,"
+                " original_filename TEXT NOT NULL,"
+                " file_path TEXT NOT NULL,"
+                " content_hash TEXT NOT NULL,"
+                " uploaded_by INTEGER NOT NULL,"
+                " status TEXT NOT NULL CHECK(status IN "
+                "('staging','indexing','current','historical','recycle_pending','failed','purged')),"
+                " validity_status TEXT NOT NULL CHECK(validity_status IN "
+                "('valid','reported_outdated','confirmed_outdated')) DEFAULT 'valid',"
+                " created_at REAL NOT NULL DEFAULT (strftime('%s','now')),"
+                " superseded_at REAL,"
+                " UNIQUE(document_id, version_no),"
+                " FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,"
+                " FOREIGN KEY(uploaded_by) REFERENCES users(id)"
+                ")"
+            )
+            self._conn.execute(
+                "INSERT INTO document_versions "
+                "(id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at) "
+                "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "FROM document_versions_old"
+            )
+            old_count = self._conn.execute(
+                "SELECT COUNT(*) FROM document_versions_old"
+            ).fetchone()[0]
+            new_count = self._conn.execute(
+                "SELECT COUNT(*) FROM document_versions"
+            ).fetchone()[0]
+            if old_count != new_count:
+                raise RuntimeError(
+                    f"document_versions rebuild row mismatch: {old_count} != {new_count}"
+                )
+            self._conn.execute("DROP TABLE document_versions_old")
+            for index in indexes:
+                self._conn.execute(index["sql"])
+            for trigger in triggers:
+                self._conn.execute(trigger["sql"])
+            violations = self._conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(f"foreign key violations: {violations}")
+            self._conn.commit()
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     # ------------------------------------------------------------------
     # Cleanup

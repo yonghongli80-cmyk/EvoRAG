@@ -13,10 +13,11 @@ def detect_and_decode(raw_bytes: bytes) -> str:
     """自动检测编码并解码。尝试 chardet 检测结果，失败则依次尝试常见编码。"""
     detected = chardet.detect(raw_bytes)
     encoding = detected.get("encoding")
-    # Low-confidence guesses can decode successfully into the wrong script
-    # (for example GBK bytes as TIS-620), so leave them to the deterministic
-    # UTF-8/Chinese-encoding fallback below.
-    if encoding and (detected.get("confidence") or 0) >= 0.7:
+    confidence = float(detected.get("confidence") or 0)
+    # Short GBK text is often misidentified as Thai by chardet at very low
+    # confidence. Do not let an unreliable guess override the Chinese
+    # encoding fallbacks used by this application.
+    if encoding and confidence >= 0.8:
         try:
             return raw_bytes.decode(encoding)
         except (UnicodeDecodeError, LookupError):

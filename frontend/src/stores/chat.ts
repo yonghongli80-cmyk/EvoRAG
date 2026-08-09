@@ -15,8 +15,18 @@ interface Message {
   id?: number
   role: 'user' | 'assistant'
   content: string
-  sources?: Array<{ doc_name: string; chunk_index: number }>
+  sources?: Array<{
+    doc_name: string
+    chunk_index: number
+    text_preview?: string
+    document_id?: number
+    document_version_id?: number
+    section_title?: string
+    is_historical?: boolean
+    rank?: number
+  }>
   feedback?: 'positive' | 'negative'
+  assistantMessageId?: number
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -132,7 +142,7 @@ export const useChatStore = defineStore('chat', () => {
     selectedFile.value = name
   }
 
-  async function sendMessage(question: string, mode?: ChatMode) {
+  async function sendMessage(question: string, mode?: ChatMode, kbId?: string) {
     // Auto-create conversation if none exists
     if (!currentConvId.value && mode) {
       await createConversation(mode)
@@ -156,6 +166,9 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (selectedFile.value) {
         payload.doc_name = selectedFile.value
+      }
+      if (mode === 'kb' && kbId) {
+        payload.kb_id = kbId
       }
 
       const response = await streamRequest('/query/stream', {
@@ -193,6 +206,11 @@ export const useChatStore = defineStore('chat', () => {
               assistantMsg.content = answer
             } else if (event.type === 'sources') {
               sources = event.sources
+            } else if (event.type === 'done') {
+              if (typeof event.assistant_message_id === 'number') {
+                assistantMsg.id = event.assistant_message_id
+                assistantMsg.assistantMessageId = event.assistant_message_id
+              }
             }
           } catch {}
         }

@@ -14,11 +14,15 @@ def test_agent_has_four_tools():
     assert "plot_chart" in tool_names
 
 
-def test_agent_max_iterations():
-    """Agent max_iterations should be correctly set."""
+@patch("langchain_openai.ChatOpenAI")
+def test_agent_defers_llm_creation_until_run(mock_chat_cls):
+    """Constructing an Agent must not require a configured model credential."""
     from rag.agent import RAGAgent
+
     agent = RAGAgent(retriever=MagicMock(), db_path=":memory:", max_iterations=2)
+
     assert agent.max_iterations == 2
+    mock_chat_cls.assert_not_called()
 
 
 @patch("rag.agent.generate")
@@ -43,7 +47,10 @@ def test_router_complex_question(mock_generate):
 def test_agent_disables_thinking_mode(mock_chat_cls):
     """Agent LLM should disable DeepSeek thinking mode."""
     from rag.agent import RAGAgent
-    RAGAgent(retriever=MagicMock(), db_path=":memory:")
+
+    agent = RAGAgent(retriever=MagicMock(), db_path=":memory:")
+    agent._ensure_agent()
+
     call_kwargs = mock_chat_cls.call_args.kwargs
     assert call_kwargs["model_kwargs"] == {"extra_body": {"thinking": {"type": "disabled"}}}
 

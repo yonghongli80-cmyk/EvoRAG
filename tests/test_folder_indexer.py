@@ -1,5 +1,6 @@
 """Tests for folder_indexer module."""
 import os
+
 import pytest
 
 
@@ -19,7 +20,8 @@ def test_scan_folder_returns_supported_files(tmp_path):
     assert "doc.md" in basenames
     assert "doc.pdf" in basenames
     assert "image.png" not in basenames
-    assert "data.csv" not in basenames
+    # CSV is a first-class indexed material in the unified format registry.
+    assert "data.csv" in basenames
 
 
 def test_scan_folder_returns_empty_for_empty_dir(tmp_path):

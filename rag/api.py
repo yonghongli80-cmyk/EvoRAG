@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import hashlib
 import logging
 import os
 import tempfile
@@ -7,16 +8,43 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from config import settings
+
 from rag.auth import create_token, decode_token, verify_api_key
+from rag.api_security import (
+    log_security_mode,
+    redact_source_config,
+    require_admin,
+    require_data_sources_admin,
+    require_doc_edit,
+    require_kb_edit,
+    require_kb_view,
+    require_user,
+)
+from rag.document_versions import (
+    DuplicateDocument,
+    choose_document_name,
+    ingest_document_version,
+)
+from rag.document_sources.upload import UploadDocumentSource
 from rag.kb_metadata import generate_summary, generate_toc
+from rag.kb_file_store import (
+    final_document_path,
+    promote_stage,
+    resolve_stored_path,
+    stage_upload,
+)
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
+from rag.materials.api import router as materials_router
+from rag.operations_api import router as operations_router
+from rag.permissions import filter_chunks_by_permission
 from rag.user_db import UserDB
 
 # Initialize logging at module level so it is active before any request arrives.
@@ -31,11 +59,58 @@ pipeline = None
 _pipelines = {}
 _pipeline_lock = ReadWriteLock()
 
+# Versioned document ingest (trusted knowledge loop).
+app.include_router(operations_router)
+app.include_router(materials_router)
+
+
+def _versions_root() -> Path:
+    """Resolve the configured document-versions root from app state."""
+    return Path(getattr(app.state, "document_versions_root", settings.document_versions_root))
+
+
+def _run_document_version_migration() -> None:
+    """Create version-1 rows for documents created before versioning."""
+    from rag.document_versions import migrate_existing_document_versions
+
+    try:
+        report = migrate_existing_document_versions(
+            user_db, _versions_root(), DATA_DIR
+        )
+        if report.migrated or report.missing:
+            logger.info(
+                "document version migration: migrated=%s missing=%s unchanged=%s",
+                report.migrated,
+                report.missing,
+                report.unchanged,
+            )
+    except Exception:
+        logger.exception("document version migration failed")
+
+
+def _run_material_metadata_migration() -> None:
+    """Backfill material FTS/metadata rows without re-embedding content."""
+    from rag.materials.migration import migrate_material_metadata
+
+    try:
+        report = migrate_material_metadata(user_db)
+        if report.migrated_documents:
+            logger.info(
+                "material metadata migration: migrated=%s missing=%s",
+                report.migrated_documents,
+                report.missing_sources,
+            )
+    except Exception:
+        logger.exception("material metadata migration failed")
+
 
 @app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
+    log_security_mode()
+    _run_document_version_migration()
+    _run_material_metadata_migration()
     if not DATA_DIR.is_dir():
         return
 
@@ -201,6 +276,7 @@ async def spa_fallback_middleware(request, call_next):
 
 # 数据目录
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "upload"
+KB_FILES_ROOT = Path(__file__).resolve().parent.parent / "data" / "kb_files"
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".csv"}
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -240,6 +316,7 @@ class StreamQueryRequest(BaseModel):
     conversation_id: int | None = None
     doc_name: str | None = None
     tags: list[str] | None = None
+    kb_id: str | None = None
 
 
 class SuggestRequest(BaseModel):
@@ -309,6 +386,7 @@ class UpdateRoleRequest(BaseModel):
 from config import settings as _settings
 _DB_PATH = Path(_settings.users_db_path)
 user_db = UserDB(str(_DB_PATH))
+app.state.user_db = user_db
 
 
 # ── Pipeline 数据处理器单例 ─────────────────────────────────────────────
@@ -375,7 +453,9 @@ def close_pipeline_processors():
         _pipelines.clear()
         pipeline = None
     for cached_pipeline in cached_pipelines:
-        cached_pipeline.close()
+        close = getattr(cached_pipeline, "close", None)
+        if callable(close):
+            close()
     with _processor_lock:
         for processor in (_feedback_processor, _gap_analyzer):
             if processor is not None:
@@ -443,16 +523,8 @@ async def login(req: LoginRequest):
 
 
 @app.get("/me", summary="获取当前用户信息")
-async def get_me(user_id: str = Security(verify_api_key), authorization: str = Header(default="")):
-    # When auth_enabled=True, verify_api_key already validated the token/JWT.
-    # Try to resolve full user info from JWT when authorization is provided.
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user = await asyncio.to_thread(_get_current_user, token)
-        if user:
-            return {"id": user["id"], "username": user["username"]}
-    # auth_enabled=False → user_id="anonymous"; or token didn't resolve to a user
-    return {"id": user_id, "username": "anonymous"}
+async def get_me(user: dict = Depends(require_user)):
+    return {"id": user["id"], "username": user["username"]}
 
 
 async def _require_auth(authorization: str) -> dict:
@@ -847,6 +919,59 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
     return False
 
 
+async def _ingest_default_document(
+    *, content: bytes, filename: str, user: dict, db: UserDB, duplicate_action: str = "reject"
+) -> dict:
+    """Ingest a private default-library document through the version service."""
+    filename = Path(filename or "upload.txt").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="不支持的文件格式")
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+    if duplicate_action not in ("reject", "overwrite", "keep"):
+        raise HTTPException(status_code=400, detail="无效的 duplicate_action")
+
+    source = UploadDocumentSource.from_bytes(filename, content)
+    if duplicate_action == "overwrite" and db.get_document_permission(source.display_name, "rag_docs"):
+        require_doc_edit(db, source.display_name, "rag_docs", user)
+    manager = KnowledgeBaseManager()
+    try:
+        result = await asyncio.to_thread(
+            ingest_document_version,
+            db,
+            manager,
+            source,
+            "rag_docs",
+            user,
+            duplicate_action,
+            _versions_root(),
+        )
+    except DuplicateDocument as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "document_id": exc.document_id,
+                "current_version": exc.current_version,
+            },
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("upload failed", extra={"user_id": user["id"], "upload_filename": filename})
+        raise HTTPException(status_code=400, detail="文件处理失败") from exc
+
+    return {
+        "status": result.status,
+        "filename": result.filename,
+        "chunks": result.chunks,
+        "document_id": result.document_id,
+        "version_id": result.version_id,
+        "version_no": result.version_no,
+    }
+
+
 @app.post(
     "/upload",
     summary="上传文件",
@@ -854,73 +979,32 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
 )
 async def upload_file(
     file: UploadFile = File(..., description="要上传的文件"),
-    user: dict | None = Depends(_resolve_upload_user),
+    duplicate_action: str = Form("reject"),
+    user: dict = Depends(require_user),
 ):
+    content = await file.read(MAX_FILE_SIZE + 1)
+    result = await _ingest_default_document(
+        content=content,
+        filename=file.filename or "upload.txt",
+        user=user,
+        db=user_db,
+        duplicate_action=duplicate_action,
+    )
+
     global pipeline
-
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-
-    # Sanitize filename to prevent path traversal
-    filename = Path(file.filename).name if file.filename else "upload.txt"
-    suffix = Path(filename).suffix.lower()
-
-    if suffix not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400, detail=f"不支持的文件格式: {suffix}，支持: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-        )
-
-    # Ensure DATA_DIR exists
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 同名覆盖保护（防越权覆盖他人/受保护文件）
-    dest = DATA_DIR / filename
-    existing_perm = user_db.get_document_permission(filename, "rag_docs") if dest.exists() else None
-    if dest.exists() and not _can_overwrite_existing(user, existing_perm):
-        raise HTTPException(status_code=409, detail=f"文件 {filename} 已存在，仅所有者或公开文件可覆盖")
-
-    # Save file to DATA_DIR
-    try:
-        dest.write_bytes(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"保存文件失败: {e}")
-
-    # 认证开启时先创建权限记录（默认私有，索引失败时回滚）
-    perm_id = None
-    if user:
-        def _create_perm():
-            # 检查是否已有权限记录（避免重复上传同名文件时冲突）
-            existing = user_db.get_document_permission(filename, "rag_docs")
-            if existing:
-                return existing["id"]
-            return user_db.create_document_permission(filename, "rag_docs", user["id"], is_public=False)
-        perm_id = await asyncio.to_thread(_create_perm)
-
-    # Index the file
-    try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document("rag_docs", str(dest), doc_name=filename, doc_permission_id=perm_id)
-    except Exception as e:
-        dest.unlink(missing_ok=True)
-        # 回滚权限记录
-        if perm_id:
-            await asyncio.to_thread(user_db.delete_document_permission, perm_id)
-        raise HTTPException(status_code=400, detail=str(e))
-
-    # Refresh pipeline
+    from rag.pipeline import RAGPipeline
     with _pipeline_lock.write():
         try:
-            pipeline = _get_or_create_pipeline("rag_docs")
-        except Exception as e:
-            logger.error("Pipeline 刷新失败（上传后）: %s", e)
-
-    return {"status": "uploaded", "filename": filename, "chunks": count}
+            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+        except Exception:
+            logger.exception("Pipeline refresh failed after upload")
+    return result
 
 
 @app.delete("/files/{filename}", summary="删除文件", description="从 data/upload/ 删除文件并重新索引")
 async def delete_file(filename: str, authorization: str = Header(default="")):
-    from rag.vector_store import delete_doc, COLLECTION_NAME
+    from rag.pipeline import RAGPipeline
+    from rag.vector_store import COLLECTION_NAME, delete_doc
 
     global pipeline
 
@@ -947,7 +1031,6 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
     await asyncio.to_thread(check_doc_permission, user_db, safe_name, "rag_docs", user_dict, "delete")
 
     # 先删向量，再删文件（确保向量删除成功）
-    from rag.vector_store import delete_doc, COLLECTION_NAME
     try:
         delete_doc(COLLECTION_NAME, safe_name)
         logger.info("向量已删除: %s", safe_name)
@@ -1122,15 +1205,17 @@ async def list_tags(user_id: str = Security(verify_api_key)):
 
 
 @app.post("/index-all", summary="索引全部文件", description="索引 data/upload/ 目录下的所有文件")
-async def index_all(user_id: str = Security(verify_api_key)):
+async def index_all(user: dict = Depends(require_user)):
     from rag.folder_indexer import index_folder
     global pipeline
+    require_admin(user)
     if not DATA_DIR.is_dir():
         raise HTTPException(status_code=400, detail="data/upload/ 目录不存在")
     try:
         stats = await asyncio.to_thread(index_folder, str(DATA_DIR))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.exception("full reindex failed", extra={"user_id": user["id"]})
+        raise HTTPException(status_code=400, detail="全量索引失败") from exc
     with _pipeline_lock.write():
         try:
             pipeline = await asyncio.to_thread(_get_or_create_pipeline, "rag_docs")
@@ -1140,35 +1225,28 @@ async def index_all(user_id: str = Security(verify_api_key)):
 
 
 @app.post("/index", summary="索引文档", description="上传文档并添加到知识库，支持 txt/md/pdf/docx/xlsx 格式，最大 10MB")
-async def index(file: UploadFile = File(..., description="要索引的文档文件"), user_id: str = Security(verify_api_key)):
+async def index(
+    file: UploadFile = File(..., description="要索引的文档文件"),
+    duplicate_action: str = Form("reject"),
+    user: dict = Depends(require_user),
+):
+    from rag.pipeline import RAGPipeline
     global pipeline
-    content = await file.read()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-    suffix = Path(file.filename).suffix if file.filename else ".txt"
-    allowed = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".csv"}
-    if suffix.lower() not in allowed:
-        raise HTTPException(status_code=400, detail=f"不支持的文件格式: {suffix}，支持: {', '.join(allowed)}")
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    try:
-        tmp.write(content)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
-    try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document("rag_docs", tmp_path, doc_name=file.filename or "upload")
-    except Exception as e:
-        os.unlink(tmp_path)
-        raise HTTPException(status_code=400, detail=str(e))
-    os.unlink(tmp_path)
+    content = await file.read(MAX_FILE_SIZE + 1)
+    result = await _ingest_default_document(
+        content=content,
+        filename=file.filename or "upload.txt",
+        user=user,
+        db=user_db,
+        duplicate_action=duplicate_action,
+    )
     # 刷新 pipeline（冷启动时创建，运行时更新）
     with _pipeline_lock.write():
         try:
-            pipeline = _get_or_create_pipeline("rag_docs")
-        except Exception as e:
-            logger.error("Pipeline 刷新失败（索引后）: %s", e)
-    return {"status": "indexed", "chunks": count}
+            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+        except Exception:
+            logger.exception("Pipeline refresh failed after index")
+    return {**result, "status": "indexed"}
 
 
 @app.post("/batch-import", summary="批量导入", description="上传 Excel/CSV 批量导入到知识库")
@@ -1176,18 +1254,22 @@ async def batch_import(
     file: UploadFile = File(...),
     mode: str = "qa_pair",
     config: str = "{}",
-    user_id: str = Security(verify_api_key),
+    user: dict = Depends(require_user),
 ):
     import json as _json
     from rag.batch_importer import BatchImporter
 
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=413, detail="文件过大")
 
     suffix = Path(file.filename).suffix.lower() if file.filename else ".csv"
     if suffix not in {".csv", ".xlsx"}:
         raise HTTPException(status_code=400, detail=f"不支持的格式: {suffix}")
+
+    doc_name = Path(file.filename or "upload").stem
+    if await asyncio.to_thread(user_db.get_document_permission, doc_name, "rag_docs"):
+        raise HTTPException(status_code=409, detail="同名文件已存在")
 
     # 保存临时文件
     tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
@@ -1204,17 +1286,42 @@ async def batch_import(
 
     try:
         importer = BatchImporter()
-        chunks = importer.parse(tmp_path, mode=mode, config=parsed_config)
+        chunks = importer.parse(
+            tmp_path, mode=mode, config=parsed_config, doc_name=doc_name
+        )
 
         if not chunks:
             raise HTTPException(status_code=400, detail="解析结果为空")
 
         # 索引到知识库
         from rag.embedder import embed
-        from rag.vector_store import add
+        from rag.vector_store import _ensure_collection_name, add_to_collection, delete_doc
 
         embeddings = embed([c.text for c in chunks])
-        add(chunks, embeddings)
+        permission_id = await asyncio.to_thread(
+            user_db.create_document_permission,
+            doc_name,
+            "rag_docs",
+            user["id"],
+            1,
+            False,
+        )
+        try:
+            await asyncio.to_thread(_ensure_collection_name, "rag_docs")
+            await asyncio.to_thread(
+                add_to_collection,
+                "rag_docs",
+                chunks,
+                embeddings,
+                doc_permission_id=permission_id,
+            )
+        except Exception:
+            await asyncio.to_thread(user_db.delete_document_permission, permission_id)
+            try:
+                await asyncio.to_thread(delete_doc, "rag_docs", doc_name)
+            except Exception:
+                logger.exception("batch import vector rollback failed", extra={"doc_name": doc_name})
+            raise
 
         # 刷新 pipeline
         global pipeline
@@ -1225,14 +1332,19 @@ async def batch_import(
                 logger.error("Pipeline 刷新失败: %s", e)
 
         return {"status": "imported", "chunks": len(chunks), "mode": mode}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="批量导入失败") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("batch import failed", extra={"user_id": user["id"], "doc_name": doc_name})
+        raise HTTPException(status_code=400, detail="批量导入失败") from exc
     finally:
-        os.unlink(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 @app.post("/query", response_model=QueryResponse, summary="查询知识库", description="对已索引的文档进行语义检索问答")
-async def query(req: QueryRequest, user_id: str = Security(verify_api_key), authorization: str = Header(default="")):
+async def query(req: QueryRequest, user: dict = Depends(require_user)):
     global pipeline
     with _pipeline_lock.read():
         if pipeline is None:
@@ -1241,15 +1353,6 @@ async def query(req: QueryRequest, user_id: str = Security(verify_api_key), auth
                 content={"error": "尚未索引文档，请先调用 POST /index 上传文档"},
             )
         current_pipeline = pipeline
-
-    # Try to resolve user from authorization header (optional)
-    user = None
-    if authorization:
-        try:
-            token = authorization.replace("Bearer ", "")
-            user = await asyncio.to_thread(_get_current_user, token)
-        except (HTTPException, Exception):
-            logger.debug("Query auth failed (non-critical): token invalid or expired")
 
     # Determine session_id: use conversation-based session if user + conversation_id provided
     session_id = req.session_id
@@ -1284,22 +1387,21 @@ async def query(req: QueryRequest, user_id: str = Security(verify_api_key), auth
 @app.post("/query/stream", summary="流式查询知识库", description="SSE 流式返回查询结果")
 async def query_stream(
     req: StreamQueryRequest,
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
     global pipeline
-    with _pipeline_lock.read():
-        if pipeline is None:
-            return JSONResponse(status_code=400, content={"error": "尚未索引文档"})
-        current_pipeline = pipeline
-
-    user = None
-    if authorization:
-        try:
-            token = authorization.replace("Bearer ", "")
-            user = await asyncio.to_thread(_get_current_user, token)
-        except (HTTPException, Exception):
-            pass
+    target_kb = req.kb_id or "rag_docs"
+    if target_kb != "rag_docs":
+        require_kb_view(user_db, target_kb, user)
+        from rag.pipeline import RAGPipeline
+        current_pipeline = await asyncio.to_thread(
+            RAGPipeline, kb_id=target_kb, user_db=user_db
+        )
+    else:
+        with _pipeline_lock.read():
+            if pipeline is None:
+                return JSONResponse(status_code=400, content={"error": "尚未索引文档"})
+            current_pipeline = pipeline
 
     session_id = req.session_id
     if user and req.conversation_id is not None:
@@ -1308,11 +1410,14 @@ async def query_stream(
     async def event_generator():
         import json as _json
 
+        from rag.citations import CitationRecord
+
         answer_buffer = ""
+        citation_records: list[CitationRecord] = []
         try:
             async for event in current_pipeline.query_stream(
                 req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
-                user=user, kb_id="rag_docs",
+                user=user, kb_id=target_kb,
             ):
                 # 从 token 事件中提取 answer 用于持久化
                 if '"type": "token"' in event:
@@ -1321,21 +1426,51 @@ async def query_stream(
                         answer_buffer += data.get("content", "")
                     except Exception:
                         pass
+                elif '"type": "sources"' in event:
+                    try:
+                        data = _json.loads(event.removeprefix("data: ").strip())
+                        for source in data.get("sources", []):
+                            if source.get("document_id") and source.get("document_version_id"):
+                                citation_records.append(
+                                    CitationRecord(
+                                        document_id=source["document_id"],
+                                        document_version_id=source["document_version_id"],
+                                        chunk_index=source.get("chunk_index", 0),
+                                        section_title=source.get("section_title") or "",
+                                        text_preview=source.get("text_preview", "")[:200],
+                                        rank=source.get("rank", 0),
+                                        is_historical=bool(source.get("is_historical", False)),
+                                    )
+                                )
+                    except Exception:
+                        pass
+                elif '"type": "done"' in event:
+                    # The pipeline's final done is replaced with an enriched one below.
+                    continue
                 yield event
         except Exception:
             logger.exception("流式查询中途失败")
             payload = {"type": "error", "reason": "流式生成失败，请稍后重试"}
             yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
             return
-        # 流式完成后持久化到 chat_messages
+        # 流式完成后持久化 assistant 消息与引用（一个事务内）
+        assistant_message_id = None
+        assistant_message_id = None
         if user and req.conversation_id is not None and answer_buffer:
-            # 验证 conversation 归属
             conv = await asyncio.to_thread(user_db.get_conversation, req.conversation_id, user["id"])
             if conv:
                 await asyncio.to_thread(user_db.add_message, req.conversation_id, "user", req.question)
-                await asyncio.to_thread(user_db.add_message, req.conversation_id, "assistant", answer_buffer)
+                persistence_key = f"stream:{req.conversation_id}:{hashlib.sha256(req.question.encode('utf-8')).hexdigest()[:16]}"
+                assistant_message_id = await asyncio.to_thread(
+                    user_db.persist_assistant_answer_with_citations,
+                    req.conversation_id,
+                    answer_buffer,
+                    citation_records,
+                    persistence_key,
+                )
             else:
                 logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
+        yield f"data: {_json.dumps({'type': 'done', 'assistant_message_id': assistant_message_id})}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -1371,47 +1506,41 @@ class KBResponse(BaseModel):
 
 
 @app.get("/knowledge-bases", summary="列出知识库", description="获取所有知识库列表")
-async def list_knowledge_bases(authorization: str = Header(default="")):
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
-
-    def _list():
-        manager = KnowledgeBaseManager()
-        kbs = manager.list_kbs()
-        kb_ids = [kb.kb_id for kb in kbs]
-        meta_map = user_db.get_kb_metadata_by_names(kb_ids)
-        result = []
-        for kb in kbs:
-            meta = meta_map.get(kb.kb_id)
-            scope = meta["scope"] if meta else "public"
-            owner_id = meta["owner_id"] if meta else 0
-            is_admin = user_dict and user_dict.get("is_admin", False)
-            is_owner = user_dict and owner_id == user_dict["id"]
-            if not is_admin and scope == "private" and not is_owner:
+async def list_knowledge_bases(user: dict = Depends(require_user)):
+    manager = KnowledgeBaseManager()
+    result = []
+    for kb in await asyncio.to_thread(manager.list_kbs):
+        try:
+            meta = await asyncio.to_thread(require_kb_view, user_db, kb.kb_id, user)
+        except HTTPException as exc:
+            if exc.status_code in {403, 409}:
                 continue
-            # 获取共享用户列表（仅 owner 或 admin 可见）
-            shared_users = []
-            if is_owner or is_admin:
-                shares = user_db.list_kb_shared_users(kb.kb_id)
-                shared_users = [{"username": s["username"], "permission": s["permission"]} for s in shares]
-            result.append(KBResponse(
-                kb_id=kb.kb_id, name=kb.name, doc_count=kb.doc_count,
-                scope=scope, is_owner=is_owner, shared_users=shared_users,
-            ))
-        return result
-    return await asyncio.to_thread(_list)
+            raise
+        is_owner = meta["owner_id"] == user["id"]
+        shares = []
+        if is_owner or user.get("is_admin"):
+            shares = await asyncio.to_thread(user_db.list_kb_shared_users, kb.kb_id)
+        result.append(KBResponse(
+            kb_id=kb.kb_id,
+            name=meta.get("name", kb.name),
+            doc_count=kb.doc_count,
+            scope=meta["scope"],
+            is_owner=is_owner,
+            shared_users=[
+                {"username": share["username"], "permission": share["permission"]}
+                for share in shares
+            ],
+        ))
+    return result
 
 
 @app.post("/knowledge-bases", summary="创建知识库", description="创建一个新的知识库")
-async def create_knowledge_base(req: CreateKBRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
+async def create_knowledge_base(req: CreateKBRequest, user: dict = Depends(require_user)):
 
     def _create():
         manager = KnowledgeBaseManager()
         kb_id = manager.create_kb(req.name)
-        user_db.create_kb_metadata(kb_id, req.name, owner_id=user_dict["id"], scope=req.scope)
+        user_db.create_kb_metadata(kb_id, req.name, owner_id=user["id"], scope=req.scope)
         return kb_id
 
     kb_id = await asyncio.to_thread(_create)
@@ -1423,15 +1552,14 @@ class KBScopeRequest(BaseModel):
 
 
 @app.put("/knowledge-bases/{kb_id}/scope", summary="切换知识库可见范围")
-async def update_kb_scope(kb_id: str, req: KBScopeRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-
-    # Owner 检查
-    meta = user_db.get_kb_metadata(kb_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="知识库不存在")
-    if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可操作")
+async def update_kb_scope(
+    kb_id: str,
+    req: KBScopeRequest,
+    user: dict = Depends(require_user),
+):
+    require_kb_edit(user_db, kb_id, user)
+    if req.scope == "private" and await asyncio.to_thread(user_db.list_kb_shared_users, kb_id):
+        raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
 
     try:
         await asyncio.to_thread(user_db.update_kb_scope, kb_id, req.scope)
@@ -1442,16 +1570,30 @@ async def update_kb_scope(kb_id: str, req: KBScopeRequest, authorization: str = 
 
 
 @app.delete("/knowledge-bases/{kb_id}", summary="删除知识库", description="删除指定知识库及其所有文档")
-async def delete_knowledge_base(kb_id: str, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
+async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
+    if kb_id == "rag_docs":
+        raise HTTPException(status_code=400, detail="不能删除系统集合 rag_docs")
 
-    # Owner 检查
-    meta = user_db.get_kb_metadata(kb_id)
-    if meta and not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可删除")
+    require_kb_edit(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
+        documents = await asyncio.to_thread(user_db.list_kb_documents, kb_id)
+        for record in documents:
+            await asyncio.to_thread(manager.remove_document, kb_id, record["filename"])
+            permission = await asyncio.to_thread(
+                user_db.get_document_permission, record["filename"], kb_id
+            )
+            if permission:
+                await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
+            if record["file_path"]:
+                stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
+                stored.unlink(missing_ok=True)
+                try:
+                    stored.parent.rmdir()
+                except OSError:
+                    pass
+            await asyncio.to_thread(user_db.delete_kb_document, record["id"])
         manager.delete_kb(kb_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1475,110 +1617,121 @@ async def delete_knowledge_base(kb_id: str, authorization: str = Header(default=
 async def add_document_to_kb(
     kb_id: str,
     file: UploadFile = File(...),
-    authorization: str = Header(default=""),
+    duplicate_action: str = Form("reject"),
+    user: dict = Depends(require_user),
 ):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+    require_kb_edit(user_db, kb_id, user)
 
-    content = await file.read()
+    content = await file.read(MAX_FILE_SIZE + 1)
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件大小超过 {MAX_FILE_SIZE // 1024 // 1024} MB 限制")
-    filename = Path(file.filename).name if file.filename else "unnamed.txt"
-    suffix = Path(file.filename).suffix if file.filename else ".txt"
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+    filename = Path(file.filename or "unnamed.txt").name
+    if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="不支持的文件格式")
+    if duplicate_action not in ("reject", "overwrite", "keep"):
+        raise HTTPException(status_code=400, detail="无效的 duplicate_action")
+
+    source = UploadDocumentSource.from_bytes(filename, content)
+    if duplicate_action == "overwrite" and user_db.get_document_permission(source.display_name, kb_id):
+        require_doc_edit(user_db, source.display_name, kb_id, user)
+    manager = KnowledgeBaseManager()
+    kb_document_id = None
     try:
-        tmp.write(content)
-        tmp_path = tmp.name
-    finally:
-        tmp.close()
-    # 使用已验证的 user_dict（来自 _require_auth）
-
-    # 先创建权限记录（索引失败时回滚）
-    perm_id = None
-    if user_dict:
-        def _create_perm():
-            return user_db.create_document_permission(filename, kb_id, user_dict["id"], is_public=False)
-        perm_id = await asyncio.to_thread(_create_perm)
-
-    persisted_path = DATA_DIR / filename
-    persisted = False
-    try:
-        manager = KnowledgeBaseManager()
-        count = manager.add_document(kb_id, tmp_path, doc_name=filename, doc_permission_id=perm_id)
-        import shutil
-
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.move(tmp_path, persisted_path)
-        persisted = True
-    except Exception as e:
-        # 回滚权限记录
-        if perm_id:
-            await asyncio.to_thread(user_db.delete_document_permission, perm_id)
-        raise HTTPException(status_code=400, detail=str(e))
-    finally:
-        if not persisted and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-    # Insert into kb_documents
-    def _insert_doc():
-        import sqlite3
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            # Generate TOC and summary for the document
-            file_path = persisted_path
-            toc_str = ""
-            summary_str = ""
-            if file_path.is_file():
-                try:
-                    content = load_document(str(file_path))
-                    toc_str = _json.dumps(generate_toc(content), ensure_ascii=False)
-                    summary_str = generate_summary(content)
-                except Exception:
-                    pass
-            conn.execute(
-                "INSERT OR REPLACE INTO kb_documents (kb_id, filename, file_path, toc, summary, chunk_count, status) VALUES (?, ?, ?, ?, ?, ?, 'indexed')",
-                (kb_id, filename, str(persisted_path), toc_str, summary_str, count)
+        # Reserve the kb_documents lifecycle row for the resolved final name.
+        final_name = choose_document_name(user_db, kb_id, source.display_name, duplicate_action)
+        existing_kb_doc = await asyncio.to_thread(user_db.get_kb_document, kb_id, final_name)
+        if existing_kb_doc is None:
+            kb_document_id = await asyncio.to_thread(
+            user_db.create_kb_document_pending, kb_id, final_name
             )
-            # Derive human-readable name from kb_id (format: kb_slug_hex)
-            readable_name = kb_id.split("_")[1] if "_" in kb_id else kb_id
-            conn.execute(
-                "INSERT OR IGNORE INTO kb_metadata (kb_id, name) VALUES (?, ?)",
-                (kb_id, readable_name)
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    await asyncio.to_thread(_insert_doc)
-    return {"status": "added", "kb_id": kb_id, "chunks": count}
+        else:
+            kb_document_id = existing_kb_doc["id"]
+        result = await asyncio.to_thread(
+            ingest_document_version,
+            user_db,
+            manager,
+            source,
+            kb_id,
+            user,
+            duplicate_action,
+            _versions_root(),
+        )
+        version = await asyncio.to_thread(
+            user_db.get_document_version_by_id, result.version_id
+        )
+        parsed = await asyncio.to_thread(load_document, version["file_path"])
+        toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
+        summary = generate_summary(parsed)
+        await asyncio.to_thread(
+            user_db.finish_kb_document,
+            kb_document_id,
+            version["file_path"],
+            toc,
+            summary,
+            result.chunks,
+        )
+    except DuplicateDocument as exc:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "document_id": exc.document_id,
+                "current_version": exc.current_version,
+            },
+        ) from exc
+    except HTTPException:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        raise
+    except Exception as exc:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        logger.exception("KB document upload failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=400, detail="文件处理失败") from exc
+
+    return {
+        "status": "added",
+        "kb_id": kb_id,
+        "chunks": result.chunks,
+        "document_id": result.document_id,
+        "version_id": result.version_id,
+        "version_no": result.version_no,
+    }
 
 
 @app.delete("/knowledge-bases/{kb_id}/documents/{doc_name}", summary="删除文档", description="从知识库中删除指定文档")
-async def remove_document_from_kb(kb_id: str, doc_name: str, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+async def remove_document_from_kb(
+    kb_id: str, doc_name: str, user: dict = Depends(require_user)
+):
+    require_kb_edit(user_db, kb_id, user)
+    record = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if record is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
-        manager.remove_document(kb_id, doc_name)
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"文档 {doc_name} 不存在")
-    # Clean up kb_documents record
-    def _cleanup():
-        import sqlite3
-        conn = sqlite3.connect(str(_DB_PATH))
-        try:
-            conn.execute("DELETE FROM kb_documents WHERE kb_id = ? AND filename = ?", (kb_id, doc_name))
-            conn.commit()
-        finally:
-            conn.close()
-    await asyncio.to_thread(_cleanup)
-
-    # 清理权限记录（级联会自动清理 shares）
-    def _cleanup_perm():
-        perm = user_db.get_document_permission(doc_name, kb_id)
-        if perm:
-            user_db.delete_document_permission(perm["id"])
-    await asyncio.to_thread(_cleanup_perm)
+        await asyncio.to_thread(user_db.set_kb_document_state, record["id"], "deleting")
+        await asyncio.to_thread(manager.remove_document, kb_id, doc_name)
+        permission = await asyncio.to_thread(user_db.get_document_permission, doc_name, kb_id)
+        if permission:
+            await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
+        if record["file_path"]:
+            stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
+            stored.unlink(missing_ok=True)
+            try:
+                stored.parent.rmdir()
+            except OSError:
+                pass
+        await asyncio.to_thread(user_db.delete_kb_document, record["id"])
+    except Exception as exc:
+        await asyncio.to_thread(
+            user_db.set_kb_document_state, record["id"], "delete_failed", str(exc)
+        )
+        logger.exception("KB document deletion failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=400, detail="文档删除失败") from exc
 
     return {"status": "removed", "kb_id": kb_id, "doc_name": doc_name}
 
@@ -1610,35 +1763,33 @@ class ShareRequest(BaseModel):
 
 
 @app.post("/knowledge-bases/{kb_id}/query", summary="查询知识库", description="对指定知识库进行语义检索")
-async def query_knowledge_base(kb_id: str, req: QueryKBRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-
-    # Scope 检查：private KB 只有 owner/admin 可查询
-    meta = user_db.get_kb_metadata(kb_id)
-    if meta and meta["scope"] == "private":
-        if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-            raise HTTPException(status_code=403, detail="私有知识库仅所有者可查询")
+async def query_knowledge_base(
+    kb_id: str, req: QueryKBRequest, user: dict = Depends(require_user)
+):
+    require_kb_view(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
-        chunks = manager.search(kb_id, req.question, top_k=req.top_k)
+        chunks = manager.search(kb_id, req.question, top_k=req.top_k * 3)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    results = [{"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text": c.text} for c in chunks]
+    visible_chunks = await asyncio.to_thread(
+        filter_chunks_by_permission, user_db, kb_id, chunks, user
+    )
+    results = [
+        {"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text": c.text}
+        for c in visible_chunks[:req.top_k]
+    ]
     return {"kb_id": kb_id, "results": results}
 
 
 @app.get("/knowledge-bases/{kb_id}", summary="获取知识库详情")
 async def get_knowledge_base_detail(
     kb_id: str,
-    authorization: str = Header(default=""),
+    user: dict = Depends(require_user),
 ):
     """获取知识库详情，包括元数据、文档列表、概述、目录。"""
-    # 认证（可选，未登录时只能看 public KB）
-    user_dict = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        user_dict = await asyncio.to_thread(_get_current_user, token)
+    meta = require_kb_view(user_db, kb_id, user)
 
     def _get():
         import sqlite3
@@ -1655,19 +1806,13 @@ async def get_knowledge_base_detail(
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
-            meta = conn.execute("SELECT * FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
-
-            # Scope 检查
-            scope = meta["scope"] if meta else "public"
-            owner_id = meta["owner_id"] if meta else 0
-            is_admin = user_dict and user_dict.get("is_admin", False)
-            is_owner = user_dict and owner_id == user_dict["id"]
-
-            if scope == "private" and not is_admin and not is_owner:
-                return "forbidden"
+            db_meta = conn.execute("SELECT * FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
+            scope = meta["scope"]
+            is_owner = meta["owner_id"] == user["id"]
 
             docs = conn.execute(
-                "SELECT * FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
+                "SELECT id, kb_id, filename, toc, summary, chunk_count, status, added_at "
+                "FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
                 (kb_id,),
             ).fetchall()
 
@@ -1675,9 +1820,9 @@ async def get_knowledge_base_detail(
 
             return {
                 "kb_id": kb_id,
-                "name": meta["name"] if meta else kb.name,
-                "description": meta["description"] if meta else "",
-                "overview": meta["overview"] if meta else "",
+                "name": meta.get("name", kb.name),
+                "description": db_meta["description"] if db_meta else "",
+                "overview": db_meta["overview"] if db_meta else "",
                 "doc_count": kb.doc_count,
                 "scope": scope,
                 "is_owner": is_owner,
@@ -1687,22 +1832,19 @@ async def get_knowledge_base_detail(
             conn.close()
 
     result = await asyncio.to_thread(_get)
-    if result == "forbidden":
-        raise HTTPException(status_code=403, detail="私有知识库仅所有者可查看")
     if not result:
         raise HTTPException(status_code=404, detail="知识库不存在")
     return result
 
 
 @app.put("/knowledge-bases/{kb_id}/overview", summary="更新知识库概述")
-async def update_kb_overview(kb_id: str, req: KBOverviewRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
-
-    def _update():
-        user_db.update_kb_overview(kb_id, req.overview)
-
-    await asyncio.to_thread(_update)
+async def update_kb_overview(
+    kb_id: str, req: KBOverviewRequest, user: dict = Depends(require_user)
+):
+    require_kb_edit(user_db, kb_id, user)
+    updated = await asyncio.to_thread(user_db.update_kb_overview, kb_id, req.overview)
+    if not updated:
+        raise HTTPException(status_code=404, detail="知识库不存在")
     return {"status": "updated"}
 
 
@@ -1731,9 +1873,13 @@ async def rename_knowledge_base(kb_id: str, req: KBRenameRequest, authorization:
 
 
 @app.put("/knowledge-bases/{kb_id}/documents/{doc_name}/toc", summary="更新文档目录")
-async def update_doc_toc(kb_id: str, doc_name: str, req: KBTocRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
+async def update_doc_toc(
+    kb_id: str, doc_name: str, req: KBTocRequest, user: dict = Depends(require_user)
+):
+    document = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
 
     import json
     def _update():
@@ -1747,30 +1893,15 @@ async def update_doc_toc(kb_id: str, doc_name: str, req: KBTocRequest, authoriza
 
 
 @app.put("/knowledge-bases/{kb_id}/documents/{doc_name}/summary", summary="更新文档概述")
-async def update_doc_summary(kb_id: str, doc_name: str, req: KBSummaryRequest, authorization: str = Header(default="")):
-    user_dict = await _require_auth(authorization)
-    _check_kb_edit_permission(kb_id, user_dict)
-
-    def _update():
-        import sqlite3
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
-            cur = conn.execute(
-                "UPDATE kb_documents SET summary = ? WHERE kb_id = ? AND filename = ?",
-                (req.summary, kb_id, doc_name)
-            )
-            if cur.rowcount == 0:
-                return False
-            conn.commit()
-            return True
-        finally:
-            conn.close()
-
-    result = await asyncio.to_thread(_update)
-    if not result:
+async def update_doc_summary(
+    kb_id: str, doc_name: str, req: KBSummaryRequest, user: dict = Depends(require_user)
+):
+    document = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
+    if document is None:
         raise HTTPException(status_code=404, detail="文档不存在")
+    require_doc_edit(user_db, doc_name, kb_id, user)
+
+    await asyncio.to_thread(user_db.update_kb_document_summary, kb_id, doc_name, req.summary)
     return {"status": "updated"}
 
 
@@ -2012,6 +2143,7 @@ async def update_document_permission(doc_id: int, authorization: str = Header(de
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可修改权限")
         new_val = user_db.toggle_document_visibility(doc_id)
@@ -2033,6 +2165,7 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可共享")
         # I4: 检查目标用户是否存在
@@ -2040,10 +2173,15 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         if not target:
             raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
         try:
-            share_id = user_db.share_document(doc_id, req.user_id, user_dict["id"])
+            share_id = user_db.share_document(doc_id, req.user_id, user_dict["id"], req.permission)
         except _sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="该用户已被共享")
-        return {"doc_id": doc_id, "user_id": req.user_id, "granted_by": user_dict["id"]}
+        return {
+            "doc_id": doc_id,
+            "user_id": req.user_id,
+            "granted_by": user_dict["id"],
+            "permission": req.permission,
+        }
 
     try:
         return await asyncio.to_thread(_share)
@@ -2060,6 +2198,7 @@ async def unshare_document(doc_id: int, user_id: int, authorization: str = Heade
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可撤销共享")
         user_db.unshare_document(doc_id, user_id)
@@ -2448,44 +2587,38 @@ def _resolve_source_owner(user_id: str, authorization: str) -> str:
 
 
 @app.post("/sources", summary="创建数据源", description="创建新的数据源（RSS / 数据库 / API）")
-async def create_source(
-    req: CreateSourceRequest,
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
-):
-    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
+async def create_source(req: CreateSourceRequest, user: dict = Depends(require_data_sources_admin)):
     source_id = await asyncio.to_thread(
         user_db.create_data_source,
         req.name,
         req.type,
         _json.dumps(req.config, ensure_ascii=False),
-        owner,
+        str(user["id"]),
     )
     return {
         "id": source_id,
         "name": req.name,
         "type": req.type,
-        "config": req.config,
+        "config": redact_source_config(req.config),
         "status": "inactive",
         "last_synced_at": None,
     }
 
 
-@app.get("/sources", summary="列出数据源", description="获取数据源列表（仅本用户可见；config 已脱敏）")
-async def list_sources(
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
-):
-    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
-    sources = await asyncio.to_thread(user_db.list_data_sources, owner)
+@app.get("/sources", summary="列出数据源", description="获取所有数据源列表")
+async def list_sources(user: dict = Depends(require_data_sources_admin)):
+    sources = await asyncio.to_thread(user_db.list_data_sources)
     result = []
     for s in sources:
         result.append({
             "id": s["id"],
             "name": s["name"],
             "type": s["type"],
-            "config": s["config"],
-            "has_secret": s.get("has_secret", False),
+            "config": redact_source_config(
+                _json.loads(s["config"])
+                if isinstance(s["config"], str) and s["config"]
+                else (s["config"] or {})
+            ),
             "status": s["status"],
             "last_synced_at": s["last_synced_at"],
             "created_at": s["created_at"],
@@ -2494,13 +2627,8 @@ async def list_sources(
 
 
 @app.delete("/sources/{source_id}", summary="删除数据源", description="删除指定数据源")
-async def delete_source(
-    source_id: int,
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
-):
-    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
-    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id, owner)
+async def delete_source(source_id: int, user: dict = Depends(require_data_sources_admin)):
+    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="数据源不存在")
     return {"status": "deleted"}
@@ -2575,14 +2703,9 @@ def _sync_source(source_id: int) -> dict:
 
 
 @app.post("/sources/{source_id}/sync", summary="同步数据源", description="手动触发数据源同步")
-async def sync_source(
-    source_id: int,
-    user_id: str = Security(verify_api_key),
-    authorization: str = Header(default=""),
-):
-    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
-    # Check existence + ownership first（非属主视为不存在，不泄露）
-    source = await asyncio.to_thread(user_db.get_data_source, source_id, owner)
+async def sync_source(source_id: int, user: dict = Depends(require_data_sources_admin)):
+    # Check existence first
+    source = await asyncio.to_thread(user_db.get_data_source, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="数据源不存在")
     try:
@@ -2622,9 +2745,5 @@ DATA_CHARTS_DIR = DATA_DIR_PATH / "charts"
 DATA_CHARTS_DIR.mkdir(exist_ok=True)
 if DATA_CHARTS_DIR.is_dir():
     app.mount("/data/charts", StaticFiles(directory=str(DATA_CHARTS_DIR)), name="data-charts")
-DATA_UPLOAD_DIR = DATA_DIR_PATH / "upload"
-if DATA_UPLOAD_DIR.is_dir():
-    app.mount("/data/upload", StaticFiles(directory=str(DATA_UPLOAD_DIR)), name="data-upload")
-
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

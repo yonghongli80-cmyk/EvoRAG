@@ -21,10 +21,18 @@ dependencies = [
     "openpyxl>=3.1,<4",
     "chardet>=5.2,<6",
     "requests>=2.33,<3",
+    "feedparser>=6.0,<7",
     "httpx>=0.28,<1",
     "python-jose[cryptography]>=3.3,<4",
     "python-multipart>=0.0.18,<1",
     "redis>=5.0,<6",
+    "filetype>=1.2,<2",
+    "python-pptx>=1.0,<2",
+    "PyMuPDF>=1.26,<2",
+    "rapidocr-onnxruntime>=1.4,<2",
+    "xlrd>=2.0,<3",
+    "py7zr>=1.0,<2",
+    "rarfile>=4.2,<5",
 ]
 
 [project.optional-dependencies]

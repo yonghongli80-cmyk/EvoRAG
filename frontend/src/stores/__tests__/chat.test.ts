@@ -287,6 +287,23 @@ describe('chat store', () => {
     expect(store.messages[1].role).toBe('assistant')
   })
 
+  it('sendMessage carries the selected knowledge base ID', async () => {
+    const mockResponse = {
+      ok: true,
+      body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }) }) }
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+    vi.mocked(api.post).mockResolvedValue({ data: { id: 1, mode: 'kb' } } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('leave policy', 'kb', 'kb_hr')
+
+    expect(JSON.parse(String(vi.mocked(globalThis.fetch).mock.calls[0][1]?.body))).toMatchObject({
+      question: 'leave policy',
+      kb_id: 'kb_hr'
+    })
+  })
+
   it('sendMessage streams tokens into assistant message', async () => {
     const encoder = new TextEncoder()
     const mockResponse = {
@@ -594,6 +611,40 @@ describe('chat store', () => {
 
     const analysisConvos = store.conversationsByMode('analysis')
     expect(analysisConvos.value).toHaveLength(0)
+  })
+
+  // ── assistant message id from done event ────────────────
+  it('stores assistant message id from the done event', async () => {
+    const encoder = new TextEncoder()
+    const mockResponse = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"token","content":"answer"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"sources","sources":[{"doc_name":"a.pdf","chunk_index":0}]}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"done","assistant_message_id":42}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question', 'file')
+
+    expect(store.messages.at(-1)?.id).toBe(42)
+    expect(store.messages.at(-1)?.assistantMessageId).toBe(42)
   })
 
   // ── currentConversation computed ────────────────────────

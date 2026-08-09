@@ -9,6 +9,9 @@ import { Upload, FolderOpened, Plus, ChatDotRound } from '@element-plus/icons-vu
 import MessageBubble from '../components/MessageBubble.vue'
 import ChatInput from '../components/ChatInput.vue'
 import AddToAnalysisDialog from '../components/AddToAnalysisDialog.vue'
+import ArchiveManifestDialog from '../components/ArchiveManifestDialog.vue'
+import OrganizationPreviewDialog from '../components/OrganizationPreviewDialog.vue'
+import RecycleBinDialog from '../components/RecycleBinDialog.vue'
 import ConversationSearch from '../components/ConversationSearch.vue'
 import api from '../utils/api'
 
@@ -128,6 +131,34 @@ async function downloadFile(name: string) {
 
 async function onSearchSelect(conversationId: number) {
   await chatStore.selectConversation(conversationId)
+}
+
+// ── Material lifecycle handlers (archives, recycle, organization) ──────────
+async function onArchiveConfirm(selectedIds: number[]) {
+  try {
+    await filesStore.confirmArchiveImport(selectedIds)
+    ElMessage.success('压缩包内容已导入')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '压缩包导入失败')
+  }
+}
+
+async function onOrganizationConfirm(selectedIds: number[]) {
+  try {
+    await filesStore.confirmOrganization(selectedIds)
+    ElMessage.success('资料整理完成')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '整理失败')
+  }
+}
+
+async function onRestoreDocument(documentId: number) {
+  try {
+    await filesStore.restoreDocument(documentId)
+    ElMessage.success('已恢复')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.detail || '恢复失败')
+  }
 }
 
 onMounted(async () => {
@@ -348,6 +379,22 @@ function askSuggested(q: string) {
       :question="dialogQuestion"
       :answer="dialogAnswer"
       @confirm="handleConfirm"
+    />
+
+    <ArchiveManifestDialog
+      v-model:visible="filesStore.archiveVisible"
+      :entries="filesStore.archiveEntries"
+      @confirm="onArchiveConfirm"
+    />
+    <OrganizationPreviewDialog
+      v-model:visible="filesStore.organizationVisible"
+      :items="filesStore.organizationItems"
+      @confirm="onOrganizationConfirm"
+    />
+    <RecycleBinDialog
+      v-model:visible="filesStore.recycleVisible"
+      :items="filesStore.recycleItems"
+      @restore="onRestoreDocument"
     />
   </div>
 </template>

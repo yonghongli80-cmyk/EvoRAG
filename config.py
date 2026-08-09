@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     auth_enabled: bool = True
     auth_keys: str = "{}"
 
+    # 外部数据源可能携带连接凭据；未显式开启前不暴露相关接口。
+    data_sources_enabled: bool = False
+
     # Qdrant 本地模式
     qdrant_path: str = str(Path(__file__).resolve().parent / "qdrant_data")
 
@@ -37,6 +40,30 @@ class Settings(BaseSettings):
 
     # Redis 缓存
     redis_url: str = "redis://localhost:6379/0"
+
+    # 文档版本存储（可信知识闭环）
+    document_versions_root: str = str(Path(__file__).resolve().parent / "data" / "document_versions")
+    feedback_cluster_days: int = 30
+    feedback_cluster_users: int = 3
+    knowledge_task_due_days: int = 7
+    knowledge_stale_days: int = 180
+    historical_result_weight: float = 0.35
+
+    # 增量资料生命周期
+    material_file_max_bytes: int = 50 * 1024 * 1024
+    material_archive_max_bytes: int = 200 * 1024 * 1024
+    material_debounce_seconds: int = 300
+    material_worker_lease_seconds: int = 120
+    material_job_max_attempts: int = 5
+    material_job_queue_limit: int = 10_000
+    material_embedding_cache_path: str = str(Path(__file__).resolve().parent / "data" / "embedding_cache.sqlite3")
+    material_embedding_cache_bytes: int = 10 * 1024 * 1024 * 1024
+    material_worker_count: int = 2
+    material_embedding_slots: int = 4
+    legacy_office_enabled: bool = False
+    legacy_office_launcher: str = ""
+    legacy_office_timeout_seconds: int = 60
+    legacy_office_max_memory_mb: int = 512
 
     # 分块与检索
     chunk_size: int = 500

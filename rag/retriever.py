@@ -80,6 +80,15 @@ def _load_all_chunks(collection_name: str) -> list[Chunk]:
                 text=payload.get("text", ""),
                 doc_name=payload.get("doc_name", ""),
                 chunk_index=payload.get("chunk_index", 0),
+                doc_permission_id=payload.get("doc_permission_id"),
+                metadata=payload.get("metadata", {}),
+                document_id=payload.get("document_id"),
+                document_version_id=payload.get("document_version_id"),
+                version_no=payload.get("version_no"),
+                is_current=bool(payload.get("is_current", True)),
+                validity_status=payload.get("validity_status", "valid"),
+                section_title=payload.get("section_title"),
+                updated_at=payload.get("updated_at"),
             )
         )
     return chunks
@@ -161,7 +170,7 @@ class Retriever:
                 self._bm25_version = target_version
                 return
 
-    def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None) -> list[Chunk]:
+    def retrieve(self, query: str, top_k: int = 5, doc_name: str = None, tags: list[str] = None, weights: dict[str, float] = None, allowed_version_ids: set[int] = None, validity_statuses: set[str] = None) -> list[Chunk]:
         self._refresh_bm25_if_stale()
         dense_hits = []
         try:
@@ -173,6 +182,8 @@ class Retriever:
                     top_k=top_k * 2,
                     doc_name=doc_name,
                     tags=tags,
+                    allowed_version_ids=allowed_version_ids,
+                    validity_statuses=validity_statuses,
                 )
             else:
                 dense_hits = dense_search(
@@ -199,6 +210,18 @@ class Retriever:
         if doc_name:
             dense_hits = [c for c in dense_hits if c.doc_name == doc_name]
             sparse_hits = [c for c in sparse_hits if c.doc_name == doc_name]
+
+        # 版本过滤：BM25 缓存若缺少版本元数据则整体禁用，避免泄漏历史内容
+        if allowed_version_ids is not None:
+            if self.chunks and getattr(self.chunks[0], "document_version_id", None) is not None:
+                sparse_hits = [c for c in sparse_hits if c.document_version_id in allowed_version_ids]
+            else:
+                sparse_hits = []
+        if validity_statuses:
+            if self.chunks and getattr(self.chunks[0], "validity_status", None) is not None:
+                sparse_hits = [c for c in sparse_hits if c.validity_status in validity_statuses]
+            else:
+                sparse_hits = []
 
         return self._rrf_fuse(dense_hits, sparse_hits, top_k, rrf_k=settings.rrf_k, weights=weights)
 
