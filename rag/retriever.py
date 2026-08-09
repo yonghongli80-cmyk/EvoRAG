@@ -206,17 +206,33 @@ class Retriever:
     def _rrf_fuse(dense: list[Chunk], sparse: list[Chunk], top_k: int, rrf_k: int = 60, weights: dict[str, float] = None) -> list[Chunk]:
         import hashlib as _hashlib
 
-        scores: dict[Chunk, float] = {}
+        scores: dict[tuple[str, int, str], float] = {}
+        representatives: dict[tuple[str, int, str], Chunk] = {}
+
+        def add_score(doc: Chunk, score: float) -> None:
+            # BM25 snapshots do not retain doc_permission_id while vector hits do.
+            # Fuse by the content identity so the same chunk cannot occupy two ranks.
+            key = (doc.doc_name, doc.chunk_index, doc.text)
+            scores[key] = scores.get(key, 0) + score
+            existing = representatives.get(key)
+            if existing is None or (
+                existing.doc_permission_id is None and doc.doc_permission_id is not None
+            ):
+                representatives[key] = doc
+
         for rank, doc in enumerate(dense):
             base = 1 / (rrf_k + rank + 1)
             if weights:
                 h = _hashlib.md5(doc.text.encode()).hexdigest()
                 base *= weights.get(h, 1.0)
-            scores[doc] = scores.get(doc, 0) + base
+            add_score(doc, base)
         for rank, doc in enumerate(sparse):
             base = 1 / (rrf_k + rank + 1)
             if weights:
                 h = _hashlib.md5(doc.text.encode()).hexdigest()
                 base *= weights.get(h, 1.0)
-            scores[doc] = scores.get(doc, 0) + base
-        return sorted(scores, key=lambda d: -scores[d])[:top_k]
+            add_score(doc, base)
+        return [
+            representatives[key]
+            for key in sorted(scores, key=lambda key: -scores[key])[:top_k]
+        ]
