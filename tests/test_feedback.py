@@ -10,13 +10,18 @@ from rag.user_db import UserDB
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     """Yield a TestClient with a temporary UserDB patched in."""
     db_path = str(tmp_path / "test_users.db")
     import rag.api as api_mod
+    from config import settings
 
     original_db = api_mod.user_db
-    api_mod.user_db = UserDB(db_path)
+    original_state_db = getattr(api_mod.app.state, "user_db", None)
+    test_db = UserDB(db_path)
+    api_mod.user_db = test_db
+    api_mod.app.state.user_db = test_db
+    monkeypatch.setattr(settings, "auth_enabled", True)
 
     # Mock the pipeline so queries work without a real index
     mock_pipeline = MagicMock()
@@ -33,6 +38,8 @@ def client(tmp_path):
 
     api_mod.pipeline = None
     api_mod.user_db = original_db
+    api_mod.app.state.user_db = original_state_db
+    test_db.close()
 
 
 def _register_and_login(client, username="test_user", password="Test_pass_123"):

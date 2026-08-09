@@ -72,12 +72,8 @@ async def require_user(
     api_key: str | None = Security(api_key_header),
 ) -> dict:
     if not settings.auth_enabled:
-        return {
-            "id": 0,
-            "username": "anonymous-development",
-            "is_admin": True,
-            "auth_mode": "disabled",
-        }
+        user = await asyncio.to_thread(get_user_db(request).ensure_development_user)
+        return {**user, "auth_mode": "disabled"}
 
     user = await asyncio.to_thread(resolve_principal, get_user_db(request), authorization, api_key)
     if not user:

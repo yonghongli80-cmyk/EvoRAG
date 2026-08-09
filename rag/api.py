@@ -1020,13 +1020,21 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
 
     # Sanitize filename to prevent path traversal
     safe_name = Path(filename).name
-    file_path = DATA_DIR / safe_name
+    legacy_path = DATA_DIR / safe_name
+    perm = user_db.get_document_permission(safe_name, "rag_docs")
+    version_paths: list[Path] = []
+    if perm:
+        from rag.document_version_store import resolve_version_path
 
-    if not file_path.is_file():
+        version_paths = [
+            resolve_version_path(_versions_root(), version["file_path"])
+            for version in user_db.list_document_versions(perm["id"])
+        ]
+
+    if not legacy_path.is_file() and not any(path.is_file() for path in version_paths):
         raise HTTPException(status_code=404, detail=f"文件 {safe_name} 不存在")
 
     # 检查是否为受保护文件
-    perm = user_db.get_document_permission(safe_name, "rag_docs")
     if perm and perm.get("protected"):
         raise HTTPException(status_code=403, detail=f"文件 {safe_name} 受保护，不可删除")
     from rag.permissions import check_doc_permission
@@ -1041,7 +1049,9 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
         raise HTTPException(status_code=500, detail=f"删除向量失败: {e}")
 
     # 向量删除成功后，再删文件
-    file_path.unlink()
+    legacy_path.unlink(missing_ok=True)
+    for version_path in version_paths:
+        version_path.unlink(missing_ok=True)
 
     # 清理权限记录（I19）
     if perm:
@@ -1086,13 +1096,21 @@ async def download_file(filename: str, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
 
     safe_name = Path(filename).name
+    perm = user_db.get_document_permission(safe_name, "rag_docs")
     file_path = DATA_DIR / safe_name
+    if perm:
+        current_version = user_db.get_current_document_version(perm["id"])
+        if current_version:
+            from rag.document_version_store import resolve_version_path
+
+            file_path = resolve_version_path(
+                _versions_root(), current_version["file_path"]
+            )
 
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"文件 {safe_name} 不存在")
 
     # 权限检查
-    perm = user_db.get_document_permission(safe_name, "rag_docs")
     if not perm:
         # 无权限记录 = 未归属/旧文档，默认拒绝下载（无法证明公开）；admin 除外
         if not user_dict.get("is_admin"):
@@ -2612,15 +2630,18 @@ async def list_sources(user: dict = Depends(require_data_sources_admin)):
     sources = await asyncio.to_thread(user_db.list_data_sources)
     result = []
     for s in sources:
+        config = (
+            _json.loads(s["config"])
+            if isinstance(s["config"], str) and s["config"]
+            else (s["config"] or {})
+        )
+        redacted_config = redact_source_config(config)
         result.append({
             "id": s["id"],
             "name": s["name"],
             "type": s["type"],
-            "config": redact_source_config(
-                _json.loads(s["config"])
-                if isinstance(s["config"], str) and s["config"]
-                else (s["config"] or {})
-            ),
+            "config": redacted_config,
+            "has_secret": redacted_config != config,
             "status": s["status"],
             "last_synced_at": s["last_synced_at"],
             "created_at": s["created_at"],

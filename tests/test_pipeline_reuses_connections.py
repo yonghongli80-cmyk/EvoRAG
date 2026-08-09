@@ -6,14 +6,20 @@ import pytest
 def _build_pipeline(feedback_processor, gap_analyzer):
     from rag.pipeline import RAGPipeline
 
-    with patch("rag.pipeline.Retriever") as retriever_cls, patch(
+    with patch("rag.pipeline.load", return_value=""), patch(
+        "rag.pipeline.clean_document", return_value=("", {})
+    ), patch("rag.pipeline.chunk", return_value=[]), patch(
+        "rag.pipeline.deduplicate_chunks", return_value=[]
+    ), patch("rag.pipeline.embed", return_value=[]), patch(
+        "rag.pipeline.clear"
+    ), patch("rag.pipeline.add"), patch("rag.pipeline.Retriever") as retriever_cls, patch(
         "rag.pipeline.Reranker"
     ), patch("rag.memory.DialogueMemory"), patch(
         "rag.pipeline.ExecutionTracker"
     ), patch("rag.pipeline.RedisCache"):
         retriever_cls.return_value = MagicMock()
         return RAGPipeline(
-            kb_id="test_kb",
+            file_path="test.txt",
             memory_db_path=":memory:",
             feedback_processor=feedback_processor,
             gap_analyzer=gap_analyzer,
@@ -27,7 +33,6 @@ def test_pipeline_reuses_injected_feedback_processor_across_queries():
     feedback_processor.get_weights.return_value = {}
     pipeline = _build_pipeline(feedback_processor, MagicMock())
     chunks = [Chunk(text="safe context", doc_name="doc.txt", chunk_index=0)]
-    pipeline._cache.get.return_value = None
     pipeline.retriever.retrieve.return_value = chunks
     pipeline.reranker.rerank.return_value = chunks
     pipeline.memory = MagicMock()
@@ -60,8 +65,6 @@ def test_pipeline_reuses_injected_gap_analyzer_across_queries():
         "chunk_hashes": ["hash"],
         "weights": {"hash": 0.1},
     }
-    pipeline._cache.get.return_value = None
-    pipeline._cache.set.return_value = None
     pipeline.memory = MagicMock()
 
     with patch.object(pipeline, "_prepare_context", return_value=(prepared, None)), patch(

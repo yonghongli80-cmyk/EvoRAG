@@ -27,11 +27,10 @@ def test_load_nonexistent():
         load("/nonexistent/file.txt")
 
 
-def test_load_unsupported_format(tmp_path):
+def test_load_unknown_text_extension_uses_plain_text_fallback(tmp_path):
     file = tmp_path / "doc.xyz"
     file.write_text("test", encoding="utf-8")
-    with pytest.raises(ValueError, match="不支持的文件格式"):
-        load(str(file))
+    assert load(str(file)) == "test"
 
 
 def test_load_excel(tmp_path):

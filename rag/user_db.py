@@ -843,6 +843,19 @@ class UserDB:
             except sqlite3.IntegrityError:
                 raise ValueError(f"Username '{username}' already exists")
 
+    def ensure_development_user(self) -> dict[str, Any]:
+        """Ensure the auth-disabled principal has a real FK-safe user row."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO users (id, username, salt, password, is_admin) "
+                "VALUES (0, 'anonymous-development', '', '!disabled!', 1)"
+            )
+            self._conn.commit()
+        user = self.get_user_by_id(0)
+        if user is None:  # pragma: no cover - guarded by the insert above
+            raise RuntimeError("failed to create development principal")
+        return user
+
     def authenticate(self, username: str, password: str) -> dict[str, Any] | None:
         """Return user dict on success, ``None`` on failure."""
         from rag.auth import verify_password

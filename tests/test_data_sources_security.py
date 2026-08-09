@@ -11,7 +11,8 @@ def test_security_settings_fail_closed(monkeypatch):
     assert getattr(configured, "data_sources_enabled", True) is False
 
 
-def test_sources_are_hidden_when_feature_is_disabled(isolated_api, make_user):
+def test_sources_are_hidden_when_feature_is_disabled(isolated_api, make_user, monkeypatch):
+    monkeypatch.setattr(settings, "data_sources_enabled", False)
     _, headers = make_user("admin", is_admin=True)
 
     response = isolated_api.get("/sources", headers=headers)
@@ -46,5 +47,6 @@ def test_enabled_source_list_redacts_credentials(isolated_api, make_user, monkey
     assert config["headers"]["Authorization"] == "[REDACTED]"
     assert config["password"] == "[REDACTED]"
     assert config["connection_string"] == "[REDACTED]"
-    assert "secret" not in response.text
+    assert "Bearer secret" not in response.text
+    assert "db-secret" not in response.text
     assert "user:pass" not in response.text

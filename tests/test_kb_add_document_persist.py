@@ -1,51 +1,32 @@
-import io
-import sqlite3
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Regression coverage for persisted knowledge-base uploads."""
 
-import pytest
-from starlette.datastructures import UploadFile
+import json
+from pathlib import Path
 
 
-@pytest.mark.asyncio
-async def test_add_document_to_kb_persists_uploaded_file(tmp_path, monkeypatch):
-    import rag.api as api
+def test_add_document_to_kb_persists_uploaded_file(
+    isolated_api, make_user, monkeypatch
+):
+    owner, headers = make_user("kb-persist-owner")
+    db = isolated_api.app.state.user_db
+    db.create_kb_metadata("kb_test", "Test", owner["id"], "private")
+    monkeypatch.setattr("rag.api.load_document", lambda path: "persist me")
+    monkeypatch.setattr("rag.api.generate_toc", lambda text: [{"title": "Guide"}])
+    monkeypatch.setattr("rag.api.generate_summary", lambda text: "summary")
+    monkeypatch.setattr(
+        "rag.knowledge_base.KnowledgeBaseManager.add_document",
+        lambda *args, **kwargs: 1,
+    )
 
-    upload_dir = tmp_path / "upload"
-    upload_dir.mkdir()
-    metadata_db = tmp_path / "metadata.db"
-    with sqlite3.connect(metadata_db) as conn:
-        conn.execute(
-            "CREATE TABLE kb_documents ("
-            "kb_id TEXT, filename TEXT, file_path TEXT, toc TEXT, summary TEXT, "
-            "chunk_count INTEGER, status TEXT, PRIMARY KEY (kb_id, filename))"
-        )
-        conn.execute(
-            "CREATE TABLE kb_metadata (kb_id TEXT PRIMARY KEY, name TEXT)"
-        )
+    response = isolated_api.post(
+        "/knowledge-bases/kb_test/documents",
+        headers=headers,
+        files={"file": ("guide.txt", b"persist me", "text/plain")},
+    )
 
-    user_db = MagicMock()
-    user_db.create_document_permission.return_value = 7
-    monkeypatch.setattr(api, "DATA_DIR", upload_dir)
-    monkeypatch.setattr(api, "_DB_PATH", metadata_db)
-    monkeypatch.setattr(api, "user_db", user_db)
-    file = UploadFile(filename="guide.txt", file=io.BytesIO(b"persist me"))
-
-    with patch.object(api, "_require_auth", new=AsyncMock(return_value={"id": 1})), patch.object(
-        api, "_check_kb_edit_permission"
-    ), patch.object(api, "KnowledgeBaseManager") as manager_cls, patch.object(
-        api, "load_document", return_value="persist me"
-    ), patch.object(api, "generate_toc", return_value=[]), patch.object(
-        api, "generate_summary", return_value="summary"
-    ):
-        manager_cls.return_value.add_document.return_value = 1
-        result = await api.add_document_to_kb("kb_test", file, authorization="Bearer token")
-
-    stored = upload_dir / "guide.txt"
-    assert result["status"] == "added"
-    assert stored.read_bytes() == b"persist me"
-    with sqlite3.connect(metadata_db) as conn:
-        row = conn.execute(
-            "SELECT file_path, toc, summary FROM kb_documents WHERE kb_id = ? AND filename = ?",
-            ("kb_test", "guide.txt"),
-        ).fetchone()
-    assert row == (str(stored), "[]", "summary")
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "added"
+    record = db.get_kb_document("kb_test", "guide.txt")
+    assert Path(record["file_path"]).read_bytes() == b"persist me"
+    assert json.loads(record["toc"]) == [{"title": "Guide"}]
+    assert record["summary"] == "summary"

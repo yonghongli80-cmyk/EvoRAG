@@ -8,6 +8,7 @@
 - 正常路径：owner 上传 → 可下载 → 可删除。
 """
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,8 +24,13 @@ def api_env(tmp_path, monkeypatch):
     from rag.user_db import UserDB
 
     db = UserDB(str(tmp_path / "users.db"))
+    versions_root = tmp_path / "document_versions"
     monkeypatch.setattr(api_module, "user_db", db)
     monkeypatch.setattr(api_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(api_module.app.state, "user_db", db)
+    monkeypatch.setattr(
+        api_module.app.state, "document_versions_root", versions_root, raising=False
+    )
 
     with ExitStack() as stack:
         mock_kb_cls = stack.enter_context(patch("rag.api.KnowledgeBaseManager"))
@@ -46,12 +52,20 @@ def _register(client, username, password="Secret123"):
     return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
-def _upload(client, headers, filename, content=b"hello"):
+def _upload(client, headers, filename, content=b"hello", action=None):
+    data = {"duplicate_action": action} if action else {}
     return client.post(
         "/upload",
         files={"file": (filename, content, "text/plain")},
+        data=data,
         headers=headers,
     )
+
+
+def _current_version_bytes(db, filename):
+    document = db.get_document_permission(filename, "rag_docs")
+    version = db.get_current_document_version(document["id"])
+    return Path(version["file_path"]).read_bytes()
 
 
 # ── 认证开启：强制登录 ──────────────────────────────────────────────
@@ -75,7 +89,7 @@ def test_upload_with_token_ok_and_creates_record_when_auth_enabled(api_env, monk
     headers = _register(client, "alice")
     resp = _upload(client, headers, "alice.txt", b"alice content")
     assert resp.status_code == 200, resp.text
-    assert resp.json()["status"] == "uploaded"
+    assert resp.json()["status"] == "created"
     perm = db.get_document_permission("alice.txt", "rag_docs")
     assert perm is not None, "认证开启上传应创建权限记录"
     assert perm["owner_id"] == db.get_user_by_username("alice")["id"]
@@ -126,7 +140,7 @@ def test_overwrite_same_name_non_owner_rejected_when_auth_enabled(api_env, monke
     assert resp.status_code in (409, 403), (
         f"非 owner 覆盖应被拒，实际 {resp.status_code}: {resp.text}"
     )
-    assert (api_module.DATA_DIR / "doc.txt").read_bytes() == b"alice content", (
+    assert _current_version_bytes(db, "doc.txt") == b"alice content", (
         "原文件不应被覆盖"
     )
 
@@ -138,9 +152,10 @@ def test_overwrite_same_name_owner_allowed_when_auth_enabled(api_env, monkeypatc
     headers = _register(client, "alice")
     resp = _upload(client, headers, "doc.txt", b"v1")
     assert resp.status_code == 200, resp.text
-    resp = _upload(client, headers, "doc.txt", b"v2")
+    resp = _upload(client, headers, "doc.txt", b"v2", action="overwrite")
     assert resp.status_code == 200, resp.text
-    assert (api_module.DATA_DIR / "doc.txt").read_bytes() == b"v2"
+    assert resp.json()["status"] == "overwritten"
+    assert _current_version_bytes(db, "doc.txt") == b"v2"
 
 
 # ── 认证开启：正常路径 ──────────────────────────────────────────────
@@ -153,13 +168,15 @@ def test_owner_upload_download_delete_when_auth_enabled(api_env, monkeypatch):
     headers = _register(client, "alice")
     resp = _upload(client, headers, "owner.txt", b"owner content")
     assert resp.status_code == 200, resp.text
+    document = db.get_document_permission("owner.txt", "rag_docs")
+    version_paths = [Path(item["file_path"]) for item in db.list_document_versions(document["id"])]
 
     resp = client.get("/files/owner.txt/download", headers=headers)
     assert resp.status_code == 200, resp.text
 
     resp = client.delete("/files/owner.txt", headers=headers)
     assert resp.status_code == 200, f"owner 删除失败: {resp.text}"
-    assert not (api_module.DATA_DIR / "owner.txt").exists()
+    assert all(not path.exists() for path in version_paths)
     assert db.get_document_permission("owner.txt", "rag_docs") is None
 
 
@@ -174,4 +191,4 @@ def test_anonymous_upload_ok_when_auth_disabled(api_env, monkeypatch):
     assert resp.status_code == 200, (
         f"认证关闭时匿名上传应成功，实际 {resp.status_code}: {resp.text}"
     )
-    assert resp.json()["status"] == "uploaded"
+    assert resp.json()["status"] == "created"

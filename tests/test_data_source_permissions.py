@@ -324,11 +324,14 @@ class TestMigration:
 # ── API 层（认证关闭环境）────────────────────────────────────────────────
 
 
-def test_api_list_masks_config_and_cleans_up():
+def test_api_list_masks_config_and_cleans_up(monkeypatch):
     """GET /sources 返回脱敏 config + has_secret（认证关闭 → owner='anonymous'）。"""
     from fastapi.testclient import TestClient
 
+    from config import settings
     from rag.api import app, user_db
+
+    monkeypatch.setattr(settings, "data_sources_enabled", True)
 
     sid = user_db.create_data_source(
         name="DB",
@@ -352,7 +355,7 @@ def test_api_list_masks_config_and_cleans_up():
 
 
 def test_api_per_user_isolation_with_auth_enabled(monkeypatch):
-    """auth 开启：用户 B 看不到/删不了/同步不了用户 A 的数据源。"""
+    """auth 开启：只有管理员能查看和管理数据源。"""
     import uuid as _uuid
 
     from fastapi.testclient import TestClient
@@ -367,22 +370,21 @@ def test_api_per_user_isolation_with_auth_enabled(monkeypatch):
     sid = user_db.create_data_source(name="A-only", source_type="rss", config="{}", owner_id=str(a_id))
 
     monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "data_sources_enabled", True)
+    user_db.set_user_admin(a_id, True)
     token_a = create_token({"user_id": a_id})
     token_b = create_token({"user_id": b_id})
 
     client = TestClient(app)
     try:
-        # B 看不到 A 的数据源
+        # 普通用户不能进入数据源管理端点。
         resp_b = client.get("/sources", headers={"Authorization": f"Bearer {token_b}"})
-        assert resp_b.status_code == 200
-        assert all(s["id"] != sid for s in resp_b.json()["sources"])
-        # B 删除 A 的数据源 → 404（非属主视为不存在）
+        assert resp_b.status_code == 403
         resp_del = client.delete(f"/sources/{sid}", headers={"Authorization": f"Bearer {token_b}"})
-        assert resp_del.status_code in (403, 404)
-        # B 同步 A 的数据源 → 404
+        assert resp_del.status_code == 403
         resp_sync = client.post(f"/sources/{sid}/sync", headers={"Authorization": f"Bearer {token_b}"})
-        assert resp_sync.status_code in (403, 404)
-        # A 自己可见、可删
+        assert resp_sync.status_code == 403
+        # 管理员可见、可删。
         resp_a = client.get("/sources", headers={"Authorization": f"Bearer {token_a}"})
         assert any(s["id"] == sid for s in resp_a.json()["sources"])
         assert (
@@ -396,20 +398,22 @@ def test_api_per_user_isolation_with_auth_enabled(monkeypatch):
 # ── auth 关闭下匿名越权收敛（Important #1）───────────────────────────────
 
 
-def test_anonymous_cannot_manage_admin_owned_source():
-    """认证关闭时匿名（owner='anonymous'）不能 list/delete/sync admin 拥有的数据源。"""
+def test_auth_disabled_admin_mode_can_manage_sources(monkeypatch):
+    """认证关闭时显式开发管理员模式仍能管理数据源。"""
     from fastapi.testclient import TestClient
 
+    from config import settings
     from rag.api import app, user_db
+
+    monkeypatch.setattr(settings, "data_sources_enabled", True)
 
     sid = user_db.create_data_source(name="Admin-only", source_type="rss", config="{}", owner_id="admin")
     try:
         client = TestClient(app)
         resp = client.get("/sources")
         assert resp.status_code == 200
-        assert all(s["id"] != sid for s in resp.json()["sources"])
-        assert client.delete(f"/sources/{sid}").status_code == 404
-        assert client.post(f"/sources/{sid}/sync").status_code == 404
+        assert any(s["id"] == sid for s in resp.json()["sources"])
+        assert client.delete(f"/sources/{sid}").status_code == 200
     finally:
         user_db.delete_data_source(sid, "admin")
 
@@ -417,11 +421,14 @@ def test_anonymous_cannot_manage_admin_owned_source():
 # ── sync 对非只读 SQL 返回 400（Minor #4）───────────────────────────────
 
 
-def test_api_sync_rejects_non_select_with_400():
+def test_api_sync_rejects_non_select_with_400(monkeypatch):
     """sync 对非只读 SQL 返回 400（而非 500），并回显中文校验消息。"""
     from fastapi.testclient import TestClient
 
+    from config import settings
     from rag.api import app, user_db
+
+    monkeypatch.setattr(settings, "data_sources_enabled", True)
 
     sid = user_db.create_data_source(
         name="BadSQL",

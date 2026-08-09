@@ -266,7 +266,7 @@ def test_query_old_kb_allowed(db):
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_api_delete_kb_non_owner_returns_403(mock_kb_cls):
+def test_api_delete_kb_non_owner_returns_403(mock_kb_cls, monkeypatch):
     """非 owner 删除 KB 应返回 403。"""
     mock_manager = MagicMock()
     mock_manager.create_kb.return_value = "kb_perm_test"
@@ -274,10 +274,12 @@ def test_api_delete_kb_non_owner_returns_403(mock_kb_cls):
     mock_kb_cls.return_value = mock_manager
 
     from fastapi.testclient import TestClient
+    from config import settings
     from rag.api import app, user_db
     from rag.auth import create_token
 
     client = TestClient(app)
+    monkeypatch.setattr(settings, "auth_enabled", True)
 
     # 创建 owner 和 other 用户
     try:
@@ -310,17 +312,19 @@ def test_api_delete_kb_non_owner_returns_403(mock_kb_cls):
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_api_query_private_kb_non_owner_returns_403(mock_kb_cls):
+def test_api_query_private_kb_non_owner_returns_403(mock_kb_cls, monkeypatch):
     """非 owner 查询私有 KB 应返回 403。"""
     mock_manager = MagicMock()
     mock_manager.create_kb.return_value = "kb_priv_test"
     mock_kb_cls.return_value = mock_manager
 
     from fastapi.testclient import TestClient
+    from config import settings
     from rag.api import app, user_db
     from rag.auth import create_token
 
     client = TestClient(app)
+    monkeypatch.setattr(settings, "auth_enabled", True)
 
     try:
         owner_id = user_db.create_user("_perm_owner2", "pwd")
@@ -349,12 +353,14 @@ def test_api_query_private_kb_non_owner_returns_403(mock_kb_cls):
                   headers={"Authorization": f"Bearer {owner_token}"})
 
 
-def test_api_no_auth_returns_401():
+def test_api_no_auth_returns_401(monkeypatch):
     """未登录访问 KB 端点应返回 401。"""
     from fastapi.testclient import TestClient
+    from config import settings
     from rag.api import app
 
     client = TestClient(app)
+    monkeypatch.setattr(settings, "auth_enabled", True)
 
     res = client.post("/knowledge-bases", json={"name": "no_auth_test"})
     assert res.status_code == 401

@@ -16,12 +16,9 @@ async def test_streaming_endpoint_yields_error_event_when_pipeline_raises(monkey
     user_db = MagicMock()
     monkeypatch.setattr(api, "pipeline", FailingPipeline())
     monkeypatch.setattr(api, "user_db", user_db)
-    monkeypatch.setattr(api, "_get_current_user", lambda _token: {"id": 1})
     request = api.StreamQueryRequest(question="question", conversation_id=7)
 
-    response = await api.query_stream(
-        request, user_id="user", authorization="Bearer token"
-    )
+    response = await api.query_stream(request, user={"id": 1})
     events = [chunk async for chunk in response.body_iterator]
 
     assert len(events) == 2
