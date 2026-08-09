@@ -28,6 +28,7 @@ from rag.concurrency import ReadWriteLock
 
 app = FastAPI(title="RAG 知识库 API", description="基于检索增强生成的智能知识库系统")
 pipeline = None
+_pipelines = {}
 _pipeline_lock = ReadWriteLock()
 
 
@@ -119,7 +120,7 @@ def auto_index_on_startup():
     if not changed and not deleted:
         logger.info("索引无需更新（%d 文件）", len(current_hashes))
         with _pipeline_lock.write():
-            pipeline = _make_pipeline(kb_id="rag_docs")
+            pipeline = _get_or_create_pipeline("rag_docs")
         _init_admin()
         _sync_repo_files()
         return
@@ -139,7 +140,7 @@ def auto_index_on_startup():
         save_index_state(state_path, new_state)
 
         with _pipeline_lock.write():
-            pipeline = _make_pipeline(kb_id="rag_docs")
+            pipeline = _get_or_create_pipeline("rag_docs")
     except Exception as e:
         logger.warning("启动索引失败: %s", e)
 
@@ -336,10 +337,31 @@ def _make_pipeline(**kwargs):
     return RAGPipeline(**kwargs)
 
 
+def _get_or_create_pipeline(kb_id: str):
+    """Return the cached pipeline for a knowledge base (caller holds write lock)."""
+    global pipeline
+    cached = _pipelines.get(kb_id)
+    if cached is None and kb_id == "rag_docs" and pipeline is not None:
+        cached = pipeline
+        _pipelines[kb_id] = cached
+    if cached is None:
+        cached = _make_pipeline(kb_id=kb_id)
+        _pipelines[kb_id] = cached
+    if kb_id == "rag_docs":
+        pipeline = cached
+    return cached
+
+
 @app.on_event("shutdown")
 def close_pipeline_processors():
     """关闭由 API 生命周期持有的共享处理器。"""
-    global _feedback_processor, _gap_analyzer
+    global pipeline, _feedback_processor, _gap_analyzer
+    with _pipeline_lock.write():
+        cached_pipelines = list(dict.fromkeys(_pipelines.values()))
+        _pipelines.clear()
+        pipeline = None
+    for cached_pipeline in cached_pipelines:
+        cached_pipeline.close()
     with _processor_lock:
         for processor in (_feedback_processor, _gap_analyzer):
             if processor is not None:
@@ -871,7 +893,7 @@ async def upload_file(
     # Refresh pipeline
     with _pipeline_lock.write():
         try:
-            pipeline = _make_pipeline(kb_id="rag_docs")
+            pipeline = _get_or_create_pipeline("rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（上传后）: %s", e)
 
@@ -928,7 +950,7 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
     # 刷新 pipeline
     with _pipeline_lock.write():
         try:
-            pipeline = _make_pipeline(kb_id="rag_docs")
+            pipeline = _get_or_create_pipeline("rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（删除后）: %s", e)
 
@@ -1083,7 +1105,7 @@ async def index_all(user_id: str = Security(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
     with _pipeline_lock.write():
         try:
-            pipeline = await asyncio.to_thread(_make_pipeline, kb_id="rag_docs")
+            pipeline = await asyncio.to_thread(_get_or_create_pipeline, "rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（全量索引后）: %s", e)
     return {"status": "indexed", **stats}
@@ -1115,7 +1137,7 @@ async def index(file: UploadFile = File(..., description="要索引的文档文�
     # 刷新 pipeline（冷启动时创建，运行时更新）
     with _pipeline_lock.write():
         try:
-            pipeline = _make_pipeline(kb_id="rag_docs")
+            pipeline = _get_or_create_pipeline("rag_docs")
         except Exception as e:
             logger.error("Pipeline 刷新失败（索引后）: %s", e)
     return {"status": "indexed", "chunks": count}
@@ -1170,7 +1192,7 @@ async def batch_import(
         global pipeline
         with _pipeline_lock.write():
             try:
-                pipeline = _make_pipeline(kb_id="rag_docs")
+                pipeline = _get_or_create_pipeline("rag_docs")
             except Exception as e:
                 logger.error("Pipeline 刷新失败: %s", e)
 

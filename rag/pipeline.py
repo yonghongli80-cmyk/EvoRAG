@@ -84,6 +84,8 @@ class RAGPipeline:
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._cache = RedisCache()
 
+        self._owns_feedback_processor = feedback_processor is None
+        self._owns_gap_analyzer = gap_analyzer is None
         if feedback_processor is None:
             from rag.feedback_processor import FeedbackProcessor
 
@@ -94,10 +96,23 @@ class RAGPipeline:
             gap_analyzer = GapAnalyzer(memory_db_path)
         self._feedback_processor = feedback_processor
         self._gap_analyzer = gap_analyzer
+        self._closed = False
 
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
         self._kb_id = kb_id or "rag_docs"
+
+    def close(self) -> None:
+        """Close connections owned by this pipeline; safe to call more than once."""
+        if self._closed:
+            return
+        self._closed = True
+        self.memory.close()
+        self.tracker.close()
+        if self._owns_feedback_processor:
+            self._feedback_processor.close()
+        if self._owns_gap_analyzer:
+            self._gap_analyzer.close()
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> cache -> route -> retrieve -> rerank -> build_messages。"""

@@ -8,7 +8,9 @@ def _build_pipeline(feedback_processor, gap_analyzer):
 
     with patch("rag.pipeline.Retriever") as retriever_cls, patch(
         "rag.pipeline.Reranker"
-    ), patch("rag.pipeline.ExecutionTracker"), patch("rag.pipeline.RedisCache"):
+    ), patch("rag.memory.DialogueMemory"), patch(
+        "rag.pipeline.ExecutionTracker"
+    ), patch("rag.pipeline.RedisCache"):
         retriever_cls.return_value = MagicMock()
         return RAGPipeline(
             kb_id="test_kb",
