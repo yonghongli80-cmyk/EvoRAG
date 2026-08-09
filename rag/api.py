@@ -52,6 +52,20 @@ def auto_index_on_startup():
     added, modified, deleted = diff_index(current_hashes, stored_state)
     changed = added + modified
 
+    # The file manifest alone cannot prove that the vector index still exists.
+    # Treat a missing Qdrant collection as stale so a restored/new data volume
+    # is rebuilt instead of constructing a Retriever against a nonexistent one.
+    try:
+        from rag.vector_store import COLLECTION_NAME, _get_client
+
+        collection_available = _get_client().collection_exists(COLLECTION_NAME)
+    except Exception as e:
+        logger.warning("无法确认向量索引状态，将尝试重建: %s", e)
+        collection_available = False
+    if not collection_available:
+        logger.warning("向量索引集合不存在，将重建索引")
+        changed = list(current_hashes)
+
     # 管理员初始化：首次启动时根据环境变量设置管理员
     def _init_admin():
         admin_username = os.getenv("INIT_ADMIN_USERNAME")
