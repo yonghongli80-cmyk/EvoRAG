@@ -23,7 +23,7 @@ def test_pipeline_indexes_file(mock_load, mock_chunk, mock_embed, mock_add, mock
     pipeline = RAGPipeline("test.txt")
 
     mock_load.assert_called_once_with("test.txt")
-    mock_chunk.assert_called_once_with("full document text", doc_name="test.txt")
+    mock_chunk.assert_called_once_with("full document text", doc_name="test.txt", metadata={})
     mock_embed.assert_called_once_with(["chunk1", "chunk2"])
     mock_add.assert_called_once_with(chunks, [[0.1] * 1024, [0.2] * 1024])
     mock_retriever_cls.assert_called_once_with(chunks)
