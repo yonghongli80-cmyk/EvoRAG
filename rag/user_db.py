@@ -728,7 +728,17 @@ class UserDB:
         comment: str = "",
     ) -> int:
         """Record user feedback on a message and return feedback id."""
+        if value not in {-1, 0, 1}:
+            raise ValueError("feedback value 必须为 -1、0 或 1")
         with self._lock:
+            owned = self._conn.execute(
+                "SELECT 1 FROM chat_messages m "
+                "JOIN conversations c ON m.conversation_id = c.id "
+                "WHERE m.id = ? AND c.user_id = ?",
+                (message_id, int(user_id)),
+            ).fetchone()
+            if owned is None:
+                raise ValueError("消息不存在或无权操作")
             cur = self._conn.execute(
                 "INSERT OR REPLACE INTO feedback (message_id, user_id, value, comment) VALUES (?, ?, ?, ?)",
                 (message_id, int(user_id), value, comment),

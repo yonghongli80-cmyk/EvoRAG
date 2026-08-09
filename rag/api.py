@@ -412,7 +412,9 @@ async def register(req: RegisterRequest):
     try:
         user_id = await asyncio.to_thread(user_db.create_user, req.username, req.password)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        if "已存在" in str(e):
+            raise HTTPException(status_code=400, detail="用户名或密码错误") from e
+        raise HTTPException(status_code=400, detail=str(e)) from e
     token = create_token({"user_id": user_id, "username": req.username})
     return TokenResponse(token=token, username=req.username)
 
