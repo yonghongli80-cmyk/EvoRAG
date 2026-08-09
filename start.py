@@ -21,6 +21,20 @@ def main():
     # Docker 环境用 0.0.0.0，本地用 127.0.0.1
     host = "0.0.0.0" if os.getenv("DOCKER_CONTAINER") else "127.0.0.1"
 
+    # 非回环地址绑定 + 认证关闭时强制告警（不阻断启动）
+    if host not in ("127.0.0.1", "localhost"):
+        try:
+            from config import settings
+
+            auth_enabled = settings.auth_enabled
+        except Exception:
+            auth_enabled = False
+        if not auth_enabled:
+            print(
+                f"  [ERROR] ⚠️ 认证已关闭，服务绑定 {host}，存在未授权访问风险。"
+                "上线前请在 .env 设置 RAG_AUTH_ENABLED=true"
+            )
+
     # 启动 API
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "rag.api:app", "--host", host, "--port", "8080"],

@@ -1,3 +1,12 @@
+import os
+
+# 安全修复后 config.auth_enabled 默认开启（True）。
+# 既有测试大多不带 token 直接调用接口，依赖认证关闭环境运行，
+# 因此在本文件被 pytest 加载时（早于任何 import config / import rag.*）
+# 把 RAG_AUTH_ENABLED 预置为 "false"。
+# tests/test_auth_default_enabled.py 用 monkeypatch.delenv 恢复未设置态来测默认值。
+os.environ.setdefault("RAG_AUTH_ENABLED", "false")
+
 import pytest
 
 

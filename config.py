@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     users_db_path: str = str(Path(__file__).resolve().parent / "data" / "users.db")
 
     # 鉴权
-    auth_enabled: bool = False
+    auth_enabled: bool = True
     auth_keys: str = "{}"
 
     # Qdrant 本地模式
