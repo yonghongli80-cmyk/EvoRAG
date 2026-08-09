@@ -4,11 +4,9 @@ import threading
 
 from config import settings
 
-DEFAULT_DB_PATH = settings.bm25_db_path
-
-
 class BM25Store:
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: str = None):
+        db_path = db_path or settings.bm25_db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._lock = threading.Lock()
         self._ensure_table()
@@ -69,6 +67,23 @@ class BM25Store:
                 (collection,),
             ).fetchone()
         return row[0] > 0
+
+    def invalidate(self, collection: str = None) -> None:
+        """Discard stale snapshots and their in-process BM25 indexes."""
+        with self._lock:
+            if collection is None:
+                self._conn.execute("DELETE FROM bm25_chunks")
+            else:
+                self._conn.execute(
+                    "DELETE FROM bm25_chunks WHERE collection = ?", (collection,)
+                )
+            self._conn.commit()
+        try:
+            from rag.retriever import invalidate_bm25_cache
+
+            invalidate_bm25_cache(collection)
+        except ImportError:
+            pass
 
     def close(self):
         self._conn.close()

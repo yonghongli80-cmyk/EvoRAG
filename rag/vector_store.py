@@ -13,6 +13,17 @@ _client = None
 _write_lock = ReadWriteLock()
 
 
+def _invalidate_bm25(collection_name: str) -> None:
+    """Remove the sparse snapshot after the authoritative vector data changes."""
+    from rag.bm25_store import BM25Store
+
+    store = BM25Store()
+    try:
+        store.invalidate(collection_name)
+    finally:
+        store.close()
+
+
 def _get_client():
     global _client
     if _client is None:
@@ -49,6 +60,7 @@ def add(chunks: list[Chunk], embeddings: list[list[float]]):
             for i in range(len(chunks))
         ]
         client.upsert(collection_name=COLLECTION_NAME, points=points)
+    _invalidate_bm25(COLLECTION_NAME)
 
 
 def clear():
@@ -58,6 +70,7 @@ def clear():
         if client.collection_exists(COLLECTION_NAME):
             client.delete_collection(COLLECTION_NAME)
         _ensure_collection()
+    _invalidate_bm25(COLLECTION_NAME)
 
 
 def search(query_embedding: list[float], top_k: int = 5) -> list[Chunk]:
@@ -113,6 +126,7 @@ def add_to_collection(collection_name: str, chunks: list[Chunk], embeddings: lis
             for i in range(len(chunks))
         ]
         client.upsert(collection_name=collection_name, points=points)
+    _invalidate_bm25(collection_name)
 
 
 def search_collection(collection_name: str, query_embedding: list[float], top_k: int = 5, doc_name: str = None, tags: list[str] = None) -> list[Chunk]:
@@ -160,3 +174,4 @@ def delete_doc(collection_name: str, doc_name: str):
             collection_name=collection_name,
             points_selector=Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))]),
         )
+    _invalidate_bm25(collection_name)
