@@ -15,13 +15,11 @@ def test_prepare_context_never_reads_a_question_only_answer_cache(monkeypatch):
 
     prepared, error = pipeline._prepare_context(
         "same question", session_id="s1", doc_name=None,
-        user={"id": 22, "is_admin": False}, kb_id="kb_public",
+        user=None, kb_id=None,
     )
 
     assert error is None
     assert prepared == {
         "route": "agent",
         "question": "same question",
-        "user": {"id": 22, "is_admin": False},
-        "kb_id": "kb_public",
     }

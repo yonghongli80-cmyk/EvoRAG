@@ -1,7 +1,9 @@
-from unittest.mock import patch, MagicMock
 import hashlib
+from unittest.mock import MagicMock, patch
+
 from rag.models import Chunk
 from rag.pipeline import RAGPipeline
+from rag.reliability import fixed_decision_copy
 
 
 @patch("rag.pipeline.Reranker")
@@ -20,7 +22,7 @@ def test_pipeline_indexes_file(mock_load, mock_chunk, mock_embed, mock_add, mock
     mock_chunk.return_value = chunks
     mock_embed.return_value = [[0.1] * 1024, [0.2] * 1024]
 
-    pipeline = RAGPipeline("test.txt")
+    RAGPipeline("test.txt")
 
     mock_load.assert_called_once_with("test.txt")
     mock_chunk.assert_called_once_with("full document text", doc_name="test.txt", metadata={})
@@ -287,7 +289,7 @@ def test_pipeline_saves_execution_trace(
 
     pipeline = RAGPipeline("test.txt", session_id="s1", memory_db_path=":memory:")
     with patch.object(pipeline.tracker, "save") as mock_save:
-        result = pipeline.query("question")
+        pipeline.query("question")
         mock_save.assert_called_once()
         trace = mock_save.call_args[0][0]
         assert trace.question == "question"
@@ -320,18 +322,15 @@ def test_pipeline_agent_route_captures_tool_calls(
     mock_tool.func = MagicMock(return_value="42")
     pipeline.agent.tools = [mock_tool]
 
-    with patch.object(pipeline.agent, "run", return_value="答案是 42") as mock_run:
-        with patch.object(pipeline.tracker, "save") as mock_save:
-            pipeline.query("计算一下")
-            trace = mock_save.call_args[0][0]
-            assert trace.route == "agent"
+    with patch.object(pipeline.agent, "run", return_value="答案是 42"), \
+         patch.object(pipeline.tracker, "save") as mock_save:
+        pipeline.query("计算一下")
+        trace = mock_save.call_args[0][0]
+        assert trace.route == "agent"
 
 
 def test_prepare_context_returns_rag_route():
     """_prepare_context 对普通问题返回 rag route。"""
-    from unittest.mock import patch, MagicMock
-    from rag.pipeline import RAGPipeline
-
     with patch("rag.pipeline.load", return_value="test content"), \
          patch("rag.pipeline.clean_document", return_value=("test content", {})), \
          patch("rag.pipeline.chunk", return_value=[]), \
@@ -343,7 +342,7 @@ def test_prepare_context_returns_rag_route():
          patch("rag.pipeline.Reranker") as mock_reranker_cls:
         mock_ret_cls.return_value = MagicMock()
         mock_reranker_cls.return_value = MagicMock()
-        p = RAGPipeline("test.txt", kb_id="test_kb")
+        p = RAGPipeline("test.txt")
 
     with patch("rag.agent.route_question", return_value="rag"), \
          patch("rag.pipeline.rewrite_query", return_value="test"), \
@@ -359,9 +358,6 @@ def test_prepare_context_returns_rag_route():
 
 def test_prepare_context_blocks_injection():
     """_prepare_context 对注入攻击返回 error。"""
-    from unittest.mock import patch, MagicMock
-    from rag.pipeline import RAGPipeline
-
     with patch("rag.pipeline.load", return_value="test"), \
          patch("rag.pipeline.clean_document", return_value=("test", {})), \
          patch("rag.pipeline.chunk", return_value=[]), \
@@ -381,9 +377,6 @@ def test_prepare_context_blocks_injection():
 
 def test_pipeline_does_not_construct_final_answer_cache():
     """Final answers are deliberately not cached without an ACL-versioned key."""
-    from unittest.mock import patch, MagicMock
-    from rag.pipeline import RAGPipeline
-
     with patch("rag.pipeline.load", return_value="test"), \
          patch("rag.pipeline.clean_document", return_value=("test", {})), \
          patch("rag.pipeline.chunk", return_value=[]), \
@@ -430,10 +423,10 @@ def test_pipeline_records_chunk_hashes_in_trace(
 
     pipeline = RAGPipeline("test.txt", session_id="s1", memory_db_path=":memory:")
     with patch.object(pipeline.tracker, "save") as mock_save:
-        result = pipeline.query("question")
+        pipeline.query("question")
         mock_save.assert_called_once()
         trace = mock_save.call_args[0][0]
-        expected_hash = hashlib.md5("chunk1".encode()).hexdigest()
+        expected_hash = hashlib.md5(b"chunk1").hexdigest()
         assert expected_hash in trace.chunk_hashes
 
 
@@ -556,6 +549,102 @@ def test_prepare_context_computes_feedback_weights(
     assert error is None
     assert "chunk_hashes" in result
     assert "weights" in result
-    expected_hash = hashlib.md5("chunk1".encode()).hexdigest()
+    expected_hash = hashlib.md5(b"chunk1").hexdigest()
     assert expected_hash in result["chunk_hashes"]
     assert isinstance(result["weights"], dict)
+
+
+def test_unscoped_enterprise_query_stops_before_external_calls():
+    user_db = MagicMock()
+    with patch("rag.pipeline.Retriever") as retriever_cls, \
+         patch("rag.pipeline.Reranker") as reranker_cls, \
+         patch("rag.agent.route_question") as route_question, \
+         patch("rag.pipeline.rewrite_query") as rewrite, \
+         patch("rag.pipeline.generate") as generate:
+        generate.return_value = "unexpected generated answer"
+        pipeline = RAGPipeline(
+            kb_id="rag_docs",
+            user_db=user_db,
+            memory_db_path=":memory:",
+            feedback_processor=MagicMock(),
+            gap_analyzer=MagicMock(),
+        )
+        with patch.object(pipeline.agent, "run") as agent_run:
+            result = pipeline.query("年假是多少", user=None)
+
+    assert result.answer == fixed_decision_copy("permission_limited")
+    retriever_cls.return_value.retrieve.assert_not_called()
+    reranker_cls.return_value.rerank.assert_not_called()
+    route_question.assert_not_called()
+    rewrite.assert_not_called()
+    generate.assert_not_called()
+    agent_run.assert_not_called()
+    pipeline.close()
+
+
+def test_enterprise_legacy_agent_route_returns_fixed_clarification():
+    user = {"id": 7, "permission_level": 1, "is_admin": False}
+    with patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"), \
+         patch("rag.agent.route_question", return_value="agent"), \
+         patch("rag.pipeline.generate") as generate:
+        pipeline = RAGPipeline(
+            kb_id="rag_docs",
+            user_db=MagicMock(),
+            memory_db_path=":memory:",
+            feedback_processor=MagicMock(),
+            gap_analyzer=MagicMock(),
+        )
+        with patch.object(pipeline.agent, "run") as agent_run:
+            agent_run.return_value = "unexpected agent answer"
+            result = pipeline.query("计算增长率", user=user)
+
+    assert result.answer == fixed_decision_copy("clarification_required")
+    agent_run.assert_not_called()
+    generate.assert_not_called()
+    pipeline.close()
+
+
+def test_invisible_chunks_never_reach_enterprise_reranker():
+    visible = Chunk(
+        text="visible", doc_name="visible.txt", chunk_index=0,
+        document_id=1, document_version_id=11,
+    )
+    invisible = Chunk(
+        text="private", doc_name="private.txt", chunk_index=0,
+        document_id=2, document_version_id=22,
+    )
+    user = {"id": 7, "permission_level": 1, "is_admin": False}
+    user_db = MagicMock()
+    user_db.get_accessible_doc_names.return_value = ["visible.txt"]
+    user_db.get_document_permission.return_value = {
+        "id": 1,
+        "current_version_id": 11,
+    }
+    user_db.list_document_versions.return_value = []
+    user_db.get_document_permissions_by_names.return_value = {
+        "visible.txt": {"id": 1},
+    }
+    feedback_processor = MagicMock()
+    feedback_processor.get_weights.return_value = {}
+
+    with patch("rag.pipeline.Retriever") as retriever_cls, \
+         patch("rag.pipeline.Reranker") as reranker_cls, \
+         patch("rag.agent.route_question", return_value="rag"), \
+         patch("rag.pipeline.rewrite_query", return_value="rewritten"), \
+         patch("rag.pipeline.generate") as generate:
+        generate.return_value = "unexpected generated answer"
+        retriever_cls.return_value.retrieve.return_value = [visible, invisible]
+        reranker_cls.return_value.rerank.side_effect = lambda _query, chunks: chunks
+        pipeline = RAGPipeline(
+            kb_id="rag_docs",
+            user_db=user_db,
+            memory_db_path=":memory:",
+            feedback_processor=feedback_processor,
+            gap_analyzer=MagicMock(),
+        )
+        pipeline.query("年假是多少", user=user)
+
+    assert reranker_cls.return_value.rerank.call_args.args[1] == [visible]
+    generate.assert_not_called()
+    pipeline.close()

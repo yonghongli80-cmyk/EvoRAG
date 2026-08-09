@@ -11,6 +11,7 @@
 from unittest.mock import MagicMock, patch
 
 from rag.models import Chunk
+from rag.reliability import fixed_decision_copy
 from rag.user_db import UserDB
 
 
@@ -140,7 +141,7 @@ def test_route_question_strip_whitespace(mock_generate):
 # ---------------------------------------------------------------------------
 
 
-def _make_pipeline(user_db=None):
+def _make_pipeline(user_db=None, kb_id="test_kb"):
     from rag.pipeline import RAGPipeline
 
     with patch("rag.pipeline.Reranker"), \
@@ -151,29 +152,25 @@ def _make_pipeline(user_db=None):
          patch("rag.pipeline.chunk"), \
          patch("rag.pipeline.load"):
         mock_ret.return_value = MagicMock()
-        return RAGPipeline("test.txt", kb_id="test_kb", memory_db_path=":memory:", user_db=user_db)
+        return RAGPipeline("test.txt", kb_id=kb_id, memory_db_path=":memory:", user_db=user_db)
 
 
 @patch("rag.agent.route_question", return_value="agent")
-def test_pipeline_agent_route_passes_user_kb_to_run(mock_route):
-    """agent 分支把 user/kb_id 透传给 agent.run。"""
+def test_pipeline_enterprise_without_user_db_is_permission_limited(mock_route):
+    """企业调用缺少 user_db 时在路由和 agent 之前安全收敛。"""
     p = _make_pipeline()
     user = {"id": 1, "is_admin": False}
     with patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率", user=user, kb_id="kb1")
-    assert result.answer == "agent answer"
-    mock_run.assert_called_once()
-    args, kwargs = mock_run.call_args
-    assert args == ("算一下增长率",)
-    assert kwargs["user"] == user
-    assert kwargs["kb_id"] == "kb1"
-    assert kwargs["tool_calls"] == []
+    assert result.answer == fixed_decision_copy("permission_limited")
+    mock_route.assert_not_called()
+    mock_run.assert_not_called()
 
 
 @patch("rag.agent.route_question", return_value="agent")
 def test_pipeline_agent_route_without_user_backward_compat(mock_route):
-    """无 user/kb_id 时保持旧调用签名 run(question)。"""
-    p = _make_pipeline()
+    """明确的本地文件模式保持旧调用签名 run(question)。"""
+    p = _make_pipeline(kb_id=None)
     with patch.object(p.agent, "run", return_value="agent answer") as mock_run:
         result = p.query("算一下增长率")
     assert result.answer == "agent answer"
@@ -191,8 +188,6 @@ def test_pipeline_agent_route_without_user_backward_compat(mock_route):
 @patch("rag.agent._check_answer_quality", return_value={"verdict": "pass", "missing": []})
 def test_run_captures_user_per_invocation_and_filters_private_chunk(mock_check, tmp_path):
     """run(user=...) 捕获 user 到线程局部，retrieve 工具过滤无权 chunk（regenerate 安全核心）。"""
-    from rag.agent import RAGAgent
-
     db, owner, other = _make_user_db(tmp_path)
     try:
         db.create_document_permission("secret.txt", "kb1", owner_id=owner, scope="private")
@@ -241,10 +236,11 @@ def _make_regenerate_pipeline(user_db, retriever):
 
 def test_regenerate_agent_route_passes_user_kb_to_run(tmp_path):
     """regenerate 走 agent 路由时把 user/kb_id 透传给 agent.run（回归 Critical #1）。"""
-    import rag.api as api_module
     from pathlib import Path
 
     from fastapi.testclient import TestClient
+
+    import rag.api as api_module
     from rag.auth import create_token
     from rag.user_db import UserDB
 
@@ -287,12 +283,13 @@ def test_regenerate_agent_route_passes_user_kb_to_run(tmp_path):
 
 
 @patch("rag.agent._check_answer_quality", return_value={"verdict": "pass", "missing": []})
-def test_regenerate_agent_route_filters_private_chunk(mock_check, tmp_path):
-    """低权限用户 regenerate 走 agent 路由，retrieve 结果不含无权私有 chunk（回归 Critical #1）。"""
-    import rag.api as api_module
+def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, tmp_path):
+    """企业 regenerate 的旧 agent 路由在 typed evidence 前固定澄清。"""
     from pathlib import Path
 
     from fastapi.testclient import TestClient
+
+    import rag.api as api_module
     from rag.auth import create_token
     from rag.user_db import UserDB
 
@@ -333,7 +330,7 @@ def test_regenerate_agent_route_filters_private_chunk(mock_check, tmp_path):
         client = TestClient(api_module.app)
         try:
             with patch("rag.agent.route_question", return_value="agent"), \
-                 patch.object(p.agent.agent, "invoke", side_effect=fake_invoke):
+                 patch.object(p.agent.agent, "invoke", side_effect=fake_invoke) as invoke:
                 resp = client.post(
                     "/regenerate",
                     json={"conversation_id": conv_id, "message_id": assistant_id},
@@ -346,8 +343,7 @@ def test_regenerate_agent_route_filters_private_chunk(mock_check, tmp_path):
 
         assert resp.status_code == 200
         answer = resp.json()["answer"]
-        assert "秘密薪资数据" not in answer
-        assert "公开销售数据" in answer
-        assert "secret.txt" not in answer
+        assert answer == fixed_decision_copy("clarification_required")
+        invoke.assert_not_called()
     finally:
         db.close()

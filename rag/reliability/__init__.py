@@ -1,5 +1,7 @@
 """Public answer-reliability contracts."""
 
+from rag.reliability.answerability import decide_answerability, fixed_decision_copy
+from rag.reliability.bundle import build_evidence_bundle
 from rag.reliability.models import (
     AnswerabilityDecision,
     ComparisonScope,
@@ -16,4 +18,7 @@ __all__ = [
     "EvidenceBundle",
     "EvidenceRef",
     "RetrievalMetrics",
+    "decide_answerability",
+    "fixed_decision_copy",
+    "build_evidence_bundle",
 ]

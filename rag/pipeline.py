@@ -14,13 +14,17 @@ from rag.guard import check_injection, check_output, sanitize_input
 from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
+from rag.redis_cache import RedisCache  # noqa: F401 - public compatibility import
+from rag.reliability import build_evidence_bundle, decide_answerability, fixed_decision_copy
+from rag.reliability.models import AnswerabilityDecision
 from rag.reranker import Reranker
 from rag.retriever import Retriever
-from rag.redis_cache import RedisCache  # Kept as a public compatibility import; final answers are not cached.
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
 from rag.vector_store import add, clear
 
 logger = logging.getLogger(__name__)
+
+_HISTORICAL_EVIDENCE_WARNING = "注意：以下回答仅依据历史版本资料，内容可能已过期。\n\n"
 
 
 class QueryResult(NamedTuple):
@@ -102,6 +106,7 @@ class RAGPipeline:
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
         self._kb_id = kb_id or "rag_docs"
+        self._enterprise_mode = kb_id is not None
 
     def close(self) -> None:
         """Close connections owned by this pipeline; safe to call more than once."""
@@ -122,8 +127,27 @@ class RAGPipeline:
         if guard.blocked:
             return None, f"请求被安全策略拦截：{guard.reason}"
 
-        cache_key_kb = kb_id or self._kb_id
-        cache_key_user = user["id"] if user else "__anon__"
+        enterprise_request = getattr(self, "_enterprise_mode", False) or kb_id is not None
+        effective_kb_id = kb_id or getattr(self, "_kb_id", "rag_docs")
+        if enterprise_request and (user is None or self._user_db is None):
+            bundle = build_evidence_bundle(
+                question,
+                [],
+                kb_id=effective_kb_id,
+                acl_checked=True,
+                permission_limited=True,
+            )
+            decision = decide_answerability(bundle)
+            return {
+                "route": "fixed",
+                "answer": fixed_decision_copy(decision.kind),
+                "context": [],
+                "sources": [],
+                "decision": decision,
+                "evidence_bundle": bundle,
+            }, None
+
+        cache_key_kb = effective_kb_id
         cached = None  # Final-answer caching is disabled until ACL versioning is end-to-end.
         if cached:
             # 缓存命中时也要做权限过滤：sources 可能引用用户无权查看的文档
@@ -135,6 +159,25 @@ class RAGPipeline:
         route = route_question(question)
 
         if route == "agent":
+            if enterprise_request:
+                bundle = build_evidence_bundle(
+                    question,
+                    [],
+                    kb_id=effective_kb_id,
+                    acl_checked=True,
+                )
+                decision = AnswerabilityDecision(
+                    kind="clarification_required",
+                    reasons=("legacy agent route has no typed evidence",),
+                )
+                return {
+                    "route": "fixed",
+                    "answer": fixed_decision_copy(decision.kind),
+                    "context": [],
+                    "sources": [],
+                    "decision": decision,
+                    "evidence_bundle": bundle,
+                }, None
             prepared = {"route": "agent", "question": question}
             # 透传当前用户/知识库，供 agent 的 retrieve 工具做权限过滤
             if user is not None:
@@ -176,12 +219,21 @@ class RAGPipeline:
                 tags=tags,
                 weights=feedback_weight,
             )
-        context = self.reranker.rerank(rewritten, raw_context)
-
-        # 权限过滤：移除无权文档的 chunks（user is not None 且有 user_db 时才过滤）
+        # ACL must run before reranking so unauthorized text never crosses that boundary.
         if user is not None and self._user_db is not None:
             from rag.permissions import filter_chunks_by_permission
-            context = filter_chunks_by_permission(self._user_db, kb_id or self._kb_id, context, user)
+            raw_context = filter_chunks_by_permission(
+                self._user_db, effective_kb_id, raw_context, user
+            )
+
+        context = self.reranker.rerank(rewritten, raw_context)
+
+        # Preserve the post-rerank ACL filter as defense in depth.
+        if user is not None and self._user_db is not None:
+            from rag.permissions import filter_chunks_by_permission
+            context = filter_chunks_by_permission(
+                self._user_db, effective_kb_id, context, user
+            )
 
         safe_context = []
         for candidate in context:
@@ -218,11 +270,29 @@ class RAGPipeline:
             }
             for i, c in enumerate(context)
         ]
-        return {
+        prepared = {
             "route": "rag", "question": question, "context": context,
             "messages": messages, "sources": sources, "sid": sid,
             "chunk_hashes": chunk_hashes, "weights": weights,
-        }, None
+        }
+        if enterprise_request:
+            bundle = build_evidence_bundle(
+                question,
+                context,
+                kb_id=effective_kb_id,
+                acl_checked=True,
+            )
+            decision = decide_answerability(bundle)
+            prepared["decision"] = decision
+            prepared["evidence_bundle"] = bundle
+            if decision.kind in {
+                "clarification_required",
+                "insufficient_evidence",
+                "permission_limited",
+            }:
+                prepared["route"] = "fixed"
+                prepared["answer"] = fixed_decision_copy(decision.kind)
+        return prepared, None
 
     def _filter_sources_by_permission(self, sources: list, kb_id: str, user: dict) -> list:
         """过滤缓存命中的 sources（dict 而非 Chunk 对象）中用户无权查看的文档来源。
@@ -258,7 +328,12 @@ class RAGPipeline:
                 self.memory.summarize_old_rounds(sid)
             return QueryResult(answer=prepared["answer"], context=[], sources=prepared["sources"])
 
-        if prepared["route"] == "agent":
+        if prepared["route"] == "fixed":
+            answer = prepared["answer"]
+            context = prepared["context"]
+            sources = prepared["sources"]
+            tool_calls = []
+        elif prepared["route"] == "agent":
             captured_calls = []
             answer = self.agent.run(
                 prepared["question"],
@@ -270,6 +345,9 @@ class RAGPipeline:
             tool_calls = [ToolCall(**c) for c in captured_calls]
         else:
             answer = generate(prepared["messages"])
+            decision = prepared.get("decision")
+            if decision is not None and decision.kind == "answerable_with_warning":
+                answer = _HISTORICAL_EVIDENCE_WARNING + answer
             context = prepared["context"]
             sources = prepared["sources"]
             tool_calls = []
@@ -322,7 +400,12 @@ class RAGPipeline:
             yield 'data: {"type": "done"}\n\n'
             return
 
-        if prepared["route"] == "agent":
+        if prepared["route"] == "fixed":
+            answer = prepared["answer"]
+            yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
+            sources = prepared["sources"]
+            tool_calls = []
+        elif prepared["route"] == "agent":
             captured_calls = []
             answer = await asyncio.to_thread(
                 self.agent.run,
@@ -331,15 +414,17 @@ class RAGPipeline:
                 **_agent_run_kwargs(prepared),
             )
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
-            context = []
             sources = []
             tool_calls = [ToolCall(**c) for c in captured_calls]
         else:
             answer = ""
+            decision = prepared.get("decision")
+            if decision is not None and decision.kind == "answerable_with_warning":
+                answer = _HISTORICAL_EVIDENCE_WARNING
+                yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
             async for token in generate_stream(prepared["messages"]):
                 answer += token
                 yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
-            context = prepared["context"]
             sources = prepared["sources"]
             tool_calls = []
 

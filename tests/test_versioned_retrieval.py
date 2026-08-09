@@ -59,6 +59,29 @@ class _FakeDB:
 DB = _FakeDB()
 
 
+class _NoVisibleVersionsDB:
+    def get_accessible_doc_names(self, kb_id, user_id, user_level=1):
+        return []
+
+
+class _FailIfCalledRetriever:
+    def retrieve(self, *_args, **_kwargs):
+        raise AssertionError("unrestricted retrieval must not run")
+
+
+def test_no_visible_versions_returns_empty_without_unrestricted_retrieval():
+    result = retrieve_current_then_history(
+        _FailIfCalledRetriever(),
+        "policy",
+        top_k=3,
+        user=USER,
+        user_db=_NoVisibleVersionsDB(),
+        kb_id="rag_docs",
+    )
+
+    assert result == []
+
+
 def test_history_only_fills_missing_current_results():
     current = [chunk("current", version_id=2, is_current=True)]
     history = [

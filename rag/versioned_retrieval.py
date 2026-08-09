@@ -35,9 +35,10 @@ def _visible_historical_version_ids(user_db, user, kb_id) -> set[int]:
         if not perm:
             continue
         for version in user_db.list_document_versions(perm["id"]):
-            if version["status"] != "current":
-                ids.add(version["id"])
-            elif version["validity_status"] == "confirmed_outdated":
+            if (
+                version["status"] != "current"
+                or version["validity_status"] == "confirmed_outdated"
+            ):
                 ids.add(version["id"])
     return ids
 
@@ -64,20 +65,22 @@ def retrieve_current_then_history(
         return retriever.retrieve(query, **kwargs)
 
     current_ids = _visible_current_version_ids(user_db, user, kb_id)
-    if not current_ids:
-        return retrieve(top_k=top_k, doc_name=doc_name, tags=tags)
+    historical_ids = _visible_historical_version_ids(user_db, user, kb_id)
+    if not current_ids and not historical_ids:
+        return []
 
-    current = retrieve(
-        top_k=top_k,
-        doc_name=doc_name,
-        tags=tags,
-        allowed_version_ids=current_ids,
-        validity_statuses={"valid"},
-    )
+    current = []
+    if current_ids:
+        current = retrieve(
+            top_k=top_k,
+            doc_name=doc_name,
+            tags=tags,
+            allowed_version_ids=current_ids,
+            validity_statuses={"valid"},
+        )
     if len(current) >= min(top_k, 3):
         return current
 
-    historical_ids = _visible_historical_version_ids(user_db, user, kb_id)
     if not historical_ids:
         return current
     fallback = retrieve(

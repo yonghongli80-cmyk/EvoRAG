@@ -41,7 +41,7 @@ def test_prepare_context_excludes_injected_document_chunk_from_prompt():
             "session",
             None,
             user=None,
-            kb_id="kb",
+            kb_id=None,
         )
 
     assert error is None

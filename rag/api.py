@@ -781,7 +781,9 @@ async def regenerate(req: RegenerateRequest, authorization: str = Header(default
     if error:
         raise HTTPException(status_code=400, detail=error)
 
-    if prepared["route"] == "agent":
+    if prepared["route"] == "fixed":
+        new_answer = prepared["answer"]
+    elif prepared["route"] == "agent":
         from rag.pipeline import _agent_run_kwargs
 
         # 权限上下文由 agent.run 的线程局部状态隔离，无需改写共享工具或持锁。
