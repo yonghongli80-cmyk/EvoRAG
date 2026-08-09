@@ -9,6 +9,8 @@
 
 set -e
 
+mkdir -p benchmarks
+
 HOST=${1:-"http://localhost:8000"}
 USERS=${2:-50}
 DURATION=${3:-5m}

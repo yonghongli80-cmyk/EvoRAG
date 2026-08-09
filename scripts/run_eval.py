@@ -11,8 +11,8 @@ RAG 系统评估脚本
 
 import argparse
 import json
+import os
 import time
-import sys
 from pathlib import Path
 
 import requests
@@ -49,7 +49,11 @@ def query(host: str, token: str, question: str) -> str:
 
 
 def check_hit(answer: str, expected_keywords: list[str]) -> bool:
-    """检查答案是否包含期望关键词（任一命中即算 hit）。"""
+    """Keyword-presence metric: any expected term in the answer is a hit.
+
+    This is not semantic correctness and does not interpret negation; evaluation
+    datasets should therefore use unambiguous expected terms.
+    """
     answer_lower = answer.lower()
     return any(kw.lower() in answer_lower for kw in expected_keywords)
 
@@ -162,7 +166,9 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="http://localhost:8080", help="API 地址")
     parser.add_argument("--dataset", default="data/eval/eval_dataset.jsonl", help="数据集路径")
     parser.add_argument("--username", default="admin", help="登录用户名")
-    parser.add_argument("--password", default="admin123", help="登录密码")
+    parser.add_argument("--password", default=os.getenv("RAG_ADMIN_PASSWORD"), help="登录密码（或设 RAG_ADMIN_PASSWORD）")
     args = parser.parse_args()
+    if not args.password:
+        parser.error("请通过 --password 或 RAG_ADMIN_PASSWORD 提供管理员密码")
 
     run_eval(args.host, args.dataset, args.username, args.password)
