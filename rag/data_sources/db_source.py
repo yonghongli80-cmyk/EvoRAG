@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlparse
 
 from rag.data_sources.base import DataSource
 
 logger = logging.getLogger(__name__)
+
+_STRIP_SQL_COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_STRIP_SQL_QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`[^`]*`")
+_WRITE_KEYWORDS = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE|GRANT|REVOKE|"
+    r"ATTACH|DETACH|VACUUM|REINDEX|LOAD|MERGE|UPSERT|CALL|EXEC)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_read_only_sql(query: str) -> None:
+    """校验 SQL 仅包含只读语句（必须以 ``SELECT`` 开头，且不含写关键字）。
+
+    不满足时抛出 ``ValueError``。用于防止数据源配置携带任意写 SQL 被执行
+    （``DELETE``/``DROP``/``INSERT``/``UPDATE``/``ALTER`` 等一律拒绝）。
+    先剥离 SQL 注释与引号内容再检查，降低误报，同时防多语句注入。
+    """
+    if not query or not query.strip():
+        raise ValueError("query 不能为空")
+    no_comments = _STRIP_SQL_COMMENTS.sub(" ", query)
+    no_quotes = _STRIP_SQL_QUOTED.sub(" ", no_comments)
+    stripped = no_quotes.lstrip()
+    first = stripped.split(None, 1)[0] if stripped.split(None, 1) else ""
+    if first.upper() != "SELECT":
+        raise ValueError("数据源 SQL 仅允许只读查询（必须以 SELECT 开头）")
+    if _WRITE_KEYWORDS.search(no_quotes):
+        raise ValueError("数据源 SQL 仅允许只读查询，检测到写操作关键字")
+    return None
 
 
 class DBSource(DataSource):
@@ -44,7 +73,7 @@ class DBSource(DataSource):
 
         try:
             conn = sqlite3.connect(self._get_sqlite_path())
-            conn.execute(self.query)
+            conn.execute("SELECT 1")  # 只验证连通性，不执行用户 SQL
             conn.close()
             return True
         except Exception as exc:
@@ -54,6 +83,7 @@ class DBSource(DataSource):
     def _sqlite_fetch(self) -> list[dict]:
         import sqlite3
 
+        validate_read_only_sql(self.query)
         conn = sqlite3.connect(self._get_sqlite_path())
         conn.row_factory = sqlite3.Row
         try:
@@ -83,7 +113,7 @@ class DBSource(DataSource):
                 database=parsed.path.lstrip("/") or None,
             )
             cur = conn.cursor()
-            cur.execute(self.query)
+            cur.execute("SELECT 1")  # 只验证连通性，不执行用户 SQL
             cur.close()
             conn.close()
             return True
@@ -97,6 +127,7 @@ class DBSource(DataSource):
         except ImportError:
             raise RuntimeError("pymysql is required for MySQL sources")
 
+        validate_read_only_sql(self.query)
         parsed = urlparse(self.connection_string)
         conn = pymysql.connect(
             host=parsed.hostname or "localhost",
@@ -126,7 +157,7 @@ class DBSource(DataSource):
         try:
             conn = psycopg2.connect(self.connection_string)
             cur = conn.cursor()
-            cur.execute(self.query)
+            cur.execute("SELECT 1")  # 只验证连通性，不执行用户 SQL
             cur.close()
             conn.close()
             return True
@@ -140,6 +171,7 @@ class DBSource(DataSource):
         except ImportError:
             raise RuntimeError("psycopg2 is required for PostgreSQL sources")
 
+        validate_read_only_sql(self.query)
         conn = psycopg2.connect(self.connection_string)
         try:
             cur = conn.cursor()

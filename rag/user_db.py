@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import threading
 from typing import Any
+from urllib.parse import urlsplit as _urlsplit
+from urllib.parse import urlunsplit as _urlunsplit
 
 
 def _validate_password_strength(password: str) -> None:
@@ -19,6 +22,71 @@ def _validate_password_strength(password: str) -> None:
         raise ValueError("密码需含小写字母")
     if not any(c.isdigit() for c in password):
         raise ValueError("密码需含数字")
+
+
+# ------------------------------------------------------------------
+# Data source config masking
+# ------------------------------------------------------------------
+
+_SENSITIVE_CONFIG_HINTS = (
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+    "authorization",
+    "credential",
+    "signature",
+)
+
+
+def _mask_connection_string(value: str) -> tuple[str, bool]:
+    """脱敏连接串中的口令。返回 (脱敏后的连接串, 是否有敏感信息被掩掉)。"""
+    if "://" not in value or "@" not in value:
+        return value, False
+    try:
+        parts = _urlsplit(value)
+        userinfo, host = parts.netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            user = userinfo.split(":", 1)[0]
+            masked_netloc = f"{user}:***@{host}"
+        else:
+            # 只有用户名没有口令 → 也一并掩掉，避免泄露用户名
+            masked_netloc = f"***@{host}"
+        return (
+            _urlunsplit((parts.scheme, masked_netloc, parts.path, parts.query, parts.fragment)),
+            True,
+        )
+    except Exception:
+        return value, True
+
+
+def mask_data_source_config(config: dict) -> tuple[dict, bool]:
+    """递归脱敏数据源 config，返回 (脱敏后的 config, has_secret)。
+
+    ``password``、``connection_string``、``token``、``api_key`` 等敏感字段
+    替换为 ``"***"``；嵌套 dict（如 API 的 headers）同样处理。
+    """
+    masked: dict = {}
+    has_secret = False
+    for key, value in config.items():
+        low = str(key).lower()
+        if isinstance(value, dict):
+            sub_masked, sub_has = mask_data_source_config(value)
+            masked[key] = sub_masked
+            has_secret = has_secret or sub_has
+        elif low == "connection_string" and isinstance(value, str):
+            masked_val, redacted = _mask_connection_string(value)
+            masked[key] = masked_val
+            has_secret = has_secret or redacted
+        elif any(hint in low for hint in _SENSITIVE_CONFIG_HINTS) and value not in (None, ""):
+            masked[key] = "***"
+            has_secret = True
+        else:
+            masked[key] = value
+    return masked, has_secret
 
 
 class UserDB:
@@ -104,6 +172,7 @@ class UserDB:
                     type            TEXT    NOT NULL,
                     config          TEXT    NOT NULL DEFAULT '{}',
                     status          TEXT    NOT NULL DEFAULT 'inactive',
+                    owner_id        TEXT,
                     last_synced_at  REAL,
                     created_at      REAL    NOT NULL DEFAULT (strftime('%s','now'))
                 );
@@ -273,6 +342,18 @@ class UserDB:
             except sqlite3.OperationalError:
                 self._conn.execute("ALTER TABLE users ADD COLUMN password_changed_at REAL DEFAULT NULL")
                 self._conn.commit()
+
+            # Data source ownership migration: add owner_id to data_sources if missing (idempotent)
+            try:
+                self._conn.execute("SELECT owner_id FROM data_sources LIMIT 1")
+            except sqlite3.OperationalError:
+                self._conn.execute("ALTER TABLE data_sources ADD COLUMN owner_id TEXT")
+                self._conn.commit()
+            # 旧数据（无 owner_id）默认归 admin 所有（仅管理员可见/可删）
+            self._conn.execute(
+                "UPDATE data_sources SET owner_id = 'admin' WHERE owner_id IS NULL OR owner_id = ''"
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # User Search (Phase 2)
@@ -621,42 +702,117 @@ class UserDB:
     # Data Sources
     # ------------------------------------------------------------------
 
-    def create_data_source(self, name: str, source_type: str, config: str) -> int:
-        """Create a data source and return its id."""
+    def _is_admin(self, user_id: Any) -> bool:
+        """判断 *user_id* 是否具备数据源 admin 权限（可见/删除全部数据源）。
+
+        - ``None`` → True（旧调用方/系统上下文，向后兼容，不按 owner 过滤）
+        - ``'admin'`` 或 ``'0'`` → True
+        - 数字 id（int 或数字字符串）→ 查 users 表的 ``is_admin``
+        - 其他（``'anonymous'``、API key 映射的用户 id 等）→ False
+        """
+        if user_id is None:
+            return True
+        uid = str(user_id)
+        if uid in ("admin", "0"):
+            return True
+        if uid.isdigit():
+            try:
+                row = self._conn.execute(
+                    "SELECT is_admin FROM users WHERE id = ?", (int(uid),)
+                ).fetchone()
+                if row is not None:
+                    return bool(row["is_admin"])
+            except (TypeError, ValueError, sqlite3.Error):
+                return False
+        return False
+
+    def create_data_source(
+        self,
+        name: str,
+        source_type: str,
+        config: str,
+        owner_id: Any = "admin",
+    ) -> int:
+        """Create a data source and return its id.
+
+        *owner_id* 记录归属（TEXT）。旧调用方不传时默认 ``'admin'``（系统级）。
+        """
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO data_sources (name, type, config) VALUES (?, ?, ?)",
-                (name, source_type, config),
+                "INSERT INTO data_sources (name, type, config, owner_id) VALUES (?, ?, ?, ?)",
+                (name, source_type, config, str(owner_id)),
             )
             self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
 
-    def list_data_sources(self) -> list[dict[str, Any]]:
-        """Return all data sources, newest first."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, name, type, config, status, last_synced_at, created_at "
-                "FROM data_sources ORDER BY created_at DESC"
-            ).fetchall()
-        return [dict(r) for r in rows]
+    def list_data_sources(self, user_id: Any = None) -> list[dict[str, Any]]:
+        """Return data sources visible to *user_id*, newest first.
 
-    def get_data_source(self, source_id: int) -> dict[str, Any] | None:
-        """Return a single data source by id, or None."""
+        admin（或 ``user_id=None``，旧调用方）可见全部；普通用户仅见自己的。
+        ``config`` 已脱敏（敏感字段替换为 ``***``），并附带 ``has_secret`` 标记。
+        """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT id, name, type, config, status, last_synced_at, created_at "
-                "FROM data_sources WHERE id = ?",
-                (source_id,),
-            ).fetchone()
+            if self._is_admin(user_id):
+                rows = self._conn.execute(
+                    "SELECT id, name, type, config, status, last_synced_at, created_at, owner_id "
+                    "FROM data_sources ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, name, type, config, status, last_synced_at, created_at, owner_id "
+                    "FROM data_sources WHERE owner_id = ? ORDER BY created_at DESC",
+                    (str(user_id),),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            item = dict(r)
+            raw = item.pop("config")
+            try:
+                cfg = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                cfg = {}
+            masked, has_secret = mask_data_source_config(cfg)
+            item["config"] = masked
+            item["has_secret"] = has_secret
+            result.append(item)
+        return result
+
+    def get_data_source(self, source_id: int, user_id: Any = None) -> dict[str, Any] | None:
+        """Return a single data source by id, or None.
+
+        非 admin 仅能读取自己的数据源。返回**完整**（未脱敏）config，供 sync 使用。
+        """
+        with self._lock:
+            if self._is_admin(user_id):
+                row = self._conn.execute(
+                    "SELECT id, name, type, config, status, last_synced_at, created_at, owner_id "
+                    "FROM data_sources WHERE id = ?",
+                    (source_id,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT id, name, type, config, status, last_synced_at, created_at, owner_id "
+                    "FROM data_sources WHERE id = ? AND owner_id = ?",
+                    (source_id, str(user_id)),
+                ).fetchone()
         return dict(row) if row else None
 
-    def delete_data_source(self, source_id: int) -> bool:
-        """Delete a data source.  Returns True if deleted."""
+    def delete_data_source(self, source_id: int, user_id: Any = None) -> bool:
+        """Delete a data source.  Returns True if deleted.
+
+        非 admin 仅能删除自己的数据源；非属主删除返回 ``False``。
+        """
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM data_sources WHERE id = ?",
-                (source_id,),
-            )
+            if self._is_admin(user_id):
+                cur = self._conn.execute(
+                    "DELETE FROM data_sources WHERE id = ?",
+                    (source_id,),
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM data_sources WHERE id = ? AND owner_id = ?",
+                    (source_id, str(user_id)),
+                )
             self._conn.commit()
             return cur.rowcount > 0
 

@@ -2326,18 +2326,48 @@ class SourceResponse(BaseModel):
     name: str
     type: str
     config: dict
+    has_secret: bool = False
     status: str
     last_synced_at: float | None
     created_at: float
 
 
+def _resolve_source_owner(user_id: str, authorization: str) -> str:
+    """把 /sources 端点的鉴权信息解析为数据源 owner_id（TEXT）。
+
+    - 优先用 JWT（Authorization: Bearer）解析真实用户 id（含 admin 判定）。
+    - 否则退回 ``verify_api_key`` 返回的 user_id 字符串（API key 路径）。
+    - 认证关闭 / 匿名（user_id 为 'anonymous' 或空）时默认视为 ``'admin'``，
+      即系统级拥有者（可见/可操作全部数据源）。此时 config 已脱敏、
+      SQL 已限制只读，风险被收敛为“匿名者可管理全部数据源”。
+    """
+    token = (
+        authorization.replace("Bearer ", "")
+        if authorization.startswith("Bearer ")
+        else ""
+    )
+    if token:
+        user = _get_current_user(token)
+        if user:
+            return str(user["id"])
+    if user_id and user_id not in ("", "anonymous"):
+        return str(user_id)
+    return "admin"
+
+
 @app.post("/sources", summary="创建数据源", description="创建新的数据源（RSS / 数据库 / API）")
-async def create_source(req: CreateSourceRequest, user_id: str = Security(verify_api_key)):
+async def create_source(
+    req: CreateSourceRequest,
+    user_id: str = Security(verify_api_key),
+    authorization: str = Header(default=""),
+):
+    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
     source_id = await asyncio.to_thread(
         user_db.create_data_source,
         req.name,
         req.type,
         _json.dumps(req.config, ensure_ascii=False),
+        owner,
     )
     return {
         "id": source_id,
@@ -2349,16 +2379,21 @@ async def create_source(req: CreateSourceRequest, user_id: str = Security(verify
     }
 
 
-@app.get("/sources", summary="列出数据源", description="获取所有数据源列表")
-async def list_sources(user_id: str = Security(verify_api_key)):
-    sources = await asyncio.to_thread(user_db.list_data_sources)
+@app.get("/sources", summary="列出数据源", description="获取数据源列表（仅本用户可见；config 已脱敏）")
+async def list_sources(
+    user_id: str = Security(verify_api_key),
+    authorization: str = Header(default=""),
+):
+    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
+    sources = await asyncio.to_thread(user_db.list_data_sources, owner)
     result = []
     for s in sources:
         result.append({
             "id": s["id"],
             "name": s["name"],
             "type": s["type"],
-            "config": _json.loads(s["config"]) if s["config"] else {},
+            "config": s["config"],
+            "has_secret": s.get("has_secret", False),
             "status": s["status"],
             "last_synced_at": s["last_synced_at"],
             "created_at": s["created_at"],
@@ -2367,8 +2402,13 @@ async def list_sources(user_id: str = Security(verify_api_key)):
 
 
 @app.delete("/sources/{source_id}", summary="删除数据源", description="删除指定数据源")
-async def delete_source(source_id: int, user_id: str = Security(verify_api_key)):
-    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id)
+async def delete_source(
+    source_id: int,
+    user_id: str = Security(verify_api_key),
+    authorization: str = Header(default=""),
+):
+    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
+    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id, owner)
     if not deleted:
         raise HTTPException(status_code=404, detail="数据源不存在")
     return {"status": "deleted"}
@@ -2443,9 +2483,14 @@ def _sync_source(source_id: int) -> dict:
 
 
 @app.post("/sources/{source_id}/sync", summary="同步数据源", description="手动触发数据源同步")
-async def sync_source(source_id: int, user_id: str = Security(verify_api_key)):
-    # Check existence first
-    source = await asyncio.to_thread(user_db.get_data_source, source_id)
+async def sync_source(
+    source_id: int,
+    user_id: str = Security(verify_api_key),
+    authorization: str = Header(default=""),
+):
+    owner = await asyncio.to_thread(_resolve_source_owner, user_id, authorization)
+    # Check existence + ownership first（非属主视为不存在，不泄露）
+    source = await asyncio.to_thread(user_db.get_data_source, source_id, owner)
     if source is None:
         raise HTTPException(status_code=404, detail="数据源不存在")
     result = await asyncio.to_thread(_sync_source, source_id)
