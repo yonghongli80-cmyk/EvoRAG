@@ -20,3 +20,13 @@ data/*.db-wal
 data/jwt_secret.txt
 data/index_state.json
 data/charts/
+
+# Development-only directories
+.worktrees/
+.venv/
+tests/
+docs/
+benchmarks/
+tmp/
+.superpowers/
+.sdd-test-data/
