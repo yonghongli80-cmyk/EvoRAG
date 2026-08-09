@@ -227,10 +227,14 @@ class RAGPipeline:
         sid = session_id or self.session_id or "default"
         start_time = time.time()
 
-        prepared, error = self._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
+        prepared, error = await asyncio.to_thread(
+            self._prepare_context, question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id
+        )
         if error:
             yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
-            self.tracker.save(ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0))
+            await asyncio.to_thread(
+                self.tracker.save, ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
+            )
             return
 
         if prepared["route"] == "cached":
@@ -272,26 +276,40 @@ class RAGPipeline:
 
         total_ms = (time.time() - start_time) * 1000
         chunk_hashes = prepared.get("chunk_hashes", [])
-        self.tracker.save(ExecutionTrace(
-            question=question, route=prepared["route"], answer=answer,
-            total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
-        ))
+        await asyncio.to_thread(
+            self.tracker.save,
+            ExecutionTrace(
+                question=question, route=prepared["route"], answer=answer,
+                total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
+            ),
+        )
 
         # Gap analysis for stream
         if prepared["route"] == "rag" and chunk_hashes:
-            from rag.gap_analyzer import GapAnalyzer
-            weights = prepared.get("weights", {})
-            best_weight = max(weights.values()) if weights else 1.0
-            if GapAnalyzer.is_gap(best_weight, answer):
-                ga = GapAnalyzer(settings.memory_db_path)
-                ga.record_gap(question, best_weight)
-                ga.close()
+            def record_gap():
+                from rag.gap_analyzer import GapAnalyzer
 
-        self.memory.add_message(sid, "user", question)
-        self.memory.add_message(sid, "assistant", answer)
-        if self.memory.should_summarize(sid):
-            self.memory.summarize_old_rounds(sid)
-        self._cache.set(question, answer, kb_id or self._kb_id, user["id"] if user else "__anon__", sources=sources)
+                weights = prepared.get("weights", {})
+                best_weight = max(weights.values()) if weights else 1.0
+                if GapAnalyzer.is_gap(best_weight, answer):
+                    ga = GapAnalyzer(settings.memory_db_path)
+                    ga.record_gap(question, best_weight)
+                    ga.close()
+
+            await asyncio.to_thread(record_gap)
+
+        await asyncio.to_thread(self.memory.add_message, sid, "user", question)
+        await asyncio.to_thread(self.memory.add_message, sid, "assistant", answer)
+        if await asyncio.to_thread(self.memory.should_summarize, sid):
+            await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
+        await asyncio.to_thread(
+            self._cache.set,
+            question,
+            answer,
+            kb_id or self._kb_id,
+            user["id"] if user else "__anon__",
+            sources=sources,
+        )
 
         yield 'data: {"type": "done"}\n\n'
 
