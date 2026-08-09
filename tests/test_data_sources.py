@@ -298,7 +298,7 @@ class TestAPISource:
     def test_connection_success(self):
         from rag.data_sources.api_source import APISource
 
-        src = APISource(url="https://api.example.com/data")
+        src = APISource(url="https://example.com/data")
         mock_response = MagicMock()
         mock_response.status_code = 200
         with patch("rag.data_sources.api_source.requests.get", return_value=mock_response):
@@ -307,7 +307,7 @@ class TestAPISource:
     def test_connection_failure(self):
         from rag.data_sources.api_source import APISource
 
-        src = APISource(url="https://api.example.com/data")
+        src = APISource(url="https://example.com/data")
         with patch("rag.data_sources.api_source.requests.get", side_effect=Exception("Network error")):
             assert src.test_connection() is False
 
@@ -315,7 +315,7 @@ class TestAPISource:
         from rag.data_sources.api_source import APISource
 
         src = APISource(
-            url="https://api.example.com/articles",
+            url="https://example.com/articles",
             headers={"Authorization": "Bearer token123"},
             title_field="name",
             content_field="body",
@@ -341,7 +341,7 @@ class TestAPISource:
         from rag.data_sources.api_source import APISource
 
         src = APISource(
-            url="https://api.example.com/articles",
+            url="https://example.com/articles",
             items_path="data.items",
             title_field="title",
             content_field="desc",
@@ -363,7 +363,7 @@ class TestAPISource:
     def test_fetch_empty_response(self):
         from rag.data_sources.api_source import APISource
 
-        src = APISource(url="https://api.example.com/empty")
+        src = APISource(url="https://example.com/empty")
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = []
@@ -376,7 +376,7 @@ class TestAPISource:
         from rag.data_sources.api_source import APISource
 
         src = APISource(
-            url="https://api.example.com/data",
+            url="https://example.com/data",
             headers={"X-Custom": "value"},
         )
         mock_response = MagicMock()
@@ -386,7 +386,7 @@ class TestAPISource:
             mock_get.return_value = mock_response
             _run(src.fetch())
             mock_get.assert_called_once_with(
-                "https://api.example.com/data",
+                "https://example.com/data",
                 headers={"X-Custom": "value"},
-                timeout=30,
+                timeout=5,
             )

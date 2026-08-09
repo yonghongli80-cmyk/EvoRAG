@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import asyncio
 from urllib.parse import urlparse
 
-from rag.data_sources.base import DataSource
+from rag.data_sources.base import DataSource, validate_external_host
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class DBSource(DataSource):
             raise ValueError("query is required for DBSource")
         self.connection_string = connection_string
         self.query = query
+        self._validate_remote_host()
 
     # -- helpers --------------------------------------------------------------
 
@@ -66,6 +68,11 @@ class DBSource(DataSource):
     def _get_sqlite_path(self) -> str:
         """Extract the file path from a ``sqlite:///`` connection string."""
         return self.connection_string[len("sqlite://") :]
+
+    def _validate_remote_host(self) -> None:
+        parsed = urlparse(self.connection_string)
+        if parsed.scheme.lower() != "sqlite" and parsed.hostname:
+            validate_external_host(parsed.hostname)
 
     # -- SQLite ---------------------------------------------------------------
 
@@ -186,6 +193,7 @@ class DBSource(DataSource):
     # -- DataSource interface -------------------------------------------------
 
     def test_connection(self) -> bool:
+        self._validate_remote_host()
         scheme = self._parse_scheme()
         if scheme == "sqlite":
             return self._sqlite_test()
@@ -198,12 +206,13 @@ class DBSource(DataSource):
             return False
 
     async def fetch(self) -> list[dict]:
+        self._validate_remote_host()
         scheme = self._parse_scheme()
         if scheme == "sqlite":
-            return self._sqlite_fetch()
+            return await asyncio.to_thread(self._sqlite_fetch)
         elif scheme in ("mysql", "mysql+pymysql"):
-            return self._mysql_fetch()
+            return await asyncio.to_thread(self._mysql_fetch)
         elif scheme in ("postgresql", "postgres", "psycopg2"):
-            return self._pg_fetch()
+            return await asyncio.to_thread(self._pg_fetch)
         else:
             raise RuntimeError(f"Unsupported database scheme: {scheme}")

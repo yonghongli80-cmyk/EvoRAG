@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import Any
 
 import requests
 
-from rag.data_sources.base import DataSource
+from rag.data_sources.base import DataSource, validate_external_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class APISource(DataSource):
     ) -> None:
         if not url:
             raise ValueError("url is required for APISource")
+        validate_external_url(url)
         self.url = url
         self.headers = headers or {}
         self.items_path = items_path
@@ -88,6 +90,7 @@ class APISource(DataSource):
 
     def test_connection(self) -> bool:
         try:
+            validate_external_url(self.url)
             resp = requests.get(self.url, headers=self.headers, timeout=self.timeout)
             return resp.status_code == 200
         except Exception as exc:
@@ -95,7 +98,10 @@ class APISource(DataSource):
             return False
 
     async def fetch(self) -> list[dict]:
-        resp = requests.get(self.url, headers=self.headers, timeout=self.timeout)
+        validate_external_url(self.url)
+        resp = await asyncio.to_thread(
+            requests.get, self.url, headers=self.headers, timeout=min(self.timeout, 5)
+        )
         resp.raise_for_status()
         data = resp.json()
         items = self._extract_items(data)
