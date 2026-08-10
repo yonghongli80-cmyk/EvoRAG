@@ -456,6 +456,13 @@ class UserDB:
                     duration_ms INTEGER NOT NULL DEFAULT 0
                 );
 
+                CREATE TABLE IF NOT EXISTS vector_flag_repairs (
+                    document_id INTEGER NOT NULL REFERENCES document_permissions(id) ON DELETE CASCADE,
+                    version_id INTEGER NOT NULL REFERENCES document_versions(id) ON DELETE CASCADE,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    PRIMARY KEY(document_id, version_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS knowledge_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_type TEXT NOT NULL CHECK(task_type IN (
@@ -2714,6 +2721,64 @@ class UserDB:
             )
             if updated.rowcount != 1:
                 raise VersionConflict("dataset is no longer staging")
+
+    def _activate_structured_dataset_in_tx(self, document_id: int, dataset_id: int) -> None:
+        """Promote a staging dataset while its caller owns the SQLite transaction."""
+        updated = self._conn.execute(
+            "UPDATE structured_datasets SET status = 'ready', ready_at = ? "
+            "WHERE id = ? AND document_id = ? AND status = 'staging'",
+            (time.time(), dataset_id, document_id),
+        )
+        if updated.rowcount != 1:
+            raise VersionConflict("dataset is no longer staging")
+
+    def activate_document_and_dataset(
+        self,
+        *,
+        document_id: int,
+        version_id: int,
+        dataset_id: int,
+        kb_id: str,
+        filename: str,
+    ) -> None:
+        """Atomically make a document version and its dataset current and ready."""
+        with self._lock, self.transaction(immediate=True):
+            dataset = self._conn.execute(
+                "SELECT document_version_id FROM structured_datasets "
+                "WHERE id = ? AND document_id = ?",
+                (dataset_id, document_id),
+            ).fetchone()
+            if dataset is None or int(dataset["document_version_id"]) != version_id:
+                raise ValueError("dataset does not belong to document version")
+            self._activate_document_version_in_tx(document_id, version_id, kb_id, filename)
+            self._activate_structured_dataset_in_tx(document_id, dataset_id)
+
+    def mark_structured_dataset_failed(self, dataset_id: int, error_code: str) -> None:
+        """Record an extraction failure without altering any current-version pointer."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE structured_datasets SET status = 'failed', last_error_code = ? "
+                "WHERE id = ? AND status = 'staging'",
+                (error_code, dataset_id),
+            )
+            self._conn.commit()
+
+    def enqueue_vector_flag_repair(self, document_id: int, version_id: int) -> None:
+        """Persist idempotent cleanup work after the authoritative SQLite switch succeeds."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO vector_flag_repairs (document_id, version_id) VALUES (?, ?)",
+                (document_id, version_id),
+            )
+            self._conn.commit()
+
+    def list_vector_flag_repairs(self) -> list[dict[str, int]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT document_id, version_id FROM vector_flag_repairs "
+                "ORDER BY document_id, version_id"
+            ).fetchall()
+        return [{"document_id": int(row["document_id"]), "version_id": int(row["version_id"])} for row in rows]
 
     def get_structured_dataset_for_version(self, version_id: int) -> dict[str, Any] | None:
         """Return metadata for exactly one document version, never a current-version fallback."""
