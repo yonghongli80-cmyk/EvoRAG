@@ -146,8 +146,10 @@ class UserDB:
         self._conn.execute("PRAGMA busy_timeout=30000")
         self._create_tables()
         from rag.db_migrations import run_migrations
+        from rag.knowledge_tasks import migrate_knowledge_task_types
 
         run_migrations(self._conn)
+        migrate_knowledge_task_types(self._conn)
 
     # ------------------------------------------------------------------
     # Transaction helpers
@@ -377,6 +379,18 @@ class UserDB:
                     new_status TEXT NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS knowledge_task_refusal_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    active_key TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    question_key TEXT NOT NULL,
+                    document_id INTEGER,
+                    created_at REAL NOT NULL,
+                    UNIQUE(active_key, user_id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE SET NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS knowledge_conflicts (
@@ -1320,40 +1334,98 @@ class UserDB:
         assigned_to: int | None,
         report_count: int,
     ) -> int:
+        with self._lock, self.transaction(immediate=True):
+            return self._upsert_active_task_in_tx(
+                task_type=task_type,
+                cluster_key=cluster_key,
+                active_key=active_key,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                assigned_to=assigned_to,
+                report_count=report_count,
+            )
+
+    def _upsert_active_task_in_tx(
+        self,
+        *,
+        task_type: str,
+        cluster_key: str,
+        active_key: str,
+        document_id: int | None,
+        document_version_id: int | None,
+        assigned_to: int | None,
+        report_count: int,
+    ) -> int:
         now = time.time()
         due_at = now + settings.knowledge_task_due_days * 86400
-        with self._lock, self.transaction(immediate=True):
-            row = self._conn.execute(
-                "SELECT id FROM knowledge_tasks WHERE active_key = ? "
-                "AND status IN ('open', 'in_progress')",
-                (active_key,),
-            ).fetchone()
-            if row is not None:
-                self._conn.execute(
-                    "UPDATE knowledge_tasks SET report_count = ?, updated_at = ? "
-                    "WHERE id = ?",
-                    (report_count, now, row["id"]),
-                )
-                return int(row["id"])
-            cur = self._conn.execute(
-                "INSERT INTO knowledge_tasks "
-                "(task_type, cluster_key, active_key, document_id, document_version_id, "
-                "assigned_to, status, report_count, due_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
-                (
-                    task_type,
-                    cluster_key,
-                    active_key,
-                    document_id,
-                    document_version_id,
-                    assigned_to,
-                    report_count,
-                    due_at,
-                    now,
-                    now,
-                ),
+        row = self._conn.execute(
+            "SELECT id FROM knowledge_tasks WHERE active_key = ? "
+            "AND status IN ('open', 'in_progress')",
+            (active_key,),
+        ).fetchone()
+        if row is not None:
+            self._conn.execute(
+                "UPDATE knowledge_tasks SET report_count = ?, updated_at = ? "
+                "WHERE id = ?",
+                (report_count, now, row["id"]),
             )
-            return int(cur.lastrowid)
+            return int(row["id"])
+        cur = self._conn.execute(
+            "INSERT INTO knowledge_tasks "
+            "(task_type, cluster_key, active_key, document_id, document_version_id, "
+            "assigned_to, status, report_count, due_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
+            (
+                task_type,
+                cluster_key,
+                active_key,
+                document_id,
+                document_version_id,
+                assigned_to,
+                report_count,
+                due_at,
+                now,
+                now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def record_refusal_task(
+        self,
+        *,
+        active_key: str,
+        reporter_id: int,
+        question_key: str,
+        document_id: int | None,
+        document_version_id: int | None,
+        assigned_to: int | None,
+    ) -> int:
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            self._conn.execute(
+                """
+                INSERT INTO knowledge_task_refusal_reports (
+                    active_key, user_id, question_key, document_id, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(active_key, user_id) DO UPDATE SET created_at = excluded.created_at
+                """,
+                (active_key, reporter_id, question_key, document_id, now),
+            )
+            report_count = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM knowledge_task_refusal_reports WHERE active_key = ?",
+                    (active_key,),
+                ).fetchone()[0]
+            )
+            return self._upsert_active_task_in_tx(
+                task_type="insufficient_evidence",
+                cluster_key=active_key,
+                active_key=active_key,
+                document_id=document_id,
+                document_version_id=document_version_id,
+                assigned_to=assigned_to,
+                report_count=report_count,
+            )
 
     def get_knowledge_task(self, task_id: int) -> dict[str, Any] | None:
         with self._lock:
@@ -1361,6 +1433,13 @@ class UserDB:
                 "SELECT * FROM knowledge_tasks WHERE id = ?", (task_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def list_tasks_by_type(self, task_type: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM knowledge_tasks WHERE task_type = ? ORDER BY id", (task_type,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_tasks_for_user(
         self, user_id: int | str, page: int = 1, page_size: int = 20

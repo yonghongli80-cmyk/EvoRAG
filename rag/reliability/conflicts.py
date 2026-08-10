@@ -117,7 +117,7 @@ def persist_conflict(user_db: UserDB, candidate: ConflictCandidate) -> dict[str,
         for claim in candidate.claims
     ):
         raise ValueError("conflict claims require document and version identifiers")
-    return user_db.create_knowledge_conflict(
+    persisted = user_db.create_knowledge_conflict(
         active_key=_conflict_active_key(candidate),
         subject_key=left.subject_key,
         attribute_key=left.attribute_key,
@@ -127,6 +127,10 @@ def persist_conflict(user_db: UserDB, candidate: ConflictCandidate) -> dict[str,
         document_ids=tuple(int(claim.document_id) for claim in candidate.claims),
         document_version_ids=tuple(int(claim.document_version_id) for claim in candidate.claims),
     )
+    from rag.knowledge_tasks import TaskService
+
+    TaskService(user_db).record_conflict(persisted)
+    return persisted
 
 
 def resolve_conflict(

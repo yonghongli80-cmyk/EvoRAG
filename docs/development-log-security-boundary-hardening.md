@@ -127,6 +127,12 @@ Set-Location "$project\frontend"
 & npm.cmd run build
 ```
 
+## Answer Reliability Task 7 (2026-08-10)
+
+- Added `insufficient_evidence` and `evidence_conflict` operations tasks. Refusals aggregate by normalized question, logical document, and reporting user; persisted conflicts aggregate by conflict record.
+- Legacy two-value `knowledge_tasks.task_type` checks migrate atomically to the four-value constraint at startup. The migration inspects `sqlite_master`, preserves named indexes and triggers, verifies row counts and foreign keys, and rolls back on error.
+- Temporary SQLite tests cover repeated refusal aggregation, idempotent conflict aggregation, and legacy-row/index/trigger preservation with a clean `foreign_key_check`.
+
 ## 已知环境限制
 
 - 完整 `tests/test_pipeline.py` 会因本机没有配置模型 API 凭据而失败，错误为 `Missing credentials`。这不是上述安全修复造成的失败。
