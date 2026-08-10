@@ -6,10 +6,10 @@ from llama_index.core.workflow import StartEvent, StopEvent, Workflow, step
 
 from config import settings
 from rag.reliability.comparison import (
-    ComparisonCell,
+    ComparisonCellDraft,
+    ComparisonExecutionResult,
     ComparisonRequest,
-    ComparisonResult,
-    ComparisonRow,
+    ComparisonRowDraft,
     DocumentEvidenceTool,
     insufficient_evidence_cell,
     validate_comparison,
@@ -31,7 +31,7 @@ class LlamaComparisonWorkflow(Workflow):
 
     @step
     async def collect_document_evidence(self, event: ComparisonStartEvent) -> StopEvent:
-        values: dict[int, ComparisonCell] = {}
+        values: dict[int, ComparisonCellDraft] = {}
         failures: list[str] = []
         for document_id in event.request.document_ids:
             try:
@@ -45,19 +45,23 @@ class LlamaComparisonWorkflow(Workflow):
                 failures.append("document query failed")
                 continue
 
-            if evidence.document_id != document_id or not evidence.text or not evidence.citation_ids:
+            if evidence.document_id != document_id or not evidence.text or not evidence.citations:
                 values[document_id] = insufficient_evidence_cell()
                 failures.append("document evidence unavailable")
                 continue
-            values[document_id] = ComparisonCell(
+            if any(citation.document_id != document_id for citation in evidence.citations):
+                values[document_id] = insufficient_evidence_cell()
+                failures.append("document evidence unavailable")
+                continue
+            values[document_id] = ComparisonCellDraft(
                 status="supported",
                 text=evidence.text,
-                citation_ids=evidence.citation_ids,
+                citations=evidence.citations,
             )
 
         dimensions = event.request.dimensions or ("comparison",)
-        result = ComparisonResult(
-            rows=tuple(ComparisonRow(dimension=dimension, values=values) for dimension in dimensions),
+        result = ComparisonExecutionResult(
+            rows=tuple(ComparisonRowDraft(dimension=dimension, values=values) for dimension in dimensions),
             partial=bool(failures),
             failures=tuple(failures),
         )
@@ -68,7 +72,7 @@ async def compare_documents(
     request: ComparisonRequest,
     scope: ComparisonScope,
     document_tool: DocumentEvidenceTool,
-) -> ComparisonResult:
+) -> ComparisonExecutionResult:
     """Compare only document IDs pre-authorized in the immutable scope."""
     if len(request.document_ids) > settings.comparison_max_documents:
         raise ValueError("comparison document limit exceeded")

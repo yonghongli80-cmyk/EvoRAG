@@ -33,7 +33,45 @@ class DocumentEvidence(BaseModel):
 
     document_id: int
     text: str = ""
-    citation_ids: tuple[int, ...] = ()
+    citations: tuple[ComparisonCitationDraft, ...] = ()
+
+
+class ComparisonCitationDraft(BaseModel):
+    """Source location retained until a comparison is persisted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    document_id: int
+    document_version_id: int
+    chunk_index: int
+    section_title: str
+    text_preview: str
+    rank: int
+
+
+class ComparisonCellDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: ComparisonCellStatus
+    text: str = ""
+    citations: tuple[ComparisonCitationDraft, ...] = ()
+
+
+class ComparisonRowDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dimension: str
+    values: Mapping[int, ComparisonCellDraft]
+
+
+class ComparisonExecutionResult(BaseModel):
+    """Internal comparison result that retains real citation locations."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rows: tuple[ComparisonRowDraft, ...]
+    partial: bool
+    failures: tuple[str, ...] = ()
 
 
 class ComparisonCell(BaseModel):
@@ -72,13 +110,13 @@ class ToolTimeout(TimeoutError):
     """A bounded per-document query exceeded its allotted time."""
 
 
-def insufficient_evidence_cell() -> ComparisonCell:
-    return ComparisonCell(status="insufficient_evidence")
+def insufficient_evidence_cell() -> ComparisonCellDraft:
+    return ComparisonCellDraft(status="insufficient_evidence")
 
 
-def validate_comparison(result: ComparisonResult) -> ComparisonResult:
+def validate_comparison(result: ComparisonExecutionResult) -> ComparisonExecutionResult:
     for row in result.rows:
         for value in row.values.values():
-            if value.status == "supported" and not value.citation_ids:
+            if value.status == "supported" and not value.citations:
                 raise ValueError("supported comparison cell requires citation")
     return result
