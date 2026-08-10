@@ -105,7 +105,14 @@ def test_unscoped_enterprise_stream_emits_fixed_refusal_without_generators():
     assert events == [
         {"type": "token", "content": fixed_decision_copy("permission_limited")},
         {"type": "sources", "sources": []},
-        {"type": "done"},
+        {
+            "type": "done",
+            "reliability": {
+                "confidence_level": "unavailable",
+                "confidence_reasons": ["answer was not generated"],
+                "answerability_kind": "permission_limited",
+            },
+        },
     ]
     retriever_cls.return_value.retrieve.assert_not_called()
     reranker_cls.return_value.rerank.assert_not_called()

@@ -202,6 +202,9 @@ class UserDB:
                     conversation_id INTEGER NOT NULL REFERENCES conversations(id),
                     role            TEXT    NOT NULL,
                     content         TEXT    NOT NULL,
+                    confidence_level TEXT NOT NULL DEFAULT 'unavailable',
+                    confidence_reasons_json TEXT NOT NULL DEFAULT '[]',
+                    answerability_kind TEXT NOT NULL DEFAULT 'answerable',
                     created_at      REAL    NOT NULL DEFAULT (strftime('%s','now'))
                 );
 
@@ -542,6 +545,22 @@ class UserDB:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_persistence "
                 "ON chat_messages(conversation_id, persistence_key)"
             )
+
+            # Answer reliability: explainable assessment persisted with answers.
+            for column, ddl in (
+                ("confidence_level", "TEXT NOT NULL DEFAULT 'unavailable'"),
+                ("confidence_reasons_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("answerability_kind", "TEXT NOT NULL DEFAULT 'answerable'"),
+            ):
+                try:
+                    self._conn.execute(
+                        f"SELECT {column} FROM chat_messages LIMIT 1"
+                    )
+                except sqlite3.OperationalError:
+                    self._conn.execute(
+                        f"ALTER TABLE chat_messages ADD COLUMN {column} {ddl}"
+                    )
+            self._conn.commit()
 
             # Trusted knowledge loop migrations: structured feedback columns.
             for column, ddl in (
@@ -987,12 +1006,54 @@ class UserDB:
     # Messages
     # ------------------------------------------------------------------
 
-    def add_message(self, conversation_id: int, role: str, content: str) -> int:
+    @staticmethod
+    def _serialize_reliability(
+        confidence_level: str,
+        confidence_reasons: tuple[str, ...] | list[str],
+        answerability_kind: str,
+    ) -> str:
+        if confidence_level not in {"high", "medium", "low", "unavailable"}:
+            raise ValueError("invalid confidence level")
+        if answerability_kind not in {
+            "answerable",
+            "answerable_with_warning",
+            "clarification_required",
+            "insufficient_evidence",
+            "permission_limited",
+        }:
+            raise ValueError("invalid answerability kind")
+        if not all(isinstance(reason, str) for reason in confidence_reasons):
+            raise ValueError("confidence reasons must be strings")
+        return json.dumps(list(confidence_reasons), ensure_ascii=False)
+
+    def add_message(
+        self,
+        conversation_id: int,
+        role: str,
+        content: str,
+        *,
+        confidence_level: str = "unavailable",
+        confidence_reasons: tuple[str, ...] | list[str] = (),
+        answerability_kind: str = "answerable",
+    ) -> int:
         """Append a message to a conversation and return its id."""
+        reasons_json = self._serialize_reliability(
+            confidence_level, confidence_reasons, answerability_kind
+        )
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO chat_messages (conversation_id, role, content) VALUES (?, ?, ?)",
-                (conversation_id, role, content),
+                "INSERT INTO chat_messages "
+                "(conversation_id, role, content, confidence_level, "
+                "confidence_reasons_json, answerability_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    conversation_id,
+                    role,
+                    content,
+                    confidence_level,
+                    reasons_json,
+                    answerability_kind,
+                ),
             )
             self._conn.commit()
             return cur.lastrowid  # type: ignore[return-value]
@@ -1006,7 +1067,9 @@ class UserDB:
         with self._lock:
             if user_id is not None:
                 rows = self._conn.execute(
-                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "SELECT m.id, m.conversation_id, m.role, m.content, "
+                    "m.confidence_level, m.confidence_reasons_json, "
+                    "m.answerability_kind, m.created_at "
                     "FROM chat_messages m "
                     "JOIN conversations c ON m.conversation_id = c.id "
                     "WHERE m.conversation_id = ? AND c.user_id = ? ORDER BY m.created_at",
@@ -1014,11 +1077,21 @@ class UserDB:
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT m.id, m.conversation_id, m.role, m.content, m.created_at "
+                    "SELECT m.id, m.conversation_id, m.role, m.content, "
+                    "m.confidence_level, m.confidence_reasons_json, "
+                    "m.answerability_kind, m.created_at "
                     "FROM chat_messages m WHERE m.conversation_id = ? ORDER BY m.created_at",
                     (conversation_id,),
                 ).fetchall()
-        return [dict(r) for r in rows]
+        messages = [dict(r) for r in rows]
+        for message in messages:
+            try:
+                message["confidence_reasons"] = json.loads(
+                    message.pop("confidence_reasons_json")
+                )
+            except (json.JSONDecodeError, TypeError):
+                message["confidence_reasons"] = []
+        return messages
 
     def update_message(self, message_id: int, new_content: str, user_id: int = None):
         """更新消息内容（用于重新生成）。可选 user_id 校验所有权。"""
@@ -1401,13 +1474,27 @@ class UserDB:
         persistence_key: str | None = None,
         citations_hash: str | None = None,
         citation_count: int = 0,
+        confidence_level: str = "unavailable",
+        confidence_reasons_json: str = "[]",
+        answerability_kind: str = "answerable",
     ) -> int:
         """Insert one message row inside an already-open transaction."""
         cur = self._conn.execute(
             "INSERT INTO chat_messages "
-            "(conversation_id, role, content, persistence_key, citations_hash, citation_count) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (conversation_id, role, content, persistence_key, citations_hash, citation_count),
+            "(conversation_id, role, content, persistence_key, citations_hash, "
+            "citation_count, confidence_level, confidence_reasons_json, "
+            "answerability_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                conversation_id,
+                role,
+                content,
+                persistence_key,
+                citations_hash,
+                citation_count,
+                confidence_level,
+                confidence_reasons_json,
+                answerability_kind,
+            ),
         )
         return int(cur.lastrowid)
 
@@ -1437,6 +1524,10 @@ class UserDB:
         answer: str,
         citations: list,
         persistence_key: str,
+        *,
+        confidence_level: str = "unavailable",
+        confidence_reasons: tuple[str, ...] | list[str] = (),
+        answerability_kind: str = "answerable",
     ) -> int:
         """Persist one assistant answer and its citations atomically.
 
@@ -1446,9 +1537,13 @@ class UserDB:
         storing different content.
         """
         citations_hash = self._citations_hash(citations)
+        reasons_json = self._serialize_reliability(
+            confidence_level, confidence_reasons, answerability_kind
+        )
         with self._lock, self.transaction(immediate=True):
             row = self._conn.execute(
-                "SELECT id, content, citations_hash, citation_count FROM chat_messages "
+                "SELECT id, content, citations_hash, citation_count, confidence_level, "
+                "confidence_reasons_json, answerability_kind FROM chat_messages "
                 "WHERE conversation_id = ? AND persistence_key = ?",
                 (conversation_id, persistence_key),
             ).fetchone()
@@ -1457,6 +1552,9 @@ class UserDB:
                     row["content"] == answer
                     and row["citations_hash"] == citations_hash
                     and row["citation_count"] == len(citations)
+                    and row["confidence_level"] == confidence_level
+                    and row["confidence_reasons_json"] == reasons_json
+                    and row["answerability_kind"] == answerability_kind
                 ):
                     return int(row["id"])
                 raise VersionConflict("answer persistence idempotency conflict")
@@ -1467,6 +1565,9 @@ class UserDB:
                 persistence_key,
                 citations_hash,
                 len(citations),
+                confidence_level,
+                reasons_json,
+                answerability_kind,
             )
             self._insert_answer_citations_in_tx(message_id, citations)
             return message_id

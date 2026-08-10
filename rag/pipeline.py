@@ -15,8 +15,13 @@ from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
 from rag.redis_cache import RedisCache  # noqa: F401 - public compatibility import
-from rag.reliability import build_evidence_bundle, decide_answerability, fixed_decision_copy
-from rag.reliability.models import AnswerabilityDecision
+from rag.reliability import (
+    assess_confidence,
+    build_evidence_bundle,
+    decide_answerability,
+    fixed_decision_copy,
+)
+from rag.reliability.models import AnswerabilityDecision, ConfidenceAssessment
 from rag.reranker import Reranker
 from rag.retriever import Retriever
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
@@ -31,6 +36,20 @@ class QueryResult(NamedTuple):
     answer: str
     context: list[Chunk]
     sources: list[dict]
+    decision: AnswerabilityDecision | None = None
+    confidence: ConfidenceAssessment | None = None
+
+
+def _reliability_payload(prepared: dict) -> dict | None:
+    decision = prepared.get("decision")
+    confidence = prepared.get("confidence")
+    if decision is None or confidence is None:
+        return None
+    return {
+        "confidence_level": confidence.level,
+        "confidence_reasons": list(confidence.reasons),
+        "answerability_kind": decision.kind,
+    }
 
 
 def _agent_run_kwargs(prepared: dict) -> dict:
@@ -138,12 +157,14 @@ class RAGPipeline:
                 permission_limited=True,
             )
             decision = decide_answerability(bundle)
+            confidence = assess_confidence(bundle, decision)
             return {
                 "route": "fixed",
                 "answer": fixed_decision_copy(decision.kind),
                 "context": [],
                 "sources": [],
                 "decision": decision,
+                "confidence": confidence,
                 "evidence_bundle": bundle,
             }, None
 
@@ -170,12 +191,14 @@ class RAGPipeline:
                     kind="clarification_required",
                     reasons=("legacy agent route has no typed evidence",),
                 )
+                confidence = assess_confidence(bundle, decision)
                 return {
                     "route": "fixed",
                     "answer": fixed_decision_copy(decision.kind),
                     "context": [],
                     "sources": [],
                     "decision": decision,
+                    "confidence": confidence,
                     "evidence_bundle": bundle,
                 }, None
             prepared = {"route": "agent", "question": question}
@@ -283,7 +306,9 @@ class RAGPipeline:
                 acl_checked=True,
             )
             decision = decide_answerability(bundle)
+            confidence = assess_confidence(bundle, decision)
             prepared["decision"] = decision
+            prepared["confidence"] = confidence
             prepared["evidence_bundle"] = bundle
             if decision.kind in {
                 "clarification_required",
@@ -373,7 +398,13 @@ class RAGPipeline:
         self.memory.add_message(sid, "assistant", answer)
         if self.memory.should_summarize(sid):
             self.memory.summarize_old_rounds(sid)
-        return QueryResult(answer=answer, context=context, sources=sources)
+        return QueryResult(
+            answer=answer,
+            context=context,
+            sources=sources,
+            decision=prepared.get("decision"),
+            confidence=prepared.get("confidence"),
+        )
 
     async def query_stream(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """流式查询，yield SSE 格式的事件字符串。"""
@@ -462,7 +493,11 @@ class RAGPipeline:
         await asyncio.to_thread(self.memory.add_message, sid, "assistant", answer)
         if await asyncio.to_thread(self.memory.should_summarize, sid):
             await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
-        yield 'data: {"type": "done"}\n\n'
+        done = {"type": "done"}
+        reliability = _reliability_payload(prepared)
+        if reliability is not None:
+            done["reliability"] = reliability
+        yield f'data: {_json.dumps(done, ensure_ascii=False)}\n\n'
 
 def main():
     import argparse

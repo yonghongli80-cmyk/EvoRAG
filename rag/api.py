@@ -1397,7 +1397,22 @@ async def query(req: QueryRequest, user: dict = Depends(require_user)):
         conv = await asyncio.to_thread(user_db.get_conversation, req.conversation_id, user["id"])
         if conv:
             await asyncio.to_thread(user_db.add_message, req.conversation_id, "user", req.question)
-            await asyncio.to_thread(user_db.add_message, req.conversation_id, "assistant", result.answer)
+            reliability_kwargs = {}
+            confidence = getattr(result, "confidence", None)
+            decision = getattr(result, "decision", None)
+            if confidence is not None and decision is not None:
+                reliability_kwargs = {
+                    "confidence_level": confidence.level,
+                    "confidence_reasons": confidence.reasons,
+                    "answerability_kind": decision.kind,
+                }
+            await asyncio.to_thread(
+                user_db.add_message,
+                req.conversation_id,
+                "assistant",
+                result.answer,
+                **reliability_kwargs,
+            )
         else:
             logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
 
@@ -1434,6 +1449,7 @@ async def query_stream(
 
         answer_buffer = ""
         citation_records: list[CitationRecord] = []
+        reliability = None
         try:
             async for event in current_pipeline.query_stream(
                 req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
@@ -1466,6 +1482,11 @@ async def query_stream(
                         pass
                 elif '"type": "done"' in event:
                     # The pipeline's final done is replaced with an enriched one below.
+                    try:
+                        data = _json.loads(event.removeprefix("data: ").strip())
+                        reliability = data.get("reliability")
+                    except Exception:
+                        reliability = None
                     continue
                 yield event
         except Exception:
@@ -1487,6 +1508,7 @@ async def query_stream(
                     answer_buffer,
                     citation_records,
                     persistence_key,
+                    **(reliability or {}),
                 )
             else:
                 logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
