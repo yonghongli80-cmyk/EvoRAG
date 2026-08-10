@@ -10,7 +10,7 @@ import {
   restoreMaterial
 } from '../api/materials'
 
-interface FileInfo {
+export interface FileInfo {
   name: string
   size: number
   size_human: string
@@ -21,6 +21,7 @@ interface FileInfo {
   is_owner?: boolean
   in_kb?: boolean
   downloadable?: boolean
+  document_id?: number
 }
 
 export const useFilesStore = defineStore('files', () => {

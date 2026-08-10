@@ -842,6 +842,7 @@ async def list_files(user_id: str = Security(verify_api_key), authorization: str
         for f in files:
             perm = perm_map.get(f["name"])
             if perm:
+                f["document_id"] = perm["id"]
                 scope = perm.get("scope", "private")
                 f["is_public"] = scope == "public"
                 f["protected"] = perm.get("protected", False)

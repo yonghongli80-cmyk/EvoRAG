@@ -27,6 +27,9 @@ interface Message {
   }>
   feedback?: 'positive' | 'negative'
   assistantMessageId?: number
+  confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
+  confidence_reasons?: string[]
+  answerability_kind?: string
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -120,7 +123,10 @@ export const useChatStore = defineStore('chat', () => {
         role: m.role,
         content: m.content,
         sources: m.sources || [],
-        feedback: m.feedback || undefined
+        feedback: m.feedback || undefined,
+        confidence_level: m.confidence_level,
+        confidence_reasons: m.confidence_reasons,
+        answerability_kind: m.answerability_kind
       }))
     } catch {
       // On failure, don't change currentConvId — keep showing old conversation
@@ -210,6 +216,11 @@ export const useChatStore = defineStore('chat', () => {
               if (typeof event.assistant_message_id === 'number') {
                 assistantMsg.id = event.assistant_message_id
                 assistantMsg.assistantMessageId = event.assistant_message_id
+              }
+              if (event.reliability) {
+                assistantMsg.confidence_level = event.reliability.confidence_level
+                assistantMsg.confidence_reasons = event.reliability.confidence_reasons
+                assistantMsg.answerability_kind = event.reliability.answerability_kind
               }
             }
           } catch {}

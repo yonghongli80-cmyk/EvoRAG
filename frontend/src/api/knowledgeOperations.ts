@@ -66,6 +66,24 @@ export interface TaskSummary {
   stale_knowledge_bases: number
 }
 
+export interface ConflictResolution {
+  id: number
+  status: 'resolved' | 'dismissed'
+}
+
+/** Resolve a conflict through the server-side owner/admin authorization gate. */
+export async function resolveConflict(
+  conflictId: number,
+  resolution: 'resolved' | 'dismissed',
+  note = ''
+): Promise<ConflictResolution> {
+  const res = await api.put(`/knowledge-operations/conflicts/${conflictId}/resolve`, {
+    resolution,
+    note
+  })
+  return res.data
+}
+
 /** Return tasks assigned to the current user. */
 export async function fetchMyTasks(page = 1, pageSize = 20): Promise<Paged<KnowledgeTask>> {
   const res = await api.get('/knowledge-operations/my-tasks', {

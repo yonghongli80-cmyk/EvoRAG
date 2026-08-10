@@ -13,6 +13,7 @@ import ArchiveManifestDialog from '../components/ArchiveManifestDialog.vue'
 import OrganizationPreviewDialog from '../components/OrganizationPreviewDialog.vue'
 import RecycleBinDialog from '../components/RecycleBinDialog.vue'
 import ConversationSearch from '../components/ConversationSearch.vue'
+import DocumentCompareDialog from '../components/DocumentCompareDialog.vue'
 import api from '../utils/api'
 
 import { computed } from 'vue'
@@ -33,6 +34,7 @@ watch(() => authStore.user, (newUser) => {
 
 // File filter
 const fileFilter = ref<'all' | 'default' | 'private' | 'public'>('all')
+const comparisonVisible = ref(false)
 
 const filteredFiles = computed(() => {
   if (fileFilter.value === 'all') return filesStore.files
@@ -43,6 +45,12 @@ const filteredFiles = computed(() => {
     return true
   })
 })
+
+const comparisonDocuments = computed(() => filesStore.files.flatMap((file) => (
+  typeof file.document_id === 'number'
+    ? [{ id: file.document_id, name: file.name }]
+    : []
+)))
 
 // File action handler (dropdown menu)
 async function handleFileAction(command: string, fileName: string) {
@@ -267,6 +275,9 @@ function askSuggested(q: string) {
     <div class="file-panel">
       <div class="file-panel-header">
         <h1 class="file-panel-title">文件管理</h1>
+        <el-button size="small" :disabled="!comparisonDocuments.length" @click="comparisonVisible = true">
+          资料比较
+        </el-button>
         <el-upload :show-file-list="false" :before-upload="() => false" :on-change="async (f: any) => { try { await filesStore.uploadFile(f.raw!); ElMessage.success('上传成功') } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '上传失败') } }" accept=".txt,.md,.pdf,.docx,.xlsx,.csv">
           <el-button size="small" type="primary">
             <el-icon><Upload /></el-icon>
@@ -395,6 +406,10 @@ function askSuggested(q: string) {
       v-model:visible="filesStore.recycleVisible"
       :items="filesStore.recycleItems"
       @restore="onRestoreDocument"
+    />
+    <DocumentCompareDialog
+      v-model:visible="comparisonVisible"
+      :documents="comparisonDocuments"
     />
   </div>
 </template>

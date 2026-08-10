@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fetchMyFeedback, submitKnowledgeFeedback } from '../knowledgeOperations'
+import { fetchMyFeedback, resolveConflict, submitKnowledgeFeedback } from '../knowledgeOperations'
 
-vi.mock('../../utils/api', () => ({ default: { post: vi.fn(), get: vi.fn() } }))
+vi.mock('../../utils/api', () => ({ default: { post: vi.fn(), get: vi.fn(), put: vi.fn() } }))
 
 import api from '../../utils/api'
 
@@ -39,5 +39,21 @@ describe('fetchMyFeedback', () => {
       '/knowledge-operations/my-feedback',
       expect.objectContaining({ params: { page: 1, page_size: 50 } })
     )
+  })
+})
+
+describe('resolveConflict', () => {
+  it('sends the selected resolution without document details', async () => {
+    vi.mocked(api.put).mockResolvedValue({ data: { id: 9, status: 'resolved' } })
+
+    await expect(resolveConflict(9, 'resolved', 'confirmed')).resolves.toEqual({
+      id: 9,
+      status: 'resolved'
+    })
+
+    expect(api.put).toHaveBeenCalledWith('/knowledge-operations/conflicts/9/resolve', {
+      resolution: 'resolved',
+      note: 'confirmed'
+    })
   })
 })

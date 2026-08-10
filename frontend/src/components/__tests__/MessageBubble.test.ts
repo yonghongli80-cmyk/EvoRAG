@@ -27,6 +27,24 @@ beforeEach(() => {
 })
 
 describe('MessageBubble', () => {
+  it('renders persisted reliability without a percentage', () => {
+    const wrapper = mount(MessageBubble, {
+      props: {
+        message: {
+          role: 'assistant',
+          content: 'Answer',
+          confidence_level: 'medium',
+          confidence_reasons: ['单一当前来源']
+        },
+        index: 1
+      }
+    })
+
+    expect(wrapper.text()).toContain('置信度：中')
+    expect(wrapper.text()).toContain('单一当前来源')
+    expect(wrapper.text()).not.toContain('%')
+  })
+
   // ── User message rendering ──────────────────────────────
   it('renders user message with user class for right alignment', () => {
     const wrapper = mount(MessageBubble, {

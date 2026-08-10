@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { useChatStore } from '../stores/chat'
 import DOMPurify from 'dompurify'
+import ReliabilityBadge from './ReliabilityBadge.vue'
 
 interface Message {
   role: string
   content: string
   sources?: Array<{ doc_name: string }>
   feedback?: string
+  confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
+  confidence_reasons?: string[]
 }
 
 const props = defineProps<{
@@ -47,6 +50,12 @@ function handleAddToAnalysis() {
 
     <div class="msg-body">
       <div class="bubble" v-html="formatContent(message.content)" />
+
+      <ReliabilityBadge
+        v-if="message.role === 'assistant' && message.confidence_level"
+        :level="message.confidence_level"
+        :reasons="message.confidence_reasons"
+      />
 
       <!-- Sources -->
       <div v-if="message.sources?.length" class="sources">

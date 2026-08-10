@@ -37,6 +37,11 @@ class TaskAssigneeRequest(BaseModel):
     assignee_id: int | None = None
 
 
+class ConflictResolutionRequest(BaseModel):
+    resolution: str = Field(pattern="^(resolved|dismissed)$")
+    note: str = ""
+
+
 def _serialize_version(db, version: dict, user: dict, document: dict) -> dict:
     payload = {
         "id": version["id"],
@@ -128,6 +133,26 @@ def submit_feedback_knowledge(
         )
     except FeedbackValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/knowledge-operations/conflicts/{conflict_id}/resolve")
+def resolve_knowledge_conflict(
+    conflict_id: int,
+    req: ConflictResolutionRequest,
+    request: Request,
+    user: dict = Depends(require_user),  # noqa: B008 - FastAPI dependency marker
+) -> dict:
+    from rag.reliability.conflicts import resolve_conflict
+
+    try:
+        resolved = resolve_conflict(
+            request.app.state.user_db, conflict_id, user, req.resolution, req.note
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="无权处理该冲突") from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="冲突不存在") from exc
+    return {"id": resolved["id"], "status": resolved["status"]}
 
 
 @router.get("/knowledge-operations/my-feedback")
