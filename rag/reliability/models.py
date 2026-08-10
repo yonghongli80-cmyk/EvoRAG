@@ -99,4 +99,17 @@ class ComparisonScope(BaseModel):
 
     actor_id: int
     allowed_document_ids: frozenset[int]
+    allowed_document_versions: frozenset[tuple[int, int]] = frozenset()
     permission_scope_fingerprint: str
+
+    @model_validator(mode="after")
+    def require_version_scope_subset(self) -> ComparisonScope:
+        if any(document_id not in self.allowed_document_ids for document_id, _ in self.allowed_document_versions):
+            raise ValueError("comparison version scope must be authorized")
+        return self
+
+    def version_for(self, document_id: int) -> int | None:
+        for scoped_document_id, version_id in self.allowed_document_versions:
+            if scoped_document_id == document_id:
+                return version_id
+        return None
