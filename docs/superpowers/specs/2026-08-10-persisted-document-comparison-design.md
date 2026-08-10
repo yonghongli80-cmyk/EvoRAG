@@ -10,7 +10,9 @@ citation and must never be represented by a document version ID or an
 ## Scope and invariants
 
 - Every selected document is authorized before retrieval or model/tool input.
-- Each retrieval is restricted to the selected document's current version.
+- The authorized scope freezes each selected document's `current_version_id`.
+  Retrieval is restricted to that version only.  If it is no longer current
+  when retrieval begins, the document contributes `insufficient_evidence`.
 - A supported comparison cell has one or more comparison citations.  Missing
   evidence yields `insufficient_evidence`; one document never fills another
   document's cell.
@@ -43,8 +45,9 @@ from comparison to cells and citations.
 1. `POST /reliability/compare` resolves all supplied IDs and checks view
    permission for each before it creates a scope or invokes a tool.
 2. A configured comparison adapter receives only the immutable authorized
-   scope and queries each document separately, filtering retrieval to that
-   document's current version.
+   scope and queries each document separately, filtering retrieval to its
+   authorization-time current version.  It does not substitute a version that
+   becomes current after authorization.
 3. The adapter maps retriever hits into evidence with source locations.  The
    workflow maps valid evidence to supported cells and failures or empty
    evidence to `insufficient_evidence` cells.
