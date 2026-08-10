@@ -18,6 +18,7 @@ export interface ComparisonRow {
 }
 
 export interface ComparisonResult {
+  comparison_id: number
   rows: ComparisonRow[]
   partial: boolean
   failures: string[]
