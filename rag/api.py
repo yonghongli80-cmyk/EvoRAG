@@ -45,6 +45,7 @@ from rag.logging_config import set_request_id, setup_logging
 from rag.materials.api import router as materials_router
 from rag.operations_api import router as operations_router
 from rag.permissions import filter_chunks_by_permission
+from rag.reliability.api import answers_router, router as reliability_router
 from rag.user_db import UserDB
 
 # Initialize logging at module level so it is active before any request arrives.
@@ -62,6 +63,8 @@ _pipeline_lock = ReadWriteLock()
 # Versioned document ingest (trusted knowledge loop).
 app.include_router(operations_router)
 app.include_router(materials_router)
+app.include_router(reliability_router)
+app.include_router(answers_router)
 
 
 def _versions_root() -> Path:

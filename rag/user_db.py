@@ -1126,6 +1126,28 @@ class UserDB:
                 message["confidence_reasons"] = []
         return messages
 
+    def get_message_reliability(
+        self, message_id: int, user_id: int | str
+    ) -> dict[str, Any] | None:
+        """Return only reliability metadata for an assistant message owned by the user."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT m.confidence_level, m.confidence_reasons_json, m.answerability_kind "
+                "FROM chat_messages m JOIN conversations c ON m.conversation_id = c.id "
+                "WHERE m.id = ? AND m.role = 'assistant' AND c.user_id = ?",
+                (message_id, int(user_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["confidence_reasons"] = json.loads(
+                result.pop("confidence_reasons_json")
+            )
+        except (json.JSONDecodeError, TypeError):
+            result["confidence_reasons"] = []
+        return result
+
     def update_message(self, message_id: int, new_content: str, user_id: int = None):
         """更新消息内容（用于重新生成）。可选 user_id 校验所有权。"""
         with self._lock:
