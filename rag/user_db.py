@@ -382,6 +382,80 @@ class UserDB:
                     rank INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS structured_datasets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL REFERENCES document_permissions(id) ON DELETE CASCADE,
+                    document_version_id INTEGER NOT NULL UNIQUE REFERENCES document_versions(id) ON DELETE CASCADE,
+                    format TEXT NOT NULL CHECK(format IN ('xlsx', 'csv')),
+                    status TEXT NOT NULL CHECK(status IN ('staging', 'ready', 'failed', 'historical')),
+                    storage_key TEXT NOT NULL,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    sheet_count INTEGER NOT NULL DEFAULT 0,
+                    total_rows INTEGER NOT NULL DEFAULT 0,
+                    total_columns INTEGER NOT NULL DEFAULT 0,
+                    semantic_index_mode TEXT NOT NULL CHECK(semantic_index_mode IN ('schema_only', 'row_groups')),
+                    extraction_version TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    ready_at REAL,
+                    last_error_code TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_structured_datasets_document
+                    ON structured_datasets(document_id, status);
+
+                CREATE TABLE IF NOT EXISTS structured_sheets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dataset_id INTEGER NOT NULL REFERENCES structured_datasets(id) ON DELETE CASCADE,
+                    sheet_key TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    visibility TEXT NOT NULL CHECK(visibility IN ('visible', 'hidden', 'very_hidden')),
+                    header_row INTEGER,
+                    first_data_row INTEGER,
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    column_count INTEGER NOT NULL DEFAULT 0,
+                    merged_range_count INTEGER NOT NULL DEFAULT 0,
+                    has_formulas INTEGER NOT NULL DEFAULT 0 CHECK(has_formulas IN (0, 1)),
+                    schema_hash TEXT NOT NULL DEFAULT '',
+                    UNIQUE(dataset_id, sheet_key),
+                    UNIQUE(dataset_id, ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS structured_columns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sheet_id INTEGER NOT NULL REFERENCES structured_sheets(id) ON DELETE CASCADE,
+                    column_key TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    inferred_type TEXT NOT NULL CHECK(inferred_type IN ('text', 'integer', 'decimal', 'boolean', 'date', 'datetime')),
+                    number_format TEXT NOT NULL DEFAULT '',
+                    unit TEXT NOT NULL DEFAULT '',
+                    nullable INTEGER NOT NULL DEFAULT 1 CHECK(nullable IN (0, 1)),
+                    sensitivity_label TEXT NOT NULL DEFAULT 'none',
+                    sample_values_json TEXT NOT NULL DEFAULT '[]',
+                    inference_confidence REAL NOT NULL DEFAULT 0,
+                    UNIQUE(sheet_id, column_key),
+                    UNIQUE(sheet_id, ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS structured_query_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    assistant_message_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+                    dataset_version_ids TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    used_columns_json TEXT NOT NULL,
+                    filter_summary_json TEXT NOT NULL,
+                    rows_scanned INTEGER NOT NULL DEFAULT 0,
+                    rows_returned INTEGER NOT NULL DEFAULT 0,
+                    result_hash TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    duration_ms INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS knowledge_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_type TEXT NOT NULL CHECK(task_type IN (
@@ -2606,6 +2680,52 @@ class UserDB:
                 (kb_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Structured spreadsheet datasets
+    # ------------------------------------------------------------------
+
+    def create_structured_dataset(
+        self, document_id: int, document_version_id: int, fmt: str, semantic_index_mode: str
+    ) -> int:
+        """Reserve one staging dataset bound to one immutable document version."""
+        with self._lock, self.transaction(immediate=True):
+            version = self._conn.execute(
+                "SELECT document_id FROM document_versions WHERE id = ?", (document_version_id,)
+            ).fetchone()
+            if version is None or int(version["document_id"]) != document_id:
+                raise ValueError("document version does not belong to document")
+            storage_key = f"{document_id}/{document_version_id}/dataset.sqlite3"
+            cur = self._conn.execute(
+                "INSERT INTO structured_datasets "
+                "(document_id, document_version_id, format, status, storage_key, semantic_index_mode) "
+                "VALUES (?, ?, ?, 'staging', ?, ?)",
+                (document_id, document_version_id, fmt, storage_key, semantic_index_mode),
+            )
+            return int(cur.lastrowid)
+
+    def activate_structured_dataset(self, dataset_id: int) -> None:
+        """Mark a fully validated staging dataset ready without changing document state."""
+        with self._lock, self.transaction(immediate=True):
+            updated = self._conn.execute(
+                "UPDATE structured_datasets SET status = 'ready', ready_at = ? "
+                "WHERE id = ? AND status = 'staging'",
+                (time.time(), dataset_id),
+            )
+            if updated.rowcount != 1:
+                raise VersionConflict("dataset is no longer staging")
+
+    def get_structured_dataset_for_version(self, version_id: int) -> dict[str, Any] | None:
+        """Return metadata for exactly one document version, never a current-version fallback."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, document_id, document_version_id, format, status, storage_key, "
+                "content_hash, sheet_count, total_rows, total_columns, semantic_index_mode, "
+                "extraction_version, created_at, ready_at, last_error_code "
+                "FROM structured_datasets WHERE document_version_id = ?",
+                (version_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     # ------------------------------------------------------------------
     # Document Versions (trusted knowledge loop)

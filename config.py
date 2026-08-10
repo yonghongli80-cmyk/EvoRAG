@@ -43,6 +43,15 @@ class Settings(BaseSettings):
 
     # 文档版本存储（可信知识闭环）
     document_versions_root: str = str(Path(__file__).resolve().parent / "data" / "document_versions")
+    structured_datasets_root: str = str(
+        Path(__file__).resolve().parent / "data" / "structured_datasets"
+    )
+    spreadsheet_max_bytes: int = 50 * 1024 * 1024
+    spreadsheet_max_sheets: int = 50
+    spreadsheet_max_rows: int = 200_000
+    spreadsheet_max_columns: int = 500
+    spreadsheet_max_cell_chars: int = 32_000
+    sensitive_structured_query_enabled: bool = False
     feedback_cluster_days: int = 30
     feedback_cluster_users: int = 3
     knowledge_task_due_days: int = 7

@@ -81,6 +81,7 @@ def isolated_api(tmp_path, monkeypatch):
     upload_dir = tmp_path / "upload"
     kb_files_root = tmp_path / "kb_files"
     document_versions_root = tmp_path / "document_versions"
+    structured_datasets_root = tmp_path / "structured_datasets"
     previous_db = api.user_db
     previous_state_db = getattr(api.app.state, "user_db", None)
     previous_upload_dir = getattr(api.app.state, "upload_dir", None)
@@ -93,10 +94,12 @@ def isolated_api(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root, raising=False)
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "document_versions_root", str(document_versions_root), raising=False)
+    monkeypatch.setattr(settings, "structured_datasets_root", str(structured_datasets_root), raising=False)
     api.app.state.user_db = db
     api.app.state.upload_dir = upload_dir
     api.app.state.kb_files_root = kb_files_root
     api.app.state.document_versions_root = document_versions_root
+    api.app.state.structured_datasets_root = structured_datasets_root
 
     with TestClient(api.app) as client:
         yield client
