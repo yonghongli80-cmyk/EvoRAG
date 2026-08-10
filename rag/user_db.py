@@ -378,6 +378,39 @@ class UserDB:
                     note TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS knowledge_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    active_key TEXT UNIQUE,
+                    subject_key TEXT NOT NULL,
+                    attribute_key TEXT NOT NULL,
+                    unit_key TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    citation_ids_json TEXT NOT NULL,
+                    document_ids_json TEXT NOT NULL,
+                    document_version_ids_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'dismissed')),
+                    resolution TEXT,
+                    resolution_note TEXT NOT NULL DEFAULT '',
+                    resolved_by INTEGER REFERENCES users(id),
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    resolved_at REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_knowledge_conflicts_status
+                    ON knowledge_conflicts(status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS knowledge_conflict_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conflict_id INTEGER NOT NULL REFERENCES knowledge_conflicts(id) ON DELETE CASCADE,
+                    actor_id INTEGER NOT NULL REFERENCES users(id),
+                    old_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    resolution TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
                 """
             )
             # Add permission_level column to users if it doesn't exist (idempotent)
@@ -1383,6 +1416,135 @@ class UserDB:
                 (task_id, actor_id, old_status, new_status, note, now),
             )
         return self.get_knowledge_task(task_id)
+
+    def create_knowledge_conflict(
+        self,
+        *,
+        active_key: str,
+        subject_key: str,
+        attribute_key: str,
+        unit_key: str,
+        scope_key: str,
+        citation_ids: tuple[int, ...],
+        document_ids: tuple[int, ...],
+        document_version_ids: tuple[int, ...],
+    ) -> dict[str, Any]:
+        """Create one active conflict, or return its idempotent existing record."""
+        now = time.time()
+        citation_ids_json = json.dumps(sorted(set(citation_ids)))
+        document_ids_json = json.dumps(sorted(set(document_ids)))
+        document_version_ids_json = json.dumps(sorted(set(document_version_ids)))
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT id FROM knowledge_conflicts WHERE active_key = ? AND status = 'open'",
+                (active_key,),
+            ).fetchone()
+            if row is None:
+                cur = self._conn.execute(
+                    "INSERT INTO knowledge_conflicts "
+                    "(active_key, subject_key, attribute_key, unit_key, scope_key, "
+                    "citation_ids_json, document_ids_json, document_version_ids_json, "
+                    "status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                    (
+                        active_key,
+                        subject_key,
+                        attribute_key,
+                        unit_key,
+                        scope_key,
+                        citation_ids_json,
+                        document_ids_json,
+                        document_version_ids_json,
+                        now,
+                        now,
+                    ),
+                )
+                conflict_id = int(cur.lastrowid)
+            else:
+                conflict_id = int(row["id"])
+        conflict = self.get_knowledge_conflict(conflict_id)
+        if conflict is None:
+            raise RuntimeError("knowledge conflict was not persisted")
+        return conflict
+
+    def get_knowledge_conflict(self, conflict_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_conflicts WHERE id = ?", (conflict_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        conflict = dict(row)
+        for field in ("citation_ids", "document_ids", "document_version_ids"):
+            conflict[field] = tuple(json.loads(conflict.pop(f"{field}_json")))
+        return conflict
+
+    def resolve_knowledge_conflict(
+        self,
+        conflict_id: int,
+        *,
+        actor_id: int,
+        resolution: str,
+        note: str,
+    ) -> dict[str, Any] | None:
+        """Resolve an active conflict only for an admin or every document owner."""
+        if resolution not in {"resolved", "dismissed"}:
+            raise ValueError("unsupported conflict resolution")
+
+        now = time.time()
+        with self._lock, self.transaction(immediate=True):
+            conflict = self._conn.execute(
+                "SELECT status, document_ids_json FROM knowledge_conflicts WHERE id = ?",
+                (conflict_id,),
+            ).fetchone()
+            if conflict is None:
+                return None
+
+            actor = self._conn.execute(
+                "SELECT is_admin FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None:
+                raise PermissionError("not authorized to resolve conflict")
+
+            document_ids = tuple(json.loads(conflict["document_ids_json"]))
+            if not bool(actor["is_admin"]):
+                if not document_ids:
+                    raise PermissionError("not authorized to resolve conflict")
+                placeholders = ",".join("?" for _ in document_ids)
+                owners = self._conn.execute(
+                    f"SELECT id, owner_id FROM document_permissions WHERE id IN ({placeholders})",
+                    document_ids,
+                ).fetchall()
+                if len(owners) != len(document_ids) or any(
+                    int(row["owner_id"]) != actor_id for row in owners
+                ):
+                    raise PermissionError("not authorized to resolve conflict")
+
+            old_status = str(conflict["status"])
+            if old_status != "open":
+                raise VersionConflict("conflict_state_conflict")
+            self._conn.execute(
+                "UPDATE knowledge_conflicts SET status = ?, active_key = NULL, resolution = ?, "
+                "resolution_note = ?, resolved_by = ?, updated_at = ?, resolved_at = ? "
+                "WHERE id = ?",
+                (resolution, resolution, note, actor_id, now, now, conflict_id),
+            )
+            self._conn.execute(
+                "INSERT INTO knowledge_conflict_events "
+                "(conflict_id, actor_id, old_status, new_status, resolution, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (conflict_id, actor_id, old_status, resolution, resolution, note, now),
+            )
+        return self.get_knowledge_conflict(conflict_id)
+
+    def list_knowledge_conflict_events(self, conflict_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT actor_id, old_status, new_status, resolution, note, created_at "
+                "FROM knowledge_conflict_events WHERE conflict_id = ? ORDER BY id ASC",
+                (conflict_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def reassign_knowledge_task(self, task_id: int, assignee_id: int | None) -> None:
         with self._lock:
