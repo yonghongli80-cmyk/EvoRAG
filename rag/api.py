@@ -96,6 +96,7 @@ def _run_material_metadata_migration() -> None:
     from rag.materials.migration import migrate_material_metadata
 
     try:
+        user_db.create_material_schema()
         report = migrate_material_metadata(user_db)
         if report.migrated_documents:
             logger.info(

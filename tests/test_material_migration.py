@@ -43,6 +43,23 @@ def test_material_migration_is_idempotent_and_does_not_reembed(legacy_material_f
     assert f.db.search_material_search_fts("legacy") != []
 
 
+def test_startup_material_migration_initializes_fts_schema_before_backfill(tmp_path, monkeypatch):
+    import rag.api as api
+
+    db = UserDB(str(tmp_path / "users.db"))
+    user_id = db.create_user("startup-user", "Password-123!")
+    document_id = db.create_document_permission("startup.pdf", "rag_docs", user_id)
+    version_id = db.create_document_version(
+        document_id, "startup.pdf", str(tmp_path / "startup.pdf"), "startup-hash", user_id
+    )
+    db.activate_document_version(document_id, version_id, "rag_docs", "startup.pdf")
+    monkeypatch.setattr(api, "user_db", db)
+
+    api._run_material_metadata_migration()
+
+    assert db.search_material_search_fts("startup") != []
+
+
 @pytest.fixture
 def worker_fixture(tmp_path):
     db = UserDB(str(tmp_path / "users.db"))
