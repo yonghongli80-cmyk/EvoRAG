@@ -2018,6 +2018,25 @@ class UserDB:
             failures=tuple(json.loads(comparison["failures_json"])),
         )
 
+    def get_document_comparison_document_ids(
+        self, comparison_id: int, actor_id: int, is_admin: bool
+    ) -> tuple[int, ...] | None:
+        """Return comparison source IDs only after the same ownership check."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT c.document_id FROM comparison_cells c "
+                "JOIN document_comparisons d ON d.id = c.comparison_id "
+                "WHERE c.comparison_id = ? AND (? OR d.owner_id = ?) ORDER BY c.document_id",
+                (comparison_id, int(is_admin), actor_id),
+            ).fetchall()
+            exists = self._conn.execute(
+                "SELECT 1 FROM document_comparisons WHERE id = ? AND (? OR owner_id = ?)",
+                (comparison_id, int(is_admin), actor_id),
+            ).fetchone()
+        if exists is None:
+            return None
+        return tuple(int(row["document_id"]) for row in rows)
+
     # ------------------------------------------------------------------
     # Data Sources
     # ------------------------------------------------------------------

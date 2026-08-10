@@ -1,3 +1,95 @@
+from rag.reliability.comparison import ComparisonCitationDraft, DocumentEvidence
+
+
+class _StaticComparisonTool:
+    async def query_document(self, document_id, question, context):
+        return DocumentEvidence(
+            document_id=document_id,
+            text="five days",
+            citations=(
+                ComparisonCitationDraft(
+                    document_id=document_id,
+                    document_version_id=11,
+                    chunk_index=0,
+                    section_title="Leave",
+                    text_preview="five days",
+                    rank=0,
+                ),
+            ),
+        )
+
+
+def test_compare_persists_result_before_returning_it(isolated_api, make_user, monkeypatch):
+    owner, owner_headers = make_user("owner")
+    document_id = isolated_api.app.state.user_db.create_document_permission(
+        "policy.pdf", "rag_docs", owner["id"]
+    )
+    monkeypatch.setattr(
+        isolated_api.app.state, "comparison_document_tool", _StaticComparisonTool(), raising=False
+    )
+
+    response = isolated_api.post(
+        "/reliability/compare",
+        headers=owner_headers,
+        json={"question": "leave", "document_ids": [document_id], "dimensions": []},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["comparison_id"] > 0
+
+
+def test_comparison_read_rechecks_deleted_source_without_leak(isolated_api, make_user, monkeypatch):
+    owner, owner_headers = make_user("owner")
+    document_id = isolated_api.app.state.user_db.create_document_permission(
+        "policy.pdf", "rag_docs", owner["id"]
+    )
+    monkeypatch.setattr(
+        isolated_api.app.state, "comparison_document_tool", _StaticComparisonTool(), raising=False
+    )
+    created = isolated_api.post(
+        "/reliability/compare",
+        headers=owner_headers,
+        json={"question": "leave", "document_ids": [document_id], "dimensions": []},
+    )
+    readable = isolated_api.get(
+        f"/reliability/comparisons/{created.json()['comparison_id']}", headers=owner_headers
+    )
+    assert readable.status_code == 200
+    isolated_api.app.state.user_db.delete_document_permission(document_id)
+
+    response = isolated_api.get(
+        f"/reliability/comparisons/{created.json()['comparison_id']}", headers=owner_headers
+    )
+
+    assert response.status_code in {403, 404}
+    assert "policy.pdf" not in response.text
+
+
+def test_compare_uses_application_tool_factory_when_no_tool_is_injected(
+    isolated_api, make_user, monkeypatch
+):
+    owner, owner_headers = make_user("owner")
+    document_id = isolated_api.app.state.user_db.create_document_permission(
+        "policy.pdf", "rag_docs", owner["id"]
+    )
+    monkeypatch.delattr(isolated_api.app.state, "comparison_document_tool", raising=False)
+    monkeypatch.setattr(
+        isolated_api.app.state,
+        "comparison_document_tool_factory",
+        lambda: _StaticComparisonTool(),
+        raising=False,
+    )
+
+    response = isolated_api.post(
+        "/reliability/compare",
+        headers=owner_headers,
+        json={"question": "leave", "document_ids": [document_id], "dimensions": []},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["comparison_id"] > 0
+
+
 def test_compare_rejects_invisible_document(isolated_api, make_user):
     owner, owner_headers = make_user("owner")
     invisible_owner, _ = make_user("invisible-owner")

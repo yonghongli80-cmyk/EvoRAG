@@ -447,6 +447,23 @@ def _get_or_create_pipeline(kb_id: str):
     return cached
 
 
+class _ComparisonRetrieverMap:
+    """Expose cached per-KB retrievers without broadening comparison access."""
+
+    def get(self, kb_id: str):
+        with _pipeline_lock.write():
+            return _get_or_create_pipeline(kb_id).retriever
+
+
+def _make_comparison_document_tool():
+    from rag.reliability.document_tool import CurrentVersionDocumentEvidenceTool
+
+    return CurrentVersionDocumentEvidenceTool(user_db, _ComparisonRetrieverMap())
+
+
+app.state.comparison_document_tool_factory = _make_comparison_document_tool
+
+
 @app.on_event("shutdown")
 def close_pipeline_processors():
     """关闭由 API 生命周期持有的共享处理器。"""
