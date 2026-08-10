@@ -18,3 +18,11 @@ class Chunk:
     historical_weight: float = 1.0
     retrieval_score: float | None = field(default=None, compare=False)
     rerank_score: float | None = field(default=None, compare=False)
+    dataset_id: int | None = None
+    sheet_id: int | None = None
+    sheet_key: str | None = None
+    sheet_name: str | None = None
+    chunk_kind: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    column_keys: tuple[str, ...] = ()

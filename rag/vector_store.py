@@ -266,6 +266,18 @@ def add_to_collection(
                 "is_current": bool(c_is_current),
                 "validity_status": c_validity,
             }
+            for key, value in {
+                "dataset_id": chunk.dataset_id,
+                "sheet_id": chunk.sheet_id,
+                "sheet_key": chunk.sheet_key,
+                "sheet_name": chunk.sheet_name,
+                "chunk_kind": chunk.chunk_kind,
+                "row_start": chunk.row_start,
+                "row_end": chunk.row_end,
+                "column_keys": list(chunk.column_keys) if chunk.column_keys else None,
+            }.items():
+                if value is not None:
+                    payload[key] = value
             if c_permission_id is not None:
                 payload["doc_permission_id"] = c_permission_id
             if c_document_id is not None:
@@ -343,6 +355,14 @@ def search_collection(collection_name: str, query_embedding: list[float], top_k:
                 validity_status=h.payload.get("validity_status", "valid"),
                 section_title=h.payload.get("section_title"),
                 updated_at=h.payload.get("updated_at"),
+                dataset_id=h.payload.get("dataset_id"),
+                sheet_id=h.payload.get("sheet_id"),
+                sheet_key=h.payload.get("sheet_key"),
+                sheet_name=h.payload.get("sheet_name"),
+                chunk_kind=h.payload.get("chunk_kind"),
+                row_start=h.payload.get("row_start"),
+                row_end=h.payload.get("row_end"),
+                column_keys=tuple(h.payload.get("column_keys", ())),
             )
             for h in hits.points
             if h.payload
