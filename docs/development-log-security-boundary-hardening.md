@@ -129,7 +129,7 @@ Set-Location "$project\frontend"
 
 ## Answer Reliability Task 7 (2026-08-10)
 
-- Added `insufficient_evidence` and `evidence_conflict` operations tasks. Refusals aggregate by normalized question, logical document, and reporting user; persisted conflicts aggregate by conflict record.
+- Added `insufficient_evidence` and `evidence_conflict` operations tasks. Real query refusals aggregate by normalized question, ACL-visible logical document, and reporting user; persisted conflicts aggregate by conflict record.
 - Legacy two-value `knowledge_tasks.task_type` checks migrate atomically to the four-value constraint at startup. The migration inspects `sqlite_master`, preserves named indexes and triggers, verifies row counts and foreign keys, and rolls back on error.
 - Temporary SQLite tests cover repeated refusal aggregation, idempotent conflict aggregation, and legacy-row/index/trigger preservation with a clean `foreign_key_check`.
 

@@ -1367,6 +1367,34 @@ async def batch_import(
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def _record_refusal_task(
+    db: UserDB,
+    user: dict,
+    question: str,
+    kb_id: str,
+    doc_name: str | None,
+) -> None:
+    """Record an insufficient-evidence report without linking an invisible document."""
+    document_id = None
+    if doc_name:
+        document = db.get_document_permissions_by_names([doc_name], kb_id).get(doc_name)
+        if document is not None:
+            from rag.permissions import check_doc_permission
+
+            try:
+                check_doc_permission(db, document["doc_name"], kb_id, user, "view")
+            except HTTPException:
+                pass
+            else:
+                document_id = document["id"]
+    try:
+        from rag.knowledge_tasks import TaskService
+
+        TaskService(db).record_refusal(int(user["id"]), question, document_id)
+    except Exception:
+        logger.exception("failed to record insufficient-evidence task")
+
+
 @app.post("/query", response_model=QueryResponse, summary="查询知识库", description="对已索引的文档进行语义检索问答")
 async def query(req: QueryRequest, user: dict = Depends(require_user)):
     global pipeline
@@ -1394,6 +1422,10 @@ async def query(req: QueryRequest, user: dict = Depends(require_user)):
         user=user,
         kb_id="rag_docs",
     )
+    if getattr(getattr(result, "decision", None), "kind", None) == "insufficient_evidence":
+        await asyncio.to_thread(
+            _record_refusal_task, user_db, user, req.question, "rag_docs", req.doc_name
+        )
 
     # Save messages to chat_messages if user and conversation_id are provided
     if user and req.conversation_id is not None:
@@ -1501,6 +1533,15 @@ async def query_stream(
         # 流式完成后持久化 assistant 消息与引用（一个事务内）
         assistant_message_id = None
         assistant_message_id = None
+        if reliability and reliability.get("answerability_kind") == "insufficient_evidence":
+            await asyncio.to_thread(
+                _record_refusal_task,
+                user_db,
+                user,
+                req.question,
+                target_kb,
+                req.doc_name,
+            )
         if user and req.conversation_id is not None and answer_buffer:
             conv = await asyncio.to_thread(user_db.get_conversation, req.conversation_id, user["id"])
             if conv:

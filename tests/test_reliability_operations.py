@@ -43,3 +43,22 @@ def test_persisted_conflict_creates_one_evidence_conflict_task(tmp_path):
     assert len(tasks) == 1
     assert tasks[0]["report_count"] == 1
     assert tasks[0]["assigned_to"] == owner_id
+
+
+def test_refusal_recording_attaches_only_an_acl_visible_selected_document(tmp_path):
+    from rag.api import _record_refusal_task
+
+    db = UserDB(str(tmp_path / "api-tasks.db"))
+    reporter_id = db.create_user("reporter", "Password-123!")
+    visible_document_id = db.create_document_permission(
+        "visible.pdf", "rag_docs", reporter_id
+    )
+    hidden_owner_id = db.create_user("hidden-owner", "Password-123!")
+    db.create_document_permission("hidden.pdf", "rag_docs", hidden_owner_id)
+    reporter = {"id": reporter_id, "is_admin": False}
+
+    _record_refusal_task(db, reporter, "资料中没有答案", "rag_docs", "visible.pdf")
+    _record_refusal_task(db, reporter, "资料中没有答案", "rag_docs", "hidden.pdf")
+
+    tasks = db.list_tasks_by_type("insufficient_evidence")
+    assert {task["document_id"] for task in tasks} == {None, visible_document_id}
