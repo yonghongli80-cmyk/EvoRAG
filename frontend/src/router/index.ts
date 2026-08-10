@@ -35,6 +35,11 @@ const router = createRouter({
           component: () => import('../views/KnowledgeDetailView.vue')
         },
         {
+          path: 'documents/:documentId/versions/:versionId/spreadsheet',
+          name: 'spreadsheet-viewer',
+          component: () => import('../views/SpreadsheetViewer.vue')
+        },
+        {
           path: 'operations',
           name: 'knowledge-operations',
           component: () => import('../views/KnowledgeOperationsView.vue')

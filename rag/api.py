@@ -110,6 +110,19 @@ def _run_material_metadata_migration() -> None:
         logger.exception("material metadata migration failed")
 
 
+def _run_spreadsheet_migration() -> None:
+    from rag.spreadsheets.migration import migrate_existing_spreadsheets
+    try:
+        report = migrate_existing_spreadsheets(
+            user_db,
+            Path(getattr(app.state, "structured_datasets_root", settings.structured_datasets_root)),
+        )
+        if report.migrated or report.failed:
+            logger.info("spreadsheet migration: migrated=%s failed=%s", report.migrated, report.failed)
+    except Exception:
+        logger.exception("spreadsheet migration failed")
+
+
 @app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
@@ -117,6 +130,7 @@ def auto_index_on_startup():
     log_security_mode()
     _run_document_version_migration()
     _run_material_metadata_migration()
+    _run_spreadsheet_migration()
     if not DATA_DIR.is_dir():
         return
 
