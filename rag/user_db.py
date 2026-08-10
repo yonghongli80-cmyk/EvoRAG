@@ -3635,6 +3635,9 @@ class UserDB:
             ).fetchall()
         ]
         self._conn.execute("PRAGMA foreign_keys=OFF")
+        # Keep child-table foreign-key declarations pointing at the final
+        # ``document_versions`` name while this legacy table is renamed.
+        self._conn.execute("PRAGMA legacy_alter_table=ON")
         try:
             self._conn.execute("BEGIN IMMEDIATE")
             self._conn.execute(
@@ -3691,6 +3694,7 @@ class UserDB:
             self._conn.execute("ROLLBACK")
             raise
         finally:
+            self._conn.execute("PRAGMA legacy_alter_table=OFF")
             self._conn.execute("PRAGMA foreign_keys=ON")
 
     # ------------------------------------------------------------------
