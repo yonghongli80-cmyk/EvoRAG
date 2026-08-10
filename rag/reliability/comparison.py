@@ -92,6 +92,7 @@ class ComparisonRow(BaseModel):
 class ComparisonResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    comparison_id: int = 0
     rows: tuple[ComparisonRow, ...]
     partial: bool
     failures: tuple[str, ...] = ()

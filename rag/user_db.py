@@ -350,6 +350,38 @@ class UserDB:
                     FOREIGN KEY(assistant_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS document_comparisons (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL REFERENCES users(id),
+                    question TEXT NOT NULL,
+                    dimensions_json TEXT NOT NULL,
+                    document_snapshot_json TEXT NOT NULL,
+                    partial INTEGER NOT NULL,
+                    failures_json TEXT NOT NULL,
+                    created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+                );
+
+                CREATE TABLE IF NOT EXISTS comparison_cells (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    comparison_id INTEGER NOT NULL REFERENCES document_comparisons(id) ON DELETE CASCADE,
+                    dimension TEXT NOT NULL,
+                    document_id INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('supported', 'insufficient_evidence')),
+                    text TEXT NOT NULL,
+                    UNIQUE(comparison_id, dimension, document_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS comparison_citations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cell_id INTEGER NOT NULL REFERENCES comparison_cells(id) ON DELETE CASCADE,
+                    document_id INTEGER NOT NULL,
+                    document_version_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    section_title TEXT NOT NULL,
+                    text_preview TEXT NOT NULL,
+                    rank INTEGER NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS knowledge_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_type TEXT NOT NULL CHECK(task_type IN (
@@ -1866,6 +1898,125 @@ class UserDB:
                 (assistant_message_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Persisted document comparisons
+    # ------------------------------------------------------------------
+
+    def persist_document_comparison(self, owner_id: int, request, execution):
+        """Persist comparison output and its independent citations atomically."""
+        from rag.reliability.comparison import ComparisonCell, ComparisonResult, ComparisonRow
+
+        snapshot = sorted(
+            {
+                (citation.document_id, citation.document_version_id)
+                for row in execution.rows
+                for cell in row.values.values()
+                for citation in cell.citations
+            }
+        )
+        with self._lock, self.transaction(immediate=True):
+            comparison_cur = self._conn.execute(
+                "INSERT INTO document_comparisons "
+                "(owner_id, question, dimensions_json, document_snapshot_json, partial, failures_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    owner_id,
+                    request.question,
+                    json.dumps(request.dimensions),
+                    json.dumps(snapshot),
+                    int(execution.partial),
+                    json.dumps(execution.failures),
+                ),
+            )
+            comparison_id = int(comparison_cur.lastrowid)
+            rows = []
+            for row in execution.rows:
+                values = {}
+                for document_id, cell in row.values.items():
+                    if cell.status == "supported" and not cell.citations:
+                        raise ValueError("supported comparison cell requires citation")
+                    if cell.status == "insufficient_evidence" and (cell.text or cell.citations):
+                        raise ValueError("insufficient evidence comparison cell must be empty")
+                    cell_cur = self._conn.execute(
+                        "INSERT INTO comparison_cells "
+                        "(comparison_id, dimension, document_id, status, text) VALUES (?, ?, ?, ?, ?)",
+                        (comparison_id, row.dimension, document_id, cell.status, cell.text),
+                    )
+                    cell_id = int(cell_cur.lastrowid)
+                    citation_ids = []
+                    for citation in cell.citations:
+                        if citation.document_id != document_id:
+                            raise ValueError("comparison citation document mismatch")
+                        citation_cur = self._conn.execute(
+                            "INSERT INTO comparison_citations "
+                            "(cell_id, document_id, document_version_id, chunk_index, section_title, "
+                            "text_preview, rank) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                cell_id,
+                                citation.document_id,
+                                citation.document_version_id,
+                                citation.chunk_index,
+                                citation.section_title,
+                                citation.text_preview,
+                                citation.rank,
+                            ),
+                        )
+                        citation_ids.append(int(citation_cur.lastrowid))
+                    values[int(document_id)] = ComparisonCell(
+                        status=cell.status,
+                        text=cell.text,
+                        citation_ids=tuple(citation_ids),
+                    )
+                rows.append(ComparisonRow(dimension=row.dimension, values=values))
+        return ComparisonResult(
+            comparison_id=comparison_id,
+            rows=tuple(rows),
+            partial=execution.partial,
+            failures=execution.failures,
+        )
+
+    def get_document_comparison(self, comparison_id: int, actor_id: int, is_admin: bool):
+        """Return one stored comparison only to its owner or an administrator."""
+        from rag.reliability.comparison import ComparisonCell, ComparisonResult, ComparisonRow
+
+        with self._lock:
+            comparison = self._conn.execute(
+                "SELECT id, partial, failures_json FROM document_comparisons "
+                "WHERE id = ? AND (? OR owner_id = ?)",
+                (comparison_id, int(is_admin), actor_id),
+            ).fetchone()
+            if comparison is None:
+                return None
+            cell_rows = self._conn.execute(
+                "SELECT id, dimension, document_id, status, text FROM comparison_cells "
+                "WHERE comparison_id = ? ORDER BY id",
+                (comparison_id,),
+            ).fetchall()
+            citations = self._conn.execute(
+                "SELECT id, cell_id FROM comparison_citations WHERE cell_id IN "
+                "(SELECT id FROM comparison_cells WHERE comparison_id = ?) ORDER BY id",
+                (comparison_id,),
+            ).fetchall()
+        citation_ids_by_cell: dict[int, list[int]] = {}
+        for citation in citations:
+            citation_ids_by_cell.setdefault(int(citation["cell_id"]), []).append(int(citation["id"]))
+        values_by_dimension: dict[str, dict[int, Any]] = {}
+        for cell in cell_rows:
+            values_by_dimension.setdefault(cell["dimension"], {})[int(cell["document_id"])] = ComparisonCell(
+                status=cell["status"],
+                text=cell["text"],
+                citation_ids=tuple(citation_ids_by_cell.get(int(cell["id"]), [])),
+            )
+        return ComparisonResult(
+            comparison_id=int(comparison["id"]),
+            rows=tuple(
+                ComparisonRow(dimension=dimension, values=values)
+                for dimension, values in values_by_dimension.items()
+            ),
+            partial=bool(comparison["partial"]),
+            failures=tuple(json.loads(comparison["failures_json"])),
+        )
 
     # ------------------------------------------------------------------
     # Data Sources
