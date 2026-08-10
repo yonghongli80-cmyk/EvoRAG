@@ -133,6 +133,15 @@ Set-Location "$project\frontend"
 - Legacy two-value `knowledge_tasks.task_type` checks migrate atomically to the four-value constraint at startup. The migration inspects `sqlite_master`, preserves named indexes and triggers, verifies row counts and foreign keys, and rolls back on error.
 - Temporary SQLite tests cover repeated refusal aggregation, idempotent conflict aggregation, and legacy-row/index/trigger preservation with a clean `foreign_key_check`.
 
+## Persisted document comparison verification (2026-08-10)
+
+- Comparisons now preserve independent, location-based citations rather than reusing answer citations or document-version IDs. The request scope freezes the authorized current version; a version change before retrieval produces insufficient evidence.
+- `& .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider`: 926 passed, 7 existing deprecation/mock warnings.
+- `& .\.venv\Scripts\python.exe -m pip check`: no broken requirements found.
+- `npm.cmd run test -- --run`: 25 files and 151 tests passed; Vitest printed its existing navigation stub notice.
+- `npm.cmd run build`: completed successfully; third-party `@vueuse/core` pure-annotation and existing bundle-size warnings remain.
+- Targeted Ruff with the recorded `rag/api.py` and `rag/user_db.py` legacy ignores: passed. `git diff --check`: passed.
+
 ## 已知环境限制
 
 - 完整 `tests/test_pipeline.py` 会因本机没有配置模型 API 凭据而失败，错误为 `Missing credentials`。这不是上述安全修复造成的失败。
