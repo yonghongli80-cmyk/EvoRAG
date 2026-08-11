@@ -499,6 +499,8 @@ def close_pipeline_processors():
                 processor.close()
         _feedback_processor = None
         _gap_analyzer = None
+    from rag.vector_store import close_client
+    close_client()
 
 
 @app.get("/health", summary="健康检查", description="检查服务是否正常运行")
@@ -1959,7 +1961,8 @@ async def get_knowledge_base_detail(
             is_owner = meta["owner_id"] == user["id"]
 
             docs = conn.execute(
-                "SELECT id, kb_id, filename, toc, summary, chunk_count, status, added_at "
+                "SELECT id, kb_id, filename, toc, summary, chunk_count, status, added_at, "
+                "document_id, document_version_id "
                 "FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
                 (kb_id,),
             ).fetchall()

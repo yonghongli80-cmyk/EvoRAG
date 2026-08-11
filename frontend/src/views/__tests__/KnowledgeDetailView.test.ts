@@ -67,4 +67,47 @@ describe('KnowledgeDetailView', () => {
 
     expect(api.get).toHaveBeenCalledWith('/knowledge-bases/second')
   })
+
+  it('shows a spreadsheet viewer action for spreadsheet documents', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        name: 'Ops',
+        documents: [{
+          filename: 'report.xlsx',
+          document_id: 7,
+          document_version_id: 9,
+          chunk_count: 1,
+          status: 'indexed',
+        }],
+      }
+    } as any)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/kb/:id', component: KnowledgeDetailView }]
+    })
+    await router.push('/kb/ops')
+    await router.isReady()
+
+    const wrapper = mount(KnowledgeDetailView, {
+      global: {
+        plugins: [router, createTestingPinia({ createSpy: vi.fn })],
+        stubs: {
+          MessageBubble: true,
+          ChatInput: true,
+          AddToAnalysisDialog: true,
+          'el-button': true,
+          'el-icon': true,
+          'el-dropdown': true,
+          'el-dropdown-menu': true,
+          'el-dropdown-item': true,
+          'el-tag': true,
+          'el-dialog': true,
+          'el-input': true,
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="open-spreadsheet-7-9"]').exists()).toBe(true)
+  })
 })

@@ -144,3 +144,33 @@ def test_kb_detail_never_exposes_stored_source_path(isolated_api, make_user, mon
     document = response.json()["documents"][0]
     assert "file_path" not in document
     assert "last_error" not in document
+
+
+def test_kb_detail_exposes_document_and_current_version_ids_for_spreadsheets(
+    isolated_api, make_user, monkeypatch
+):
+    """A spreadsheet listed in its KB carries only the IDs needed by the table route."""
+    import rag.api as api
+    from rag.knowledge_base import KnowledgeBaseInfo
+
+    owner, headers = make_user("owner")
+    db = isolated_api.app.state.user_db
+    db.create_kb_metadata("kb_ops", "Ops", owner["id"], "private")
+    db.create_kb_document_pending("kb_ops", "report.xlsx")
+    document_id = db.create_document_permission("report.xlsx", "kb_ops", owner["id"])
+    version_id = db.create_document_version(
+        document_id, "report.xlsx", "source.xlsx", "hash", owner["id"]
+    )
+    db.activate_document_version(document_id, version_id, "kb_ops", "report.xlsx")
+
+    class FakeManager:
+        def list_kbs(self):
+            return [KnowledgeBaseInfo("kb_ops", "Ops", 1, "")]
+
+    monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
+    response = isolated_api.get("/knowledge-bases/kb_ops", headers=headers)
+
+    assert response.status_code == 200
+    document = response.json()["documents"][0]
+    assert document["document_id"] == document_id
+    assert document["document_version_id"] == version_id

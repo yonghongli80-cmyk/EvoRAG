@@ -31,6 +31,14 @@ def _get_client():
     return _client
 
 
+def close_client() -> None:
+    """Release the process-local Qdrant lock held by the shared client."""
+    global _client
+    client, _client = _client, None
+    if client is not None:
+        client.close()
+
+
 def _ensure_collection():
     client = _get_client()
     if not client.collection_exists(COLLECTION_NAME):

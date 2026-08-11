@@ -328,6 +328,20 @@ function getStatusLabel(status: string) {
   }
 }
 
+function isSpreadsheetDocument(doc: { filename?: string; document_id?: number; document_version_id?: number }) {
+  const extension = doc.filename?.split('.').pop()?.toLowerCase()
+  return (extension === 'xlsx' || extension === 'csv')
+    && typeof doc.document_id === 'number'
+    && typeof doc.document_version_id === 'number'
+}
+
+function openSpreadsheet(doc: { document_id: number; document_version_id: number }) {
+  router.push({
+    name: 'spreadsheet-viewer',
+    params: { documentId: doc.document_id, versionId: doc.document_version_id },
+  })
+}
+
 function parseToc(toc: string | object): any {
   if (!toc) return {}
   if (typeof toc === 'string') {
@@ -487,6 +501,13 @@ function parseToc(toc: string | object): any {
                   </div>
                 </div>
                 <div class="kb-doc-actions">
+                  <el-button
+                    v-if="isSpreadsheetDocument(doc)"
+                    text
+                    size="small"
+                    :data-test="`open-spreadsheet-${doc.document_id}-${doc.document_version_id}`"
+                    @click.stop="openSpreadsheet(doc)"
+                  >打开表格</el-button>
                   <el-button text size="small" @click.stop="removeFromKB(doc)" title="从知识库移除">移除</el-button>
                   <span v-if="doc.toc" class="toc-toggle">{{ doc._showToc ? '▲' : '▼' }}</span>
                 </div>

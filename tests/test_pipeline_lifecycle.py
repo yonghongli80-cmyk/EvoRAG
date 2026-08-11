@@ -83,3 +83,16 @@ def test_api_shutdown_closes_cached_pipelines_before_shared_processors(monkeypat
     gap_analyzer.close.assert_called_once_with()
     assert api._pipelines == {}
     assert api.pipeline is None
+
+
+def test_api_shutdown_closes_the_global_qdrant_client(monkeypatch):
+    import rag.api as api
+    import rag.vector_store as vector_store
+
+    qdrant_client = MagicMock()
+    monkeypatch.setattr(vector_store, "_client", qdrant_client)
+
+    api.close_pipeline_processors()
+
+    qdrant_client.close.assert_called_once_with()
+    assert vector_store._client is None
