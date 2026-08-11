@@ -139,3 +139,18 @@ def test_material_job_requires_document_view_permission(isolated_api, make_user)
     response = isolated_api.get(f"/materials/jobs/{job_id}", headers=bob_headers)
 
     assert response.status_code == 403
+
+
+def test_queued_material_is_visible_in_files_listing(isolated_api, make_user):
+    _, headers = make_user("alice")
+    upload = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("queued.txt", b"queued material", "text/plain")},
+    )
+    assert upload.status_code == 202
+
+    listing = isolated_api.get("/files", headers=headers)
+
+    assert listing.status_code == 200
+    assert [item["name"] for item in listing.json()["files"]] == ["queued.txt"]

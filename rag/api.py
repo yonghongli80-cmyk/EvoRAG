@@ -860,6 +860,32 @@ async def list_files(user_id: str = Security(verify_api_key), authorization: str
                     }
                 )
 
+    # Material uploads live under immutable version paths rather than the
+    # legacy upload directory; include visible staged/current documents too.
+    if user_dict:
+        existing_names = {item["name"] for item in files}
+        visible_names = await asyncio.to_thread(
+            user_db.get_accessible_doc_names, "rag_docs", user_dict["id"]
+        )
+        for name in visible_names:
+            if name in existing_names:
+                continue
+            perm = await asyncio.to_thread(user_db.get_document_permission, name, "rag_docs")
+            if perm is None:
+                continue
+            versions = await asyncio.to_thread(user_db.list_document_versions, perm["id"])
+            version = next((item for item in versions if item["status"] in {"current", "staging"}), None)
+            if version is None:
+                continue
+            source = Path(version["file_path"])
+            size = source.stat().st_size if source.is_file() else 0
+            files.append({"name": name, "size": size, "size_human": _human_size(size),
+                          "ext": Path(name).suffix.lower(), "document_id": perm["id"],
+                          "is_public": perm.get("scope") == "public",
+                          "protected": perm.get("protected", False),
+                          "owner_id": perm.get("owner_id"),
+                          "is_owner": perm.get("owner_id") == user_dict["id"]})
+
     # 批量查询权限信息并过滤
     if files:
         filenames = [f["name"] for f in files]
@@ -1589,6 +1615,7 @@ async def query_stream(
                     persistence_key,
                     **(reliability or {}),
                 )
+
             else:
                 logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
         yield f"data: {_json.dumps({'type': 'done', 'assistant_message_id': assistant_message_id})}\n\n"
