@@ -21,4 +21,14 @@ describe('downloadLibraryFile', () => {
 
     await expect(downloadLibraryFile('secret.txt', {})).rejects.toThrow('无法读取文件')
   })
+  it('requests the explicitly selected material version when one is supplied', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('staged', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await downloadLibraryFile('policy.txt', { Authorization: 'Bearer token' }, 42)
+
+    expect(fetchMock).toHaveBeenCalledWith('/files/policy.txt/download?version_id=42', {
+      headers: { Authorization: 'Bearer token' }
+    })
+  })
 })

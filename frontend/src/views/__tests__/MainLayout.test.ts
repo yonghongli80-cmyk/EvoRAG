@@ -23,13 +23,13 @@ beforeEach(() => {
 })
 
 describe('MainLayout', () => {
-  it('uses knowledge operations as the third main navigation item', () => {
+  it('adds spreadsheet audit after the three main admin navigation items', () => {
     mockPath = '/operations'
 
     const wrapper = mount(MainLayout)
 
     const labels = wrapper.findAll('.nav-label').map((node) => node.text())
-    expect(labels).toEqual(['文件', '知识库', '知识运营'])
+    expect(labels).toEqual(['文件', '知识库', '知识运营', '表格变更'])
     expect(wrapper.get('[aria-label="知识运营"]').classes()).toContain('active')
   })
 

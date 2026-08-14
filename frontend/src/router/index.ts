@@ -45,6 +45,11 @@ const router = createRouter({
           component: () => import('../views/KnowledgeOperationsView.vue')
         },
         {
+          path: 'operations/spreadsheet-changes',
+          name: 'spreadsheet-changes',
+          component: () => import('../views/SpreadsheetChangesView.vue')
+        },
+        {
           path: 'analysis',
           name: 'analysis',
           component: () => import('../views/AnalysisModeView.vue')

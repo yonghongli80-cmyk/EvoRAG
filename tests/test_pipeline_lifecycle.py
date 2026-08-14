@@ -96,3 +96,109 @@ def test_api_shutdown_closes_the_global_qdrant_client(monkeypatch):
 
     qdrant_client.close.assert_called_once_with()
     assert vector_store._client is None
+
+
+def test_api_starts_and_stops_material_worker(monkeypatch):
+    import rag.api as api
+    from config import settings
+
+    calls = []
+
+    class FakeWorker:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, batch):
+            calls.append(("run", batch))
+            api._material_worker_stop.set()
+            return []
+
+        def shutdown(self):
+            calls.append(("shutdown", None))
+
+    monkeypatch.setattr(settings, "material_worker_enabled", True, raising=False)
+    monkeypatch.setattr("rag.materials.worker.MaterialWorker", FakeWorker)
+    monkeypatch.setattr(api, "_material_worker_thread", None, raising=False)
+    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+
+    api._start_material_worker()
+    api._material_worker_thread.join(timeout=1)
+    api.close_pipeline_processors()
+
+    assert calls == [("run", settings.material_worker_count), ("shutdown", None)]
+
+
+def test_api_startup_starts_material_worker_without_upload_directory(monkeypatch, tmp_path):
+    """Queued material jobs must still be consumed when legacy upload data is absent."""
+    import rag.api as api
+
+    starts = []
+    monkeypatch.setattr(api, "DATA_DIR", tmp_path / "missing-upload-directory")
+    monkeypatch.setattr(api, "log_security_mode", lambda: None)
+    monkeypatch.setattr(api, "_run_document_version_migration", lambda: None)
+    monkeypatch.setattr(api, "_run_material_metadata_migration", lambda: None)
+    monkeypatch.setattr(api, "_run_spreadsheet_migration", lambda: None)
+    monkeypatch.setattr(api, "_start_material_worker", lambda: starts.append(True), raising=False)
+
+    api.auto_index_on_startup()
+
+    assert starts == [True]
+
+
+def test_material_worker_loop_survives_a_transient_run_error(monkeypatch):
+    """One failed polling iteration must not stop future material indexing."""
+    import rag.api as api
+    from config import settings
+
+    attempts = []
+
+    class FakeWorker:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, batch):
+            attempts.append(batch)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary database lock")
+            api._material_worker_stop.set()
+            return []
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(settings, "material_worker_enabled", True)
+    monkeypatch.setattr("rag.materials.worker.MaterialWorker", FakeWorker)
+    monkeypatch.setattr(api, "_material_worker_thread", None, raising=False)
+    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+
+    api._start_material_worker()
+    api._material_worker_thread.join(timeout=2)
+    api.close_pipeline_processors()
+
+    assert attempts == [settings.material_worker_count, settings.material_worker_count]
+
+
+def test_api_shutdown_keeps_qdrant_open_until_material_worker_exits(monkeypatch):
+    """A slow index operation must not access Qdrant after API shutdown closes it."""
+    import rag.api as api
+    import rag.vector_store as vector_store
+
+    class StillRunningThread:
+        def is_alive(self):
+            return True
+
+        def join(self, timeout):
+            assert timeout == 5.0
+
+    worker = MagicMock()
+    qdrant_client = MagicMock()
+    monkeypatch.setattr(api, "_material_worker", worker, raising=False)
+    monkeypatch.setattr(api, "_material_worker_thread", StillRunningThread(), raising=False)
+    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+    monkeypatch.setattr(vector_store, "_client", qdrant_client)
+
+    api.close_pipeline_processors()
+
+    worker.shutdown.assert_not_called()
+    qdrant_client.close.assert_not_called()
+    assert api._material_worker is worker

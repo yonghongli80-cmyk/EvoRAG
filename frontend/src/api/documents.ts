@@ -26,6 +26,7 @@ export interface DocumentVersion {
   superseded_at: number | null
   content_hash: string
   uploaded_by?: number
+  restored_from_version_id?: number | null
 }
 
 /** Upload a file with an explicit duplicate resolution action. */

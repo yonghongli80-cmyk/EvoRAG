@@ -6,6 +6,7 @@ import os
 # 把 RAG_AUTH_ENABLED 预置为 "false"。
 # tests/test_auth_default_enabled.py 用 monkeypatch.delenv 恢复未设置态来测默认值。
 os.environ.setdefault("RAG_AUTH_ENABLED", "false")
+os.environ.setdefault("RAG_MATERIAL_WORKER_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -93,6 +94,7 @@ def isolated_api(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_DIR", upload_dir)
     monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root, raising=False)
     monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "qdrant_path", str(tmp_path / "qdrant"))
     monkeypatch.setattr(settings, "document_versions_root", str(document_versions_root), raising=False)
     monkeypatch.setattr(settings, "structured_datasets_root", str(structured_datasets_root), raising=False)
     api.app.state.user_db = db

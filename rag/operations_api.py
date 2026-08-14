@@ -53,6 +53,7 @@ def _serialize_version(db, version: dict, user: dict, document: dict) -> dict:
         "created_at": version["created_at"],
         "superseded_at": version["superseded_at"],
         "content_hash": version["content_hash"],
+        "restored_from_version_id": version.get("restored_from_version_id"),
     }
     # Uploader identity is visible only to the owner and administrators.
     is_owner_or_admin = user.get("is_admin") or (

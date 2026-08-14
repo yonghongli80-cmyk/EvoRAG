@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     material_job_queue_limit: int = 10_000
     material_embedding_cache_path: str = str(Path(__file__).resolve().parent / "data" / "embedding_cache.sqlite3")
     material_embedding_cache_bytes: int = 10 * 1024 * 1024 * 1024
+    material_worker_enabled: bool = True
     material_worker_count: int = 2
     material_embedding_slots: int = 4
     legacy_office_enabled: bool = False

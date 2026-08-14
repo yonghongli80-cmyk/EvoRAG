@@ -34,6 +34,23 @@ def test_rows_are_acl_scoped_and_do_not_expose_storage_path(isolated_api, make_u
 
     assert response.status_code == 200
     assert response.json()["rows"] == [{"row_number": 2, "values": ["east", 0]}]
+    assert response.json()["columns"] == [
+        {
+            "column_key": "c_0001",
+            "ordinal": 1,
+            "display_name": "region",
+            "value_type": "text",
+        },
+        {
+            "column_key": "c_0002",
+            "ordinal": 2,
+            "display_name": "amount",
+            "value_type": "integer",
+        },
+    ]
+    assert response.json()["can_edit"] is True
+    assert response.json()["current_version_id"] == version_id
+    assert response.json()["non_editable_cells"] == []
     assert "storage" not in response.text.lower()
     assert "sqlite" not in response.text.lower()
 

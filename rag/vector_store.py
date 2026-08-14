@@ -418,6 +418,85 @@ def delete_document_version(collection_name: str, version_id: int) -> None:
         )
 
 
+def copy_units_to_version(
+    collection_name: str,
+    *,
+    source_version_id: int,
+    target_version_id: int,
+    document_id: int,
+    version_no: int,
+    unit_keys: list[str] | tuple[str, ...],
+    dataset_id: int | None = None,
+) -> int:
+    """Clone exact unchanged semantic units into an immutable target version."""
+    from qdrant_client.models import FieldCondition, MatchValue
+
+    requested = set(unit_keys)
+    if not requested:
+        return 0
+    with _write_lock.write():
+        client = _get_client()
+        if not client.collection_exists(collection_name):
+            return 0
+        records = []
+        offset = None
+        source_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="document_id", match=MatchValue(value=document_id)
+                ),
+                FieldCondition(
+                    key="document_version_id",
+                    match=MatchValue(value=source_version_id),
+                ),
+            ]
+        )
+        while True:
+            batch, offset = client.scroll(
+                collection_name=collection_name,
+                scroll_filter=source_filter,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            records.extend(batch)
+            if offset is None:
+                break
+
+        selected = {}
+        for record in records:
+            payload = record.payload or {}
+            unit_key = (payload.get("metadata") or {}).get("unit_key")
+            if unit_key in requested:
+                if unit_key in selected or record.vector is None:
+                    return 0
+                selected[unit_key] = record
+        if set(selected) != requested:
+            return 0
+
+        points = []
+        for unit_key in unit_keys:
+            record = selected[unit_key]
+            payload = dict(record.payload or {})
+            payload.update(
+                document_id=document_id,
+                document_version_id=target_version_id,
+                version_no=version_no,
+                is_current=True,
+            )
+            if dataset_id is not None:
+                payload["dataset_id"] = dataset_id
+            points.append(
+                PointStruct(
+                    id=str(uuid.uuid4()), vector=record.vector, payload=payload
+                )
+            )
+        client.upsert(collection_name=collection_name, points=points)
+    _invalidate_bm25(collection_name)
+    return len(points)
+
+
 def delete_doc(collection_name: str, doc_name: str):
     from qdrant_client.models import FieldCondition, MatchValue
 

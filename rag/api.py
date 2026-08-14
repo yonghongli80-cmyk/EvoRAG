@@ -60,6 +60,9 @@ app = FastAPI(title="RAG 知识库 API", description="基于检索增强生成�
 pipeline = None
 _pipelines = {}
 _pipeline_lock = ReadWriteLock()
+_material_worker_stop = threading.Event()
+_material_worker_thread: threading.Thread | None = None
+_material_worker = None
 
 # Versioned document ingest (trusted knowledge loop).
 app.include_router(operations_router)
@@ -123,6 +126,66 @@ def _run_spreadsheet_migration() -> None:
         logger.exception("spreadsheet migration failed")
 
 
+def _start_material_worker() -> None:
+    """Start the single API-owned consumer for persistent material jobs."""
+    global _material_worker, _material_worker_thread
+    if not settings.material_worker_enabled:
+        return
+    if _material_worker_thread is not None and _material_worker_thread.is_alive():
+        return
+
+    from rag.embedder import embed
+    from rag.materials.formats import build_default_format_registry
+    from rag.materials.worker import MaterialWorker, WorkerServices
+
+    worker = MaterialWorker(
+        WorkerServices(
+            db=user_db,
+            versions_root=_versions_root(),
+            registry=build_default_format_registry(),
+            embedder=embed,
+            max_embedding_concurrency=settings.material_embedding_slots,
+        ),
+        worker_id=f"api-material-{uuid.uuid4().hex[:8]}",
+        lease_seconds=settings.material_worker_lease_seconds,
+        max_attempts=settings.material_job_max_attempts,
+    )
+    _material_worker_stop.clear()
+
+    def _consume() -> None:
+        while not _material_worker_stop.is_set():
+            try:
+                worker.run(batch=settings.material_worker_count)
+            except Exception:
+                logger.exception("material index worker polling iteration failed")
+            _material_worker_stop.wait(1.0)
+
+    _material_worker = worker
+    _material_worker_thread = threading.Thread(
+        target=_consume, name="material-index-worker", daemon=True
+    )
+    _material_worker_thread.start()
+    logger.info("material index worker started")
+
+
+def _stop_material_worker() -> bool:
+    """Stop the API-owned worker before closing shared vector resources."""
+    global _material_worker, _material_worker_thread
+    worker = _material_worker
+    thread = _material_worker_thread
+    _material_worker_stop.set()
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=5.0)
+    if thread is not None and thread.is_alive():
+        logger.error("material index worker did not stop before shutdown; preserving shared resources")
+        return False
+    if worker is not None:
+        worker.shutdown()
+    _material_worker = None
+    _material_worker_thread = None
+    return True
+
+
 @app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
@@ -132,6 +195,7 @@ def auto_index_on_startup():
     _run_material_metadata_migration()
     _run_spreadsheet_migration()
     if not DATA_DIR.is_dir():
+        _start_material_worker()
         return
 
     from rag.folder_indexer import compute_file_hash, load_index_state, save_index_state, diff_index, index_folder
@@ -232,6 +296,7 @@ def auto_index_on_startup():
             pipeline = _get_or_create_pipeline("rag_docs")
         _init_admin()
         _sync_repo_files()
+        _start_material_worker()
         return
 
     logger.info("索引变化: %d 新增, %d 修改, %d 删除", len(added), len(modified), len(deleted))
@@ -258,6 +323,7 @@ def auto_index_on_startup():
         _sync_repo_files()
     except Exception as e:
         logger.warning("管理员初始化失败: %s", e)
+    _start_material_worker()
 
 
 @app.middleware("http")
@@ -485,6 +551,8 @@ app.state.comparison_document_tool_factory = _make_comparison_document_tool
 def close_pipeline_processors():
     """关闭由 API 生命周期持有的共享处理器。"""
     global pipeline, _feedback_processor, _gap_analyzer
+    if not _stop_material_worker():
+        return
     with _pipeline_lock.write():
         cached_pipelines = list(dict.fromkeys(_pipelines.values()))
         _pipelines.clear()
@@ -883,6 +951,7 @@ async def list_files(user_id: str = Security(verify_api_key), authorization: str
             size = source.stat().st_size if source.is_file() else 0
             files.append({"name": name, "size": size, "size_human": _human_size(size),
                           "ext": Path(name).suffix.lower(), "document_id": perm["id"],
+                          "version_id": version["id"],
                           "is_public": perm.get("scope") == "public",
                           "protected": perm.get("protected", False),
                           "owner_id": perm.get("owner_id"),
@@ -1157,7 +1226,11 @@ async def toggle_file_visibility(filename: str, authorization: str = Header(defa
 
 
 @app.get("/files/{filename}/download", summary="下载文件")
-async def download_file(filename: str, authorization: str = Header(default="")):
+async def download_file(
+    filename: str,
+    version_id: int | None = Query(default=None, ge=1),
+    authorization: str = Header(default=""),
+):
     """下载文件。检查权限 + downloadable 字段。"""
     user_dict = await _require_auth(authorization)
 
@@ -1166,11 +1239,30 @@ async def download_file(filename: str, authorization: str = Header(default="")):
     file_path = DATA_DIR / safe_name
     if perm:
         current_version = user_db.get_current_document_version(perm["id"])
-        if current_version:
+        transferable_version = current_version
+        if version_id is not None:
+            candidate = user_db.get_document_version_by_id(version_id)
+            if (
+                candidate is None
+                or candidate["document_id"] != perm["id"]
+                or candidate["status"] not in {"current", "staging"}
+            ):
+                raise HTTPException(status_code=404, detail="文件版本不存在")
+            transferable_version = candidate
+        elif transferable_version is None:
+            transferable_version = next(
+                (
+                    version
+                    for version in user_db.list_document_versions(perm["id"])
+                    if version["status"] == "staging"
+                ),
+                None,
+            )
+        if transferable_version:
             from rag.document_version_store import resolve_version_path
 
             file_path = resolve_version_path(
-                _versions_root(), current_version["file_path"]
+                _versions_root(), transferable_version["file_path"]
             )
 
     if not file_path.is_file():

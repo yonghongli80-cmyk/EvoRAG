@@ -295,7 +295,8 @@ async function addFileToKB() {
     const formData = new FormData()
     const blob = await downloadLibraryFile(
       selectedFile.value.name,
-      authStore.getAuthHeaders()
+      authStore.getAuthHeaders(),
+      selectedFile.value.version_id
     )
     formData.append('file', blob, selectedFile.value.name)
 

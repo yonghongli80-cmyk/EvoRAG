@@ -331,6 +331,7 @@ class UserDB:
                     )) DEFAULT 'valid',
                     created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
                     superseded_at REAL,
+                    restored_from_version_id INTEGER REFERENCES document_versions(id),
                     UNIQUE(document_id, version_no),
                     FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,
                     FOREIGN KEY(uploaded_by) REFERENCES users(id)
@@ -2796,6 +2797,280 @@ class UserDB:
     # Document Versions (trusted knowledge loop)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _canonical_json_text(value: Any) -> str:
+        """Return deterministic JSON for a value or an existing JSON string."""
+        decoded = json.loads(value) if isinstance(value, str) else value
+        return json.dumps(
+            decoded,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def reserve_spreadsheet_edit(
+        self,
+        *,
+        document_id: int,
+        base_version_id: int,
+        actor_user_id: int,
+        original_filename: str,
+        staged_path: str,
+        content_hash: str,
+        operation: str,
+        reason: str,
+        restored_from_version_id: int | None,
+        changes: tuple[dict[str, Any], ...],
+        ip_address: str = "",
+        user_agent: str = "",
+        risk_flags: tuple[str, ...] = (),
+        structure_change: dict[str, Any] | None = None,
+    ) -> tuple[int, int]:
+        """Atomically reserve a spreadsheet version and its immutable audit rows."""
+        if operation not in {"edit", "rollback"}:
+            raise ValueError("invalid spreadsheet edit operation")
+        with self._lock, self.transaction(immediate=True):
+            current = self._conn.execute(
+                "SELECT dp.current_version_id, dv.status "
+                "FROM document_permissions dp "
+                "LEFT JOIN document_versions dv ON dv.id = dp.current_version_id "
+                "WHERE dp.id = ?",
+                (document_id,),
+            ).fetchone()
+            if (
+                current is None
+                or current["current_version_id"] != base_version_id
+                or current["status"] != "current"
+            ):
+                raise VersionConflict("spreadsheet_base_version_conflict")
+
+            if restored_from_version_id is not None:
+                source = self._conn.execute(
+                    "SELECT document_id FROM document_versions WHERE id = ?",
+                    (restored_from_version_id,),
+                ).fetchone()
+                if source is None or source["document_id"] != document_id:
+                    raise VersionConflict("spreadsheet_restore_source_conflict")
+
+            next_row = self._conn.execute(
+                "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no "
+                "FROM document_versions WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()
+            version_cur = self._conn.execute(
+                "INSERT INTO document_versions "
+                "(document_id, version_no, original_filename, file_path, content_hash, "
+                "uploaded_by, status, restored_from_version_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'staging', ?)",
+                (
+                    document_id,
+                    int(next_row["next_no"]),
+                    original_filename,
+                    staged_path,
+                    content_hash,
+                    actor_user_id,
+                    restored_from_version_id,
+                ),
+            )
+            version_id = int(version_cur.lastrowid)
+            session_cur = self._conn.execute(
+                "INSERT INTO spreadsheet_edit_sessions "
+                "(document_id, base_version_id, new_version_id, actor_user_id, operation, "
+                "status, change_count, restored_from_version_id, document_name_snapshot, "
+                "reason, ip_address, user_agent, risk_flags_json) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    document_id,
+                    base_version_id,
+                    version_id,
+                    actor_user_id,
+                    operation,
+                    1 if structure_change is not None else len(changes),
+                    restored_from_version_id,
+                    original_filename,
+                    reason,
+                    ip_address,
+                    user_agent,
+                    json.dumps(
+                        sorted(set(risk_flags)),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+            session_id = int(session_cur.lastrowid)
+            self._conn.executemany(
+                "INSERT INTO spreadsheet_cell_changes "
+                "(session_id, sheet_key, sheet_name_snapshot, cell_address, "
+                "old_value_type, old_value_json, new_value_type, new_value_json, sensitive) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        session_id,
+                        change["sheet_key"],
+                        change["sheet_name_snapshot"],
+                        change["cell_address"],
+                        change["old_value_type"],
+                        self._canonical_json_text(change["old_value_json"]),
+                        change["new_value_type"],
+                        self._canonical_json_text(change["new_value_json"]),
+                        int(bool(change.get("sensitive", 0))),
+                    )
+                    for change in changes
+                ],
+            )
+            if structure_change is not None:
+                self._conn.execute(
+                    "INSERT INTO spreadsheet_structure_changes "
+                    "(session_id, action, sheet_key, sheet_name_snapshot, target_index, "
+                    "count, new_sheet_name, affected_nonempty_cells, confirm_nonempty) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        structure_change["action"],
+                        structure_change.get("sheet_key"),
+                        structure_change.get("sheet_name_snapshot"),
+                        structure_change.get("target_index"),
+                        structure_change.get("count", 1),
+                        structure_change.get("new_sheet_name"),
+                        structure_change.get("affected_nonempty_cells", 0),
+                        int(bool(structure_change.get("confirm_nonempty", 0))),
+                    ),
+                )
+            return session_id, version_id
+
+    def reserve_spreadsheet_structure_edit(
+        self,
+        *,
+        document_id: int,
+        base_version_id: int,
+        actor_user_id: int,
+        original_filename: str,
+        staged_path: str,
+        content_hash: str,
+        reason: str,
+        structure_change: dict[str, Any],
+        ip_address: str = "",
+        user_agent: str = "",
+        risk_flags: tuple[str, ...] = (),
+    ) -> tuple[int, int]:
+        """Atomically reserve an immutable version and one structure audit row."""
+        return self.reserve_spreadsheet_edit(
+            document_id=document_id,
+            base_version_id=base_version_id,
+            actor_user_id=actor_user_id,
+            original_filename=original_filename,
+            staged_path=staged_path,
+            content_hash=content_hash,
+            operation="edit",
+            reason=reason,
+            restored_from_version_id=None,
+            changes=(),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            risk_flags=risk_flags,
+            structure_change=structure_change,
+        )
+
+    def count_recent_spreadsheet_edits(
+        self, actor_user_id: int, document_id: int, since: float
+    ) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM spreadsheet_edit_sessions "
+                "WHERE actor_user_id=? AND document_id=? AND created_at>=?",
+                (actor_user_id, document_id, since),
+            ).fetchone()
+        return int(row[0])
+
+    def record_rejected_spreadsheet_edit(
+        self,
+        *,
+        document_id: int,
+        base_version_id: int,
+        actor_user_id: int,
+        operation: str,
+        document_name_snapshot: str,
+        reason: str,
+        error_code: str,
+        risk_flags: tuple[str, ...],
+        ip_address: str = "",
+        user_agent: str = "",
+    ) -> int:
+        """Persist a value-free audit record for a server-rejected edit attempt."""
+        with self._lock, self.transaction(immediate=True):
+            cur = self._conn.execute(
+                "INSERT INTO spreadsheet_edit_sessions "
+                "(document_id, base_version_id, new_version_id, actor_user_id, operation, "
+                "status, change_count, document_name_snapshot, reason, ip_address, "
+                "user_agent, risk_flags_json, error_code) "
+                "VALUES (?, ?, NULL, ?, ?, 'rejected', 0, ?, ?, ?, ?, ?, ?)",
+                (
+                    document_id,
+                    base_version_id,
+                    actor_user_id,
+                    operation,
+                    document_name_snapshot,
+                    reason,
+                    ip_address,
+                    user_agent,
+                    json.dumps(sorted(set(risk_flags)), separators=(",", ":")),
+                    error_code,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_spreadsheet_edit_session(self, session_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spreadsheet_edit_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_spreadsheet_edit_session_for_version(
+        self, version_id: int
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM spreadsheet_edit_sessions WHERE new_version_id = ?",
+                (version_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_spreadsheet_edit_status(
+        self,
+        session_id: int,
+        status: str,
+        *,
+        activated_at: float | None = None,
+        error_code: str = "",
+    ) -> None:
+        allowed = {
+            "pending": {"active", "failed", "cancelled"},
+            "active": set(),
+            "failed": set(),
+            "cancelled": set(),
+            "rejected": set(),
+        }
+        if status not in allowed:
+            raise ValueError("invalid spreadsheet edit status")
+        with self._lock, self.transaction(immediate=True):
+            row = self._conn.execute(
+                "SELECT status FROM spreadsheet_edit_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None or status not in allowed[row["status"]]:
+                raise VersionConflict("spreadsheet_edit_status_conflict")
+            active_time = (
+                activated_at if activated_at is not None else time.time()
+            ) if status == "active" else None
+            self._conn.execute(
+                "UPDATE spreadsheet_edit_sessions "
+                "SET status = ?, activated_at = ?, error_code = ? WHERE id = ?",
+                (status, active_time, error_code, session_id),
+            )
+
     def create_document_version(
         self,
         document_id: int,
@@ -2866,7 +3141,8 @@ class UserDB:
         with self._lock:
             row = self._conn.execute(
                 "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
-                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "uploaded_by, status, validity_status, created_at, superseded_at, "
+                "restored_from_version_id "
                 "FROM document_versions WHERE document_id = ? AND status = 'current'",
                 (document_id,),
             ).fetchone()
@@ -2876,7 +3152,8 @@ class UserDB:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
-                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "uploaded_by, status, validity_status, created_at, superseded_at, "
+                "restored_from_version_id "
                 "FROM document_versions WHERE document_id = ? ORDER BY version_no DESC",
                 (document_id,),
             ).fetchall()
@@ -2896,7 +3173,8 @@ class UserDB:
         with self._lock:
             row = self._conn.execute(
                 "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
-                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "uploaded_by, status, validity_status, created_at, superseded_at, "
+                "restored_from_version_id "
                 "FROM document_versions WHERE id = ?",
                 (version_id,),
             ).fetchone()
@@ -2988,6 +3266,39 @@ class UserDB:
                 "SELECT * FROM document_index_jobs WHERE id = ?", (job_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def settle_material_job(
+        self,
+        job_id: int,
+        worker_id: str,
+        status: str,
+        error_code: str = "",
+        available_at: float | None = None,
+    ) -> bool:
+        """Finalize a claimed material job and release its lease."""
+        if status not in {"done", "failed", "cancelled", "retry"}:
+            raise ValueError(f"Unsupported material job status: {status}")
+        with self._lock, self.transaction(immediate=True):
+            cur = self._conn.execute(
+                "UPDATE document_index_jobs "
+                "SET status=?, error_code=?, available_at=COALESCE(?, available_at), "
+                "lease_owner=NULL, lease_expires_at=NULL, updated_at=? "
+                "WHERE id=? AND status='running' AND lease_owner=?",
+                (status, error_code, available_at, time.time(), job_id, worker_id),
+            )
+        return cur.rowcount == 1
+
+    def renew_material_job(
+        self, job_id: int, worker_id: str, now: float, lease_seconds: int
+    ) -> bool:
+        """Extend the current worker's lease before a long job can be reclaimed."""
+        with self._lock, self.transaction(immediate=True):
+            cur = self._conn.execute(
+                "UPDATE document_index_jobs SET lease_expires_at=?, updated_at=? "
+                "WHERE id=? AND status='running' AND lease_owner=?",
+                (now + lease_seconds, now, job_id, worker_id),
+            )
+        return cur.rowcount == 1
 
     def claim_material_jobs(
         self,
@@ -3658,6 +3969,7 @@ class UserDB:
                 "('valid','reported_outdated','confirmed_outdated')) DEFAULT 'valid',"
                 " created_at REAL NOT NULL DEFAULT (strftime('%s','now')),"
                 " superseded_at REAL,"
+                " restored_from_version_id INTEGER REFERENCES document_versions(id),"
                 " UNIQUE(document_id, version_no),"
                 " FOREIGN KEY(document_id) REFERENCES document_permissions(id) ON DELETE CASCADE,"
                 " FOREIGN KEY(uploaded_by) REFERENCES users(id)"
@@ -3666,9 +3978,9 @@ class UserDB:
             self._conn.execute(
                 "INSERT INTO document_versions "
                 "(id, document_id, version_no, original_filename, file_path, content_hash, "
-                "uploaded_by, status, validity_status, created_at, superseded_at) "
+                "uploaded_by, status, validity_status, created_at, superseded_at, restored_from_version_id) "
                 "SELECT id, document_id, version_no, original_filename, file_path, content_hash, "
-                "uploaded_by, status, validity_status, created_at, superseded_at "
+                "uploaded_by, status, validity_status, created_at, superseded_at, restored_from_version_id "
                 "FROM document_versions_old"
             )
             old_count = self._conn.execute(

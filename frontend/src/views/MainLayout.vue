@@ -67,6 +67,16 @@ function handleLogout() {
           <span class="nav-icon">🛠️</span>
           <span class="nav-label">知识运营</span>
         </button>
+        <button
+          v-if="authStore.user?.is_admin"
+          :class="['nav-item', { active: route.path === '/operations/spreadsheet-changes' }]"
+          data-test="spreadsheet-audit-nav"
+          @click="handleMenuSelect('operations/spreadsheet-changes')"
+          aria-label="表格变更记录"
+        >
+          <span class="nav-icon">▦</span>
+          <span class="nav-label">表格变更</span>
+        </button>
       </nav>
 
       <!-- User -->

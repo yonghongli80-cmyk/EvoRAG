@@ -5,6 +5,11 @@ from __future__ import annotations
 import io
 import zipfile
 
+from pathlib import Path
+
+from rag.materials.formats import build_default_format_registry
+from rag.materials.worker import MaterialWorker, WorkerServices
+
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
@@ -154,3 +159,86 @@ def test_queued_material_is_visible_in_files_listing(isolated_api, make_user):
 
     assert listing.status_code == 200
     assert [item["name"] for item in listing.json()["files"]] == ["queued.txt"]
+
+
+def test_staging_material_can_be_downloaded_by_its_owner(isolated_api, make_user):
+    """A newly uploaded material can be transferred into a knowledge base before indexing."""
+    _, headers = make_user("alice")
+    upload = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("pending.txt", b"pending material", "text/plain")},
+    )
+
+    assert upload.status_code == 202
+    download = isolated_api.get("/files/pending.txt/download", headers=headers)
+    assert download.status_code == 200
+    assert download.content == b"pending material"
+
+
+def test_download_can_target_the_new_staging_version_of_a_replaced_material(
+    isolated_api, make_user, mock_embedding_indexing
+):
+    """A KB transfer must not silently substitute the old current file."""
+    _, headers = make_user("alice")
+    first = isolated_api.post(
+        "/upload",
+        headers=headers,
+        files={"file": ("policy.txt", b"old policy", "text/plain")},
+    )
+    assert first.status_code == 200
+    replacement = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("policy.txt", b"new policy", "text/plain")},
+    )
+    assert replacement.status_code == 202
+
+    download = isolated_api.get(
+        f"/files/policy.txt/download?version_id={replacement.json()['version_id']}",
+        headers=headers,
+    )
+
+    assert download.status_code == 200
+    assert download.content == b"new policy"
+
+
+def test_uploaded_material_job_activates_its_version(isolated_api, make_user):
+    """A queued API upload becomes the current searchable document when consumed."""
+    _, headers = make_user("alice")
+    upload = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("queued.txt", b"leave policy: five days", "text/plain")},
+    )
+    assert upload.status_code == 202
+    body = upload.json()
+
+    class VectorStore:
+        def add_units(self, *_args, **_kwargs):
+            pass
+
+        def delete_version(self, *_args, **_kwargs):
+            pass
+
+        def mark_current(self, *_args, **_kwargs):
+            pass
+
+    worker = MaterialWorker(
+        WorkerServices(
+            db=isolated_api.app.state.user_db,
+            versions_root=Path(isolated_api.app.state.document_versions_root),
+            registry=build_default_format_registry(),
+            vector_store=VectorStore(),
+            embedder=lambda texts: [[0.1] * 1024 for _ in texts],
+        ),
+        worker_id="test-material-worker",
+    )
+
+    results = worker.run(batch=1)
+
+    assert results[0].status == "done"
+    assert isolated_api.app.state.user_db.get_index_job(1)["status"] == "done"
+    current = isolated_api.app.state.user_db.get_current_document_version(body["document_id"])
+    assert current is not None
+    assert current["id"] == body["version_id"]

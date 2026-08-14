@@ -42,6 +42,7 @@ class IncrementalIndexPlan:
     previous_version_id: int | None
     unchanged: tuple[UnitFingerprint, ...]
     changed: tuple[UnitFingerprint, ...]
+    removed: tuple[UnitFingerprint, ...]
 
     @property
     def reused_units(self) -> int:
@@ -64,14 +65,19 @@ def plan_incremental_index(
     current_fps = fingerprint_material(current, parser_schema_version)
     previous_digests = {fp.unit_key: fp.digest for fp in previous_fps}
     unchanged = tuple(
-        fp for fp in current_fps if previous_digests.get(fp.unit_key) == fp.digest
+        UnitFingerprint(fp.unit_key, fp.digest, previous.version_id)
+        for fp in current_fps
+        if previous is not None and previous_digests.get(fp.unit_key) == fp.digest
     )
     changed = tuple(
         fp for fp in current_fps if previous_digests.get(fp.unit_key) != fp.digest
     )
     previous_version_id = previous.version_id if previous is not None else None
+    current_keys = {fp.unit_key for fp in current_fps}
+    removed = tuple(fp for fp in previous_fps if fp.unit_key not in current_keys)
     return IncrementalIndexPlan(
         previous_version_id=previous_version_id,
         unchanged=unchanged,
         changed=changed,
+        removed=removed,
     )

@@ -72,6 +72,23 @@ def test_one_changed_unit_embeds_only_that_unit(tmp_path):
     assert result.embedded_units == 1
 
 
+def test_incremental_plan_reports_removed_units_and_reuse_source():
+    previous = extracted(["unchanged", "removed"], version_id=7)
+    current = extracted(["unchanged", "replacement"], version_id=8)
+
+    plan = plan_incremental_index(previous, current, current.parser_schema_version)
+
+    assert plan.previous_version_id == 7
+    assert [unit.unit_key for unit in plan.unchanged] == ["u0"]
+    assert plan.unchanged[0].unchanged_from_version_id == 7
+    assert [unit.unit_key for unit in plan.changed] == ["u1"]
+    assert [unit.unit_key for unit in plan.removed] == []
+
+    shortened = extracted(["unchanged"], version_id=9)
+    removal = plan_incremental_index(current, shortened, shortened.parser_schema_version)
+    assert [unit.unit_key for unit in removal.removed] == ["u1"]
+
+
 class CacheEmbedder:
     def __init__(self):
         self.calls = 0
@@ -109,6 +126,19 @@ class FakeVectorStore:
 
     def add_units(self, kb_id, chunks, vectors, *, document_id, document_version_id, version_no):
         self._versions.setdefault(document_version_id, []).extend(chunks)
+
+    def copy_units_to_version(
+        self, kb_id, source_version_id, target_version_id, document_id, version_no, unit_keys,
+        dataset_id=None,
+    ):
+        source = self._versions.get(source_version_id, [])
+        requested = set(unit_keys)
+        copied = [
+            chunk for chunk in source
+            if chunk.metadata.get("unit_key") in requested
+        ]
+        self._versions.setdefault(target_version_id, []).extend(copied)
+        return len(copied)
 
     def delete_version(self, kb_id, version_id):
         self._versions.pop(version_id, None)
@@ -227,3 +257,44 @@ def test_successful_job_indexes_and_activates(worker_fixture):
     hits = db.search_material_search_fts("合同正文")
     assert {h["document_id"] for h in hits} == {doc}
     assert hits[0]["version_id"] == v11
+
+
+def test_new_version_materializes_unchanged_and_changed_units(worker_fixture):
+    db = worker_fixture.db
+    doc = worker_fixture.document_id
+    versions = {
+        1: extracted(["unchanged", "old"], version_id=1),
+        2: extracted(["unchanged", "new"], version_id=2),
+    }
+    embedder = RecordingEmbedder()
+
+    def process(version_id, job_id):
+        services = WorkerServices(
+            db=db,
+            versions_root=worker_fixture.versions_root,
+            registry=REGISTRY,
+            vector_store=worker_fixture.vector_store,
+            embedder=embedder,
+            extractor=lambda path, actual_version_id, resolution: versions[version_id],
+        )
+        return process_index_job(worker_fixture.job(version_id, job_id), services)
+
+    v1 = db.create_document_version(
+        doc, "contract.pdf", str(worker_fixture.versions_root / "v1.bin"), "h1", worker_fixture.user_id
+    )
+    versions[v1] = extracted(["unchanged", "old"], version_id=v1)
+    assert process(v1, 1).status == "done"
+
+    embedder.texts.clear()
+    v2 = db.create_document_version(
+        doc, "contract.pdf", str(worker_fixture.versions_root / "v2.bin"), "h2", worker_fixture.user_id
+    )
+    versions[v2] = extracted(["unchanged", "new"], version_id=v2)
+    result = process(v2, 2)
+
+    assert result.status == "done"
+    assert embedder.texts == ["new"]
+    assert [chunk.text for chunk in worker_fixture.vector_store._versions[v2]] == [
+        "unchanged",
+        "new",
+    ]

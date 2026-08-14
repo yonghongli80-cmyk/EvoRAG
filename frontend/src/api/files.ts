@@ -1,8 +1,10 @@
 export async function downloadLibraryFile(
   filename: string,
-  authHeaders: Record<string, string>
+  authHeaders: Record<string, string>,
+  versionId?: number
 ): Promise<Blob> {
-  const response = await fetch(`/files/${encodeURIComponent(filename)}/download`, {
+  const versionQuery = versionId ? `?version_id=${encodeURIComponent(String(versionId))}` : ''
+  const response = await fetch(`/files/${encodeURIComponent(filename)}/download${versionQuery}`, {
     headers: authHeaders
   })
   if (!response.ok) {

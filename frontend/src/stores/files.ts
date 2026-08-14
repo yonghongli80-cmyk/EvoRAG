@@ -22,6 +22,7 @@ export interface FileInfo {
   in_kb?: boolean
   downloadable?: boolean
   document_id?: number
+  version_id?: number
 }
 
 export const useFilesStore = defineStore('files', () => {

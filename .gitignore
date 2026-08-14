@@ -56,6 +56,10 @@ data/index_state.json
 
 # SDD workspace artifacts
 .superpowers/
+/.sdd-test-data/
+
+# Runtime document-version storage
+/data/document_versions/
 
 # Python virtual environments
 .venv/
