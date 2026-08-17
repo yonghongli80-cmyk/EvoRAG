@@ -473,6 +473,9 @@ from config import settings as _settings
 _DB_PATH = Path(_settings.users_db_path)
 user_db = UserDB(str(_DB_PATH))
 app.state.user_db = user_db
+app.state.document_versions_root = _settings.document_versions_root
+app.state.structured_datasets_root = _settings.structured_datasets_root
+app.state.kb_files_root = str(KB_FILES_ROOT)
 
 
 # ── Pipeline 数据处理器单例 ─────────────────────────────────────────────
@@ -1912,6 +1915,31 @@ async def add_document_to_kb(
             summary,
             result.chunks,
         )
+        if Path(result.filename).suffix.lower() in {".xlsx", ".csv"}:
+            from rag.spreadsheets.migration import ensure_structured_dataset
+
+            spreadsheet_format = Path(result.filename).suffix.lower().removeprefix(".")
+            try:
+                await asyncio.to_thread(
+                    ensure_structured_dataset,
+                    user_db,
+                    Path(
+                        getattr(
+                            app.state,
+                            "structured_datasets_root",
+                            settings.structured_datasets_root,
+                        )
+                    ),
+                    document_id=result.document_id,
+                    version_id=result.version_id,
+                    source_path=Path(version["file_path"]),
+                    fmt=spreadsheet_format,
+                )
+            except Exception:
+                logger.exception(
+                    "KB spreadsheet dataset extraction failed",
+                    extra={"kb_id": kb_id, "document_id": result.document_id},
+                )
     except DuplicateDocument as exc:
         if kb_document_id is not None:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)

@@ -1,7 +1,17 @@
 from openpyxl import Workbook
 
+from config import settings
 from rag.spreadsheets.parser import parse_spreadsheet
 from rag.spreadsheets.store import resolve_dataset_path, write_dataset
+
+
+def test_production_app_configures_spreadsheet_storage_root():
+    import rag.api as api
+
+    assert (
+        api.app.state.structured_datasets_root
+        == settings.structured_datasets_root
+    )
 
 
 def _seed_sheet(client, owner, tmp_path):
