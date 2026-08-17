@@ -1,17 +1,7 @@
 from openpyxl import Workbook
 
-from config import settings
 from rag.spreadsheets.parser import parse_spreadsheet
 from rag.spreadsheets.store import resolve_dataset_path, write_dataset
-
-
-def test_production_app_configures_spreadsheet_storage_root():
-    import rag.api as api
-
-    assert (
-        api.app.state.structured_datasets_root
-        == settings.structured_datasets_root
-    )
 
 
 def _seed_sheet(client, owner, tmp_path):
@@ -31,6 +21,22 @@ def _seed_sheet(client, owner, tmp_path):
         kb_id="rag_docs", filename="sales.xlsx",
     )
     return document_id, version_id
+
+
+def test_rows_fall_back_to_configured_storage_root_when_app_state_is_absent(
+    isolated_api, make_user, tmp_path
+):
+    owner, headers = make_user("sheet-storage-fallback-owner")
+    document_id, version_id = _seed_sheet(isolated_api, owner, tmp_path)
+    del isolated_api.app.state.structured_datasets_root
+
+    response = isolated_api.get(
+        f"/documents/{document_id}/versions/{version_id}"
+        "/sheets/sheet_0001/rows",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
 
 
 def test_rows_are_acl_scoped_and_do_not_expose_storage_path(isolated_api, make_user, tmp_path):

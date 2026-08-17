@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from openpyxl.utils import get_column_letter, range_boundaries
 
+from config import settings
 from rag.api_security import require_doc_version_edit, require_doc_view, require_user
 from rag.spreadsheets.audit import (
     get_spreadsheet_audit_detail,
@@ -80,8 +81,20 @@ def spreadsheet_change_audit_detail(
 def _edit_service(request: Request) -> SpreadsheetEditService:
     return SpreadsheetEditService(
         request.app.state.user_db,
-        Path(request.app.state.document_versions_root),
-        Path(request.app.state.structured_datasets_root),
+        Path(
+            getattr(
+                request.app.state,
+                "document_versions_root",
+                settings.document_versions_root,
+            )
+        ),
+        Path(
+            getattr(
+                request.app.state,
+                "structured_datasets_root",
+                settings.structured_datasets_root,
+            )
+        ),
     )
 
 
@@ -238,7 +251,13 @@ def rows(
     dataset = db.get_structured_dataset_for_version(version_id)
     if version is None or dataset is None or version["document_id"] != document_id or dataset["document_id"] != document_id or dataset["status"] != "ready":
         raise HTTPException(404, "spreadsheet version not found")
-    root = Path(request.app.state.structured_datasets_root)
+    root = Path(
+        getattr(
+            request.app.state,
+            "structured_datasets_root",
+            settings.structured_datasets_root,
+        )
+    )
     path = (root / dataset["storage_key"]).resolve()
     if root.resolve() not in path.parents:
         raise HTTPException(404, "spreadsheet version not found")
