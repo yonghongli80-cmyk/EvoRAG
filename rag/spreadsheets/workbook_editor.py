@@ -135,7 +135,9 @@ def _snapshot_workbook(book) -> dict[str, Any]:
         }
     return {
         "sheet_names": tuple(book.sheetnames),
-        "lock_structure": bool(book.security.lockStructure),
+        "lock_structure": bool(
+            getattr(book.security, "lockStructure", False)
+        ),
         "sheets": sheets,
     }
 

@@ -80,6 +80,38 @@ def test_apply_cell_patches_preserves_workbook_structure_and_formatting(tmp_path
     assert changes[1].new_value == 6500
 
 
+def test_apply_cell_patches_supports_workbooks_without_protection_metadata(tmp_path):
+    from rag.spreadsheets.workbook_editor import apply_cell_patches
+
+    source = tmp_path / "unprotected.xlsx"
+    destination = tmp_path / "edited.xlsx"
+    book = Workbook()
+    book.active.title = "Sheet1"
+    book.active["A1"] = "before"
+    book.security = None
+    book.save(source)
+
+    changes = apply_cell_patches(
+        source,
+        destination,
+        {"sheet_0001": "Sheet1"},
+        (
+            CellPatch(
+                sheet_key="sheet_0001",
+                cell="A1",
+                value_type="text",
+                value="after",
+            ),
+        ),
+    )
+
+    edited = load_workbook(destination, data_only=False)
+    assert edited["Sheet1"]["A1"].value == "after"
+    assert edited.security is None
+    assert changes[0].old_value == "before"
+    assert changes[0].new_value == "after"
+
+
 def _assert_edit_error(source, destination, patches, reason_code, sheet_map=None):
     from rag.spreadsheets.workbook_editor import WorkbookEditError, apply_cell_patches
 
