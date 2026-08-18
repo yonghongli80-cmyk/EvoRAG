@@ -35,6 +35,11 @@ describe('KnowledgeOperationsView', () => {
     const { wrapper: admin } = mountView(true)
     await flushPromises()
     expect(admin.text()).toContain('运营总览')
+    expect(admin.findAll('el-tab-pane').map((tab) => tab.attributes('label'))).toEqual([
+      '我的反馈',
+      '待我处理',
+      '运营总览'
+    ])
 
     const { wrapper: employee } = mountView(false)
     await flushPromises()

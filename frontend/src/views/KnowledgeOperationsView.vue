@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import {
   fetchMyFeedback,
@@ -18,12 +18,6 @@ const tasksTotal = ref(0)
 const summary = ref<TaskSummary | null>(null)
 const loading = ref(false)
 const error = ref('')
-
-const tabs = computed(() => [
-  { key: 'feedback' as const, label: '我的反馈', visible: true },
-  { key: 'tasks' as const, label: '待我处理', visible: true },
-  { key: 'overview' as const, label: '运营总览', visible: authStore.user?.is_admin === true }
-].filter((tab) => tab.visible))
 
 const OVERDUE_MS = 0
 
@@ -99,13 +93,6 @@ onMounted(load)
     </div>
 
     <el-tabs v-model="activeTab">
-      <el-tab-pane
-        v-for="tab in tabs"
-        :key="tab.key"
-        :name="tab.key"
-        :label="tab.label"
-      />
-
       <el-tab-pane name="feedback" label="我的反馈">
         <div class="tab-content">
           <h3 class="tab-title">我的反馈</h3>
@@ -164,7 +151,11 @@ onMounted(load)
         </div>
       </el-tab-pane>
 
-      <el-tab-pane name="overview" label="运营总览">
+      <el-tab-pane
+        v-if="authStore.user?.is_admin"
+        name="overview"
+        label="运营总览"
+      >
         <div class="tab-content" v-if="summary" data-test="operations-overview">
           <h3 class="tab-title">运营总览</h3>
           <el-row :gutter="12">
