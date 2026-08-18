@@ -89,9 +89,12 @@ onMounted(load)
 <template>
   <div class="operations" data-test="operations-view">
     <div class="page-header">
+      <span>KNOWLEDGE OPERATIONS</span>
       <h2>知识运营</h2>
+      <p>集中查看反馈、处理内容任务，并关注知识质量状态。</p>
     </div>
 
+    <div class="operations-panel">
     <el-tabs v-model="activeTab">
       <el-tab-pane name="feedback" label="我的反馈">
         <div class="tab-content">
@@ -195,21 +198,33 @@ onMounted(load)
     </el-tabs>
 
     <p v-if="error" class="error" data-test="operations-error">{{ error }}</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .operations {
-  padding: var(--space-5);
+  padding: var(--space-6);
   height: 100%;
   overflow: auto;
+  background: var(--color-background);
 }
 
+.page-header { margin-bottom: var(--space-5); }
+.page-header > span { display: block; margin-bottom: var(--space-1); color: var(--color-primary); font-size: 10px; font-weight: var(--font-bold); letter-spacing: .1em; }
 .page-header h2 {
-  margin: 0 0 var(--space-4);
+  margin: 0;
   font-family: var(--font-heading);
+  font-size: var(--text-2xl);
   color: var(--color-foreground);
 }
+.page-header p { margin: var(--space-1) 0 0; color: var(--color-secondary); font-size: var(--text-sm); }
+
+.operations-panel { min-height: 420px; padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-xs); }
+:deep(.el-tabs__header) { margin-bottom: var(--space-5); }
+:deep(.el-tabs__item) { height: 42px; color: var(--color-secondary); font-weight: var(--font-medium); }
+:deep(.el-tabs__item.is-active) { color: var(--color-primary); }
+:deep(.el-tabs__active-bar) { background: var(--color-primary); }
 
 .tab-content {
   padding: var(--space-2) 0;
@@ -217,6 +232,12 @@ onMounted(load)
 
 .muted {
   color: var(--color-secondary);
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-background);
 }
 
 .tab-title {
@@ -238,6 +259,11 @@ onMounted(load)
 }
 
 .error {
-  color: var(--color-danger);
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid #fecaca;
+  border-radius: var(--radius);
+  color: var(--color-destructive);
+  background: var(--color-destructive-light);
 }
 </style>

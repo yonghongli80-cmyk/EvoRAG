@@ -62,8 +62,9 @@ onMounted(load)
 
 <template>
   <section class="spreadsheet-changes">
-    <header>
+    <header class="page-header">
       <div>
+        <span class="eyebrow">管理后台</span>
         <h2>公共表格变更记录</h2>
         <p>查看谁在什么时间修改或回退了表格。审计记录不可删除。</p>
       </div>
@@ -75,23 +76,30 @@ onMounted(load)
           <option value="">全部操作</option><option value="edit">编辑</option><option value="rollback">回退</option>
         </select>
         <input v-model="risk" placeholder="风险标记" @keyup.enter="load">
-        <button type="button" @click="load">查询</button>
+        <button class="query-button" type="button" @click="load">查询</button>
       </div>
     </header>
-    <p v-if="error" role="alert">{{ error }}</p>
-    <p v-else-if="!loading && !items.length" data-test="audit-empty">暂无表格变更记录</p>
-    <table v-else>
+    <p v-if="error" class="error-banner" role="alert">{{ error }}</p>
+    <div v-else-if="!loading && !items.length" class="audit-empty" data-test="audit-empty">
+      <strong>暂无表格变更记录</strong>
+      <span>公共表格发生修改或回退后，会自动记录在这里。</span>
+    </div>
+    <div v-else class="table-card">
+    <table>
       <thead><tr><th>文件</th><th>操作人</th><th>操作</th><th>状态</th><th>变更</th><th>风险</th><th></th></tr></thead>
       <tbody>
         <tr v-for="item in items" :key="item.session_id">
           <td>{{ item.document_name }}</td><td>{{ item.actor_name }}</td><td>{{ item.structure_action ? structureLabel(item.structure_action) : (item.operation === 'rollback' ? '回退' : '编辑') }}</td><td>{{ item.status }}</td><td>{{ item.structure_action ? '1 次结构调整' : `${item.change_count} 个单元格` }}</td>
           <td><span v-for="flag in item.risk_flags" :key="flag" class="risk">{{ flag }}</span></td>
-          <td><button data-test="audit-detail" type="button" @click="openDetail(item.session_id)">查看详情</button></td>
+          <td><button class="detail-button" data-test="audit-detail" type="button" @click="openDetail(item.session_id)">查看详情</button></td>
         </tr>
       </tbody>
     </table>
-    <dialog :open="Boolean(detail)" v-if="detail">
-      <button class="close" type="button" @click="detail = null">关闭</button>
+    </div>
+    <div v-if="detail" class="dialog-backdrop" @click.self="detail = null">
+    <dialog :open="Boolean(detail)">
+      <button class="close" type="button" aria-label="关闭详情" @click="detail = null">×</button>
+      <span class="eyebrow">变更详情</span>
       <h3>{{ detail.document_name }} · {{ detail.actor_name }}</h3>
       <p>{{ detail.reason || '未填写修改说明' }}</p>
       <section v-if="detail.structure_change" data-test="structure-detail" class="structure-detail">
@@ -114,20 +122,41 @@ onMounted(load)
         </div>
       </section>
     </dialog>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.spreadsheet-changes { padding: 24px; height: 100%; overflow: auto; box-sizing: border-box; }
-header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; }
-header p { color: #606266; }
-.filters { display: flex; gap: 8px; }
-table { width: 100%; border-collapse: collapse; margin-top: 18px; background: white; }
-th, td { padding: 10px; border-bottom: 1px solid #ebeef5; text-align: left; }
-.risk { display: inline-block; padding: 2px 6px; margin: 2px; border-radius: 10px; color: #b88230; background: #fdf6ec; font-size: 12px; }
-dialog { position: fixed; inset: 10% 12%; width: auto; max-height: 75%; overflow: auto; border: 1px solid #dcdfe6; border-radius: 10px; box-shadow: 0 12px 40px #0003; }
-.close { float: right; }
-.diff { display: grid; grid-template-columns: 70px 1fr 30px 1fr; gap: 8px; padding: 8px; background: #f7f8fa; margin-bottom: 4px; }
-.structure-detail { padding: 10px 12px; margin: 12px 0; border-radius: 8px; background: #f4f7ff; }
-[role="alert"] { color: #c45656; }
+.spreadsheet-changes { height: 100%; padding: var(--space-6); overflow: auto; box-sizing: border-box; background: var(--color-background); }
+.page-header { display: flex; justify-content: space-between; gap: var(--space-6); align-items: flex-end; margin-bottom: var(--space-5); }
+.eyebrow { display: block; margin-bottom: var(--space-1); color: var(--color-primary); font-size: 10px; font-weight: var(--font-bold); letter-spacing: .1em; text-transform: uppercase; }
+.page-header h2 { margin: 0; color: var(--color-foreground); font-family: var(--font-heading); font-size: var(--text-2xl); }
+.page-header p { margin: var(--space-1) 0 0; color: var(--color-secondary); font-size: var(--text-sm); }
+.filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.filters select, .filters input { min-height: 38px; padding: 0 var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); color: var(--color-foreground); background: var(--color-surface); font: inherit; font-size: var(--text-sm); }
+.query-button { min-height: 38px; padding: 0 var(--space-5); border: 1px solid var(--color-primary); border-radius: var(--radius); color: var(--color-on-primary); background: var(--color-primary); font: inherit; font-size: var(--text-sm); font-weight: var(--font-medium); cursor: pointer; }
+.table-card { overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-xs); }
+table { width: 100%; border-collapse: collapse; background: var(--color-surface); }
+th, td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-border); text-align: left; font-size: var(--text-sm); }
+th { color: var(--color-secondary); background: var(--color-surface-2); font-weight: var(--font-semibold); }
+tbody tr:hover { background: #f8fbff; }
+.risk { display: inline-block; padding: 3px 8px; margin: 2px; border-radius: var(--radius-full); color: #92400e; background: var(--color-warning-light); font-size: var(--text-xs); }
+.detail-button { min-height: 30px; padding: 0 var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius); color: var(--color-primary); background: var(--color-surface); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.audit-empty { min-height: 340px; display: grid; place-content: center; gap: var(--space-2); text-align: center; border: 1px dashed var(--color-border); border-radius: var(--radius-lg); color: var(--color-secondary); background: var(--color-surface); }
+.audit-empty strong { color: var(--color-foreground); font-size: var(--text-base); }
+.audit-empty span { font-size: var(--text-sm); }
+.error-banner { padding: var(--space-3) var(--space-4); border: 1px solid #fecaca; border-radius: var(--radius); color: #b91c1c; background: var(--color-destructive-light); font-size: var(--text-sm); }
+.dialog-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: var(--space-6); background: rgba(15, 23, 42, .38); backdrop-filter: blur(2px); }
+dialog { position: relative; width: min(900px, 100%); max-height: 82vh; padding: var(--space-6); overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-xl); color: var(--color-foreground); background: var(--color-surface); box-shadow: var(--shadow-lg); }
+dialog h3 { margin: 0 40px var(--space-2) 0; }
+dialog > p { color: var(--color-secondary); font-size: var(--text-sm); }
+.close { position: absolute; top: var(--space-4); right: var(--space-4); width: 34px; height: 34px; border: 1px solid var(--color-border); border-radius: var(--radius); color: var(--color-secondary); background: var(--color-surface); font-size: 20px; cursor: pointer; }
+.diff { display: grid; grid-template-columns: 70px 1fr 30px 1fr; gap: var(--space-2); padding: var(--space-3); border-radius: var(--radius); background: var(--color-surface-2); margin-bottom: var(--space-2); font-size: var(--text-sm); }
+.structure-detail { padding: var(--space-4); margin: var(--space-4) 0; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-accent-subtle); }
+
+@media (max-width: 900px) {
+  .page-header { align-items: flex-start; flex-direction: column; }
+  .filters { justify-content: flex-start; }
+  .table-card { overflow: auto; }
+}
 </style>
