@@ -3,6 +3,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -338,6 +339,9 @@ async def request_id_middleware(request, call_next):
 # Vue Router SPA fallback: browser requests to known frontend paths → serve index.html
 _VUE_ROUTES = {"/files", "/kb", "/analysis", "/analytics", "/operations", "/settings/password", "/mode/file", "/mode/kb", "/mode/analysis"}
 _VUE_ROUTE_PREFIXES = {"/kb/"}
+_VUE_ROUTE_PATTERNS = (
+    re.compile(r"^/documents/\d+/versions/\d+/spreadsheet$"),
+)
 
 
 @app.middleware("http")
@@ -348,7 +352,12 @@ async def spa_fallback_middleware(request, call_next):
     has_auth = "authorization" in {k.lower() for k in request.headers}
     # Only for GET requests from browsers to known Vue routes (no auth header)
     if request.method == "GET" and "text/html" in accept and not has_auth:
-        if path in _VUE_ROUTES or any(path.startswith(p) for p in _VUE_ROUTE_PREFIXES):
+        is_frontend_route = (
+            path in _VUE_ROUTES
+            or any(path.startswith(p) for p in _VUE_ROUTE_PREFIXES)
+            or any(pattern.fullmatch(path) for pattern in _VUE_ROUTE_PATTERNS)
+        )
+        if is_frontend_route:
             index = STATIC_DIR / "index.html"
             if index.exists():
                 resp = FileResponse(index, media_type="text/html")
