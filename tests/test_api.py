@@ -26,6 +26,22 @@ def test_health():
     assert "components" in data
 
 
+def test_lifespan_stops_backup_scheduler(monkeypatch):
+    calls = []
+    monkeypatch.setattr("rag.api.auto_index_on_startup", lambda: None)
+    monkeypatch.setattr(
+        "rag.api.start_backup_scheduler", lambda: calls.append("start")
+    )
+    monkeypatch.setattr(
+        "rag.api.stop_backup_scheduler", lambda: calls.append("stop")
+    )
+
+    with TestClient(app):
+        assert calls == ["start"]
+
+    assert calls == ["start", "stop"]
+
+
 @patch("rag.api.KnowledgeBaseManager")
 def test_index_adds_to_kb(mock_kb_cls, tmp_path, isolated_api):
     mock_manager = MagicMock()

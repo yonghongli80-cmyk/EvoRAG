@@ -12,6 +12,7 @@ from tests.backup_fixtures import make_backup_context, make_manifest
 
 def test_backup_settings_have_weekly_safe_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RAG_BACKUP_ENABLED", raising=False)
     configured = Settings(_env_file=None)
 
     assert configured.backup_enabled is True

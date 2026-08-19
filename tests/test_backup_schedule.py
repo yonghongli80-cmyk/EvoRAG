@@ -1,10 +1,18 @@
 import logging
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
 
+from config import settings
 from rag.backups.models import BackupError
+from rag.backups.scheduler import (
+    BackupScheduler,
+    backup_scheduler_is_alive,
+    start_backup_scheduler,
+    stop_backup_scheduler,
+)
 from rag.backups.service import (
     create_backup,
     create_if_due,
@@ -19,6 +27,15 @@ from tests.backup_fixtures import (
 
 
 WEEK = 7 * 24 * 60 * 60
+
+
+def wait_until(predicate):
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("scheduler condition timed out")
 
 
 @pytest.fixture
@@ -119,3 +136,49 @@ def test_concurrent_creation_is_rejected_by_lock(backup_context):
 
     assert worker.is_alive() is False
     assert worker_errors == []
+
+
+def test_scheduler_failure_does_not_end_future_checks():
+    calls = []
+
+    def run_once():
+        calls.append(len(calls))
+        if len(calls) == 1:
+            raise BackupError("disk_full")
+
+    scheduler = BackupScheduler(run_once=run_once, check_interval_seconds=0.01)
+    scheduler.start()
+    try:
+        wait_until(lambda: len(calls) >= 2)
+    finally:
+        scheduler.stop()
+
+    assert len(calls) >= 2
+
+
+def test_scheduler_stop_joins_background_thread():
+    scheduler = BackupScheduler(run_once=lambda: None, check_interval_seconds=3600)
+
+    scheduler.start()
+    scheduler.stop(timeout=1.0)
+
+    assert scheduler.is_alive is False
+
+
+def test_scheduler_start_and_stop_are_idempotent():
+    scheduler = BackupScheduler(run_once=lambda: None, check_interval_seconds=3600)
+
+    scheduler.start()
+    scheduler.start()
+    scheduler.stop(timeout=1.0)
+    scheduler.stop(timeout=1.0)
+
+    assert scheduler.is_alive is False
+
+
+def test_disabled_scheduler_does_not_create_thread(monkeypatch):
+    stop_backup_scheduler()
+    monkeypatch.setattr(settings, "backup_enabled", False)
+
+    assert start_backup_scheduler() is None
+    assert backup_scheduler_is_alive() is False

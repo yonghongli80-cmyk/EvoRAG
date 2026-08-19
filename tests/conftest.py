@@ -7,6 +7,7 @@ import os
 # tests/test_auth_default_enabled.py 用 monkeypatch.delenv 恢复未设置态来测默认值。
 os.environ.setdefault("RAG_AUTH_ENABLED", "false")
 os.environ.setdefault("RAG_MATERIAL_WORKER_ENABLED", "false")
+os.environ.setdefault("RAG_BACKUP_ENABLED", "false")
 
 import pytest
 from fastapi.testclient import TestClient

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from config import settings
 
 from rag.auth import create_token, decode_token, verify_api_key
+from rag.backups.scheduler import start_backup_scheduler, stop_backup_scheduler
 from rag.api_security import (
     log_security_mode,
     redact_source_config,
@@ -57,9 +58,11 @@ from rag.concurrency import ReadWriteLock
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     auto_index_on_startup()
+    start_backup_scheduler()
     try:
         yield
     finally:
+        stop_backup_scheduler()
         close_pipeline_processors()
 
 
