@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 import shutil
@@ -5,7 +7,74 @@ import shutil
 import pytest
 
 from rag.backups.models import BackupError
-from rag.backups.service import copy_file_verified, snapshot_sqlite
+from rag.backups.service import copy_file_verified, snapshot_sqlite, verify_backup
+
+
+def _json_bytes(payload):
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _write_literal_manifest(backup_dir, payload):
+    manifest_bytes = _json_bytes(payload)
+    (backup_dir / "manifest.json").write_bytes(manifest_bytes)
+    checksum = hashlib.sha256(manifest_bytes).hexdigest()
+    (backup_dir / "manifest.sha256").write_bytes(f"{checksum}\n".encode("ascii"))
+
+
+@pytest.fixture
+def complete_backup(tmp_path):
+    backup_dir = tmp_path / "backup-1"
+    database = backup_dir / "sqlite" / "users.db"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)")
+        connection.execute("INSERT INTO users(name) VALUES ('Ada')")
+
+    data_file = backup_dir / "files" / "upload" / "guide.txt"
+    data_file.parent.mkdir(parents=True)
+    data_file.write_text("guide", encoding="utf-8")
+
+    payload = {
+        "schema_version": 1,
+        "backup_id": "backup-1",
+        "created_at": 1_777_000_000.0,
+        "app_version": "test",
+        "python_version": "3.12",
+        "trigger": "manual",
+        "databases": [
+            {
+                "name": "users",
+                "path": "sqlite/users.db",
+                "size": database.stat().st_size,
+                "sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+                "integrity": "ok",
+                "required": True,
+            }
+        ],
+        "files": [
+            {
+                "path": "upload/guide.txt",
+                "size": data_file.stat().st_size,
+                "sha256": hashlib.sha256(data_file.read_bytes()).hexdigest(),
+            }
+        ],
+        "required_file_keys": ["upload/guide.txt"],
+        "excluded": ["qdrant", "bm25", "embedding_cache"],
+        "total_files": 2,
+        "total_bytes": database.stat().st_size + data_file.stat().st_size,
+        "qdrant_included": False,
+        "vector_rebuild_required": True,
+    }
+    _write_literal_manifest(backup_dir, payload)
+    return backup_dir
+
+
+def rewrite_manifest_file_path(backup_dir, logical_path):
+    payload = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    payload["files"][0]["path"] = logical_path
+    _write_literal_manifest(backup_dir, payload)
 
 
 def test_snapshot_sqlite_uses_a_consistent_database_copy(tmp_path):
@@ -88,3 +157,44 @@ def test_copy_rejects_symbolic_links(tmp_path):
 
     with pytest.raises(BackupError, match="symbolic_link_rejected"):
         copy_file_verified(link, tmp_path / "target.txt", "upload/link.txt")
+
+
+def test_verify_accepts_complete_backup(complete_backup):
+    result = verify_backup(complete_backup)
+
+    assert result.status == "verified"
+    assert result.file_count == 1
+    assert result.database_count == 1
+    assert result.vector_rebuild_required is True
+
+
+def test_verify_rejects_changed_file(complete_backup):
+    (complete_backup / "files/upload/guide.txt").write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(BackupError, match="file_hash_mismatch"):
+        verify_backup(complete_backup)
+
+
+def test_verify_rejects_corrupt_sqlite(complete_backup):
+    database = complete_backup / "sqlite/users.db"
+    database.write_bytes(b"not sqlite".ljust(database.stat().st_size, b"!"))
+
+    with pytest.raises(BackupError, match="sqlite_integrity_failed"):
+        verify_backup(complete_backup)
+
+
+def test_verify_rejects_unlisted_database_payload(complete_backup):
+    (complete_backup / "sqlite/rogue.db").write_bytes(b"unexpected")
+
+    with pytest.raises(BackupError, match="unexpected_backup_file"):
+        verify_backup(complete_backup)
+
+
+@pytest.mark.parametrize(
+    "logical_path", ["../escape.txt", "/absolute.txt", "upload/../escape.txt", r"upload\bad.txt"]
+)
+def test_verify_rejects_unsafe_manifest_paths(complete_backup, logical_path):
+    rewrite_manifest_file_path(complete_backup, logical_path)
+
+    with pytest.raises(BackupError, match="unsafe_manifest_path"):
+        verify_backup(complete_backup)
