@@ -16,6 +16,8 @@ docker compose up -d --build
 
 访问 <http://localhost:8000>。完整说明见 [docs/deployment.md](docs/deployment.md)。
 
+文档的当前/历史状态见 [docs/README.md](docs/README.md)；旧计划中的空复选框不直接代表功能尚未实现。
+
 ### 本地开发
 
 ```bash
