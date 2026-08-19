@@ -59,6 +59,8 @@ npm run build
 - `tests/`：后端测试。
 - `data/`、`qdrant_data/`：运行时数据；不要提交用户数据或密钥。
 
+自动备份默认每 7 天执行并保留最近 8 份；命令、排除项和隔离恢复演练见[部署指南的“数据与备份”章节](docs/deployment.md#数据与备份)。
+
 ## 安全提示
 
 生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、数据库、索引和上传数据均已从版本控制及 Docker 构建上下文中排除。

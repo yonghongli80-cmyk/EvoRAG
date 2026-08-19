@@ -1,11 +1,16 @@
 from pathlib import Path
 
+import pytest
+
+from scripts.create_backup_smoke_fixture import create_smoke_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = ROOT
 COMPOSE = ROOT / "docker-compose.yml"
 DOCKERFILE = ROOT / "Dockerfile"
 DEPLOY_SH = ROOT / "deploy.sh"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
+DEPLOYMENT_DOC = ROOT / "docs" / "deployment.md"
 
 
 def test_compose_uses_a_separate_backup_volume():
@@ -43,3 +48,19 @@ def test_backup_payloads_are_excluded_from_git_and_image_context():
         assert ignored in gitignore
     for ignored in ("backups/", "RAGv3-backups/"):
         assert ignored in dockerignore
+
+
+def test_deployment_docs_explain_backup_and_isolated_restore():
+    docs = DEPLOYMENT_DOC.read_text(encoding="utf-8")
+
+    assert "每 7 天" in docs
+    assert "保留最近 8 份" in docs
+    assert "python scripts/backup.py verify" in docs
+    assert "python scripts/backup.py restore-test" in docs
+    assert "不包含 Qdrant" in docs
+    assert "重新生成向量索引" in docs
+
+
+def test_smoke_fixture_refuses_repository_target():
+    with pytest.raises(ValueError, match="smoke_target_must_be_temporary"):
+        create_smoke_fixture(PROJECT_ROOT)

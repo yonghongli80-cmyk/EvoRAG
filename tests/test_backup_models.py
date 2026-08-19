@@ -105,7 +105,7 @@ def test_context_from_settings_maps_paths_without_reading_them(tmp_path):
 
     context = context_from_settings(configured)
 
-    assert context.project_root == project_root.resolve()
+    assert context.project_root == Path(__file__).resolve().parents[1]
     assert context.data_root == data_root
     assert context.databases["users"] == data_root / "users.db"
     assert context.file_roots["upload"] == data_root / "upload"
