@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -78,6 +79,13 @@ class Settings(BaseSettings):
     legacy_office_launcher: str = ""
     legacy_office_timeout_seconds: int = 60
     legacy_office_max_memory_mb: int = 512
+
+    # 权威数据备份
+    backup_enabled: bool = True
+    backup_root: str = str(Path(__file__).resolve().parent.parent / "RAGv3-backups")
+    backup_interval_days: int = Field(default=7, ge=1)
+    backup_retention_count: int = Field(default=8, ge=1)
+    backup_check_interval_seconds: int = Field(default=3600, ge=1)
 
     # 分块与检索
     chunk_size: int = 500
