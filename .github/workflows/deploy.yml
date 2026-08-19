@@ -23,7 +23,7 @@ jobs:
             docker compose build rag-app
             docker compose up -d
             for i in $(seq 1 12); do
-              if curl --fail --silent http://127.0.0.1:8080/health; then
+              if curl --fail --silent http://127.0.0.1:8000/health; then
                 echo "Deploy healthy"
                 exit 0
               fi
@@ -31,4 +31,3 @@ jobs:
             done
             echo "Deploy health check failed; manual rollback required" >&2
             exit 1
-            echo "Deploy completed at $(date)"

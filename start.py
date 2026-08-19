@@ -1,13 +1,24 @@
 """RAG 知识库系统 — 一键启动脚本"""
 
 import os
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 
-def main():
+def _port_is_available(host: str, port: int) -> bool:
+    """Return whether this process can bind the requested listening address."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def main() -> int:
     print()
     print("  ╔══════════════════════════════════╗")
     print("  ║   RAG 知识库系统                 ║")
@@ -22,6 +33,10 @@ def main():
     in_container = bool(os.getenv("DOCKER_CONTAINER"))
     host = "0.0.0.0" if in_container else "127.0.0.1"
     port = int(os.getenv("PORT", "8000" if in_container else "8080"))
+
+    if not _port_is_available(host, port):
+        print(f"  [错误] 端口 {port} 已被占用，服务未启动。请先关闭已有实例。")
+        return 1
 
     # 非回环地址绑定 + 认证关闭时强制告警（不阻断启动）
     if host not in ("127.0.0.1", "localhost"):
@@ -47,6 +62,9 @@ def main():
     import urllib.request
 
     for _ in range(60):
+        if proc.poll() is not None:
+            print(f"  [错误] API 进程已退出（退出码 {proc.returncode}），服务未启动。")
+            return proc.returncode or 1
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
             break
@@ -68,11 +86,12 @@ def main():
         webbrowser.open(f"http://localhost:{port}")
 
     try:
-        proc.wait()
+        return proc.wait()
     except KeyboardInterrupt:
         proc.terminate()
         print("\n  服务已停止。")
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

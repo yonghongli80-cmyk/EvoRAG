@@ -122,6 +122,21 @@ def test_health_returns_component_status():
     assert "components" in data
 
 
+def test_health_returns_503_when_a_critical_component_is_unavailable():
+    """Returning 200 while degraded would make container health checks pass."""
+    with patch(
+        "rag.vector_store._get_client",
+        side_effect=RuntimeError("Qdrant unavailable"),
+    ):
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "components": {"qdrant": "error", "sqlite": "ok"},
+    }
+
+
 def test_query_stream_endpoint_exists():
     """POST /query/stream 端点应该存在。"""
     from fastapi.testclient import TestClient

@@ -224,14 +224,16 @@ def auto_index_on_startup():
     # The file manifest alone cannot prove that the vector index still exists.
     # Treat a missing Qdrant collection as stale so a restored/new data volume
     # is rebuilt instead of constructing a Retriever against a nonexistent one.
+    collection_check_failed = False
     try:
         from rag.vector_store import COLLECTION_NAME, _get_client
 
         collection_available = _get_client().collection_exists(COLLECTION_NAME)
     except Exception as e:
-        logger.warning("无法确认向量索引状态，将尝试重建: %s", e)
-        collection_available = False
-    if not collection_available:
+        logger.warning("无法确认向量索引状态，将跳过本次自动索引: %s", e)
+        collection_check_failed = True
+        collection_available = None
+    if collection_available is False:
         logger.warning("向量索引集合不存在，将重建索引")
         changed = list(current_hashes)
 
@@ -299,6 +301,14 @@ def auto_index_on_startup():
                     )
                     user_db._conn.commit()
                 logger.info("更新为受保护+公开: %s", fname)
+
+    if collection_check_failed:
+        try:
+            _init_admin()
+            _sync_repo_files()
+        except Exception as e:
+            logger.warning("管理员初始化失败: %s", e)
+        return
 
     if not changed and not deleted:
         logger.info("索引无需更新（%d 文件）", len(current_hashes))
@@ -620,7 +630,10 @@ def health():
         components["sqlite"] = "error"
 
     status = "healthy" if all(v == "ok" for v in components.values()) else "degraded"
-    return {"status": status, "components": components}
+    payload = {"status": status, "components": components}
+    if status == "degraded":
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 @app.post("/register", response_model=TokenResponse, summary="用户注册")
