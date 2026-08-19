@@ -25,6 +25,8 @@ from rag.backups.models import (
     BackupVerification,
     DatabaseEntry,
     FileEntry,
+    RestoreReport,
+    deterministic_json_bytes,
 )
 
 
@@ -565,3 +567,74 @@ def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
             )
         )
     return tuple(sorted(records, key=lambda record: record.created_at, reverse=True))
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    first_resolved = first.resolve()
+    second_resolved = second.resolve()
+    return (
+        first_resolved == second_resolved
+        or first_resolved.is_relative_to(second_resolved)
+        or second_resolved.is_relative_to(first_resolved)
+    )
+
+
+def restore_test(
+    backup_dir: Path,
+    isolation_root: Path,
+    protected_roots: tuple[Path, ...],
+) -> RestoreReport:
+    source_verification = verify_backup(backup_dir)
+    source = backup_dir.resolve(strict=True)
+    isolation = isolation_root.resolve()
+
+    if any(_paths_overlap(isolation, protected) for protected in protected_roots):
+        raise BackupError("restore_target_protected")
+    if _paths_overlap(source, isolation):
+        raise BackupError("restore_source_overlap")
+
+    destination = isolation / source_verification.backup_id
+    if destination.exists():
+        raise BackupError("restore_target_not_empty")
+
+    isolation.mkdir(parents=True, exist_ok=True)
+    temporary = isolation / (
+        f".{source_verification.backup_id}.restore-{uuid.uuid4().hex[:12]}"
+    )
+    try:
+        for path in source.rglob("*"):
+            if path.is_symlink():
+                raise BackupError("symbolic_link_rejected")
+        shutil.copytree(source, temporary)
+        verify_backup(temporary)
+        temporary.rename(destination)
+        restored_verification = verify_backup(destination)
+        report_payload = {
+            "backup_id": restored_verification.backup_id,
+            "database_count": restored_verification.database_count,
+            "file_count": restored_verification.file_count,
+            "status": restored_verification.status,
+            "total_bytes": restored_verification.total_bytes,
+            "vector_rebuild_required": restored_verification.vector_rebuild_required,
+        }
+        (destination / "restore-report.json").write_bytes(
+            deterministic_json_bytes(report_payload)
+        )
+        return RestoreReport(
+            backup_id=restored_verification.backup_id,
+            status=restored_verification.status,
+            target=destination,
+            file_count=restored_verification.file_count,
+            database_count=restored_verification.database_count,
+            vector_rebuild_required=restored_verification.vector_rebuild_required,
+        )
+    except Exception:
+        if temporary.exists():
+            resolved_temporary = temporary.resolve()
+            if (
+                resolved_temporary.parent != isolation
+                or ".restore-" not in temporary.name
+            ):
+                raise BackupError("unsafe_restore_path")
+            shutil.rmtree(temporary)
+        raise
