@@ -1,13 +1,26 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 import shutil
 
 import pytest
 
 from rag.backups.models import BackupError
-from rag.backups.service import copy_file_verified, snapshot_sqlite, verify_backup
+from rag.backups.service import (
+    copy_file_verified,
+    create_backup,
+    list_verified_backups,
+    snapshot_sqlite,
+    verify_backup,
+)
+from tests.backup_fixtures import (
+    create_backup_sources,
+    create_fixture_file,
+    load_manifest,
+    make_backup_context,
+)
 
 
 def _json_bytes(payload):
@@ -69,6 +82,13 @@ def complete_backup(tmp_path):
     }
     _write_literal_manifest(backup_dir, payload)
     return backup_dir
+
+
+@pytest.fixture
+def backup_context(tmp_path):
+    context = make_backup_context(tmp_path)
+    create_backup_sources(context)
+    return context
 
 
 def rewrite_manifest_file_path(backup_dir, logical_path):
@@ -198,3 +218,89 @@ def test_verify_rejects_unsafe_manifest_paths(complete_backup, logical_path):
 
     with pytest.raises(BackupError, match="unsafe_manifest_path"):
         verify_backup(complete_backup)
+
+
+def test_create_backup_publishes_only_a_verified_directory(backup_context):
+    record = create_backup(backup_context, "manual", now=1_777_000_000.0)
+
+    assert record.status == "verified"
+    assert record.path.name.startswith("20260424T")
+    assert not list(backup_context.backup_root.glob(".incomplete-*"))
+    assert verify_backup(record.path).status == "verified"
+
+
+def test_failed_copy_never_publishes_backup(backup_context, monkeypatch):
+    def fail_copy(*_args, **_kwargs):
+        raise BackupError("copy_failed")
+
+    monkeypatch.setattr("rag.backups.service.copy_file_verified", fail_copy)
+
+    with pytest.raises(BackupError, match="copy_failed"):
+        create_backup(backup_context, "manual", now=1_777_000_000.0)
+
+    assert list_verified_backups(backup_context.backup_root) == ()
+    assert not list(backup_context.backup_root.glob(".incomplete-*"))
+
+
+def test_create_backup_excludes_transient_and_derived_data(backup_context):
+    create_fixture_file(
+        backup_context.file_roots["document_versions"] / "staging/tmp.bin"
+    )
+    create_fixture_file(
+        backup_context.file_roots["document_versions"] / "7/1/current.pdf"
+    )
+    create_fixture_file(backup_context.data_root / "bm25_index.db")
+
+    record = create_backup(backup_context, "manual", now=1_777_000_000.0)
+    manifest = load_manifest(record.path)
+
+    assert "document_versions/7/1/current.pdf" in manifest.file_keys
+    assert "document_versions/staging/tmp.bin" not in manifest.file_keys
+    assert all("bm25" not in key for key in manifest.file_keys)
+    assert manifest.qdrant_included is False
+    assert manifest.vector_rebuild_required is True
+
+
+def test_create_requires_users_database_but_allows_optional_databases(backup_context):
+    backup_context.databases["analysis"].unlink(missing_ok=True)
+    backup_context.databases["memory"].unlink(missing_ok=True)
+    assert create_backup(
+        backup_context, "manual", now=1_777_000_000.0
+    ).status == "verified"
+
+    backup_context.databases["users"].unlink()
+    with pytest.raises(BackupError, match="required_database_missing"):
+        create_backup(backup_context, "manual", now=1_777_604_800.0)
+
+
+def test_create_records_database_referenced_files_as_required(backup_context):
+    referenced = create_fixture_file(
+        backup_context.file_roots["document_versions"] / "7/1/current.pdf"
+    )
+    with closing(sqlite3.connect(backup_context.databases["users"])) as database:
+        database.execute(
+            "INSERT INTO document_versions(file_path, status) VALUES (?, 'current')",
+            (str(referenced),),
+        )
+        database.commit()
+
+    record = create_backup(backup_context, "manual", now=1_777_000_000.0)
+
+    assert load_manifest(record.path).required_file_keys == (
+        "document_versions/7/1/current.pdf",
+    )
+
+
+def test_create_fails_when_database_references_a_missing_file(backup_context):
+    missing = backup_context.file_roots["document_versions"] / "7/1/missing.pdf"
+    with closing(sqlite3.connect(backup_context.databases["users"])) as database:
+        database.execute(
+            "INSERT INTO document_versions(file_path, status) VALUES (?, 'current')",
+            (str(missing),),
+        )
+        database.commit()
+
+    with pytest.raises(BackupError, match="referenced_file_missing"):
+        create_backup(backup_context, "manual", now=1_777_000_000.0)
+
+    assert not list(backup_context.backup_root.glob(".incomplete-*"))

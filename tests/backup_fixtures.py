@@ -1,5 +1,8 @@
+from contextlib import closing
 from dataclasses import replace
+import json
 from pathlib import Path
+import sqlite3
 
 from rag.backups.models import (
     BackupContext,
@@ -66,3 +69,34 @@ def make_manifest(
 
 def context_with_backup_root(context: BackupContext, backup_root: Path) -> BackupContext:
     return replace(context, backup_root=backup_root)
+
+
+def create_fixture_file(path: Path, content: bytes = b"fixture") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
+def create_backup_sources(context: BackupContext) -> None:
+    for name, path in context.databases.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(path)) as database:
+            database.execute("CREATE TABLE marker(name TEXT NOT NULL)")
+            database.execute("INSERT INTO marker VALUES (?)", (name,))
+            if name == "users":
+                database.execute(
+                    "CREATE TABLE document_versions(file_path TEXT, status TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE kb_documents(file_path TEXT, status TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE structured_datasets(storage_key TEXT, status TEXT)"
+                )
+            database.commit()
+    create_fixture_file(context.file_roots["upload"] / "guide.txt", b"guide")
+
+
+def load_manifest(backup_dir: Path) -> BackupManifest:
+    payload = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    return BackupManifest.from_dict(payload)

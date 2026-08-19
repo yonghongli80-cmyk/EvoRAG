@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
+from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
+from importlib.metadata import PackageNotFoundError, version
 import json
+import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import shutil
 import sqlite3
+import sys
+import time
+from typing import Iterator
+import uuid
 
 from rag.backups.models import (
+    BackupContext,
     BackupError,
     BackupManifest,
+    BackupRecord,
     BackupVerification,
     DatabaseEntry,
     FileEntry,
@@ -19,6 +30,16 @@ from rag.backups.models import (
 
 _MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 _CHECKSUM_PATTERN = re.compile(r"[0-9a-f]{64}\n?\Z")
+_TRANSIENT_DIRECTORIES = frozenset({"staging", "quarantine", "archive_work"})
+_EXCLUDED_PAYLOADS = (
+    "qdrant",
+    "bm25",
+    "embedding_cache",
+    "index_state",
+    "staging",
+    "quarantine",
+    "archive_work",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -38,16 +59,19 @@ def snapshot_sqlite(source: Path, target: Path) -> DatabaseEntry:
         with target.open("xb"):
             pass
         source_uri = f"file:{source.resolve().as_posix()}?mode=ro"
-        with sqlite3.connect(source_uri, uri=True, timeout=30) as source_db:
-            with sqlite3.connect(target) as target_db:
-                source_db.backup(target_db)
-                target_db.execute("PRAGMA journal_mode=DELETE")
+        with closing(
+            sqlite3.connect(source_uri, uri=True, timeout=30)
+        ) as source_db, closing(sqlite3.connect(target)) as target_db:
+            source_db.backup(target_db)
+            target_db.execute("PRAGMA journal_mode=DELETE")
     except (OSError, sqlite3.Error) as error:
         raise BackupError("sqlite_snapshot_failed") from error
 
     try:
         target_uri = f"file:{target.resolve().as_posix()}?mode=ro"
-        with sqlite3.connect(target_uri, uri=True, timeout=30) as snapshot_db:
+        with closing(
+            sqlite3.connect(target_uri, uri=True, timeout=30)
+        ) as snapshot_db:
             result = snapshot_db.execute("PRAGMA integrity_check").fetchone()
     except sqlite3.Error as error:
         raise BackupError("sqlite_integrity_failed") from error
@@ -170,7 +194,7 @@ def _payload_files(root: Path) -> set[str]:
 def _verify_sqlite(path: Path) -> None:
     try:
         uri = f"file:{path.resolve().as_posix()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=30) as database:
+        with closing(sqlite3.connect(uri, uri=True, timeout=30)) as database:
             result = database.execute("PRAGMA integrity_check").fetchone()
     except sqlite3.Error as error:
         raise BackupError("sqlite_integrity_failed") from error
@@ -257,3 +281,287 @@ def verify_backup(backup_dir: Path) -> BackupVerification:
         total_bytes=total_bytes,
         vector_rebuild_required=manifest.vector_rebuild_required,
     )
+
+
+@contextmanager
+def _exclusive_backup_lock(root: Path) -> Iterator[None]:
+    lock_path = root / ".backup.lock"
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        if os.path.getsize(lock_path) == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+    except OSError as error:
+        raise BackupError("backup_lock_failed") from error
+
+    locked = False
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as error:
+            raise BackupError("backup_in_progress") from error
+        yield
+    finally:
+        if locked:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(descriptor)
+
+
+def _iter_source_files(root: Path) -> Iterator[Path]:
+    if not root.exists():
+        return
+    if root.is_symlink():
+        raise BackupError("symbolic_link_rejected")
+    resolved_root = root.resolve()
+    for current_root, directory_names, file_names in os.walk(root):
+        directory_names[:] = sorted(
+            name for name in directory_names if name not in _TRANSIENT_DIRECTORIES
+        )
+        current = Path(current_root)
+        for directory_name in directory_names:
+            if (current / directory_name).is_symlink():
+                raise BackupError("symbolic_link_rejected")
+        for file_name in sorted(file_names):
+            source = current / file_name
+            if source.is_symlink():
+                raise BackupError("symbolic_link_rejected")
+            try:
+                source.resolve().relative_to(resolved_root)
+            except (OSError, ValueError) as error:
+                raise BackupError("source_path_outside_root") from error
+            yield source
+
+
+def _table_exists(database: sqlite3.Connection, table: str) -> bool:
+    row = database.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _logical_key_for_reference(
+    raw_path: str, context: BackupContext, preferred_root: str
+) -> str:
+    source_path = Path(raw_path)
+    candidates: list[tuple[str, Path]] = []
+    if source_path.is_absolute():
+        candidates = list(context.file_roots.items())
+    else:
+        preferred = context.file_roots[preferred_root]
+        candidates = [(preferred_root, preferred)]
+
+    matches: list[str] = []
+    for logical_root, root in candidates:
+        try:
+            relative = (
+                source_path.resolve().relative_to(root.resolve())
+                if source_path.is_absolute()
+                else (root / source_path).resolve().relative_to(root.resolve())
+            )
+        except (OSError, ValueError):
+            continue
+        matches.append((PurePosixPath(logical_root) / PurePosixPath(relative.as_posix())).as_posix())
+    if len(matches) != 1:
+        raise BackupError("referenced_file_outside_roots")
+    return matches[0]
+
+
+def _required_file_keys(users_snapshot: Path, context: BackupContext) -> tuple[str, ...]:
+    queries = (
+        (
+            "document_versions",
+            "SELECT file_path FROM document_versions "
+            "WHERE status IN ('current', 'historical')",
+            "document_versions",
+        ),
+        (
+            "kb_documents",
+            "SELECT file_path FROM kb_documents "
+            "WHERE status = 'indexed' AND file_path IS NOT NULL",
+            "kb_files",
+        ),
+        (
+            "structured_datasets",
+            "SELECT storage_key FROM structured_datasets "
+            "WHERE status IN ('ready', 'historical')",
+            "structured_datasets",
+        ),
+    )
+    keys: set[str] = set()
+    uri = f"file:{users_snapshot.resolve().as_posix()}?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=30)) as database:
+            for table, query, preferred_root in queries:
+                if not _table_exists(database, table):
+                    continue
+                for row in database.execute(query):
+                    if row[0]:
+                        keys.add(
+                            _logical_key_for_reference(str(row[0]), context, preferred_root)
+                        )
+    except BackupError:
+        raise
+    except sqlite3.Error as error:
+        raise BackupError("reference_validation_failed") from error
+    return tuple(sorted(keys))
+
+
+def _application_version() -> str:
+    try:
+        return version("rag-knowledge-base")
+    except PackageNotFoundError:
+        return "3.0.0"
+
+
+def _remove_staging(staging: Path, backup_root: Path) -> None:
+    try:
+        resolved_root = backup_root.resolve()
+        resolved_staging = staging.resolve()
+        if resolved_staging.parent != resolved_root or not staging.name.startswith(
+            ".incomplete-"
+        ):
+            raise BackupError("unsafe_staging_path")
+        if staging.exists():
+            shutil.rmtree(staging)
+    except BackupError:
+        raise
+    except OSError as error:
+        raise BackupError("staging_cleanup_failed") from error
+
+
+def create_backup(
+    context: BackupContext, trigger: str, now: float | None = None
+) -> BackupRecord:
+    validated = context.validate()
+    timestamp = time.time() if now is None else now
+    if trigger not in {"manual", "scheduled", "deploy"}:
+        raise BackupError("invalid_backup_trigger")
+
+    validated.backup_root.mkdir(parents=True, exist_ok=True)
+    backup_id = datetime.fromtimestamp(timestamp, timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ"
+    ) + f"-{uuid.uuid4().hex[:12]}"
+    staging = validated.backup_root / f".incomplete-{backup_id}"
+    final_path = validated.backup_root / backup_id
+
+    with _exclusive_backup_lock(validated.backup_root):
+        try:
+            staging.mkdir()
+            database_entries: list[DatabaseEntry] = []
+            for name, source in sorted(validated.databases.items()):
+                if not source.is_file():
+                    if name in validated.required_databases:
+                        raise BackupError("required_database_missing")
+                    continue
+                target = staging / "sqlite" / f"{name}.db"
+                snapshot = snapshot_sqlite(source, target)
+                database_entries.append(
+                    replace(
+                        snapshot,
+                        name=name,
+                        path=f"sqlite/{name}.db",
+                        required=name in validated.required_databases,
+                    )
+                )
+
+            file_entries: list[FileEntry] = []
+            for logical_root, source_root in sorted(validated.file_roots.items()):
+                for source in _iter_source_files(source_root):
+                    relative = source.relative_to(source_root).as_posix()
+                    logical_path = (
+                        PurePosixPath(logical_root) / PurePosixPath(relative)
+                    ).as_posix()
+                    target = staging / "files" / logical_root / Path(relative)
+                    file_entries.append(
+                        copy_file_verified(source, target, logical_path)
+                    )
+
+            users_snapshot = staging / "sqlite" / "users.db"
+            required_file_keys = _required_file_keys(users_snapshot, validated)
+            copied_keys = frozenset(entry.path for entry in file_entries)
+            if not set(required_file_keys).issubset(copied_keys):
+                raise BackupError("referenced_file_missing")
+
+            database_entries.sort(key=lambda entry: entry.name)
+            file_entries.sort(key=lambda entry: entry.path)
+            total_bytes = sum(entry.size for entry in database_entries) + sum(
+                entry.size for entry in file_entries
+            )
+            manifest = BackupManifest(
+                schema_version=1,
+                backup_id=backup_id,
+                created_at=timestamp,
+                app_version=_application_version(),
+                python_version=sys.version.split()[0],
+                trigger=trigger,
+                databases=tuple(database_entries),
+                files=tuple(file_entries),
+                required_file_keys=required_file_keys,
+                excluded=_EXCLUDED_PAYLOADS,
+                total_files=len(database_entries) + len(file_entries),
+                total_bytes=total_bytes,
+                qdrant_included=False,
+                vector_rebuild_required=True,
+            )
+            write_manifest(staging, manifest)
+            verification = verify_backup(staging)
+            staging.replace(final_path)
+            return BackupRecord(
+                backup_id=backup_id,
+                created_at=timestamp,
+                status=verification.status,
+                path=final_path,
+                file_count=verification.file_count,
+                database_count=verification.database_count,
+                total_bytes=verification.total_bytes,
+                vector_rebuild_required=verification.vector_rebuild_required,
+            )
+        except Exception:
+            _remove_staging(staging, validated.backup_root)
+            raise
+
+
+def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
+    if not root.exists():
+        return ()
+    records: list[BackupRecord] = []
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() or path.name.startswith(".") or path.is_symlink():
+            continue
+        try:
+            verification = verify_backup(path)
+            manifest = _read_manifest(path.resolve())
+        except BackupError:
+            continue
+        records.append(
+            BackupRecord(
+                backup_id=manifest.backup_id,
+                created_at=manifest.created_at,
+                status=verification.status,
+                path=path,
+                file_count=verification.file_count,
+                database_count=verification.database_count,
+                total_bytes=verification.total_bytes,
+                vector_rebuild_required=verification.vector_rebuild_required,
+            )
+        )
+    return tuple(sorted(records, key=lambda record: record.created_at, reverse=True))
