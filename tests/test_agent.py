@@ -52,7 +52,8 @@ def test_agent_disables_thinking_mode(mock_chat_cls):
     agent._ensure_agent()
 
     call_kwargs = mock_chat_cls.call_args.kwargs
-    assert call_kwargs["model_kwargs"] == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert call_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "model_kwargs" not in call_kwargs
 
 
 def test_tool_wrapper_retries_on_exception():

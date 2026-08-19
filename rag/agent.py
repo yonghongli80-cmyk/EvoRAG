@@ -158,7 +158,7 @@ class RAGAgent:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             temperature=0.3,
-            model_kwargs={"extra_body": {"thinking": {"type": "disabled"}}},
+            extra_body={"thinking": {"type": "disabled"}},
         )
 
         system_prompt = _pm.get("agent_system")
