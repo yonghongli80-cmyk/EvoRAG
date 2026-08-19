@@ -18,9 +18,12 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
           script: |
+            set -euo pipefail
             cd ~/RAG
             git pull origin main
             docker compose build rag-app
+            docker compose run --rm --no-deps rag-app \
+              python scripts/backup.py create-if-due --trigger deploy
             docker compose up -d
             for i in $(seq 1 12); do
               if curl --fail --silent http://127.0.0.1:8000/health; then

@@ -51,7 +51,7 @@ RUN mkdir -p /app/repo_upload && \
 
 # 数据目录（运行时挂载卷）与非特权运行用户
 RUN useradd -m -u 10001 rag && \
-    mkdir -p /app/data/upload /app/qdrant_data && \
+    mkdir -p /app/data/upload /app/qdrant_data /app/backups && \
     chown -R rag:rag /app
 
 USER rag

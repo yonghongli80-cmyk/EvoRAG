@@ -62,6 +62,11 @@ data/index_state.json
 /data/document_versions/
 /data/structured_datasets/
 
+# Backup payloads. The default ../RAGv3-backups sibling is outside this repo;
+# these rules protect explicitly configured in-repository roots.
+/backups/
+/RAGv3-backups/
+
 # Python virtual environments
 .venv/
 venv/

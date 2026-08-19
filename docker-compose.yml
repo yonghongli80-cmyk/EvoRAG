@@ -23,10 +23,12 @@ services:
       - .env
     environment:
       - RAG_REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+      - RAG_BACKUP_ROOT=/app/backups
     volumes:
       # 命名卷首次挂载时继承镜像内 rag 用户的目录属主，非 root 进程可写
       - rag_data:/app/data
       - qdrant_data:/app/qdrant_data
+      - backup_data:/app/backups
     depends_on:
       redis:
         condition: service_healthy
@@ -41,3 +43,4 @@ volumes:
   redis_data:
   rag_data:
   qdrant_data:
+  backup_data:

@@ -21,6 +21,8 @@ data/jwt_secret.txt
 data/index_state.json
 data/charts/
 data/structured_datasets/
+backups/
+RAGv3-backups/
 
 # Development-only directories
 .worktrees/

@@ -24,6 +24,10 @@ fi
 echo "==> 构建应用镜像"
 docker compose build rag-app
 
+echo "==> 检查并创建到期备份"
+docker compose run --rm --no-deps rag-app \
+  python scripts/backup.py create-if-due --trigger deploy
+
 echo "==> 启动服务"
 docker compose up -d
 docker compose ps
