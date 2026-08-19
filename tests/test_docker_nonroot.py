@@ -22,3 +22,14 @@ def test_application_data_uses_named_volumes_owned_by_the_image():
     assert "./qdrant_data:/app/qdrant_data" not in compose
     assert "rag_data:" in compose
     assert "qdrant_data:" in compose
+
+
+def test_container_port_matches_compose_and_healthcheck():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    start = (ROOT / "start.py").read_text(encoding="utf-8")
+
+    assert "EXPOSE 8000" in dockerfile
+    assert '"8000:8000"' in compose
+    assert "localhost:8000/health" in compose
+    assert '"8000" if in_container else "8080"' in start

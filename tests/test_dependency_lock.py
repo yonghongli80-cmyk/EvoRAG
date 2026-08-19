@@ -25,6 +25,6 @@ def test_deployment_uses_the_lock_file_and_build_cache():
     assert "-r requirements.lock" in dockerfile
     assert "pip install --no-cache" not in dockerfile
 
-    for relative_path in ("deploy.sh", "scripts/deploy.sh", ".github/workflows/deploy.yml"):
+    for relative_path in ("deploy.sh", ".github/workflows/deploy.yml"):
         deployment = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "--no-cache" not in deployment

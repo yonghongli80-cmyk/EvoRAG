@@ -74,6 +74,28 @@ def test_insert_columns_shifts_existing_cells(tmp_path):
     assert book["Data"]["D2"].value == "second"
 
 
+def test_insert_rows_accepts_workbook_without_security_metadata(tmp_path):
+    source = tmp_path / "source.xlsx"
+    destination = tmp_path / "edited.xlsx"
+    _save_workbook(source)
+
+    book = load_workbook(source)
+    book.security = None
+    book.save(source)
+    assert load_workbook(source).security is None
+
+    _apply(
+        source,
+        destination,
+        action="insert_rows",
+        sheet_key="sheet_0001",
+        index=1,
+        count=1,
+    )
+
+    assert load_workbook(destination)["Data"]["A2"].value == "header"
+
+
 @pytest.mark.parametrize(
     ("action", "index", "count", "expected_count"),
     [

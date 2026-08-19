@@ -71,7 +71,11 @@ def _has_unsupported_dependencies(book) -> bool:
 
 
 def _validate_row_or_column_edit(book, sheet) -> None:
-    if bool(book.security.lockStructure) or bool(sheet.protection.sheet):
+    workbook_security = getattr(book, "security", None)
+    sheet_protection = getattr(sheet, "protection", None)
+    if bool(getattr(workbook_security, "lockStructure", False)) or bool(
+        getattr(sheet_protection, "sheet", False)
+    ):
         raise WorkbookStructureError("protected_workbook")
     if _contains_formulas(book):
         raise WorkbookStructureError("workbook_contains_formulas")

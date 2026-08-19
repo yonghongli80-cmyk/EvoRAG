@@ -34,12 +34,7 @@ from rag.document_versions import (
 )
 from rag.document_sources.upload import UploadDocumentSource
 from rag.kb_metadata import generate_summary, generate_toc
-from rag.kb_file_store import (
-    final_document_path,
-    promote_stage,
-    resolve_stored_path,
-    stage_upload,
-)
+from rag.kb_file_store import resolve_stored_path
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
@@ -1152,7 +1147,6 @@ async def upload_file(
 
 @app.delete("/files/{filename}", summary="删除文件", description="从 data/upload/ 删除文件并重新索引")
 async def delete_file(filename: str, authorization: str = Header(default="")):
-    from rag.pipeline import RAGPipeline
     from rag.vector_store import COLLECTION_NAME, delete_doc
 
     global pipeline
@@ -2072,8 +2066,6 @@ async def get_knowledge_base_detail(
 
     def _get():
         import sqlite3
-        from config import settings as _settings
-
         manager = KnowledgeBaseManager()
         kbs = manager.list_kbs()
         kb = next((k for k in kbs if k.kb_id == kb_id), None)
@@ -2336,7 +2328,7 @@ async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str
         raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
 
     try:
-        share_id = await asyncio.to_thread(user_db.share_kb, kb_id, req.user_id, user_dict["id"], req.permission)
+        await asyncio.to_thread(user_db.share_kb, kb_id, req.user_id, user_dict["id"], req.permission)
     except Exception as e:
         if "UNIQUE" in str(e):
             raise HTTPException(status_code=409, detail="该用户已被共享")
@@ -2453,7 +2445,7 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         if not target:
             raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
         try:
-            share_id = user_db.share_document(doc_id, req.user_id, user_dict["id"], req.permission)
+            user_db.share_document(doc_id, req.user_id, user_dict["id"], req.permission)
         except _sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail="该用户已被共享")
         return {

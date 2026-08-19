@@ -149,4 +149,22 @@ describe('SpreadsheetViewer editing', () => {
       reason: '',
     })
   })
+
+  it('explains formula safety refusals in Chinese', async () => {
+    vi.mocked(saveSpreadsheetStructureEdit).mockRejectedValue({
+      response: {
+        status: 422,
+        data: { detail: { code: 'workbook_contains_formulas' } },
+      },
+    })
+    const { wrapper } = await render()
+
+    await wrapper.get('[data-test="structure-spreadsheet"]').trigger('click')
+    await wrapper.get('[data-test="apply-structure"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      '工作簿包含公式，为避免公式引用错位，暂不支持增删行列。',
+    )
+  })
 })

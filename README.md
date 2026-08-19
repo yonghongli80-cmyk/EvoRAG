@@ -1,21 +1,62 @@
-# RAG
-try to make a agent
-# test deploy
-# deploy test Fri Jun 26 19:11:58     2026
+# RAGv3
 
-## Excel 在线编辑与版本回退
+面向团队知识管理的 RAG 系统，包含文档入库与版本管理、权限感知检索、回答可靠性分析、资料治理和 Excel 在线编辑。
 
-V3 支持对已入库的 `.xlsx` 文件直接编辑单元格。每次保存都会创建不可变的新版本，旧版本文件、结构化数据集和历史记录不会被覆盖。支持文本、数字、日期、布尔值和清空单元格；一次请求最多修改 500 个单元格。
+## 快速开始
 
-保存采用乐观并发控制：客户端必须携带当前 `base_version_id`。如果期间已有其他人生成了新版本，接口返回 `409`，前端保留本地修改并提示刷新后重新应用。保存成功先返回 `202 pending`，后台完成结构化解析、FTS 和向量索引后，才会原子切换当前版本。
+要求：Python 3.12、Node.js 22（Docker 部署只需 Docker Compose）。
 
-历史版本回退不会移动版本指针或覆盖文件，而是把选定历史版本复制成一个新的当前版本，并记录 `restored_from_version_id`。因此可以从 v3 回退到 v1 生成 v4，之后仍可从 v4 回退到 v3 生成 v5。
+### Docker
 
-权限和限制：
+```bash
+cp .env.example .env
+# 编辑 .env，至少填写模型 API Key 和 REDIS_PASSWORD
+docker compose up -d --build
+```
 
-- 查看表格需要文档 `view` 权限；编辑和回退需要当前有效的 `edit` 权限。
-- 后台激活前会再次检查编辑权限和基线版本，撤权或并发冲突不会改变原当前版本。
-- 公式单元格、受保护单元格、合并区域的非锚点单元格禁止在线编辑；不接受公式注入。
-- 暂不提供 Word/PDF 在线编辑，也不是实时多人协同编辑器。
-- 管理员可从“表格变更”页面查看操作人、文件、状态、风险标记和单元格差异；文件所有者只能查看自己文件的审计，共享编辑者不能读取管理审计。
-- 最终答案缓存仍保持关闭；向量缓存仅按内容指纹复用嵌入，不复用权限或最终答案。
+访问 <http://localhost:8000>。完整说明见 [docs/deployment.md](docs/deployment.md)。
+
+### 本地开发
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
+pip install -e ".[dev]"
+
+cd frontend
+npm ci
+npm run build
+cd ..
+
+cp .env.example .env
+python start.py
+```
+
+本地服务默认位于 <http://localhost:8080>。前端开发服务器可在 `frontend` 目录运行 `npm run dev`。
+
+## 验证
+
+```bash
+pytest -q
+ruff check . --select E9,F63,F7,F82
+
+cd frontend
+npm test
+npm run build
+```
+
+## 依赖与目录
+
+- `pyproject.toml`：Python 直接依赖和开发工具配置的唯一来源。
+- `requirements.lock`：CI 与容器使用的可复现完整锁文件。
+- `rag/`：后端与 RAG 核心逻辑。
+- `frontend/src/`：Vue 3 前端源码。
+- `static/`：由 Vite 生成、供 FastAPI 提供的生产前端。
+- `prompts/`：提示词配置。
+- `tests/`：后端测试。
+- `data/`、`qdrant_data/`：运行时数据；不要提交用户数据或密钥。
+
+## 安全提示
+
+生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、数据库、索引和上传数据均已从版本控制及 Docker 构建上下文中排除。

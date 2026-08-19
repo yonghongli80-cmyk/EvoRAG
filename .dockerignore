@@ -20,6 +20,7 @@ data/*.db-wal
 data/jwt_secret.txt
 data/index_state.json
 data/charts/
+data/structured_datasets/
 
 # Development-only directories
 .worktrees/

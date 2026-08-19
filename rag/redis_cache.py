@@ -9,8 +9,6 @@ import json
 import logging
 import threading
 import time
-from typing import Any
-
 from config import settings
 
 logger = logging.getLogger(__name__)

@@ -43,6 +43,25 @@ const structureCanSubmit = computed(() => structureIsAddSheet.value
   ? Boolean(newSheetName.value.trim())
   : structureIndex.value >= 1 && structureCount.value >= 1 && structureCount.value <= 100)
 
+const structureErrorMessages: Record<string, string> = {
+  protected_workbook: '工作簿或当前工作表受保护，无法调整结构。',
+  workbook_contains_formulas: '工作簿包含公式，为避免公式引用错位，暂不支持增删行列。',
+  sheet_contains_merged_cells: '当前工作表包含合并单元格，暂不支持增删行列。',
+  unsupported_workbook_dependencies: '工作簿包含表格、图表、数据透视表或外部引用，暂不支持调整结构。',
+  invalid_structure_index: '起始位置或数量超出了当前工作表范围。',
+  invalid_sheet_name: '工作表名称为空、重复、过长或包含非法字符。',
+  unknown_sheet: '找不到当前工作表，请刷新页面后重试。',
+  unsupported_workbook_format: '只有 .xlsx 文件支持结构调整。',
+  workbook_open_failed: '工作簿无法打开，请确认文件没有损坏或加密。',
+  workbook_validation_failed: '工作簿保存校验失败，原文件未被修改。',
+  nonempty_delete_requires_confirmation: '删除范围包含内容，需要确认后再试。',
+}
+
+function structureErrorMessage(code: string) {
+  return structureErrorMessages[code]
+    || (code ? `结构调整失败：${code}` : '结构调整失败，请稍后重试。')
+}
+
 function columnLetter(ordinal: number) {
   let value = ordinal
   let result = ''
@@ -217,10 +236,10 @@ async function applyStructure() {
     newSheetName.value = ''
     structureReason.value = ''
   } catch (caught: any) {
-    const code = caught?.response?.data?.detail?.code
+    const code = caught?.response?.data?.detail?.code || caught?.message || ''
     error.value = caught?.response?.status === 409
       ? '文件已被其他人更新，请刷新后重试。'
-      : `结构调整失败${code ? `：${code}` : '，请稍后重试。'}`
+      : structureErrorMessage(code)
   } finally {
     saving.value = false
   }

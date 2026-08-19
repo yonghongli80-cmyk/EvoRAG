@@ -19,7 +19,9 @@ def main():
     project_root = Path(__file__).resolve().parent
 
     # Docker 环境用 0.0.0.0，本地用 127.0.0.1
-    host = "0.0.0.0" if os.getenv("DOCKER_CONTAINER") else "127.0.0.1"
+    in_container = bool(os.getenv("DOCKER_CONTAINER"))
+    host = "0.0.0.0" if in_container else "127.0.0.1"
+    port = int(os.getenv("PORT", "8000" if in_container else "8080"))
 
     # 非回环地址绑定 + 认证关闭时强制告警（不阻断启动）
     if host not in ("127.0.0.1", "localhost"):
@@ -37,16 +39,16 @@ def main():
 
     # 启动 API
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "rag.api:app", "--host", host, "--port", "8080"],
+        [sys.executable, "-m", "uvicorn", "rag.api:app", "--host", host, "--port", str(port)],
         cwd=str(project_root),
     )
 
     # 等待 API 就绪
     import urllib.request
 
-    for i in range(60):
+    for _ in range(60):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:8080/health", timeout=1)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
             break
         except Exception:
             time.sleep(0.5)
@@ -55,7 +57,7 @@ def main():
 
     print("  ╔══════════════════════════════════╗")
     print("  ║   服务已就绪！                    ║")
-    print(f"  ║   http://{host}:8080              ║")
+    print(f"  ║   http://{host}:{port:<5}             ║")
     print("  ║   关闭此窗口停止服务              ║")
     print("  ╚══════════════════════════════════╝")
     print()
@@ -63,7 +65,7 @@ def main():
     # Docker 环境不打开浏览器
     if host == "127.0.0.1":
         import webbrowser
-        webbrowser.open("http://localhost:8080")
+        webbrowser.open(f"http://localhost:{port}")
 
     try:
         proc.wait()

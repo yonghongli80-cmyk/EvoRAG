@@ -60,6 +60,7 @@ data/index_state.json
 
 # Runtime document-version storage
 /data/document_versions/
+/data/structured_datasets/
 
 # Python virtual environments
 .venv/

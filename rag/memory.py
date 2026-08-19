@@ -126,11 +126,6 @@ class DialogueMemory:
             ).fetchone()[0]
             if total <= MAX_ROUNDS:
                 return
-            last = self._conn.execute(
-                "SELECT last_summarized_count FROM sessions WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-            already_summarized = last[0] if last else 0
             # Keep the most recent MAX_ROUNDS user turns.  A round may contain
             # multiple assistant/tool messages, so derive the message boundary
             # from the first retained user-message ID rather than multiplying by 2.

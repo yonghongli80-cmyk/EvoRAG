@@ -42,7 +42,7 @@ class LocalOcrEngine:
         lines = []
         boxes = []
         for item in result:
-            box, text, confidence = item[0], item[1], float(item[2])
+            box, text = item[0], item[1]
             lines.append(text)
             if len(box) == 4:
                 x0, y0 = box[0]

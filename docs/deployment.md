@@ -1,188 +1,93 @@
 # RAGv3 部署指南
 
-## 方式一：Docker 部署（推荐）
+本文是项目唯一的部署入口。生产环境推荐使用 Docker Compose。
 
-### 对方需要做的
+## 前置条件
+
+- Docker Engine 24+ 与 Docker Compose v2
+- 至少 2 核 CPU、4 GB 内存和 20 GB 可用磁盘
+- 可用的生成模型与嵌入模型 API Key
+
+## 首次部署
 
 ```bash
-# 1. 安装 Docker（如果没装）
-# Windows: https://docs.docker.com/desktop/install/windows-install/
-# Linux: curl -fsSL https://get.docker.com | sh
-
-# 2. 克隆项目
-git clone <你的仓库地址> RAGv3
+git clone <仓库地址> RAGv3
 cd RAGv3
-
-# 3. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 API Key
-
-# 4. 一键启动
-docker-compose up -d
-
-# 5. 访问
-# http://localhost:8000
 ```
 
-### 你自己需要做的（首次打包）
+编辑 `.env`：
+
+- 填写 `RAG_DEEPSEEK_API_KEY` 和 `RAG_BAILIAN_API_KEY`；
+- 保持 `RAG_AUTH_ENABLED=true`；
+- 为 `REDIS_PASSWORD` 设置 URL-safe 的强随机值；
+- 可选设置 `INIT_ADMIN_USERNAME`。
+
+启动并检查状态：
 
 ```bash
-# 在项目根目录执行
-docker-compose build
-docker-compose up -d
+docker compose up -d --build
+docker compose ps
+docker compose logs -f rag-app
 ```
 
-### 数据持久化
+服务默认暴露在 <http://服务器地址:8000>，健康检查地址为 `/health`。
 
-`./data` 目录挂载为 Docker 卷，包含：
-- `data/users.db` — 用户数据库
-- `data/upload/` — 上传的文件
-- `data/qdrant/` — 向量数据库
-- `data/analysis.db` — 分析数据库
+## 更新
 
----
-
-## 方式二：直接部署到 Linux 服务器
-
-### 1. 服务器准备
+根目录的 `deploy.sh` 会拉取当前分支、重建应用镜像并重启服务：
 
 ```bash
-# SSH 登录服务器
-ssh root@你的服务器IP
-
-# 安装 Python 3.12
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3-pip
-
-# 安装 Node.js 20（构建前端用）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+bash deploy.sh
 ```
 
-### 2. 上传代码
+也可手动执行：
 
 ```bash
-# 方式A: git clone
-git clone <你的仓库地址> /opt/RAGv3
-
-# 方式B: scp 上传
-scp -r ./RAGv3 root@服务器IP:/opt/RAGv3
+git pull --ff-only
+docker compose build rag-app
+docker compose up -d
 ```
 
-### 3. 构建前端
+## 数据与备份
+
+Compose 使用三个命名卷：
+
+- `rag_data`：用户、文档、审计与结构化数据；
+- `qdrant_data`：向量索引；
+- `redis_data`：Redis 持久化数据。
+
+升级前应备份卷，尤其是 `rag_data`。不要把 `.env` 或运行时数据库提交到 Git。删除 Compose 容器不会删除命名卷；执行 `docker compose down -v` 会永久删除数据，生产环境不要使用。
+
+## HTTPS 与公网访问
+
+公网部署应在应用前配置 Nginx、Caddy 或云负载均衡器，终止 TLS 后转发到 `127.0.0.1:8000`。防火墙只开放 SSH、HTTP 和 HTTPS；不要直接暴露 Redis。
+
+## 非 Docker 开发运行
 
 ```bash
-cd /opt/RAGv3/frontend
+python -m venv .venv
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
+pip install -e ".[dev]"
+
+cd frontend
 npm ci
 npm run build
-# 产物会输出到 /opt/RAGv3/static/
-```
+cd ..
 
-### 4. 安装后端依赖
-
-```bash
-cd /opt/RAGv3
-python3.12 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 5. 配置环境变量
-
-```bash
 cp .env.example .env
-nano .env
-# 填入 API Key 等配置
+python start.py
 ```
 
-### 6. 启动服务
+本地默认端口为 8080。可用 `PORT` 环境变量覆盖端口。
+
+## 常用排查
 
 ```bash
-# 测试启动
-python -m uvicorn rag.api:app --host 0.0.0.0 --port 8000
-
-# 正式运行（用 systemd 管理）
+docker compose ps
+docker compose logs --tail=200 rag-app
+docker compose logs --tail=100 redis
+curl -f http://localhost:8000/health
 ```
 
-### 7. 配置 systemd 服务（开机自启）
-
-```bash
-cat > /etc/systemd/system/ragv3.service << 'EOF'
-[Unit]
-Description=RAGv3 Knowledge Base System
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/RAGv3
-ExecStart=/opt/RAGv3/venv/bin/python -m uvicorn rag.api:app --host 0.0.0.0 --port 8000
-Restart=always
-RestartSec=5
-EnvironmentFile=/opt/RAGv3/.env
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable ragv3
-systemctl start ragv3
-```
-
-### 8. 配置 Nginx 反向代理（可选，支持域名 + HTTPS）
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # SSE 流式响应需要这些
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 300s;
-    }
-}
-```
-
----
-
-## 方式三：云平台部署
-
-### Railway（最简单）
-
-1. 注册 https://railway.app
-2. 连接 GitHub 仓库
-3. 设置环境变量（.env 里的内容）
-4. 自动部署，获得一个公网域名
-
-### Zeabur（国内友好）
-
-1. 注册 https://zeabur.com
-2. 导入 GitHub 仓库
-3. 配置环境变量
-4. 自动部署
-
-### 注意事项
-
-- 云平台免费额度有限，向量数据库可能需要外部托管
-- SQLite 文件在容器重启后会丢失，需要挂载持久化卷
-- 推荐用 Docker 部署到自己的服务器
-
----
-
-## 部署后检查清单
-
-- [ ] `http://你的IP:8000` 能访问
-- [ ] `http://你的IP:8000/health` 返回正常
-- [ ] 注册用户功能正常
-- [ ] 上传文件功能正常
-- [ ] 对话功能正常（流式响应）
-- [ ] 设置了 `INIT_ADMIN_USERNAME` 环境变量
+如果 Redis 未启动，先确认 `.env` 中 `REDIS_PASSWORD` 非空且不含需要 URL 转义的字符。如果应用容器不健康，检查模型密钥、卷权限和端口占用。

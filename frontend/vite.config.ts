@@ -17,8 +17,8 @@ export default defineConfig({
   },
   build: {
     outDir: '../static',
-    // static also contains hand-maintained assets served by FastAPI.
-    emptyOutDir: false
+    // public/ is the source of hand-maintained assets; clear stale hashed bundles.
+    emptyOutDir: true
   },
   test: {
     globals: true,
