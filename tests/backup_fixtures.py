@@ -100,3 +100,15 @@ def create_backup_sources(context: BackupContext) -> None:
 def load_manifest(backup_dir: Path) -> BackupManifest:
     payload = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
     return BackupManifest.from_dict(payload)
+
+
+def seed_verified_backups(
+    context: BackupContext,
+    count: int,
+    start: float = 1_700_000_000.0,
+) -> None:
+    from rag.backups.service import create_if_due
+
+    week = 7 * 24 * 60 * 60
+    for index in range(count):
+        create_if_due(context, "scheduled", now=start + index * week)

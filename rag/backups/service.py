@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
+import logging
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -32,6 +33,7 @@ from rag.backups.models import (
 
 _MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 _CHECKSUM_PATTERN = re.compile(r"[0-9a-f]{64}\n?\Z")
+_FORMAL_BACKUP_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}\Z")
 _TRANSIENT_DIRECTORIES = frozenset({"staging", "quarantine", "archive_work"})
 _EXCLUDED_PAYLOADS = (
     "qdrant",
@@ -42,6 +44,7 @@ _EXCLUDED_PAYLOADS = (
     "quarantine",
     "archive_work",
 )
+logger = logging.getLogger(__name__)
 
 
 def sha256_file(path: Path) -> str:
@@ -527,6 +530,12 @@ def create_backup(
             write_manifest(staging, manifest)
             verification = verify_backup(staging)
             staging.replace(final_path)
+            try:
+                prune_verified_backups(
+                    validated.backup_root, validated.retention_count
+                )
+            except BackupError:
+                logger.warning("backup_retention_failed")
             return BackupRecord(
                 backup_id=backup_id,
                 created_at=timestamp,
@@ -547,7 +556,11 @@ def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
         return ()
     records: list[BackupRecord] = []
     for path in sorted(root.iterdir()):
-        if not path.is_dir() or path.name.startswith(".") or path.is_symlink():
+        if (
+            not path.is_dir()
+            or path.is_symlink()
+            or not _FORMAL_BACKUP_PATTERN.fullmatch(path.name)
+        ):
             continue
         try:
             verification = verify_backup(path)
@@ -566,7 +579,51 @@ def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
                 vector_rebuild_required=verification.vector_rebuild_required,
             )
         )
-    return tuple(sorted(records, key=lambda record: record.created_at, reverse=True))
+    return tuple(
+        sorted(records, key=lambda record: (record.created_at, record.backup_id))
+    )
+
+
+def prune_verified_backups(root: Path, keep: int) -> tuple[str, ...]:
+    if keep < 1:
+        raise BackupError("invalid_retention_count")
+    if not root.exists():
+        return ()
+
+    resolved_root = root.resolve()
+    candidates = list_verified_backups(resolved_root)[:-keep]
+    deleted: list[str] = []
+    for record in candidates:
+        candidate = record.path.resolve(strict=True)
+        if (
+            candidate.parent != resolved_root
+            or candidate.name != record.backup_id
+            or not _FORMAL_BACKUP_PATTERN.fullmatch(candidate.name)
+        ):
+            raise BackupError("unsafe_retention_path")
+        verify_backup(candidate)
+        try:
+            shutil.rmtree(candidate)
+        except OSError as error:
+            raise BackupError("backup_prune_failed") from error
+        deleted.append(record.backup_id)
+    return tuple(deleted)
+
+
+def create_if_due(
+    context: BackupContext, trigger: str, now: float | None = None
+) -> BackupRecord | None:
+    timestamp = time.time() if now is None else now
+    records = list_verified_backups(context.backup_root)
+    if records:
+        latest = records[-1]
+        elapsed = timestamp - latest.created_at
+        if elapsed < 0:
+            logger.warning("backup_clock_moved_backwards")
+            return None
+        if elapsed < context.interval_days * 86400:
+            return None
+    return create_backup(context, trigger, now=timestamp)
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:
