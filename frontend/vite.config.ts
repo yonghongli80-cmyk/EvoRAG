@@ -18,7 +18,17 @@ export default defineConfig({
   build: {
     outDir: '../static',
     // public/ is the source of hand-maintained assets; clear stale hashed bundles.
-    emptyOutDir: true
+    emptyOutDir: true,
+    rolldownOptions: {
+      onLog(level, log, handler) {
+        const source = log.id?.replaceAll('\\', '/') || ''
+        if (
+          log.code === 'INVALID_ANNOTATION'
+          && source.includes('/node_modules/@vueuse/core/')
+        ) return
+        handler(level, log)
+      },
+    },
   },
   test: {
     globals: true,

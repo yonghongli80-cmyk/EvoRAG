@@ -4,18 +4,21 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_python_dependencies_have_a_fully_pinned_lock_file():
-    lock_path = ROOT / "requirements.lock"
-    assert lock_path.exists()
+def test_python_dependencies_have_fully_pinned_lock_files():
+    for filename in ("requirements.lock", "requirements-dev.lock"):
+        lock_path = ROOT / filename
+        assert lock_path.exists()
 
-    requirements = [
-        line.strip()
-        for line in lock_path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith(("#", "--"))
-    ]
-    assert requirements
-    assert all("==" in requirement for requirement in requirements)
-    assert not any(">=" in requirement or "<" in requirement for requirement in requirements)
+        requirements = [
+            line.strip()
+            for line in lock_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith(("#", "--"))
+        ]
+        assert requirements
+        assert all("==" in requirement for requirement in requirements)
+        assert not any(
+            ">=" in requirement or "<" in requirement for requirement in requirements
+        )
 
 
 def test_deployment_uses_the_lock_file_and_build_cache():
@@ -28,3 +31,10 @@ def test_deployment_uses_the_lock_file_and_build_cache():
     for relative_path in ("deploy.sh", ".github/workflows/deploy.yml"):
         deployment = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "--no-cache" not in deployment
+
+
+def test_ci_uses_the_development_lock_file():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "pip install -r requirements-dev.lock" in workflow

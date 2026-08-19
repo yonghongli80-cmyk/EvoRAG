@@ -7,6 +7,7 @@ import re
 import tempfile
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Security, UploadFile
@@ -52,7 +53,21 @@ logger = logging.getLogger(__name__)
 
 from rag.concurrency import ReadWriteLock
 
-app = FastAPI(title="RAG 知识库 API", description="基于检索增强生成的智能知识库系统")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    auto_index_on_startup()
+    try:
+        yield
+    finally:
+        close_pipeline_processors()
+
+
+app = FastAPI(
+    title="RAG 知识库 API",
+    description="基于检索增强生成的智能知识库系统",
+    lifespan=lifespan,
+)
 pipeline = None
 _pipelines = {}
 _pipeline_lock = ReadWriteLock()
@@ -182,7 +197,6 @@ def _stop_material_worker() -> bool:
     return True
 
 
-@app.on_event("startup")
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
@@ -554,7 +568,6 @@ def _make_comparison_document_tool():
 app.state.comparison_document_tool_factory = _make_comparison_document_tool
 
 
-@app.on_event("shutdown")
 def close_pipeline_processors():
     """关闭由 API 生命周期持有的共享处理器。"""
     global pipeline, _feedback_processor, _gap_analyzer
