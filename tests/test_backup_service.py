@@ -210,6 +210,49 @@ def test_verify_rejects_unlisted_database_payload(complete_backup):
         verify_backup(complete_backup)
 
 
+def test_verify_rejects_unlisted_root_payload(complete_backup):
+    (complete_backup / "rogue.txt").write_text("unexpected", encoding="utf-8")
+
+    with pytest.raises(BackupError, match="unexpected_backup_file"):
+        verify_backup(complete_backup)
+
+
+def test_verify_rejects_manifest_backup_id_that_does_not_match_directory(
+    complete_backup,
+):
+    payload = json.loads(
+        (complete_backup / "manifest.json").read_text(encoding="utf-8")
+    )
+    payload["backup_id"] = "another-backup"
+    _write_literal_manifest(complete_backup, payload)
+
+    with pytest.raises(BackupError, match="backup_id_mismatch"):
+        verify_backup(complete_backup)
+
+
+def test_verify_rejects_symlinked_payload_root(complete_backup, monkeypatch):
+    real_is_symlink = Path.is_symlink
+
+    def payload_root_is_symlink(path):
+        return path.name == "files" or real_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", payload_root_is_symlink)
+
+    with pytest.raises(BackupError, match="symbolic_link_rejected"):
+        verify_backup(complete_backup)
+
+
+def test_verify_rejects_manifest_claiming_qdrant_is_included(complete_backup):
+    payload = json.loads(
+        (complete_backup / "manifest.json").read_text(encoding="utf-8")
+    )
+    payload["qdrant_included"] = True
+    _write_literal_manifest(complete_backup, payload)
+
+    with pytest.raises(BackupError, match="invalid_manifest"):
+        verify_backup(complete_backup)
+
+
 @pytest.mark.parametrize(
     "logical_path", ["../escape.txt", "/absolute.txt", "upload/../escape.txt", r"upload\bad.txt"]
 )

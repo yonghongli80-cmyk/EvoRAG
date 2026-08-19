@@ -187,6 +187,8 @@ def _read_manifest(backup_dir: Path) -> BackupManifest:
 def _payload_files(root: Path) -> set[str]:
     if not root.exists():
         return set()
+    if root.is_symlink():
+        raise BackupError("symbolic_link_rejected")
     found: set[str] = set()
     for path in root.rglob("*"):
         if path.is_symlink():
@@ -207,6 +209,32 @@ def _verify_sqlite(path: Path) -> None:
         raise BackupError("sqlite_integrity_failed")
 
 
+def _directory_matches_backup_id(directory_name: str, backup_id: str) -> bool:
+    return (
+        directory_name == backup_id
+        or directory_name == f".incomplete-{backup_id}"
+        or re.fullmatch(
+            rf"\.{re.escape(backup_id)}\.restore-[0-9a-f]{{12}}", directory_name
+        )
+        is not None
+    )
+
+
+def _validate_manifest_semantics(manifest: BackupManifest) -> None:
+    database_names = [entry.name for entry in manifest.databases]
+    required_databases = {
+        entry.name for entry in manifest.databases if entry.required
+    }
+    if (
+        manifest.qdrant_included
+        or not manifest.vector_rebuild_required
+        or "qdrant" not in manifest.excluded
+        or len(database_names) != len(set(database_names))
+        or "users" not in required_databases
+    ):
+        raise BackupError("invalid_manifest")
+
+
 def verify_backup(backup_dir: Path) -> BackupVerification:
     if backup_dir.is_symlink():
         raise BackupError("symbolic_link_rejected")
@@ -218,6 +246,23 @@ def verify_backup(backup_dir: Path) -> BackupVerification:
         raise BackupError("backup_missing")
 
     manifest = _read_manifest(resolved_backup)
+    if not _directory_matches_backup_id(resolved_backup.name, manifest.backup_id):
+        raise BackupError("backup_id_mismatch")
+    _validate_manifest_semantics(manifest)
+
+    allowed_root_entries = {
+        "files",
+        "manifest.json",
+        "manifest.sha256",
+        "restore-report.json",
+        "sqlite",
+    }
+    for path in resolved_backup.iterdir():
+        if path.is_symlink():
+            raise BackupError("symbolic_link_rejected")
+        if path.name not in allowed_root_entries:
+            raise BackupError("unexpected_backup_file")
+
     database_paths: set[str] = set()
     file_paths: set[str] = set()
 
