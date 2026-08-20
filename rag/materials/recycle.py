@@ -72,12 +72,21 @@ def _append_audit(db: UserDB, document_id: int, actor_id: int, action: str, now:
 
 
 def delete_to_recycle(
-    db: UserDB, document_id: int, actor: dict, now: float | None = None
+    db: UserDB, document_id: int, actor: dict, now: float | None = None,
+    *, organization_authorized: bool = False,
 ) -> RecycleRecord:
     """Tombstone a document and downgrade its current version atomically."""
     now = now if now is not None else time.time()
     with db._lock, db.transaction(immediate=True):
-        doc = _require_edit(db, document_id, actor)
+        if organization_authorized:
+            row = db._conn.execute(
+                "SELECT * FROM document_permissions WHERE id = ?", (document_id,)
+            ).fetchone()
+            if row is None:
+                raise RecycleError("document_missing")
+            doc = dict(row)
+        else:
+            doc = _require_edit(db, document_id, actor)
         if doc["deleted_at"] is not None:
             raise RecycleError("already_deleted")
         expected = doc["metadata_version"]
@@ -110,6 +119,8 @@ def restore_from_recycle(
     actor: dict,
     expected_metadata_version: int,
     now: float | None = None,
+    *,
+    organization_authorized: bool = False,
 ) -> RestoreResult:
     """Reverse a tombstone before the deadline; only deleter/owner/admin."""
     now = now if now is not None else time.time()
@@ -123,7 +134,9 @@ def restore_from_recycle(
             raise RecycleError("not_deleted")
         if now > (doc["restore_until"] or 0):
             raise RecycleError("restore_window_expired")
-        if not (actor.get("is_admin") or actor["id"] in (doc["owner_id"], doc["deleted_by"])):
+        if not organization_authorized and not (
+            actor.get("is_admin") or actor["id"] in (doc["owner_id"], doc["deleted_by"])
+        ):
             raise RecycleError("no_restore_permission")
         updated = db._conn.execute(
             "UPDATE document_permissions "

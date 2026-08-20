@@ -66,6 +66,23 @@ def test_seed_rejects_fixed_username_and_kb_id_collisions(tmp_path, monkeypatch)
         db.close()
 
 
+def test_seed_rejects_person_code_and_org_unit_collisions(tmp_path, monkeypatch):
+    monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
+    db = UserDB(str(tmp_path / "stable-key-collision.db"))
+    try:
+        user_id = db.create_user("unrelated", "Password1")
+        with db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_units(code,name,kind) VALUES('ORG-ROOT','其他组织','company')")
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P-001',?,'其他人','专员')", (user_id,),
+            )
+        with pytest.raises(ValueError, match="seed collision"):
+            seed_organization(db, metadata_only=True)
+    finally:
+        db.close()
+
+
 def test_seed_documents_are_resumable_and_indexed_once(tmp_path, monkeypatch):
     monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
     calls = []

@@ -361,7 +361,8 @@ async def delete_material(request: Request, document_id: int, user: dict = Depen
     if document is None:
         raise HTTPException(status_code=404, detail="document_missing")
     policy = OrgRepository(db).get_kb_policy(document["kb_id"])
-    if is_org_policy(policy):
+    organization_authorized = is_org_policy(policy)
+    if organization_authorized:
         require_kb_edit(db, document["kb_id"], user)
     elif not (
         user.get("is_admin")
@@ -369,7 +370,9 @@ async def delete_material(request: Request, document_id: int, user: dict = Depen
     ):
         raise HTTPException(status_code=403, detail="no_restore_permission")
     try:
-        record = delete_to_recycle(db, document_id, user)
+        record = delete_to_recycle(
+            db, document_id, user, organization_authorized=organization_authorized
+        )
     except RecycleError as exc:
         _raise_recycle_error(exc)
     _audit_org_material(db, user, "document_recycled", document["kb_id"])
@@ -392,7 +395,8 @@ async def restore_material(
     if document is None:
         raise HTTPException(status_code=404, detail="document_missing")
     policy = OrgRepository(db).get_kb_policy(document["kb_id"])
-    if is_org_policy(policy):
+    organization_authorized = is_org_policy(policy)
+    if organization_authorized:
         require_kb_edit(db, document["kb_id"], user)
     elif not (
         user.get("is_admin")
@@ -400,7 +404,10 @@ async def restore_material(
     ):
         raise HTTPException(status_code=403, detail="no_restore_permission")
     try:
-        result = restore_from_recycle(db, document_id, user, body.expected_metadata_version)
+        result = restore_from_recycle(
+            db, document_id, user, body.expected_metadata_version,
+            organization_authorized=organization_authorized,
+        )
     except RecycleError as exc:
         _raise_recycle_error(exc)
     _audit_org_material(db, user, "document_restored", document["kb_id"])

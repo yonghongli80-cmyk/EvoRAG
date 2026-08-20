@@ -24,6 +24,12 @@ def test_inactive_identity_and_old_security_version_are_rejected(tmp_path):
         with db.locked_transaction() as conn:
             conn.execute("UPDATE org_people SET active=0,security_version=2 WHERE user_id=?", (user_id,))
         assert resolve_principal(db, f"Bearer {valid}", None) is None
+        assert OrgRepository(db).get_person_for_user(user_id) is not None
+        with db.locked_read() as conn:
+            event = conn.execute(
+                "SELECT action,reason FROM org_audit_events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        assert tuple(event) == ("token_rejected", "security_version_mismatch")
     finally:
         db.close()
 
@@ -35,5 +41,20 @@ def test_profile_uses_stable_person_mapping(tmp_path):
         assert profile.person_code == "P-001"
         assert profile.display_name == "林知远"
         assert profile.primary_org == {"code": "ROOT", "name": "星河集团"}
+    finally:
+        db.close()
+
+
+def test_api_key_principal_respects_inactive_org_identity(tmp_path, monkeypatch):
+    db, user_id, _ = _identity_db(tmp_path)
+    try:
+        monkeypatch.setattr(
+            "rag.api_security._user_for_api_key",
+            lambda _db, _key: db.get_user_by_id(user_id),
+        )
+        assert resolve_principal(db, "", "key") is not None
+        with db.locked_transaction() as conn:
+            conn.execute("UPDATE org_people SET active=0 WHERE user_id=?", (user_id,))
+        assert resolve_principal(db, "", "key") is None
     finally:
         db.close()

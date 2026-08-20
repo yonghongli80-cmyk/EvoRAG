@@ -144,6 +144,25 @@ class GrantRequest(BaseModel):
     effect: str
 
 
+def _invalidate_grant_subject(conn, subject_type: str, subject_id: str) -> None:
+    if subject_type == "user":
+        conn.execute(
+            "UPDATE org_people SET security_version=security_version+1 WHERE user_id=?",
+            (int(subject_id),),
+        )
+        return
+    conn.execute("""
+        WITH RECURSIVE tree(code) AS (
+          SELECT code FROM org_units WHERE code=?
+          UNION ALL SELECT u.code FROM org_units u JOIN tree t ON u.parent_code=t.code
+        )
+        UPDATE org_people SET security_version=security_version+1
+        WHERE person_code IN (
+          SELECT DISTINCT m.person_code FROM org_memberships m JOIN tree t ON t.code=m.org_code
+        )
+    """, (subject_id,))
+
+
 @router.post("/organization/grants")
 def create_grant(body: GrantRequest, request: Request, user: dict = Depends(require_user)):
     _company_admin(user)
@@ -172,24 +191,28 @@ def create_grant(body: GrantRequest, request: Request, user: dict = Depends(requ
         if subject is None:
             raise HTTPException(status_code=404, detail="资源不存在")
         cur = conn.execute("INSERT INTO kb_org_grants(kb_id,subject_type,subject_id,role,effect,granted_by) VALUES(?,?,?,?,?,?)", (body.kb_id, body.subject_type, body.subject_id, body.role, body.effect, user["id"]))
-        if body.subject_type == "user":
-            conn.execute(
-                "UPDATE org_people SET security_version=security_version+1 WHERE user_id=?",
-                (subject_user_id,),
-            )
-        else:
-            conn.execute("""
-                WITH RECURSIVE tree(code) AS (
-                  SELECT code FROM org_units WHERE code=?
-                  UNION ALL SELECT u.code FROM org_units u JOIN tree t ON u.parent_code=t.code
-                )
-                UPDATE org_people SET security_version=security_version+1
-                WHERE person_code IN (
-                  SELECT DISTINCT m.person_code FROM org_memberships m JOIN tree t ON t.code=m.org_code
-                )
-            """, (body.subject_id,))
+        _invalidate_grant_subject(conn, body.subject_type, body.subject_id)
     OrgAuditService(db).record(int(user["id"]), "grant_created", "knowledge_base", body.kb_id, "success", body.effect)
     return {"id": int(cur.lastrowid)}
+
+
+@router.delete("/organization/grants/{grant_id}")
+def revoke_grant(grant_id: int, request: Request, user: dict = Depends(require_user)):
+    _company_admin(user)
+    db = _db(request)
+    with db.locked_transaction() as conn:
+        grant = conn.execute(
+            "SELECT * FROM kb_org_grants WHERE id=? AND active=1", (grant_id,)
+        ).fetchone()
+        if grant is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        conn.execute("UPDATE kb_org_grants SET active=0 WHERE id=?", (grant_id,))
+        _invalidate_grant_subject(conn, grant["subject_type"], grant["subject_id"])
+    OrgAuditService(db).record(
+        int(user["id"]), "grant_revoked", "knowledge_base", grant["kb_id"],
+        "success", "admin_revoke",
+    )
+    return {"status": "revoked", "id": grant_id}
 
 
 @router.get("/organization/audit")

@@ -76,6 +76,34 @@ def test_unassigned_legacy_owner_cannot_recycle_document(isolated_api, make_user
     assert response.status_code == 404
 
 
+def test_organization_manager_can_recycle_seed_owned_document(isolated_api, make_user):
+    from rag.auth import create_token
+
+    manager, _headers = make_user("manager")
+    seed_owner, _ = make_user("seed-owner")
+    db = isolated_api.app.state.user_db
+    document_id = db.create_document_permission("seeded.txt", "kb_org", seed_owner["id"])
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEAM','协作组','team')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P1',?,'甲','负责人')", (manager["id"],),
+        )
+        conn.execute("INSERT INTO org_manager_scopes VALUES('P1','TEAM')")
+        conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb_org','组织库')")
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+            "VALUES('kb_org','TEAM','organization')"
+        )
+    headers = {"Authorization": "Bearer " + create_token({
+        "user_id": manager["id"], "username": "manager", "security_version": 1,
+    })}
+
+    response = isolated_api.delete(f"/materials/{document_id}", headers=headers)
+
+    assert response.status_code == 200
+
+
 def test_upload_archive_returns_manifest_preview(isolated_api, make_user):
     _, user_headers = make_user("alice")
     response = isolated_api.post(

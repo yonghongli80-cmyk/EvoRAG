@@ -30,7 +30,25 @@ def seed_organization(
     repo.install_schema()
     with db.locked_read() as conn:
         collisions = []
+        for unit in manifest.units:
+            row = conn.execute(
+                "SELECT parent_code,name,kind FROM org_units WHERE code=?", (unit.code,)
+            ).fetchone()
+            if row is not None and (
+                row["parent_code"], row["name"], row["kind"]
+            ) != (unit.parent_code, unit.name, unit.kind):
+                collisions.append(f"org_unit:{unit.code}")
         for person in manifest.people:
+            by_code = conn.execute(
+                "SELECT p.seed_key,u.username FROM org_people p "
+                "JOIN users u ON u.id=p.user_id WHERE p.person_code=? OR p.seed_key=?",
+                (person.person_code, person.person_code),
+            ).fetchone()
+            if by_code is not None and not (
+                by_code["seed_key"] == person.person_code
+                and by_code["username"] == person.username
+            ):
+                collisions.append(f"person:{person.person_code}")
             row = conn.execute(
                 "SELECT u.id,p.seed_key,p.person_code FROM users u "
                 "LEFT JOIN org_people p ON p.user_id=u.id WHERE u.username=?",
@@ -77,13 +95,16 @@ def seed_organization(
             created_kbs += cur.rowcount
             conn.execute("INSERT OR IGNORE INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb.kb_id, kb.name))
         conn.execute("INSERT INTO org_seed_state(seed_key,seed_version,status) VALUES('fictional-org',1,'complete') ON CONFLICT(seed_key) DO UPDATE SET status='complete',updated_at=strftime('%s','now')")
-        seeded_people = conn.execute(
-            "SELECT count(*) FROM org_people WHERE seed_key LIKE 'P-%'"
-        ).fetchone()[0]
-        seeded_kbs = conn.execute(
-            "SELECT count(*) FROM kb_org_policies WHERE seed_key LIKE 'kb_%'"
-        ).fetchone()[0]
-        if seeded_people != len(manifest.people) or seeded_kbs != len(manifest.knowledge_bases):
+        exact_people = sum(bool(conn.execute(
+            "SELECT 1 FROM org_people p JOIN users u ON u.id=p.user_id "
+            "WHERE p.person_code=? AND p.seed_key=? AND u.username=?",
+            (person.person_code, person.person_code, person.username),
+        ).fetchone()) for person in manifest.people)
+        exact_kbs = sum(bool(conn.execute(
+            "SELECT 1 FROM kb_org_policies WHERE kb_id=? AND seed_key=?",
+            (kb.kb_id, kb.kb_id),
+        ).fetchone()) for kb in manifest.knowledge_bases)
+        if exact_people != len(manifest.people) or exact_kbs != len(manifest.knowledge_bases):
             raise ValueError("seed integrity validation failed")
     if not metadata_only:
         root = documents_root or (Path(db.db_path).resolve().parent / "kb_files")

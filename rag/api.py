@@ -666,6 +666,10 @@ async def register(req: RegisterRequest):
 async def login(req: LoginRequest):
     user = await asyncio.to_thread(user_db.authenticate, req.username, req.password)
     if not user:
+        await asyncio.to_thread(
+            OrgAuditService(user_db).record,
+            None, "login_failed", "authentication", "", "denied", "invalid_credentials",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
     if profile is not None and not profile.active:

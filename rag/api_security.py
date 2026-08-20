@@ -50,7 +50,17 @@ def _user_for_api_key(db: UserDB, api_key: str) -> dict | None:
 
 def resolve_principal(db: UserDB, authorization: str, api_key: str | None) -> dict | None:
     if api_key:
-        return _user_for_api_key(db, api_key)
+        user = _user_for_api_key(db, api_key)
+        if user is None:
+            return None
+        person = OrgRepository(db).get_person_for_user(int(user["id"]))
+        if person is not None and not person["active"]:
+            OrgAuditService(db).record(
+                int(user["id"]), "api_key_rejected", "person", person["person_code"],
+                "denied", "account_inactive",
+            )
+            return None
+        return user
 
     scheme, separator, token = authorization.partition(" ")
     if scheme != "Bearer" or separator != " " or not token or " " in token:
@@ -67,7 +77,14 @@ def resolve_principal(db: UserDB, authorization: str, api_key: str | None) -> di
     user = db.get_user_by_id(user_id)
     if not user or decode_token(token, user.get("password_changed_at")) is None:
         return None
-    if not OrgRepository(db).token_is_current(user_id, payload.get("security_version")):
+    repo = OrgRepository(db)
+    if not repo.token_is_current(user_id, payload.get("security_version")):
+        person = repo.get_person_for_user(user_id)
+        if person is not None:
+            OrgAuditService(db).record(
+                user_id, "token_rejected", "person", person["person_code"],
+                "denied", "security_version_mismatch",
+            )
         return None
     return user
 
