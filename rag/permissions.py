@@ -158,6 +158,18 @@ def filter_chunks_by_permission(
     if user.get("is_admin"):
         return list(chunks)
 
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+        from rag.org_auth.service import OrgAuthorizationService
+        allowed_ids = OrgAuthorizationService(db).allowed_document_ids(int(user["id"]), kb_id)
+        if not allowed_ids:
+            return []
+        names = {
+            permission["doc_name"] for document_id in allowed_ids
+            if (permission := db.get_document_permission_by_id(document_id)) is not None
+        }
+        return [chunk for chunk in chunks if chunk.doc_name in names]
+
     # 批量查询：一次性查出所有 doc_name 的权限记录（避免 N+1）
     doc_names = list(set(c.doc_name for c in chunks))
     perm_map = db.get_document_permissions_by_names(doc_names, kb_id)

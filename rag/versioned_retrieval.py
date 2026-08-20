@@ -12,13 +12,32 @@ from dataclasses import replace
 from config import settings
 
 
+def _visible_document_ids(user_db, user, kb_id) -> set[int]:
+    if user is None or user_db is None:
+        return set()
+    from rag.org_auth.repository import OrgRepository
+    if hasattr(user_db, "locked_read") and OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        from rag.org_auth.service import OrgAuthorizationService
+        return set(OrgAuthorizationService(user_db).allowed_document_ids(int(user["id"]), kb_id))
+    names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))
+    return {
+        permission["id"] for name in names
+        if (permission := user_db.get_document_permission(name, kb_id)) is not None
+    }
+
+
 def _visible_current_version_ids(user_db, user, kb_id) -> set[int]:
     if user is None or user_db is None:
         return set()
-    names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))
     ids: set[int] = set()
-    for name in names:
-        perm = user_db.get_document_permission(name, kb_id)
+    if not hasattr(user_db, "get_document_permission_by_id"):
+        for name in user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1)):
+            perm = user_db.get_document_permission(name, kb_id)
+            if perm and perm.get("current_version_id"):
+                ids.add(perm["current_version_id"])
+        return ids
+    for document_id in _visible_document_ids(user_db, user, kb_id):
+        perm = user_db.get_document_permission_by_id(document_id)
         if perm and perm.get("current_version_id"):
             ids.add(perm["current_version_id"])
     return ids
@@ -28,10 +47,12 @@ def _visible_historical_version_ids(user_db, user, kb_id) -> set[int]:
     """Visible historical version IDs plus confirmed-outdated current versions."""
     if user is None or user_db is None:
         return set()
-    names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))
     ids: set[int] = set()
-    for name in names:
-        perm = user_db.get_document_permission(name, kb_id)
+    if not hasattr(user_db, "get_document_permission_by_id"):
+        permissions = [user_db.get_document_permission(name, kb_id) for name in user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))]
+    else:
+        permissions = [user_db.get_document_permission_by_id(document_id) for document_id in _visible_document_ids(user_db, user, kb_id)]
+    for perm in permissions:
         if not perm:
             continue
         for version in user_db.list_document_versions(perm["id"]):
