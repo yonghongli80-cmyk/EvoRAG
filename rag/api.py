@@ -25,6 +25,7 @@ from rag.api_security import (
     require_admin,
     require_data_sources_admin,
     require_doc_edit,
+    require_personal_document_acl,
     require_kb_edit,
     require_kb_view,
     require_user,
@@ -2234,26 +2235,13 @@ async def generate_kb_toc(kb_id: str, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
     _check_kb_edit_permission(kb_id, user_dict)
     def _generate():
-        import sqlite3
         import json as _json
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
         try:
-            # 验证 KB 存在
-            meta = conn.execute("SELECT 1 FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
-            if not meta:
-                # 也检查 Qdrant 中是否有此 KB
-                manager = KnowledgeBaseManager()
-                kbs = manager.list_kbs()
-                if not any(k.kb_id == kb_id for k in kbs):
-                    return None, "not_found"
-
-            docs = conn.execute(
-                "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
-                (kb_id,),
-            ).fetchall()
+            with user_db.locked_read() as conn:
+                docs = conn.execute(
+                    "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
+                    (kb_id,),
+                ).fetchall()
             if not docs:
                 return None, "no_documents"
 
@@ -2271,18 +2259,15 @@ async def generate_kb_toc(kb_id: str, authorization: str = Header(default="")):
                     content = ""
                 toc = generate_toc(content)
                 toc_results[filename] = toc
-                # 保存到数据库
                 toc_str = _json.dumps(toc, ensure_ascii=False)
-                conn.execute(
-                    "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
-                    (toc_str, kb_id, filename),
-                )
-            conn.commit()
+                with user_db.locked_transaction() as conn:
+                    conn.execute(
+                        "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
+                        (toc_str, kb_id, filename),
+                    )
             return toc_results, None
         except Exception as e:
             return None, str(e)
-        finally:
-            conn.close()
 
     result, error = await asyncio.to_thread(_generate)
     if error == "not_found":
@@ -2300,24 +2285,12 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
     user_dict = await _require_auth(authorization)
     _check_kb_edit_permission(kb_id, user_dict)
     def _generate():
-        import sqlite3
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
         try:
-            # 验证 KB 存在
-            meta = conn.execute("SELECT 1 FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
-            if not meta:
-                manager = KnowledgeBaseManager()
-                kbs = manager.list_kbs()
-                if not any(k.kb_id == kb_id for k in kbs):
-                    return None, "not_found"
-
-            docs = conn.execute(
-                "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
-                (kb_id,),
-            ).fetchall()
+            with user_db.locked_read() as conn:
+                docs = conn.execute(
+                    "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
+                    (kb_id,),
+                ).fetchall()
             if not docs:
                 return None, "no_documents"
 
@@ -2336,18 +2309,15 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
             combined = "\n\n".join(all_content)
             overview = generate_summary(combined)
 
-            # 保存到 kb_metadata
-            conn.execute(
-                "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
-                "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
-                (kb_id, overview, overview),
-            )
-            conn.commit()
+            with user_db.locked_transaction() as conn:
+                conn.execute(
+                    "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
+                    "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
+                    (kb_id, overview, overview),
+                )
             return overview, None
         except Exception as e:
             return None, str(e)
-        finally:
-            conn.close()
 
     result, error = await asyncio.to_thread(_generate)
     if error == "not_found":
@@ -2439,6 +2409,7 @@ async def get_document_permissions(doc_id: int, authorization: str = Header(defa
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             return None
+        require_personal_document_acl(user_db, perm["kb_id"])
         # 检查查看权限：admin / owner / 共享用户 / 公开文档
         if (not user_dict.get("is_admin")
                 and perm["owner_id"] != user_dict["id"]
@@ -2475,6 +2446,7 @@ async def update_document_permission(doc_id: int, authorization: str = Header(de
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_personal_document_acl(user_db, perm["kb_id"])
         require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可修改权限")
@@ -2497,6 +2469,7 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_personal_document_acl(user_db, perm["kb_id"])
         require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可共享")
@@ -2530,6 +2503,7 @@ async def unshare_document(doc_id: int, user_id: int, authorization: str = Heade
         perm = user_db.get_document_permission_by_id(doc_id)
         if not perm:
             raise HTTPException(status_code=404, detail="文档不存在")
+        require_personal_document_acl(user_db, perm["kb_id"])
         require_doc_edit(user_db, perm["doc_name"], perm["kb_id"], user_dict)
         if not user_dict.get("is_admin") and perm["owner_id"] != user_dict["id"]:
             raise HTTPException(status_code=403, detail="仅文档上传者或管理员可撤销共享")

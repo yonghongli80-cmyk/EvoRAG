@@ -1,7 +1,13 @@
 import pytest
 from fastapi import HTTPException
 
-from rag.api_security import require_kb_edit, require_kb_view
+from rag.api_security import (
+    require_doc_edit,
+    require_doc_view,
+    require_kb_edit,
+    require_kb_view,
+    require_personal_document_acl,
+)
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
@@ -23,6 +29,9 @@ def test_kb_guard_uses_org_role_not_legacy_owner(tmp_path):
         with pytest.raises(HTTPException) as denied:
             require_kb_view(db, "kb", db.get_user_by_id(outsider))
         assert denied.value.status_code == 404
+        with db.locked_read() as conn:
+            audit = conn.execute("SELECT action,reason FROM org_audit_events ORDER BY id DESC LIMIT 1").fetchone()
+        assert tuple(audit) == ("kb_access_denied", "outside_org_scope")
         with pytest.raises(HTTPException):
             require_kb_edit(db, "kb", db.get_user_by_id(member))
     finally:
@@ -45,6 +54,13 @@ def test_kb_documents_inherit_the_knowledge_base_role(tmp_path):
         service = OrgAuthorizationService(db)
         assert service.allowed_document_ids(member, "kb") == frozenset({first, second})
         assert service.allowed_document_ids(outsider, "kb") == frozenset()
+        assert require_doc_view(db, "a.txt", "kb", db.get_user_by_id(member))["id"] == first
+        with pytest.raises(HTTPException) as no_personal_acl_override:
+            require_doc_edit(db, "a.txt", "kb", db.get_user_by_id(member))
+        assert no_personal_acl_override.value.status_code == 404
+        with pytest.raises(HTTPException) as hidden:
+            require_doc_view(db, "a.txt", "kb", db.get_user_by_id(outsider))
+        assert hidden.value.status_code == 404
     finally:
         db.close()
 
@@ -65,6 +81,21 @@ def test_visible_knowledge_bases_return_org_metadata(tmp_path):
             "kb_type": "organization", "org_unit": {"code": "TEAM", "name": "协作组"},
             "effective_role": "read", "sensitivity": None,
         }]
+    finally:
+        db.close()
+
+
+def test_organization_documents_reject_personal_acl_controls(tmp_path):
+    db = UserDB(str(tmp_path / "no-personal-acl.db"))
+    try:
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,kb_type) VALUES('kb','company_public')"
+            )
+        with pytest.raises(HTTPException) as denied:
+            require_personal_document_acl(db, "kb")
+        assert denied.value.status_code == 404
+        require_personal_document_acl(db, "rag_docs")
     finally:
         db.close()
 

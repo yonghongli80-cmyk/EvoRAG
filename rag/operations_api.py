@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from rag.api_security import require_doc_view, require_user
+from rag.api_security import require_doc_view, require_personal_document_acl, require_user
 
 router = APIRouter()
 
@@ -279,5 +279,6 @@ def change_document_owner(
     document = db.get_document_permission_by_id(document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="文档不存在")
+    require_personal_document_acl(db, document["kb_id"])
     db.set_document_owner(document_id, req.owner_id)
     return {"document_id": document_id, "owner_id": req.owner_id}

@@ -77,8 +77,8 @@ def build_seed_manifest() -> SeedManifest:
         second = ("工作指引.md", f"# {name}工作指引\n\n编号：{code}\n\n请依据已发布资料开展协作，并及时维护过期内容。\n")
         return (first, second) if sum(map(ord, code)) % 2 == 0 else (first,)
 
-    kbs = [KnowledgeBaseSeed("kb-company-public", "公司公共知识库", "ORG-ROOT", "company_public", None, docs("公司公共知识库", "PUBLIC"))]
-    kbs.extend(KnowledgeBaseSeed(f"kb-{u.code.lower()}", f"{u.name}知识库", u.code, "organization", None, docs(f"{u.name}知识库", u.code)) for u in units)
+    kbs = [KnowledgeBaseSeed("kb_company_public", "公司公共知识库", "ORG-ROOT", "company_public", None, docs("公司公共知识库", "PUBLIC"))]
+    kbs.extend(KnowledgeBaseSeed(f"kb_{u.code.lower().replace('-', '_')}", f"{u.name}知识库", u.code, "organization", None, docs(f"{u.name}知识库", u.code)) for u in units)
     for domain, name in (("finance", "财务管理知识库"), ("hr", "人才发展知识库"), ("customer", "客户协作知识库")):
-        kbs.append(KnowledgeBaseSeed(f"kb-sensitive-{domain}", name, "ORG-ROOT", "sensitive", domain, docs(name, domain)))
+        kbs.append(KnowledgeBaseSeed(f"kb_sensitive_{domain}", name, "ORG-ROOT", "sensitive", domain, docs(name, domain)))
     return SeedManifest(tuple(units), tuple(people), tuple(memberships), tuple(managers), qualifications, tuple(kbs))

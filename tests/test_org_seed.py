@@ -32,3 +32,37 @@ def test_seed_is_idempotent_and_preserves_later_edits(tmp_path, monkeypatch):
             assert conn.execute("SELECT count(*) FROM kb_org_policies").fetchone()[0] == 65
     finally:
         db.close()
+
+
+def test_seed_quarantines_preexisting_personal_knowledge_bases(tmp_path, monkeypatch):
+    monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
+    db = UserDB(str(tmp_path / "legacy.db"))
+    try:
+        owner = db.create_user("legacy", "Password1")
+        db.create_kb_metadata("legacy-kb", "旧知识库", owner, "public")
+        seed_organization(db, metadata_only=True)
+        policy = OrgRepository(db).get_kb_policy("legacy-kb")
+        assert policy["kb_type"] == "unassigned"
+        assert policy["org_code"] is None
+    finally:
+        db.close()
+
+
+def test_seed_documents_are_resumable_and_indexed_once(tmp_path, monkeypatch):
+    monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
+    calls = []
+    def index_document(kb_id, path, filename, permission_id):
+        calls.append((kb_id, filename, permission_id))
+        return 2
+    db = UserDB(str(tmp_path / "content.db"))
+    try:
+        seed_organization(db, index_document=index_document, documents_root=tmp_path / "docs")
+        first_calls = len(calls)
+        with db.locked_read() as conn:
+            rows = conn.execute("SELECT status,chunk_count FROM kb_documents").fetchall()
+        assert first_calls == 100
+        assert rows and all(row["status"] == "indexed" and row["chunk_count"] == 2 for row in rows)
+        seed_organization(db, index_document=index_document, documents_root=tmp_path / "docs")
+        assert len(calls) == first_calls
+    finally:
+        db.close()

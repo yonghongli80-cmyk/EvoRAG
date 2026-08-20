@@ -16,6 +16,7 @@ from rag.auth import decode_token
 from rag.permissions import check_doc_permission, check_kb_permission
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.models import OrgRole
+from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
 
@@ -99,6 +100,10 @@ def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
     if policy is not None:
         decision = OrgAuthorizationService(db).authorize(int(user["id"]), kb_id, OrgRole.READ)
         if not decision.allowed:
+            OrgAuditService(db).record(
+                int(user["id"]), "kb_access_denied", "knowledge_base", kb_id,
+                "denied", decision.reason,
+            )
             raise HTTPException(status_code=404, detail="资源不存在")
         return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
     if meta is None:
@@ -116,6 +121,10 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
     if policy is not None:
         decision = OrgAuthorizationService(db).authorize(int(user["id"]), kb_id, OrgRole.MANAGE)
         if not decision.allowed:
+            OrgAuditService(db).record(
+                int(user["id"]), "kb_access_denied", "knowledge_base", kb_id,
+                "denied", decision.reason,
+            )
             raise HTTPException(status_code=404, detail="资源不存在")
         return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
     if meta is None:
@@ -126,12 +135,23 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
 
 def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
+    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+        require_kb_view(db, kb_id, user)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        return doc
     if doc is None:
         if user.get("is_admin"):
             return {"id": 0, "doc_name": doc_name, "kb_id": kb_id, "historical": True}
         raise HTTPException(status_code=403, detail="文档尚未建立权限记录")
     check_doc_permission(db, doc_name, kb_id, user, "view")
     return doc
+
+
+def require_personal_document_acl(db: UserDB, kb_id: str) -> None:
+    """Reject legacy per-document sharing controls for organization KBs."""
+    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+        raise HTTPException(status_code=404, detail="资源不存在")
 
 
 def require_doc_version_edit(db: UserDB, document_id: int, user: dict) -> dict:
@@ -145,6 +165,13 @@ def require_doc_version_edit(db: UserDB, document_id: int, user: dict) -> dict:
 
 def require_doc_edit(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
+    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+        require_kb_edit(db, kb_id, user)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        if doc.get("protected"):
+            raise HTTPException(status_code=403, detail="受保护文档不可修改")
+        return doc
     if doc is None:
         raise HTTPException(status_code=409, detail="文档权限记录缺失")
     if doc.get("protected"):
