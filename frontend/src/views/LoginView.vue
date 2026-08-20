@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
+import AccountPicker from '../components/AccountPicker.vue'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -61,6 +62,10 @@ async function handleSubmit() {
         </div>
 
         <form @submit.prevent="handleSubmit" class="form">
+          <div v-if="isLogin" class="field">
+            <label class="label">选择员工</label>
+            <AccountPicker v-model="username" />
+          </div>
           <div class="field">
             <label class="label">用户名</label>
             <input
