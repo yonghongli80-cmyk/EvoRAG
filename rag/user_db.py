@@ -175,6 +175,19 @@ class UserDB:
         else:
             self._conn.commit()
 
+    @contextmanager
+    def locked_transaction(self, immediate: bool = False):
+        """Yield the shared connection inside the database lock and one transaction."""
+        with self._lock:
+            with self.transaction(immediate=immediate):
+                yield self._conn
+
+    @contextmanager
+    def locked_read(self):
+        """Yield the shared connection while holding the database lock."""
+        with self._lock:
+            yield self._conn
+
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
