@@ -114,3 +114,30 @@ def test_manager_can_create_only_inside_descendant_scope(tmp_path):
         assert service.can_manage_org(manager, "PEER") is False
     finally:
         db.close()
+
+
+def test_descendant_members_inherit_ancestor_knowledge_base_read_access(tmp_path):
+    db = UserDB(str(tmp_path / "ancestor-read.db"))
+    try:
+        user_id = db.create_user("member", "Password1")
+        repo = OrgRepository(db)
+        repo.create_units((
+            ("DIV", None, "事业群", "division"),
+            ("DEP", "DIV", "部门", "department"),
+            ("TEAM", "DEP", "小组", "team"),
+        ))
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P1',?,'甲','专员')", (user_id,),
+            )
+            conn.execute("INSERT INTO org_memberships VALUES('P1','TEAM',1)")
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+                "VALUES('division-kb','DIV','organization')"
+            )
+        decision = OrgAuthorizationService(db).decision(user_id, "division-kb")
+        assert decision.allowed is True
+        assert decision.role.value == "read"
+    finally:
+        db.close()

@@ -20,9 +20,13 @@ class OrgAuthorizationService:
             return resolve_role(AuthorizationContext(True, bool(user.get("is_admin")), True, bool(policy["active"]), KnowledgeBaseType(policy["kb_type"]), policy["sensitivity"], False, False, False, OrgRole.NONE, False))
         memberships = {m["org_code"] for m in self.repo.memberships(person["person_code"]) if m["active"]}
         target = policy["org_code"]
+        target_tree = self.repo.descendants(target) if target else set()
+        member = bool(memberships & target_tree)
         manager = any(target in self.repo.descendants(scope) for scope in self.repo.manager_scopes(person["person_code"])) if target else False
         grants = self.repo.grants(kb_id)
-        matches = [g for g in grants if (g["subject_type"] == "user" and g["subject_id"] == str(user_id)) or (g["subject_type"] == "org" and g["subject_id"] in memberships)]
+        matches = [g for g in grants if
+                   (g["subject_type"] == "user" and g["subject_id"] == str(user_id)) or
+                   (g["subject_type"] == "org" and bool(memberships & self.repo.descendants(g["subject_id"])))]
         denied = any(g["effect"] == "deny" for g in matches)
         allowed = [OrgRole(g["role"]) for g in matches if g["effect"] == "allow"]
         allow_role = OrgRole.MANAGE if OrgRole.MANAGE in allowed else (OrgRole.READ if allowed else OrgRole.NONE)
@@ -31,7 +35,7 @@ class OrgAuthorizationService:
             bool(person["active"]), bool(user.get("is_admin")), bool(unit and unit["active"]), bool(policy["active"]),
             KnowledgeBaseType(policy["kb_type"]), policy["sensitivity"],
             policy["sensitivity"] in self.repo.qualifications(person["person_code"]) if policy["sensitivity"] else True,
-            target in memberships, manager, allow_role, denied,
+            member, manager, allow_role, denied,
         ))
 
     def can_manage_org(self, user_id: int, org_code: str) -> bool:
