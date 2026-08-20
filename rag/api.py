@@ -739,6 +739,10 @@ def _check_kb_edit_permission(kb_id: str, user_dict: dict) -> None:
         HTTPException 403: 无编辑权限
         HTTPException 404: KB 不存在
     """
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        require_kb_edit(user_db, kb_id, user_dict)
+        return
     meta = user_db.get_kb_metadata(kb_id)
     if not meta:
         raise HTTPException(status_code=404, detail="知识库不存在")
@@ -2134,43 +2138,28 @@ async def get_knowledge_base_detail(
     meta = require_kb_view(user_db, kb_id, user)
 
     def _get():
-        import sqlite3
-        manager = KnowledgeBaseManager()
-        kbs = manager.list_kbs()
-        kb = next((k for k in kbs if k.kb_id == kb_id), None)
-        if not kb:
-            return None
-
-        # 从 SQLite 获取元数据
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        try:
+        with user_db.locked_read() as conn:
             db_meta = conn.execute("SELECT * FROM kb_metadata WHERE kb_id = ?", (kb_id,)).fetchone()
-            scope = meta["scope"]
-            is_owner = meta["owner_id"] == user["id"]
-
+            if db_meta is None:
+                return None
             docs = conn.execute(
                 "SELECT id, kb_id, filename, toc, summary, chunk_count, status, added_at, "
                 "document_id, document_version_id "
                 "FROM kb_documents WHERE kb_id = ? ORDER BY added_at DESC",
                 (kb_id,),
             ).fetchall()
-
-            doc_list = [dict(d) for d in docs]
-
             return {
                 "kb_id": kb_id,
-                "name": meta.get("name", kb.name),
-                "description": db_meta["description"] if db_meta else "",
-                "overview": db_meta["overview"] if db_meta else "",
-                "doc_count": kb.doc_count,
-                "scope": scope,
-                "is_owner": is_owner,
-                "documents": doc_list,
+                "name": meta.get("name", db_meta["name"]),
+                "description": db_meta["description"] or "",
+                "overview": db_meta["overview"] or "",
+                "doc_count": len(docs),
+                "kb_type": meta.get("kb_type"),
+                "org_unit_code": meta.get("org_code"),
+                "effective_role": meta.get("effective_role", "administer" if user.get("is_admin") else "read"),
+                "sensitivity": meta.get("sensitivity"),
+                "documents": [dict(d) for d in docs],
             }
-        finally:
-            conn.close()
 
     result = await asyncio.to_thread(_get)
     if not result:
@@ -2195,19 +2184,12 @@ async def rename_knowledge_base(kb_id: str, req: KBRenameRequest, authorization:
     _check_kb_edit_permission(kb_id, user_dict)
 
     def _update():
-        import sqlite3
-
-        db_path = str(_DB_PATH)
-        conn = sqlite3.connect(db_path)
-        try:
+        with user_db.locked_transaction() as conn:
             conn.execute(
                 "INSERT INTO kb_metadata (kb_id, name) VALUES (?, ?) "
                 "ON CONFLICT(kb_id) DO UPDATE SET name = ?",
                 (kb_id, req.name, req.name),
             )
-            conn.commit()
-        finally:
-            conn.close()
 
     await asyncio.to_thread(_update)
     return {"status": "updated", "name": req.name}

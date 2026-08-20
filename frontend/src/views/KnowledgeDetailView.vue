@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, watch } from 'vue'
+import { ref, onMounted, nextTick, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../utils/api'
 import { downloadLibraryFile } from '../api/files'
@@ -37,6 +37,8 @@ const kbName = ref('')
 const kbDescription = ref('')
 const kbOverview = ref('')
 const documents = ref<any[]>([])
+const effectiveRole = ref<'read' | 'manage' | 'administer'>('read')
+const canManage = computed(() => effectiveRole.value === 'manage' || effectiveRole.value === 'administer')
 
 // Overview editing
 const editingOverview = ref(false)
@@ -96,6 +98,7 @@ async function loadDetail() {
     kbDescription.value = data.description || ''
     kbOverview.value = data.overview || ''
     documents.value = data.documents || []
+    effectiveRole.value = data.effective_role || 'read'
   } catch (err: any) {
     if (err.response?.status === 404) {
       ElMessage.error('知识库不存在')
@@ -415,7 +418,7 @@ function parseToc(toc: string | object): any {
         </el-button>
         <div class="kb-info-title-row">
           <h1 class="kb-info-title">{{ kbName }}</h1>
-          <el-dropdown trigger="click" v-model:visible="showSettingsMenu">
+          <el-dropdown v-if="canManage" trigger="click" v-model:visible="showSettingsMenu">
             <el-button text size="small" class="settings-btn">
               <el-icon><Setting /></el-icon>
             </el-button>
@@ -453,7 +456,7 @@ function parseToc(toc: string | object): any {
         <div class="kb-section">
           <div class="kb-section-header">
             <h3 class="kb-section-title">概述</h3>
-            <el-button v-if="!editingOverview" text size="small" @click="startEditOverview">
+            <el-button v-if="canManage && !editingOverview" text size="small" @click="startEditOverview">
               <el-icon style="margin-right: 4px;"><Edit /></el-icon>
               编辑
             </el-button>
@@ -476,7 +479,7 @@ function parseToc(toc: string | object): any {
         <div class="kb-section">
           <div class="kb-section-header">
             <h3 class="kb-section-title">文档</h3>
-            <el-button type="primary" size="small" text @click="openAddDialog">
+            <el-button v-if="canManage" type="primary" size="small" text @click="openAddDialog">
               <el-icon style="margin-right: 4px;"><Plus /></el-icon>
               添加
             </el-button>
@@ -509,7 +512,7 @@ function parseToc(toc: string | object): any {
                     :data-test="`open-spreadsheet-${doc.document_id}-${doc.document_version_id}`"
                     @click.stop="openSpreadsheet(doc)"
                   >打开表格</el-button>
-                  <el-button text size="small" @click.stop="removeFromKB(doc)" title="从知识库移除">移除</el-button>
+                  <el-button v-if="canManage" text size="small" @click.stop="removeFromKB(doc)" title="从知识库移除">移除</el-button>
                   <span v-if="doc.toc" class="toc-toggle">{{ doc._showToc ? '▲' : '▼' }}</span>
                 </div>
               </div>
