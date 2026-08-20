@@ -61,6 +61,10 @@ npm run build
 
 自动备份默认每 7 天执行并保留最近 8 份；命令、排除项和隔离恢复演练见[部署指南的“数据与备份”章节](docs/deployment.md#数据与备份)。
 
+## 组织知识库权限
+
+知识库按公司、组织和敏感领域归属，文档继承所在知识库权限；文件页面仍保留个人私密、共享、公开三级权限。固定组织数据初始化、旧知识库迁移、账号停用和回滚方法见 [组织知识库权限运维手册](docs/organization-authorization-operations.md)。
+
 ## 安全提示
 
 生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、数据库、索引和上传数据均已从版本控制及 Docker 构建上下文中排除。
