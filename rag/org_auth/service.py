@@ -34,6 +34,15 @@ class OrgAuthorizationService:
             target in memberships, manager, allow_role, denied,
         ))
 
+    def can_manage_org(self, user_id: int, org_code: str) -> bool:
+        user = self.db.get_user_by_id(user_id)
+        if user and user.get("is_admin"):
+            return self.repo.get_unit(org_code) is not None
+        person = self.repo.get_person_for_user(user_id)
+        if person is None or not person["active"]:
+            return False
+        return any(org_code in self.repo.descendants(scope) for scope in self.repo.manager_scopes(person["person_code"]))
+
     def authorize(self, user_id: int, kb_id: str, required: OrgRole = OrgRole.READ) -> AuthorizationDecision:
         decision = self.decision(user_id, kb_id)
         if role_allows(decision.role, required):

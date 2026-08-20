@@ -1784,6 +1784,7 @@ class BatchImportRequest(BaseModel):
 class CreateKBRequest(BaseModel):
     name: str = Field(..., description="知识库名称")
     scope: str = Field(default="private", pattern="^(private|public)$", description="可见范围：private 或 public")
+    org_unit_code: str | None = Field(default=None, description="所属组织编号")
 
 
 class KBResponse(BaseModel):
@@ -1797,6 +1798,10 @@ class KBResponse(BaseModel):
 
 @app.get("/knowledge-bases", summary="列出知识库", description="获取所有知识库列表")
 async def list_knowledge_bases(user: dict = Depends(require_user)):
+    from rag.org_auth.repository import OrgRepository
+    from rag.org_auth.service import OrgAuthorizationService
+    if OrgRepository(user_db).get_person_for_user(int(user["id"])) is not None:
+        return await asyncio.to_thread(OrgAuthorizationService(user_db).visible_knowledge_bases, int(user["id"]))
     manager = KnowledgeBaseManager()
     result = []
     for kb in await asyncio.to_thread(manager.list_kbs):
@@ -1827,6 +1832,24 @@ async def list_knowledge_bases(user: dict = Depends(require_user)):
 @app.post("/knowledge-bases", summary="创建知识库", description="创建一个新的知识库")
 async def create_knowledge_base(req: CreateKBRequest, user: dict = Depends(require_user)):
 
+    from rag.org_auth.repository import OrgRepository
+    from rag.org_auth.service import OrgAuthorizationService
+    org_repo = OrgRepository(user_db)
+    if org_repo.get_person_for_user(int(user["id"])) is not None:
+        if not req.org_unit_code or not OrgAuthorizationService(user_db).can_manage_org(int(user["id"]), req.org_unit_code):
+            raise HTTPException(status_code=404, detail="资源不存在")
+
+        def _create_org_kb():
+            manager = KnowledgeBaseManager()
+            kb_id = manager.create_kb(req.name)
+            with user_db.locked_transaction() as conn:
+                conn.execute("INSERT INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb_id, req.name))
+                conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, req.org_unit_code))
+            return kb_id
+
+        kb_id = await asyncio.to_thread(_create_org_kb)
+        return {"kb_id": kb_id, "name": req.name, "kb_type": "organization", "org_unit_code": req.org_unit_code, "effective_role": "manage"}
+
     def _create():
         manager = KnowledgeBaseManager()
         kb_id = manager.create_kb(req.name)
@@ -1847,6 +1870,9 @@ async def update_kb_scope(
     req: KBScopeRequest,
     user: dict = Depends(require_user),
 ):
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        raise HTTPException(status_code=404, detail="资源不存在")
     require_kb_edit(user_db, kb_id, user)
     if req.scope == "private" and await asyncio.to_thread(user_db.list_kb_shared_users, kb_id):
         raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
@@ -1891,14 +1917,10 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
     # Clean up SQLite metadata
     def _cleanup():
-        import sqlite3
-        conn = sqlite3.connect(str(_DB_PATH))
-        try:
+        with user_db.locked_transaction() as conn:
             conn.execute("DELETE FROM kb_documents WHERE kb_id = ?", (kb_id,))
+            conn.execute("DELETE FROM kb_org_policies WHERE kb_id = ?", (kb_id,))
             conn.execute("DELETE FROM kb_metadata WHERE kb_id = ?", (kb_id,))
-            conn.commit()
-        finally:
-            conn.close()
     await asyncio.to_thread(_cleanup)
     return {"status": "deleted", "kb_id": kb_id}
 
@@ -2356,6 +2378,9 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
 @app.post("/knowledge-bases/{kb_id}/share", summary="共享知识库给指定用户")
 async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
     meta = user_db.get_kb_metadata(kb_id)
@@ -2382,6 +2407,9 @@ async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str
 @app.delete("/knowledge-bases/{kb_id}/share/{user_id}", summary="取消知识库共享", status_code=204)
 async def unshare_knowledge_base(kb_id: str, user_id: int, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
     meta = user_db.get_kb_metadata(kb_id)
@@ -2397,6 +2425,9 @@ async def unshare_knowledge_base(kb_id: str, user_id: int, authorization: str = 
 @app.get("/knowledge-bases/{kb_id}/shares", summary="查看知识库共享列表")
 async def list_kb_shares(kb_id: str, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
+    from rag.org_auth.repository import OrgRepository
+    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
     meta = user_db.get_kb_metadata(kb_id)

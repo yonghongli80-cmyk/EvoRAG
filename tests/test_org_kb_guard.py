@@ -67,3 +67,19 @@ def test_visible_knowledge_bases_return_org_metadata(tmp_path):
         }]
     finally:
         db.close()
+
+
+def test_manager_can_create_only_inside_descendant_scope(tmp_path):
+    db = UserDB(str(tmp_path / "create.db"))
+    try:
+        manager = db.create_user("manager", "Password1")
+        repo = OrgRepository(db)
+        repo.create_units((("DIV", None, "事业群", "division"), ("TEAM", "DIV", "一组", "team"), ("PEER", None, "其他组", "team")))
+        with db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_people(person_code,user_id,display_name,job_title) VALUES('P1',?,'甲','负责人')", (manager,))
+            conn.execute("INSERT INTO org_manager_scopes VALUES('P1','DIV')")
+        service = OrgAuthorizationService(db)
+        assert service.can_manage_org(manager, "TEAM") is True
+        assert service.can_manage_org(manager, "PEER") is False
+    finally:
+        db.close()
