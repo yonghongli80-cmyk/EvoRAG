@@ -22,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.generator import generate_structured
 from rag.user_db import UserDB
+from fastapi import HTTPException
+from rag.api_security import require_doc_edit
 
 MIN_CONFIDENCE = 0.70
 PROPOSAL_TTL_SECONDS = 15 * 60
@@ -115,15 +117,11 @@ def _default_candidate_docs(db: UserDB, user: dict) -> dict[int, dict]:
         full = db.get_document_permission_by_id(doc["id"])
         if full is None or full.get("deleted_at") or full["current_version_id"] is None:
             continue
-        can_edit = (
-            user.get("is_admin")
-            or full["owner_id"] == user["id"]
-            or (
-                full.get("scope") == "shared"
-                and db.is_document_shared(full["id"], user["id"], permission="edit")
-            )
-        )
-        if can_edit:
+        try:
+            require_doc_edit(db, full["doc_name"], full["kb_id"], user)
+        except HTTPException:
+            continue
+        else:
             candidates[full["id"]] = full
     return candidates
 
@@ -210,14 +208,9 @@ class OrganizationService:
             return "unknown_tag"
         if item.confidence < MIN_CONFIDENCE:
             return "low_confidence"
-        if not (
-            actor.get("is_admin")
-            or doc["owner_id"] == actor["id"]
-            or (
-                doc.get("scope") == "shared"
-                and self.db.is_document_shared(doc["id"], actor["id"], permission="edit")
-            )
-        ):
+        try:
+            require_doc_edit(self.db, doc["doc_name"], doc["kb_id"], actor)
+        except HTTPException:
             return "permission_conflict"
         return ""
 
@@ -245,12 +238,24 @@ class OrganizationService:
 
         items = self.db.list_organization_items(proposal_id)
         selected = [item for item in items if item["id"] in selected_item_ids and item["status"] == "executable"]
+        authorized_ids: set[int] = set()
+        for item in selected:
+            document = self.db.get_document_permission_by_id(item["document_id"])
+            if document is None:
+                continue
+            try:
+                require_doc_edit(
+                    self.db, document["doc_name"], document["kb_id"], actor
+                )
+            except HTTPException:
+                continue
+            authorized_ids.add(int(item["document_id"]))
 
         with self.db._lock, self.db.transaction(immediate=True):
             batch_id = self.db._create_organization_batch_in_tx(proposal_id, actor["id"], idempotency_key)
             batch_items = []
             for item in selected:
-                status, reason_code, before, after, before_version, after_version = self._apply_item_in_tx(item, actor)
+                status, reason_code, before, after, before_version, after_version = self._apply_item_in_tx(item, authorized_ids)
                 row_id = self._record_batch_item_in_tx(
                     batch_id, item["document_id"], before, after, before_version, after_version, status, reason_code
                 )
@@ -266,7 +271,7 @@ class OrganizationService:
             batch_id=batch_id, proposal_id=proposal_id, status="applied", items=tuple(batch_items)
         )
 
-    def _apply_item_in_tx(self, item: dict, actor: dict):
+    def _apply_item_in_tx(self, item: dict, authorized_ids: set[int]):
         doc = self.db._conn.execute(
             "SELECT id, doc_name, kb_id, owner_id, scope, metadata_version, deleted_at, "
             "logical_path, tags_json, document_type "
@@ -277,15 +282,7 @@ class OrganizationService:
             return "permission_conflict", "document_missing", None, None, 0, 0
         if doc["deleted_at"] is not None:
             return "permission_conflict", "deleted", doc["logical_path"], None, 0, 0
-        can_edit = (
-            actor.get("is_admin")
-            or doc["owner_id"] == actor["id"]
-            or (
-                doc["scope"] == "shared"
-                and self.db.is_document_shared(doc["id"], actor["id"], permission="edit")
-            )
-        )
-        if not can_edit:
+        if int(doc["id"]) not in authorized_ids:
             return "permission_conflict", "acl", doc["logical_path"], None, 0, 0
         before_version = doc["metadata_version"]
         after_path = item["target_path"]

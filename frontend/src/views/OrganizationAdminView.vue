@@ -7,7 +7,7 @@ const units=ref<OrgUnit[]>([]), selected=ref(''), detail=ref<any>(null), preview
 const editing=ref<any>(null)
 async function selectUnit(code:string){selected.value=code;detail.value=await getOrganizationUnit(code);preview.value=null}
 async function previewPerson(person:any){preview.value=await previewOrganizationUser(person.user_id)}
-function editPerson(person:any){editing.value={...person,primary_org_code:selected.value,secondary_org_codes:'',manager_org_codes:'',sensitivities:''}}
+function editPerson(person:any){editing.value={...person,primary_org_code:person.primary_org_code||selected.value,secondary_org_codes:(person.secondary_org_codes||[]).join(','),manager_org_codes:(person.manager_org_codes||[]).join(','),sensitivities:(person.sensitivities||[]).join(',')}}
 async function savePerson(){const p=editing.value;await updateOrganizationPerson(p.person_code,{active:Boolean(p.active),job_title:p.job_title,primary_org_code:p.primary_org_code,secondary_org_codes:p.secondary_org_codes.split(',').map((v:string)=>v.trim()).filter(Boolean),manager_org_codes:p.manager_org_codes.split(',').map((v:string)=>v.trim()).filter(Boolean),sensitivities:p.sensitivities.split(',').map((v:string)=>v.trim()).filter(Boolean)});editing.value=null;await selectUnit(selected.value)}
 onMounted(async()=>{units.value=await getOrganizationTree();audit.value=await getOrganizationAudit();if(units.value.length)await selectUnit(units.value[0].code)})
 function roleText(role:string){return role==='read'?'可查看':role==='manage'?'可管理':'可管理全部'}

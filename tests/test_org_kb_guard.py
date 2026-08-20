@@ -5,6 +5,7 @@ from rag.api_security import (
     require_doc_edit,
     require_doc_view,
     require_kb_edit,
+    require_kb_administer,
     require_kb_view,
     require_personal_document_acl,
 )
@@ -112,6 +113,14 @@ def test_manager_can_create_only_inside_descendant_scope(tmp_path):
         service = OrgAuthorizationService(db)
         assert service.can_manage_org(manager, "TEAM") is True
         assert service.can_manage_org(manager, "PEER") is False
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+                "VALUES('team-kb','TEAM','organization')"
+            )
+        with pytest.raises(HTTPException) as denied:
+            require_kb_administer(db, "team-kb", db.get_user_by_id(manager))
+        assert denied.value.status_code == 404
     finally:
         db.close()
 

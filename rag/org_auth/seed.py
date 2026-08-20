@@ -28,6 +28,29 @@ def seed_organization(
     manifest = build_seed_manifest()
     repo = OrgRepository(db)
     repo.install_schema()
+    with db.locked_read() as conn:
+        collisions = []
+        for person in manifest.people:
+            row = conn.execute(
+                "SELECT u.id,p.seed_key,p.person_code FROM users u "
+                "LEFT JOIN org_people p ON p.user_id=u.id WHERE u.username=?",
+                (person.username,),
+            ).fetchone()
+            if row is not None and not (
+                row["seed_key"] == person.person_code
+                and row["person_code"] == person.person_code
+            ):
+                collisions.append(f"username:{person.username}")
+        for kb in manifest.knowledge_bases:
+            row = conn.execute(
+                "SELECT m.kb_id,p.seed_key FROM kb_metadata m "
+                "LEFT JOIN kb_org_policies p ON p.kb_id=m.kb_id WHERE m.kb_id=?",
+                (kb.kb_id,),
+            ).fetchone()
+            if row is not None and row["seed_key"] != kb.kb_id:
+                collisions.append(f"knowledge_base:{kb.kb_id}")
+    if collisions:
+        raise ValueError("seed collision: " + ", ".join(collisions[:10]))
     migrate_legacy_knowledge_bases(db)
     created_people = created_units = created_kbs = 0
     admin_user_id = 0
@@ -54,6 +77,14 @@ def seed_organization(
             created_kbs += cur.rowcount
             conn.execute("INSERT OR IGNORE INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb.kb_id, kb.name))
         conn.execute("INSERT INTO org_seed_state(seed_key,seed_version,status) VALUES('fictional-org',1,'complete') ON CONFLICT(seed_key) DO UPDATE SET status='complete',updated_at=strftime('%s','now')")
+        seeded_people = conn.execute(
+            "SELECT count(*) FROM org_people WHERE seed_key LIKE 'P-%'"
+        ).fetchone()[0]
+        seeded_kbs = conn.execute(
+            "SELECT count(*) FROM kb_org_policies WHERE seed_key LIKE 'kb_%'"
+        ).fetchone()[0]
+        if seeded_people != len(manifest.people) or seeded_kbs != len(manifest.knowledge_bases):
+            raise ValueError("seed integrity validation failed")
     if not metadata_only:
         root = documents_root or (Path(db.db_path).resolve().parent / "kb_files")
         for kb in manifest.knowledge_bases:
@@ -72,7 +103,7 @@ def seed_organization(
                         permission_id = int(conn.execute("INSERT INTO document_permissions(doc_name,kb_id,owner_id,scope) VALUES(?,?,?,'private')", (filename, kb.kb_id, admin_user_id)).lastrowid)
                     else:
                         permission_id = int(permission[0])
-                    conn.execute("INSERT INTO kb_documents(kb_id,filename,file_path,status,document_id) VALUES(?,?,?,'pending',?) ON CONFLICT(kb_id,filename) DO UPDATE SET file_path=excluded.file_path", (kb.kb_id, filename, str(destination.resolve()), permission_id))
+                    conn.execute("INSERT INTO kb_documents(kb_id,filename,file_path,status,document_id) VALUES(?,?,?,'pending',?) ON CONFLICT(kb_id,filename) DO UPDATE SET file_path=excluded.file_path", (kb.kb_id, filename, relative.as_posix(), permission_id))
                 if index_document is not None:
                     try:
                         chunk_count = int(index_document(kb.kb_id, str(destination), filename, permission_id))

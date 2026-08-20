@@ -425,8 +425,12 @@ def confirm_archive_import(
     container = db.get_document_permission_by_id(manifest["container_document_id"])
     if container is None:
         raise ArchiveConfirmationError("container_missing")
-    if not (actor.get("is_admin") or container["owner_id"] == actor["id"]):
-        raise ArchiveConfirmationError("no_edit_permission")
+    from fastapi import HTTPException
+    from rag.api_security import require_doc_edit
+    try:
+        require_doc_edit(db, container["doc_name"], container["kb_id"], actor)
+    except HTTPException as exc:
+        raise ArchiveConfirmationError("no_edit_permission") from exc
 
     current = db.get_current_document_version(container["id"])
     current_no = current["version_no"] if current else 0

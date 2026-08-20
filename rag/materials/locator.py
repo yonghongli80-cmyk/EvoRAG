@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from rag.materials.models import CitationLocation, MaterialLocationQuery
+from rag.api_security import require_doc_view
+from fastapi import HTTPException
 from rag.user_db import UserDB
 
 
@@ -45,12 +47,11 @@ def _visible_documents(db: UserDB, user: dict) -> dict[int, dict]:
         full = db.get_document_permission_by_id(doc["id"])
         if full is None or full.get("deleted_at") or full["current_version_id"] is None:
             continue
-        if (
-            user.get("is_admin")
-            or full["owner_id"] == user["id"]
-            or full.get("scope") == "public"
-            or db.is_document_shared(full["id"], user["id"])
-        ):
+        try:
+            require_doc_view(db, full["doc_name"], full["kb_id"], user)
+        except HTTPException:
+            continue
+        else:
             visible[full["id"]] = full
     return visible
 

@@ -27,6 +27,7 @@ from rag.api_security import (
     require_doc_edit,
     require_personal_document_acl,
     require_kb_edit,
+    require_kb_administer,
     require_kb_view,
     require_user,
 )
@@ -42,6 +43,7 @@ from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
 from rag.org_auth.repository import OrgRepository, is_org_policy
+from rag.org_auth.audit import OrgAuditService
 from rag.materials.api import router as materials_router
 from rag.spreadsheets.api import router as spreadsheets_router
 from rag.operations_api import router as operations_router
@@ -672,6 +674,12 @@ async def login(req: LoginRequest):
         "user_id": user["id"], "username": user["username"],
         "security_version": profile.security_version if profile else None,
     })
+    if profile is not None:
+        await asyncio.to_thread(
+            OrgAuditService(user_db).record,
+            int(user["id"]), "login_success", "person", profile.person_code,
+            "success", "authenticated",
+        )
     return TokenResponse(token=token, username=user["username"])
 
 
@@ -754,6 +762,14 @@ def _check_kb_edit_permission(kb_id: str, user_dict: dict) -> None:
     if user_db.is_kb_shared(kb_id, user_dict["id"], permission="edit"):
         return
     raise HTTPException(status_code=403, detail="仅知识库所有者、管理员或共享编辑者可操作")
+
+
+def _audit_org_event(user: dict, action: str, kb_id: str, reason: str = "authorized") -> None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
+        OrgAuditService(user_db).record(
+            int(user["id"]), action, "knowledge_base", kb_id,
+            "success", reason,
+        )
 
 
 @app.get("/users", summary="搜索用户", description="按用户名搜索用户，用于共享功能")
@@ -1858,6 +1874,7 @@ async def create_knowledge_base(req: CreateKBRequest, user: dict = Depends(requi
             return kb_id
 
         kb_id = await asyncio.to_thread(_create_org_kb)
+        await asyncio.to_thread(_audit_org_event, user, "kb_created", kb_id)
         return {"kb_id": kb_id, "name": req.name, "kb_type": "organization", "org_unit_code": req.org_unit_code, "effective_role": "manage"}
 
     def _create():
@@ -1900,7 +1917,7 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
     if kb_id == "rag_docs":
         raise HTTPException(status_code=400, detail="不能删除系统集合 rag_docs")
 
-    require_kb_edit(user_db, kb_id, user)
+    require_kb_administer(user_db, kb_id, user)
 
     manager = KnowledgeBaseManager()
     try:
@@ -1925,6 +1942,7 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
+    await asyncio.to_thread(_audit_org_event, user, "kb_deleted", kb_id)
     # Clean up SQLite metadata
     def _cleanup():
         with user_db.locked_transaction() as conn:
@@ -2038,6 +2056,7 @@ async def add_document_to_kb(
         logger.exception("KB document upload failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
 
+    await asyncio.to_thread(_audit_org_event, user, "document_uploaded", kb_id)
     return {
         "status": "added",
         "kb_id": kb_id,
@@ -2080,6 +2099,7 @@ async def remove_document_from_kb(
         logger.exception("KB document deletion failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文档删除失败") from exc
 
+    await asyncio.to_thread(_audit_org_event, user, "document_deleted", kb_id)
     return {"status": "removed", "kb_id": kb_id, "doc_name": doc_name}
 
 
@@ -2127,6 +2147,7 @@ async def query_knowledge_base(
         {"doc_name": c.doc_name, "chunk_index": c.chunk_index, "text": c.text}
         for c in visible_chunks[:req.top_k]
     ]
+    await asyncio.to_thread(_audit_org_event, user, "kb_queried", kb_id)
     return {"kb_id": kb_id, "results": results}
 
 
@@ -2193,6 +2214,7 @@ async def rename_knowledge_base(kb_id: str, req: KBRenameRequest, authorization:
             )
 
     await asyncio.to_thread(_update)
+    await asyncio.to_thread(_audit_org_event, user_dict, "kb_renamed", kb_id)
     return {"status": "updated", "name": req.name}
 
 
@@ -2249,7 +2271,8 @@ async def generate_kb_toc(kb_id: str, authorization: str = Header(default="")):
             for doc in docs:
                 filename = doc["filename"]
                 # 使用 loader 解析文档内容（支持 docx/xlsx/pdf 等二进制格式）
-                file_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
+                stored_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
+                file_path = stored_path if stored_path.is_absolute() else resolve_stored_path(KB_FILES_ROOT, str(stored_path))
                 if file_path.is_file():
                     try:
                         content = load_document(str(file_path))
@@ -2298,7 +2321,8 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
             all_content = []
             for doc in docs:
                 filename = doc["filename"]
-                file_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
+                stored_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
+                file_path = stored_path if stored_path.is_absolute() else resolve_stored_path(KB_FILES_ROOT, str(stored_path))
                 if file_path.is_file():
                     try:
                         content = load_document(str(file_path))

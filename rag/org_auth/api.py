@@ -22,14 +22,15 @@ def _company_admin(user: dict) -> None:
 
 @router.get("/login/accounts")
 def login_accounts(request: Request, q: str = Query(default="", max_length=50)):
-    pattern = f"%{q.strip()}%"
+    term = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{term}%"
     with _db(request).locked_read() as conn:
         rows = conn.execute("""
             SELECT u.username,p.person_code,p.display_name,p.job_title,o.name AS department
             FROM org_people p JOIN users u ON u.id=p.user_id
             LEFT JOIN org_memberships m ON m.person_code=p.person_code AND m.is_primary=1
             LEFT JOIN org_units o ON o.code=m.org_code
-            WHERE p.active=1 AND (u.username LIKE ? OR p.person_code LIKE ? OR p.display_name LIKE ? OR p.job_title LIKE ? OR o.name LIKE ?)
+            WHERE p.active=1 AND (u.username LIKE ? ESCAPE '\\' OR p.person_code LIKE ? ESCAPE '\\' OR p.display_name LIKE ? ESCAPE '\\' OR p.job_title LIKE ? ESCAPE '\\' OR o.name LIKE ? ESCAPE '\\')
             ORDER BY p.person_code LIMIT 50
         """, (pattern,) * 5).fetchall()
     return [dict(row) for row in rows]
@@ -64,6 +65,23 @@ def organization_unit(code: str, request: Request, user: dict = Depends(require_
           FROM org_memberships m JOIN org_people p ON p.person_code=m.person_code JOIN users u ON u.id=p.user_id
           WHERE m.org_code=? ORDER BY p.person_code
         """, (code,))]
+        for person in people:
+            person["primary_org_code"] = next((r[0] for r in conn.execute(
+                "SELECT org_code FROM org_memberships WHERE person_code=? AND is_primary=1",
+                (person["person_code"],),
+            )), None)
+            person["secondary_org_codes"] = [r[0] for r in conn.execute(
+                "SELECT org_code FROM org_memberships WHERE person_code=? AND is_primary=0 ORDER BY org_code",
+                (person["person_code"],),
+            )]
+            person["manager_org_codes"] = [r[0] for r in conn.execute(
+                "SELECT org_code FROM org_manager_scopes WHERE person_code=? ORDER BY org_code",
+                (person["person_code"],),
+            )]
+            person["sensitivities"] = [r[0] for r in conn.execute(
+                "SELECT sensitivity FROM org_sensitive_qualifications WHERE person_code=? ORDER BY sensitivity",
+                (person["person_code"],),
+            )]
         kbs = [dict(r) for r in conn.execute("SELECT p.kb_id,m.name,p.kb_type,p.sensitivity FROM kb_org_policies p JOIN kb_metadata m ON m.kb_id=p.kb_id WHERE p.org_code=?", (code,))]
     return {"unit": next(row for row in visible if row["code"] == code), "people": people, "knowledge_bases": kbs}
 
@@ -109,9 +127,11 @@ def update_person(person_code: str, body: PersonUpdate, request: Request, user: 
         if body.manager_org_codes is not None:
             conn.execute("DELETE FROM org_manager_scopes WHERE person_code=?", (person_code,))
             conn.executemany("INSERT INTO org_manager_scopes VALUES(?,?)", ((person_code, code) for code in body.manager_org_codes))
+            conn.execute("UPDATE org_people SET security_version=security_version+1 WHERE person_code=?", (person_code,))
         if body.sensitivities is not None:
             conn.execute("DELETE FROM org_sensitive_qualifications WHERE person_code=?", (person_code,))
             conn.executemany("INSERT INTO org_sensitive_qualifications VALUES(?,?)", ((person_code, value) for value in body.sensitivities))
+            conn.execute("UPDATE org_people SET security_version=security_version+1 WHERE person_code=?", (person_code,))
     OrgAuditService(db).record(int(user["id"]), "person_updated", "person", person_code, "success", "admin_update")
     return {"status": "updated"}
 
@@ -131,7 +151,43 @@ def create_grant(body: GrantRequest, request: Request, user: dict = Depends(requ
         raise HTTPException(status_code=400, detail="授权参数无效")
     db = _db(request)
     with db.locked_transaction() as conn:
+        kb = conn.execute(
+            "SELECT 1 FROM kb_org_policies WHERE kb_id=? AND active=1", (body.kb_id,)
+        ).fetchone()
+        if kb is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        if body.subject_type == "user":
+            try:
+                subject_user_id = int(body.subject_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="授权参数无效") from exc
+            subject = conn.execute(
+                "SELECT person_code FROM org_people WHERE user_id=? AND active=1",
+                (subject_user_id,),
+            ).fetchone()
+        else:
+            subject = conn.execute(
+                "SELECT code FROM org_units WHERE code=? AND active=1", (body.subject_id,)
+            ).fetchone()
+        if subject is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
         cur = conn.execute("INSERT INTO kb_org_grants(kb_id,subject_type,subject_id,role,effect,granted_by) VALUES(?,?,?,?,?,?)", (body.kb_id, body.subject_type, body.subject_id, body.role, body.effect, user["id"]))
+        if body.subject_type == "user":
+            conn.execute(
+                "UPDATE org_people SET security_version=security_version+1 WHERE user_id=?",
+                (subject_user_id,),
+            )
+        else:
+            conn.execute("""
+                WITH RECURSIVE tree(code) AS (
+                  SELECT code FROM org_units WHERE code=?
+                  UNION ALL SELECT u.code FROM org_units u JOIN tree t ON u.parent_code=t.code
+                )
+                UPDATE org_people SET security_version=security_version+1
+                WHERE person_code IN (
+                  SELECT DISTINCT m.person_code FROM org_memberships m JOIN tree t ON t.code=m.org_code
+                )
+            """, (body.subject_id,))
     OrgAuditService(db).record(int(user["id"]), "grant_created", "knowledge_base", body.kb_id, "success", body.effect)
     return {"id": int(cur.lastrowid)}
 

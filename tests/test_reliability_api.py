@@ -114,6 +114,24 @@ def test_compare_rejects_invisible_document(isolated_api, make_user):
     assert "invisible.pdf" not in response.text
 
 
+def test_compare_rejects_legacy_owner_after_kb_quarantine(isolated_api, make_user):
+    owner, headers = make_user("legacy-owner")
+    db = isolated_api.app.state.user_db
+    document_id = db.create_document_permission("legacy.pdf", "legacy-kb", owner["id"])
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,kb_type) VALUES('legacy-kb','unassigned')"
+        )
+
+    response = isolated_api.post(
+        "/reliability/compare",
+        headers=headers,
+        json={"question": "compare", "document_ids": [document_id], "dimensions": []},
+    )
+
+    assert response.status_code == 403
+
+
 def test_answer_reliability_returns_only_the_owners_persisted_fields(isolated_api, make_user):
     owner, owner_headers = make_user("owner")
     conversation_id = isolated_api.app.state.user_db.create_conversation(owner["id"])

@@ -40,7 +40,8 @@ def promote_stage(stage: Path, destination: Path) -> Path:
 
 def resolve_stored_path(root: Path, stored_path: str) -> Path:
     resolved_root = root.resolve()
-    resolved = Path(stored_path).resolve()
+    candidate = Path(stored_path)
+    resolved = (candidate if candidate.is_absolute() else resolved_root / candidate).resolve()
     if not resolved.is_relative_to(resolved_root):
         raise ValueError("stored path escapes kb root")
     return resolved

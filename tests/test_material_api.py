@@ -41,6 +41,41 @@ def test_upload_returns_queued_version_without_blocking_for_index(isolated_api, 
     assert body["version_id"]
 
 
+def test_organization_material_upload_requires_manage_role(isolated_api, make_user):
+    _alice, headers = make_user("org-member")
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEAM','协作组','team')")
+        conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb_org','组织库')")
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+            "VALUES('kb_org','TEAM','organization')"
+        )
+
+    response = isolated_api.post(
+        "/materials/upload?kb_id=kb_org",
+        headers=headers,
+        files={"file": ("policy.txt", b"content", "text/plain")},
+    )
+
+    assert response.status_code == 404
+    assert db.get_document_permission("policy.txt", "kb_org") is None
+
+
+def test_unassigned_legacy_owner_cannot_recycle_document(isolated_api, make_user):
+    alice, headers = make_user("legacy-owner")
+    db = isolated_api.app.state.user_db
+    document_id = db.create_document_permission("legacy.txt", "legacy-kb", alice["id"])
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,kb_type) VALUES('legacy-kb','unassigned')"
+        )
+
+    response = isolated_api.delete(f"/materials/{document_id}", headers=headers)
+
+    assert response.status_code == 404
+
+
 def test_upload_archive_returns_manifest_preview(isolated_api, make_user):
     _, user_headers = make_user("alice")
     response = isolated_api.post(

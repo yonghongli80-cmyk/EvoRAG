@@ -133,6 +133,28 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
     return meta
 
 
+def require_kb_administer(db: UserDB, kb_id: str, user: dict) -> dict:
+    """Require company-administrator authority for an organization KB."""
+    meta = db.get_kb_metadata(kb_id)
+    policy = OrgRepository(db).get_kb_policy(kb_id)
+    if not is_org_policy(policy):
+        return require_kb_edit(db, kb_id, user)
+    decision = OrgAuthorizationService(db).authorize(
+        int(user["id"]), kb_id, OrgRole.ADMINISTER
+    )
+    if not decision.allowed:
+        OrgAuditService(db).record(
+            int(user["id"]), "kb_access_denied", "knowledge_base", kb_id,
+            "denied", decision.reason,
+        )
+        raise HTTPException(status_code=404, detail="资源不存在")
+    return {
+        **(meta or {"kb_id": kb_id}),
+        **policy,
+        "effective_role": decision.role.value,
+    }
+
+
 def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
     if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):

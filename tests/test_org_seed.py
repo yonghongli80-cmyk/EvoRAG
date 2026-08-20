@@ -1,3 +1,6 @@
+import pytest
+from pathlib import Path
+
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.seed import seed_organization
 from rag.org_auth.seed_manifest import build_seed_manifest
@@ -49,6 +52,20 @@ def test_seed_quarantines_preexisting_personal_knowledge_bases(tmp_path, monkeyp
         db.close()
 
 
+def test_seed_rejects_fixed_username_and_kb_id_collisions(tmp_path, monkeypatch):
+    monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
+    db = UserDB(str(tmp_path / "collision.db"))
+    try:
+        owner = db.create_user("demo001", "DifferentPassword1")
+        db.create_kb_metadata("kb_company_public", "用户已有库", owner, "private")
+        with pytest.raises(ValueError, match="seed collision"):
+            seed_organization(db, metadata_only=True)
+        assert OrgRepository(db).get_person_for_user(owner) is None
+        assert OrgRepository(db).get_kb_policy("kb_company_public") is None
+    finally:
+        db.close()
+
+
 def test_seed_documents_are_resumable_and_indexed_once(tmp_path, monkeypatch):
     monkeypatch.setattr("rag.org_auth.seed.hash_password", lambda value: f"hash:{value}")
     calls = []
@@ -63,6 +80,7 @@ def test_seed_documents_are_resumable_and_indexed_once(tmp_path, monkeypatch):
             rows = conn.execute("SELECT status,chunk_count,file_path FROM kb_documents").fetchall()
         assert first_calls == 100
         assert rows and all(row["status"] == "indexed" and row["chunk_count"] == 2 for row in rows)
+        assert all(not Path(row["file_path"]).is_absolute() for row in rows)
         assert all(resolve_stored_path(tmp_path / "docs", row["file_path"]).is_file() for row in rows)
         seed_organization(db, index_document=index_document, documents_root=tmp_path / "docs")
         assert len(calls) == first_calls

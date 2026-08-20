@@ -15,7 +15,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.api_security import get_user_db, require_doc_view, require_user
+from rag.api_security import (
+    get_user_db,
+    require_doc_edit,
+    require_doc_view,
+    require_kb_edit,
+    require_user,
+)
 from rag.generator import StructuredOutputError
 from rag.materials.archives import (
     ArchiveConfirmationError,
@@ -34,6 +40,10 @@ from rag.materials.organizer import (
 )
 from rag.materials.recycle import RecycleError, delete_to_recycle, restore_from_recycle
 from rag.materials.staging import MaterialTooLarge, stream_upload_to_stage
+from rag.org_auth.models import OrgRole
+from rag.org_auth.audit import OrgAuditService
+from rag.org_auth.repository import OrgRepository, is_org_policy
+from rag.org_auth.service import OrgAuthorizationService
 
 router = APIRouter()
 
@@ -86,6 +96,14 @@ def _limits() -> MaterialLimits:
 
 def _archive_limits() -> ArchiveLimits:
     return ArchiveLimits()
+
+
+def _audit_org_material(db, user: dict, action: str, kb_id: str) -> None:
+    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
+        OrgAuditService(db).record(
+            int(user["id"]), action, "knowledge_base", kb_id,
+            "success", "authorized",
+        )
 
 
 def _read_signature(path: Path) -> bytes:
@@ -193,6 +211,9 @@ async def upload_material(
     user: dict = Depends(require_user),
 ):
     db = get_user_db(request)
+    policy = OrgRepository(db).get_kb_policy(_kb_id(request))
+    if is_org_policy(policy):
+        require_kb_edit(db, _kb_id(request), user)
     registry = build_default_format_registry()
     limits = _limits()
     try:
@@ -211,6 +232,7 @@ async def upload_material(
     if resolution.capability is not None and resolution.capability.archive_container:
         service = ArchiveService(db, _versions_root(request), registry, _archive_limits())
         preview = service.upload_zip(staged.filename, _kb_id(request), user, staged.path)
+        _audit_org_material(db, user, "archive_uploaded", _kb_id(request))
         return {
             "status": "awaiting_archive_confirmation",
             "manifest_id": preview.manifest_id,
@@ -229,6 +251,7 @@ async def upload_material(
     )
     db.set_version_file_path(version_id, str(staged.path))
     enqueue_latest_index_job(db, document_id, version_id, staged.sha256, time.time())
+    _audit_org_material(db, user, "document_uploaded", _kb_id(request))
     return {
         "status": "queued",
         "document_id": document_id,
@@ -265,12 +288,14 @@ async def get_archive_manifest(request: Request, manifest_id: int, user: dict = 
     if manifest is None:
         raise HTTPException(status_code=404, detail="manifest_not_found")
     container = db.get_document_permission_by_id(manifest["container_document_id"])
-    if container is None or (
-        not user.get("is_admin") and container["owner_id"] != user["id"]
-    ):
+    if container is None:
         # Archive manifests reveal unimported child names; do not expose them
         # to a shared-document viewer or disclose whether the container exists.
         raise HTTPException(status_code=404, detail="manifest_not_found")
+    try:
+        require_doc_edit(db, container["doc_name"], container["kb_id"], user)
+    except HTTPException as exc:
+        raise HTTPException(status_code=404, detail="manifest_not_found") from exc
     entries = db.list_material_archive_entries(manifest_id)
     return {
         "manifest_id": manifest["id"],
@@ -300,6 +325,11 @@ async def confirm_archive(
     user: dict = Depends(require_user),
 ):
     db = get_user_db(request)
+    manifest = db.get_material_archive_manifest(manifest_id)
+    container = db.get_document_permission_by_id(manifest["container_document_id"]) if manifest else None
+    if container is None:
+        raise HTTPException(status_code=404, detail="manifest_not_found")
+    require_doc_edit(db, container["doc_name"], container["kb_id"], user)
     try:
         result = confirm_archive_import(
             db,
@@ -327,10 +357,22 @@ async def confirm_archive(
 @router.delete("/materials/{document_id}")
 async def delete_material(request: Request, document_id: int, user: dict = Depends(require_user)):
     db = get_user_db(request)
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="document_missing")
+    policy = OrgRepository(db).get_kb_policy(document["kb_id"])
+    if is_org_policy(policy):
+        require_kb_edit(db, document["kb_id"], user)
+    elif not (
+        user.get("is_admin")
+        or user["id"] in {document["owner_id"], document.get("deleted_by")}
+    ):
+        raise HTTPException(status_code=403, detail="no_restore_permission")
     try:
         record = delete_to_recycle(db, document_id, user)
     except RecycleError as exc:
         _raise_recycle_error(exc)
+    _audit_org_material(db, user, "document_recycled", document["kb_id"])
     return {
         "status": record.status,
         "document_id": record.document_id,
@@ -346,10 +388,22 @@ async def restore_material(
     user: dict = Depends(require_user),
 ):
     db = get_user_db(request)
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="document_missing")
+    policy = OrgRepository(db).get_kb_policy(document["kb_id"])
+    if is_org_policy(policy):
+        require_kb_edit(db, document["kb_id"], user)
+    elif not (
+        user.get("is_admin")
+        or user["id"] in {document["owner_id"], document.get("deleted_by")}
+    ):
+        raise HTTPException(status_code=403, detail="no_restore_permission")
     try:
         result = restore_from_recycle(db, document_id, user, body.expected_metadata_version)
     except RecycleError as exc:
         _raise_recycle_error(exc)
+    _audit_org_material(db, user, "document_restored", document["kb_id"])
     return {
         "status": result.status,
         "document_id": result.document_id,
@@ -361,12 +415,17 @@ async def restore_material(
 async def list_recycle(request: Request, user: dict = Depends(require_user)):
     db = get_user_db(request)
     items = db.list_recycled_documents()
-    if not user.get("is_admin"):
-        items = [
-            item
-            for item in items
-            if item["owner_id"] == user["id"] or item["deleted_by"] == user["id"]
-        ]
+    visible = []
+    for item in items:
+        policy = OrgRepository(db).get_kb_policy(item["kb_id"])
+        if is_org_policy(policy):
+            if OrgAuthorizationService(db).authorize(
+                int(user["id"]), item["kb_id"], OrgRole.MANAGE
+            ).allowed:
+                visible.append(item)
+        elif user.get("is_admin") or item["owner_id"] == user["id"] or item["deleted_by"] == user["id"]:
+            visible.append(item)
+    items = visible
     return {
         "items": [
             {

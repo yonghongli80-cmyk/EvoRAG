@@ -6,8 +6,7 @@ import hashlib
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from rag.api_security import get_user_db, require_user
-from rag.permissions import check_doc_permission
+from rag.api_security import get_user_db, require_doc_view, require_user
 from rag.reliability.comparison import ComparisonRequest, ComparisonResult, DocumentEvidenceTool
 from rag.reliability.models import ComparisonScope
 from rag.reliability.service import execute_persisted_comparison
@@ -24,7 +23,7 @@ def build_comparison_scope(user_db, user: dict, document_ids: tuple[int, ...]) -
     try:
         for document_id in document_ids:
             document = documents[document_id]
-            check_doc_permission(user_db, document["doc_name"], document["kb_id"], user, "view")
+            require_doc_view(user_db, document["doc_name"], document["kb_id"], user)
     except HTTPException as exc:
         raise HTTPException(status_code=403, detail="无权比较所选资料") from exc
 
@@ -89,7 +88,7 @@ async def get_comparison(
     try:
         for document_id in document_ids:
             document = documents[document_id]
-            check_doc_permission(user_db, document["doc_name"], document["kb_id"], user, "view")
+            require_doc_view(user_db, document["doc_name"], document["kb_id"], user)
     except HTTPException as exc:
         raise HTTPException(status_code=404, detail="comparison not found") from exc
     return comparison

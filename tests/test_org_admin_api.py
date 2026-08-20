@@ -37,3 +37,44 @@ def test_org_kb_detail_uses_durable_metadata_without_vector_collection(isolated_
     assert response.status_code == 200
     assert response.json()["effective_role"] == "read"
     assert response.json()["documents"] == []
+
+
+def test_admin_relationship_changes_invalidate_old_token(isolated_api, make_user):
+    from rag.api_security import resolve_principal
+    from rag.auth import create_token
+
+    admin, admin_headers = make_user("admin", is_admin=True)
+    employee, _ = make_user("member")
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('ROOT','集团','company')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P1',?,'甲','专员')", (employee["id"],),
+        )
+        conn.execute("INSERT INTO org_memberships VALUES('P1','ROOT',1)")
+    token = create_token({
+        "user_id": employee["id"], "username": "member", "security_version": 1,
+    })
+    assert resolve_principal(db, f"Bearer {token}", None) is not None
+
+    response = isolated_api.patch(
+        "/organization/people/P1",
+        headers=admin_headers,
+        json={"manager_org_codes": ["ROOT"], "sensitivities": ["finance"]},
+    )
+
+    assert response.status_code == 200
+    assert resolve_principal(db, f"Bearer {token}", None) is None
+
+
+def test_grant_rejects_unknown_subject_and_knowledge_base(isolated_api, make_user):
+    _admin, headers = make_user("admin", is_admin=True)
+    invalid = {
+        "kb_id": "missing",
+        "subject_type": "org",
+        "subject_id": "missing",
+        "role": "read",
+        "effect": "allow",
+    }
+    assert isolated_api.post("/organization/grants", headers=headers, json=invalid).status_code == 404
