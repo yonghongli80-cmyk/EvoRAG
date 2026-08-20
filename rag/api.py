@@ -661,13 +661,23 @@ async def login(req: LoginRequest):
     user = await asyncio.to_thread(user_db.authenticate, req.username, req.password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    token = create_token({"user_id": user["id"], "username": user["username"]})
+    from rag.org_auth.repository import OrgRepository
+    profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
+    if profile is not None and not profile.active:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    token = create_token({
+        "user_id": user["id"], "username": user["username"],
+        "security_version": profile.security_version if profile else None,
+    })
     return TokenResponse(token=token, username=user["username"])
 
 
 @app.get("/me", summary="获取当前用户信息")
 async def get_me(user: dict = Depends(require_user)):
-    return {"id": user["id"], "username": user["username"]}
+    from dataclasses import asdict
+    from rag.org_auth.repository import OrgRepository
+    profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
+    return {"id": user["id"], "username": user["username"], "is_admin": bool(user.get("is_admin")), "profile": asdict(profile) if profile else None}
 
 
 async def _require_auth(authorization: str) -> dict:
@@ -710,6 +720,9 @@ def _get_current_user(token: str) -> dict | None:
     # 再用 password_changed_at 校验 token 是否因改密而失效
     password_changed_at = user.get("password_changed_at")
     if password_changed_at and payload.get("iat", 0) < password_changed_at:
+        return None
+    from rag.org_auth.repository import OrgRepository
+    if not OrgRepository(user_db).token_is_current(user["id"], payload.get("security_version")):
         return None
     return user
 

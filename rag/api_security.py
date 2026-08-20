@@ -14,6 +14,7 @@ from fastapi.security import APIKeyHeader
 from config import settings
 from rag.auth import decode_token
 from rag.permissions import check_doc_permission, check_kb_permission
+from rag.org_auth.repository import OrgRepository
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -62,6 +63,8 @@ def resolve_principal(db: UserDB, authorization: str, api_key: str | None) -> di
 
     user = db.get_user_by_id(user_id)
     if not user or decode_token(token, user.get("password_changed_at")) is None:
+        return None
+    if not OrgRepository(db).token_is_current(user_id, payload.get("security_version")):
         return None
     return user
 

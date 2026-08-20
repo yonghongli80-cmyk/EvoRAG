@@ -149,6 +149,9 @@ class UserDB:
 
         run_migrations(self._conn)
         migrate_knowledge_task_types(self._conn)
+        from rag.org_auth.schema import install_org_schema
+        with self.locked_transaction():
+            install_org_schema(self._conn)
 
     # ------------------------------------------------------------------
     # Transaction helpers

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterable
 
+from rag.org_auth.models import PersonProfile
 from rag.org_auth.schema import install_org_schema
 
 
@@ -45,6 +46,28 @@ class OrgRepository:
         with self.db.locked_read() as conn:
             row = conn.execute("SELECT * FROM org_people WHERE user_id=?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+    def get_profile_for_user(self, user_id: int) -> PersonProfile | None:
+        person = self.get_person_for_user(user_id)
+        if person is None:
+            return None
+        memberships = self.memberships(person["person_code"])
+        primary = next(({"code": m["org_code"], "name": m["name"]} for m in memberships if m["is_primary"]), None)
+        secondary = tuple({"code": m["org_code"], "name": m["name"]} for m in memberships if not m["is_primary"])
+        with self.db.locked_read() as conn:
+            username = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()[0]
+        return PersonProfile(
+            person_code=person["person_code"], user_id=user_id, username=username,
+            display_name=person["display_name"], job_title=person["job_title"],
+            primary_org=primary, secondary_orgs=secondary, active=bool(person["active"]),
+            security_version=int(person["security_version"]),
+        )
+
+    def token_is_current(self, user_id: int, security_version: int | None) -> bool:
+        person = self.get_person_for_user(user_id)
+        if person is None:
+            return True
+        return bool(person["active"]) and security_version == int(person["security_version"])
 
     def memberships(self, person_code: str) -> list[dict]:
         with self.db.locked_read() as conn:
