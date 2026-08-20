@@ -1,6 +1,7 @@
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.seed import seed_organization
 from rag.org_auth.seed_manifest import build_seed_manifest
+from rag.kb_file_store import resolve_stored_path
 from rag.user_db import UserDB
 
 
@@ -59,9 +60,10 @@ def test_seed_documents_are_resumable_and_indexed_once(tmp_path, monkeypatch):
         seed_organization(db, index_document=index_document, documents_root=tmp_path / "docs")
         first_calls = len(calls)
         with db.locked_read() as conn:
-            rows = conn.execute("SELECT status,chunk_count FROM kb_documents").fetchall()
+            rows = conn.execute("SELECT status,chunk_count,file_path FROM kb_documents").fetchall()
         assert first_calls == 100
         assert rows and all(row["status"] == "indexed" and row["chunk_count"] == 2 for row in rows)
+        assert all(resolve_stored_path(tmp_path / "docs", row["file_path"]).is_file() for row in rows)
         seed_organization(db, index_document=index_document, documents_root=tmp_path / "docs")
         assert len(calls) == first_calls
     finally:

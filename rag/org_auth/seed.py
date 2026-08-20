@@ -72,7 +72,7 @@ def seed_organization(
                         permission_id = int(conn.execute("INSERT INTO document_permissions(doc_name,kb_id,owner_id,scope) VALUES(?,?,?,'private')", (filename, kb.kb_id, admin_user_id)).lastrowid)
                     else:
                         permission_id = int(permission[0])
-                    conn.execute("INSERT INTO kb_documents(kb_id,filename,file_path,status,document_id) VALUES(?,?,?,'pending',?) ON CONFLICT(kb_id,filename) DO UPDATE SET file_path=excluded.file_path", (kb.kb_id, filename, relative.as_posix(), permission_id))
+                    conn.execute("INSERT INTO kb_documents(kb_id,filename,file_path,status,document_id) VALUES(?,?,?,'pending',?) ON CONFLICT(kb_id,filename) DO UPDATE SET file_path=excluded.file_path", (kb.kb_id, filename, str(destination.resolve()), permission_id))
                 if index_document is not None:
                     try:
                         chunk_count = int(index_document(kb.kb_id, str(destination), filename, permission_id))

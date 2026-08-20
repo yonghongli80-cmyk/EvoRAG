@@ -2239,7 +2239,7 @@ async def generate_kb_toc(kb_id: str, authorization: str = Header(default="")):
         try:
             with user_db.locked_read() as conn:
                 docs = conn.execute(
-                    "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
+                    "SELECT filename,file_path FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
                     (kb_id,),
                 ).fetchall()
             if not docs:
@@ -2249,7 +2249,7 @@ async def generate_kb_toc(kb_id: str, authorization: str = Header(default="")):
             for doc in docs:
                 filename = doc["filename"]
                 # 使用 loader 解析文档内容（支持 docx/xlsx/pdf 等二进制格式）
-                file_path = DATA_DIR / filename
+                file_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
                 if file_path.is_file():
                     try:
                         content = load_document(str(file_path))
@@ -2288,7 +2288,7 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
         try:
             with user_db.locked_read() as conn:
                 docs = conn.execute(
-                    "SELECT filename FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
+                    "SELECT filename,file_path FROM kb_documents WHERE kb_id = ? AND status = 'indexed'",
                     (kb_id,),
                 ).fetchall()
             if not docs:
@@ -2298,7 +2298,7 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
             all_content = []
             for doc in docs:
                 filename = doc["filename"]
-                file_path = DATA_DIR / filename
+                file_path = Path(doc["file_path"]) if doc["file_path"] else DATA_DIR / filename
                 if file_path.is_file():
                     try:
                         content = load_document(str(file_path))
