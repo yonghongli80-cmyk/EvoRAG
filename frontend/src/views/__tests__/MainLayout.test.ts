@@ -29,7 +29,7 @@ describe('MainLayout', () => {
     const wrapper = mount(MainLayout)
 
     const labels = wrapper.findAll('.nav-label').map((node) => node.text())
-    expect(labels).toEqual(['文件', '知识库', '知识运营', '表格变更'])
+    expect(labels).toEqual(['文件', '知识库', '知识运营', '表格变更', '组织权限'])
     expect(wrapper.get('[aria-label="知识运营"]').classes()).toContain('active')
   })
 

@@ -16,6 +16,7 @@ const activeMenu = computed(() => {
   if (route.path.startsWith('/kb')) return 'kb'
   if (route.path.startsWith('/operations')) return 'operations'
   if (route.path.startsWith('/analysis')) return 'analysis'
+  if (route.path.startsWith('/organization')) return 'organization'
   return 'files'
 })
 
@@ -77,15 +78,23 @@ function handleLogout() {
           <span class="nav-icon">▦</span>
           <span class="nav-label">表格变更</span>
         </button>
+        <button
+          v-if="authStore.user?.is_admin"
+          :class="['nav-item', { active: activeMenu === 'organization' }]"
+          @click="handleMenuSelect('organization')"
+          aria-label="组织权限管理"
+        >
+          <span class="nav-icon">♙</span><span class="nav-label">组织权限</span>
+        </button>
       </nav>
 
       <!-- User -->
       <div class="sidebar-footer">
         <div class="user-info">
-          <div class="user-avatar">{{ authStore.user?.username?.[0]?.toUpperCase() || 'U' }}</div>
+          <div class="user-avatar">{{ authStore.user?.profile?.display_name?.[0] || authStore.user?.username?.[0]?.toUpperCase() || 'U' }}</div>
           <div class="user-details">
-            <div class="user-name">{{ authStore.user?.username || '用户' }}</div>
-            <div class="user-role">{{ authStore.user?.is_admin ? '管理员' : '用户' }}</div>
+            <div class="user-name">{{ authStore.user?.profile?.display_name || authStore.user?.username || '用户' }}</div>
+            <div class="user-role">{{ authStore.user?.profile ? `${authStore.user.profile.job_title} · ${authStore.user.profile.primary_org?.name || ''}` : (authStore.user?.is_admin ? '管理员' : '用户') }}</div>
           </div>
         </div>
         <div class="user-actions">
