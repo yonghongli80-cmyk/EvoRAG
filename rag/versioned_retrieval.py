@@ -15,8 +15,9 @@ from config import settings
 def _visible_document_ids(user_db, user, kb_id) -> set[int]:
     if user is None or user_db is None:
         return set()
-    from rag.org_auth.repository import OrgRepository
-    if hasattr(user_db, "locked_read") and OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    from rag.org_auth.repository import OrgRepository, is_org_policy
+    policy = OrgRepository(user_db).get_kb_policy(kb_id) if hasattr(user_db, "locked_read") else None
+    if is_org_policy(policy):
         from rag.org_auth.service import OrgAuthorizationService
         return set(OrgAuthorizationService(user_db).allowed_document_ids(int(user["id"]), kb_id))
     names = user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))

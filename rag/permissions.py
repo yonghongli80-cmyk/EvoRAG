@@ -158,8 +158,8 @@ def filter_chunks_by_permission(
     if user.get("is_admin"):
         return list(chunks)
 
-    from rag.org_auth.repository import OrgRepository
-    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+    from rag.org_auth.repository import OrgRepository, is_org_policy
+    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         from rag.org_auth.service import OrgAuthorizationService
         allowed_ids = OrgAuthorizationService(db).allowed_document_ids(int(user["id"]), kb_id)
         if not allowed_ids:

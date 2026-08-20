@@ -14,7 +14,7 @@ from fastapi.security import APIKeyHeader
 from config import settings
 from rag.auth import decode_token
 from rag.permissions import check_doc_permission, check_kb_permission
-from rag.org_auth.repository import OrgRepository
+from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.models import OrgRole
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.service import OrgAuthorizationService
@@ -135,7 +135,7 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
 
 def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
-    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         require_kb_view(db, kb_id, user)
         if doc is None:
             raise HTTPException(status_code=404, detail="资源不存在")
@@ -150,7 +150,7 @@ def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
 
 def require_personal_document_acl(db: UserDB, kb_id: str) -> None:
     """Reject legacy per-document sharing controls for organization KBs."""
-    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
 
 
@@ -165,7 +165,7 @@ def require_doc_version_edit(db: UserDB, document_id: int, user: dict) -> dict:
 
 def require_doc_edit(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
-    if OrgRepository(db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         require_kb_edit(db, kb_id, user)
         if doc is None:
             raise HTTPException(status_code=404, detail="资源不存在")

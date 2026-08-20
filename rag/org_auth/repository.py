@@ -4,6 +4,14 @@ import sqlite3
 from collections.abc import Iterable
 
 from rag.org_auth.models import PersonProfile
+
+
+def is_org_policy(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("kb_type")
+        in {"company_public", "organization", "sensitive", "unassigned"}
+    )
 from rag.org_auth.schema import install_org_schema
 
 

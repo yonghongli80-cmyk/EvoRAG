@@ -41,6 +41,7 @@ from rag.kb_file_store import resolve_stored_path
 from rag.loader import load as load_document
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.logging_config import set_request_id, setup_logging
+from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.materials.api import router as materials_router
 from rag.spreadsheets.api import router as spreadsheets_router
 from rag.operations_api import router as operations_router
@@ -664,7 +665,6 @@ async def login(req: LoginRequest):
     user = await asyncio.to_thread(user_db.authenticate, req.username, req.password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
-    from rag.org_auth.repository import OrgRepository
     profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
     if profile is not None and not profile.active:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
@@ -741,7 +741,7 @@ def _check_kb_edit_permission(kb_id: str, user_dict: dict) -> None:
         HTTPException 404: KB 不存在
     """
     from rag.org_auth.repository import OrgRepository
-    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         require_kb_edit(user_db, kb_id, user_dict)
         return
     meta = user_db.get_kb_metadata(kb_id)
@@ -1881,7 +1881,7 @@ async def update_kb_scope(
     user: dict = Depends(require_user),
 ):
     from rag.org_auth.repository import OrgRepository
-    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
     require_kb_edit(user_db, kb_id, user)
     if req.scope == "private" and await asyncio.to_thread(user_db.list_kb_shared_users, kb_id):
@@ -2336,7 +2336,7 @@ async def generate_kb_overview(kb_id: str, authorization: str = Header(default="
 async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
     from rag.org_auth.repository import OrgRepository
-    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
@@ -2365,7 +2365,7 @@ async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str
 async def unshare_knowledge_base(kb_id: str, user_id: int, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
     from rag.org_auth.repository import OrgRepository
-    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
@@ -2383,7 +2383,7 @@ async def unshare_knowledge_base(kb_id: str, user_id: int, authorization: str = 
 async def list_kb_shares(kb_id: str, authorization: str = Header(default="")):
     user_dict = await _require_auth(authorization)
     from rag.org_auth.repository import OrgRepository
-    if OrgRepository(user_db).get_kb_policy(kb_id) is not None:
+    if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
 
     # Owner 检查
