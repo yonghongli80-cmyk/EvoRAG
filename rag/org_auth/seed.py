@@ -28,15 +28,23 @@ def seed_organization(
     manifest = build_seed_manifest()
     repo = OrgRepository(db)
     repo.install_schema()
+    with db.locked_transaction() as conn:
+        prior_seed = conn.execute(
+            "SELECT 1 FROM org_seed_state WHERE seed_key='fictional-org' AND status='complete'"
+        ).fetchone()
+        if prior_seed:
+            conn.executemany(
+                "UPDATE org_units SET seed_key=? WHERE code=? AND seed_key IS NULL",
+                ((unit.code, unit.code) for unit in manifest.units),
+            )
     with db.locked_read() as conn:
         collisions = []
         for unit in manifest.units:
             row = conn.execute(
-                "SELECT parent_code,name,kind FROM org_units WHERE code=?", (unit.code,)
+                "SELECT seed_key FROM org_units WHERE code=? OR seed_key=?",
+                (unit.code, unit.code),
             ).fetchone()
-            if row is not None and (
-                row["parent_code"], row["name"], row["kind"]
-            ) != (unit.parent_code, unit.name, unit.kind):
+            if row is not None and row["seed_key"] != unit.code:
                 collisions.append(f"org_unit:{unit.code}")
         for person in manifest.people:
             by_code = conn.execute(
@@ -74,7 +82,7 @@ def seed_organization(
     admin_user_id = 0
     with db.locked_transaction(immediate=True) as conn:
         for u in manifest.units:
-            cur = conn.execute("INSERT OR IGNORE INTO org_units(code,parent_code,name,kind) VALUES(?,?,?,?)", (u.code, u.parent_code, u.name, u.kind))
+            cur = conn.execute("INSERT OR IGNORE INTO org_units(code,parent_code,name,kind,seed_key) VALUES(?,?,?,?,?)", (u.code, u.parent_code, u.name, u.kind, u.code))
             created_units += cur.rowcount
         for p in manifest.people:
             existing = conn.execute("SELECT id FROM users WHERE username=?", (p.username,)).fetchone()

@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from rag.api_security import require_doc_view, require_personal_document_acl, require_user
+from rag.org_auth.audit import OrgAuditService
+from rag.org_auth.repository import OrgRepository, is_org_policy
 
 router = APIRouter()
 
@@ -107,6 +109,12 @@ def download_document_version(
     path = resolve_version_path(root, version["file_path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="版本文件缺失")
+    if is_org_policy(OrgRepository(db).get_kb_policy(document["kb_id"])):
+        OrgAuditService(db).record(
+            int(user["id"]), "document_version_downloaded", "knowledge_base",
+            document["kb_id"], "success", "authorized",
+            {"document_id": document_id, "version_id": version_id},
+        )
     return FileResponse(path, filename=version["original_filename"])
 
 

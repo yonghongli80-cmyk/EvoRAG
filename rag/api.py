@@ -673,6 +673,11 @@ async def login(req: LoginRequest):
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
     if profile is not None and not profile.active:
+        await asyncio.to_thread(
+            OrgAuditService(user_db).record,
+            int(user["id"]), "login_failed", "person", profile.person_code,
+            "denied", "account_inactive",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_token({
         "user_id": user["id"], "username": user["username"],
@@ -1696,6 +1701,7 @@ async def query_stream(
     target_kb = req.kb_id or "rag_docs"
     if target_kb != "rag_docs":
         require_kb_view(user_db, target_kb, user)
+        await asyncio.to_thread(_audit_org_event, user, "answer_requested", target_kb)
         from rag.pipeline import RAGPipeline
         current_pipeline = await asyncio.to_thread(
             RAGPipeline, kb_id=target_kb, user_db=user_db

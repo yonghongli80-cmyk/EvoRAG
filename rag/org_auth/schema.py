@@ -7,7 +7,8 @@ def install_org_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS org_units (
         code TEXT PRIMARY KEY, parent_code TEXT REFERENCES org_units(code),
-        name TEXT NOT NULL, kind TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1
+        name TEXT NOT NULL, kind TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+        seed_key TEXT UNIQUE
     );
     CREATE INDEX IF NOT EXISTS idx_org_units_parent ON org_units(parent_code);
     CREATE TABLE IF NOT EXISTS org_people (
@@ -56,3 +57,7 @@ def install_org_schema(conn: sqlite3.Connection) -> None:
         updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
     );
     """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(org_units)")}
+    if "seed_key" not in columns:
+        conn.execute("ALTER TABLE org_units ADD COLUMN seed_key TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_org_units_seed_key ON org_units(seed_key)")

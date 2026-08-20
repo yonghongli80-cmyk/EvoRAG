@@ -344,6 +344,7 @@ async def confirm_archive(
         )
     except ArchiveConfirmationError as exc:
         _raise_archive_error(exc)
+    _audit_org_material(db, user, "archive_confirmed", container["kb_id"])
     return {
         "status": result.status,
         "container_document_id": result.container_document_id,
@@ -475,6 +476,10 @@ async def organization_preview(
         _raise_organization_error(exc)
     except StructuredOutputError as exc:
         raise HTTPException(status_code=503, detail=exc.detail) from exc
+    for item in preview.items:
+        document = db.get_document_permission_by_id(item.document_id)
+        if document is not None:
+            _audit_org_material(db, user, "organization_previewed", document["kb_id"])
     return {
         "proposal_id": preview.id,
         "items": [
@@ -507,6 +512,10 @@ async def organization_confirm(
         )
     except OrganizationError as exc:
         _raise_organization_error(exc)
+    for item in result.items:
+        document = db.get_document_permission_by_id(item.document_id)
+        if document is not None:
+            _audit_org_material(db, user, "organization_confirmed", document["kb_id"])
     return {
         "batch_id": result.batch_id,
         "status": result.status,
@@ -535,6 +544,10 @@ async def organization_rollback(
         result = service.rollback(batch_id, user, body.idempotency_key)
     except OrganizationError as exc:
         _raise_organization_error(exc)
+    for item in result.items:
+        document = db.get_document_permission_by_id(item.document_id)
+        if document is not None:
+            _audit_org_material(db, user, "organization_rolled_back", document["kb_id"])
     return {
         "batch_id": result.batch_id,
         "status": result.status,

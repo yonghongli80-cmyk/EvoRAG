@@ -27,11 +27,13 @@ def test_seed_is_idempotent_and_preserves_later_edits(tmp_path, monkeypatch):
         first = seed_organization(db, metadata_only=True)
         with db.locked_transaction() as conn:
             conn.execute("UPDATE org_people SET display_name='已修改姓名' WHERE person_code='P-001'")
+            conn.execute("UPDATE org_units SET name='已修改组织名' WHERE code='ORG-ROOT'")
         second = seed_organization(db, metadata_only=True)
         repo = OrgRepository(db)
         assert first.created_people == 280
         assert second.created_people == 0
         assert repo.get_person_for_user(1)["display_name"] == "已修改姓名"
+        assert repo.get_unit("ORG-ROOT")["name"] == "已修改组织名"
         with db.locked_read() as conn:
             assert conn.execute("SELECT count(*) FROM kb_org_policies").fetchone()[0] == 65
     finally:
