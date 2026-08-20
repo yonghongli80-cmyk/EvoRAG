@@ -15,6 +15,8 @@ from config import settings
 from rag.auth import decode_token
 from rag.permissions import check_doc_permission, check_kb_permission
 from rag.org_auth.repository import OrgRepository
+from rag.org_auth.models import OrgRole
+from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -93,6 +95,12 @@ def require_admin(user: dict) -> dict:
 def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
     """Require an explicit KB view grant; legacy metadata is admin-only."""
     meta = db.get_kb_metadata(kb_id)
+    policy = OrgRepository(db).get_kb_policy(kb_id)
+    if policy is not None:
+        decision = OrgAuthorizationService(db).authorize(int(user["id"]), kb_id, OrgRole.READ)
+        if not decision.allowed:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
     if meta is None:
         if user.get("is_admin"):
             return {"kb_id": kb_id, "owner_id": 0, "scope": "orphaned"}
@@ -104,6 +112,12 @@ def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
 def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
     """Require an explicit KB edit grant and reject orphaned collections."""
     meta = db.get_kb_metadata(kb_id)
+    policy = OrgRepository(db).get_kb_policy(kb_id)
+    if policy is not None:
+        decision = OrgAuthorizationService(db).authorize(int(user["id"]), kb_id, OrgRole.MANAGE)
+        if not decision.allowed:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
     if meta is None:
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
     check_kb_permission(db, kb_id, user, "edit")
