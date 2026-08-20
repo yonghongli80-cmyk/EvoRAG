@@ -3,6 +3,7 @@ from fastapi import HTTPException
 
 from rag.api_security import require_kb_edit, require_kb_view
 from rag.org_auth.repository import OrgRepository
+from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
 
 
@@ -24,5 +25,25 @@ def test_kb_guard_uses_org_role_not_legacy_owner(tmp_path):
         assert denied.value.status_code == 404
         with pytest.raises(HTTPException):
             require_kb_edit(db, "kb", db.get_user_by_id(member))
+    finally:
+        db.close()
+
+
+def test_kb_documents_inherit_the_knowledge_base_role(tmp_path):
+    db = UserDB(str(tmp_path / "documents.db"))
+    try:
+        member = db.create_user("member", "Password1")
+        outsider = db.create_user("outsider", "Password2")
+        repo = OrgRepository(db)
+        repo.create_unit("TEAM", None, "协作组", "team")
+        with db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_people(person_code,user_id,display_name,job_title) VALUES('P1',?,'甲','专员')", (member,))
+            conn.execute("INSERT INTO org_memberships VALUES('P1','TEAM',1)")
+            conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES('kb','TEAM','organization')")
+        first = db.create_document_permission("a.txt", "kb", outsider, scope="private")
+        second = db.create_document_permission("b.txt", "kb", outsider, scope="private")
+        service = OrgAuthorizationService(db)
+        assert service.allowed_document_ids(member, "kb") == frozenset({first, second})
+        assert service.allowed_document_ids(outsider, "kb") == frozenset()
     finally:
         db.close()

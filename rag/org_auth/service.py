@@ -44,3 +44,13 @@ class OrgAuthorizationService:
         with self.db.locked_read() as conn:
             ids = [r[0] for r in conn.execute("SELECT kb_id FROM kb_org_policies")]
         return frozenset(kb_id for kb_id in ids if self.authorize(user_id, kb_id, required).allowed)
+
+    def allowed_document_ids(self, user_id: int, kb_id: str) -> frozenset[int]:
+        if not self.authorize(user_id, kb_id, OrgRole.READ).allowed:
+            return frozenset()
+        with self.db.locked_read() as conn:
+            rows = conn.execute(
+                "SELECT id FROM document_permissions WHERE kb_id=? AND deleted_at IS NULL",
+                (kb_id,),
+            ).fetchall()
+        return frozenset(int(row[0]) for row in rows)
