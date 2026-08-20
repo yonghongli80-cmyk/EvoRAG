@@ -47,3 +47,23 @@ def test_kb_documents_inherit_the_knowledge_base_role(tmp_path):
         assert service.allowed_document_ids(outsider, "kb") == frozenset()
     finally:
         db.close()
+
+
+def test_visible_knowledge_bases_return_org_metadata(tmp_path):
+    db = UserDB(str(tmp_path / "list.db"))
+    try:
+        user = db.create_user("member", "Password1")
+        repo = OrgRepository(db)
+        repo.create_unit("TEAM", None, "协作组", "team")
+        with db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_people(person_code,user_id,display_name,job_title) VALUES('P1',?,'甲','专员')", (user,))
+            conn.execute("INSERT INTO org_memberships VALUES('P1','TEAM',1)")
+            conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb','协作知识库')")
+            conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES('kb','TEAM','organization')")
+        assert OrgAuthorizationService(db).visible_knowledge_bases(user) == [{
+            "kb_id": "kb", "name": "协作知识库", "doc_count": 0,
+            "kb_type": "organization", "org_unit": {"code": "TEAM", "name": "协作组"},
+            "effective_role": "read", "sensitivity": None,
+        }]
+    finally:
+        db.close()

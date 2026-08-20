@@ -54,3 +54,24 @@ class OrgAuthorizationService:
                 (kb_id,),
             ).fetchall()
         return frozenset(int(row[0]) for row in rows)
+
+    def visible_knowledge_bases(self, user_id: int) -> list[dict]:
+        allowed = self.allowed_kb_ids(user_id)
+        if not allowed:
+            return []
+        with self.db.locked_read() as conn:
+            rows = conn.execute("""
+                SELECT p.kb_id,m.name,p.kb_type,p.sensitivity,p.org_code,u.name AS org_name,
+                       (SELECT count(*) FROM kb_documents d WHERE d.kb_id=p.kb_id AND d.status!='deleting') AS doc_count
+                FROM kb_org_policies p JOIN kb_metadata m ON m.kb_id=p.kb_id
+                LEFT JOIN org_units u ON u.code=p.org_code ORDER BY m.name
+            """).fetchall()
+        result = []
+        for row in rows:
+            if row["kb_id"] not in allowed:
+                continue
+            role = self.decision(user_id, row["kb_id"]).role.value
+            result.append({"kb_id": row["kb_id"], "name": row["name"], "doc_count": row["doc_count"],
+                           "kb_type": row["kb_type"], "org_unit": {"code": row["org_code"], "name": row["org_name"]} if row["org_code"] else None,
+                           "effective_role": role, "sensitivity": row["sensitivity"]})
+        return result
