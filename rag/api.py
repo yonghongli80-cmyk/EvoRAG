@@ -43,6 +43,7 @@ from rag.logging_config import set_request_id, setup_logging
 from rag.materials.api import router as materials_router
 from rag.spreadsheets.api import router as spreadsheets_router
 from rag.operations_api import router as operations_router
+from rag.org_auth.api import router as organization_router
 from rag.permissions import filter_chunks_by_permission
 from rag.reliability.api import answers_router, router as reliability_router
 from rag.user_db import UserDB
@@ -84,6 +85,7 @@ app.include_router(materials_router)
 app.include_router(spreadsheets_router)
 app.include_router(reliability_router)
 app.include_router(answers_router)
+app.include_router(organization_router)
 
 
 def _versions_root() -> Path:
@@ -677,7 +679,10 @@ async def get_me(user: dict = Depends(require_user)):
     from dataclasses import asdict
     from rag.org_auth.repository import OrgRepository
     profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
-    return {"id": user["id"], "username": user["username"], "is_admin": bool(user.get("is_admin")), "profile": asdict(profile) if profile else None}
+    result = {"id": user["id"], "username": user["username"]}
+    if profile is not None:
+        result.update({"is_admin": bool(user.get("is_admin")), "profile": asdict(profile)})
+    return result
 
 
 async def _require_auth(authorization: str) -> dict:
