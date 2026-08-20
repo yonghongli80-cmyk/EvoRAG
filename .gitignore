@@ -61,6 +61,7 @@ data/index_state.json
 # Runtime document-version storage
 /data/document_versions/
 /data/structured_datasets/
+/data/kb_files/
 
 # Backup payloads. The default ../RAGv3-backups sibling is outside this repo;
 # these rules protect explicitly configured in-repository roots.
