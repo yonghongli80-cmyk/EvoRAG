@@ -39,6 +39,7 @@ const kbOverview = ref('')
 const documents = ref<any[]>([])
 const effectiveRole = ref<'read' | 'manage' | 'administer'>('read')
 const canManage = computed(() => effectiveRole.value === 'manage' || effectiveRole.value === 'administer')
+const canAdminister = computed(() => effectiveRole.value === 'administer')
 
 // Overview editing
 const editingOverview = ref(false)
@@ -440,7 +441,7 @@ function parseToc(toc: string | object): any {
                   <el-icon style="margin-right: 6px;"><Upload /></el-icon>
                   添加文件
                 </el-dropdown-item>
-                <el-dropdown-item divided @click="deleteKB" class="danger-item">
+                <el-dropdown-item v-if="canAdminister" divided @click="deleteKB" class="danger-item">
                   <el-icon style="margin-right: 6px;"><Delete /></el-icon>
                   删除知识库
                 </el-dropdown-item>

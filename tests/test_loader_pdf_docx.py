@@ -1,8 +1,9 @@
 """TDD: Tests for PDF and DOCX loading."""
-from unittest.mock import patch
 import os
 from pathlib import Path
-from rag.loader import load, load_pdf, load_docx
+from unittest.mock import patch
+
+from rag.loader import load, load_docx, load_pdf
 
 
 def _create_test_docx(path: str, text: str = "Hello World"):

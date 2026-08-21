@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from config import settings
 from rag.backups.models import BackupError, context_from_settings
 from rag.backups.service import create_if_due
-
 
 logger = logging.getLogger(__name__)
 

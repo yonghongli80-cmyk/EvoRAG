@@ -3,6 +3,8 @@
 import time
 from datetime import UTC
 
+import jwt
+
 from rag.auth import (
     create_token,
     decode_token,
@@ -41,8 +43,6 @@ def test_create_and_decode_token():
 def test_decode_expired_token():
     """A token whose expiry is in the past should be rejected."""
     from datetime import datetime
-
-    from jose import jwt
 
     from rag.auth import _JWT_ALGORITHM, _JWT_SECRET
 

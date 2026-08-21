@@ -118,7 +118,7 @@ def test_pipeline_cache_is_disabled_with_real_user_db(tmp_path):
     db = UserDB(str(tmp_path / "users.db"))
     try:
         owner = db.create_user("owner_user", "Password1")
-        other = db.create_user("other_user", "Password2")
+        db.create_user("other_user", "Password2")
         db.create_document_permission("secret.txt", "kb1", owner_id=owner, scope="private")
         db.create_document_permission("public.txt", "kb1", owner_id=owner, scope="public")
 

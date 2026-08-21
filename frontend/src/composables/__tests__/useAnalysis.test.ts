@@ -15,7 +15,6 @@ vi.mock('element-plus', () => ({
 
 import api from '../../utils/api'
 import { useAnalysis } from '../useAnalysis'
-import { useAuthStore } from '../../stores/auth'
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -37,9 +36,6 @@ describe('useAnalysis composable', () => {
   it('handleConfirm with existing card adds question', async () => {
     vi.mocked(api.post).mockResolvedValue({ data: { id: 1 } } as any)
 
-    const auth = useAuthStore()
-    auth.token = 'test-token'
-
     const { handleConfirm, dialogVisible, dialogQuestion, dialogAnswer } = useAnalysis()
     dialogQuestion.value = 'What is RAG?'
     dialogAnswer.value = 'Retrieval-Augmented Generation'
@@ -57,9 +53,6 @@ describe('useAnalysis composable', () => {
     vi.mocked(api.post)
       .mockResolvedValueOnce({ data: { id: 99 } } as any)
       .mockResolvedValueOnce({ data: { id: 100 } } as any)
-
-    const auth = useAuthStore()
-    auth.token = 'test-token'
 
     const { handleConfirm, dialogVisible, dialogQuestion, dialogAnswer } = useAnalysis()
     dialogQuestion.value = 'How does it work?'
@@ -90,9 +83,6 @@ describe('useAnalysis composable', () => {
     vi.mocked(api.post).mockImplementation(
       () => new Promise(r => setTimeout(() => r({ data: { id: 1 } } as any), 10))
     )
-
-    const auth = useAuthStore()
-    auth.token = 'test-token'
 
     const { handleConfirm, loading } = useAnalysis()
 

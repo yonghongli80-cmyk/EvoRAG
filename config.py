@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # 鉴权
     auth_enabled: bool = True
     auth_keys: str = "{}"
+    self_registration_enabled: bool = False
+    allow_initial_passwords_remote: bool = False
+    login_failure_limit: int = Field(default=5, ge=1)
+    login_failure_window_seconds: int = Field(default=900, ge=1)
 
     # 外部数据源可能携带连接凭据；未显式开启前不暴露相关接口。
     data_sources_enabled: bool = False

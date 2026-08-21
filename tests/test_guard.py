@@ -1,4 +1,6 @@
-from rag.guard import check_injection, sanitize_input, check_output
+from unittest.mock import patch
+
+from rag.guard import check_injection, check_output, sanitize_input
 
 
 def test_detects_ignore_previous():
@@ -41,9 +43,6 @@ def test_check_output_leaks_system_prompt():
 def test_check_output_allows_normal():
     result = check_output("Raft 是一种一致性协议")
     assert result.filtered is False
-
-
-from unittest.mock import patch, MagicMock
 
 
 def test_pipeline_blocks_injection():

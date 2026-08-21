@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 
 
@@ -19,6 +18,14 @@ def test_python_dependencies_have_fully_pinned_lock_files():
         assert not any(
             ">=" in requirement or "<" in requirement for requirement in requirements
         )
+
+
+def test_jwt_dependency_does_not_include_vulnerable_ecdsa_chain():
+    for filename in ("requirements.lock", "requirements-dev.lock"):
+        locked = (ROOT / filename).read_text(encoding="utf-8").casefold()
+        assert "pyjwt==" in locked
+        assert "python-jose==" not in locked
+        assert "ecdsa==" not in locked
 
 
 def test_deployment_uses_the_lock_file_and_build_cache():

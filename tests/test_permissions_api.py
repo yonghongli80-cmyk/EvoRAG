@@ -1,6 +1,7 @@
 """Tests for permission-related API endpoints."""
 
 import pytest
+
 from rag.user_db import UserDB
 
 

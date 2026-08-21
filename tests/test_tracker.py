@@ -1,7 +1,8 @@
 """Tests for execution tracker."""
 import json
 import sqlite3
-from rag.tracker import ExecutionTracker, ExecutionTrace, ToolCall
+
+from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
 
 
 def test_ensure_table_creates_execution_logs(tmp_path):

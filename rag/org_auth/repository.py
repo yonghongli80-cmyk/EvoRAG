@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterable
 
 from rag.org_auth.models import PersonProfile
+from rag.org_auth.schema import install_org_schema
 
 
 def is_org_policy(value: object) -> bool:
@@ -12,7 +12,6 @@ def is_org_policy(value: object) -> bool:
         and value.get("kb_type")
         in {"company_public", "organization", "sensitive", "unassigned"}
     )
-from rag.org_auth.schema import install_org_schema
 
 
 class OrgRepository:

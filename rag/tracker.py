@@ -28,8 +28,8 @@ class ExecutionTrace:
 
 
 class ExecutionTracker:
-    def __init__(self, db_path: str = settings.memory_db_path):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+    def __init__(self, db_path: str | None = None):
+        self._conn = sqlite3.connect(db_path or settings.memory_db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._ensure_table()

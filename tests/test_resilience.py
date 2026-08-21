@@ -1,5 +1,7 @@
 import time
-from rag.resilience import retry
+from unittest.mock import MagicMock, patch
+
+from rag.resilience import CircuitBreaker, retry
 
 
 def test_retry_succeeds_on_first_try():
@@ -57,9 +59,6 @@ def test_retry_skips_non_retryable():
     assert call_count == 1
 
 
-from rag.resilience import CircuitBreaker
-
-
 def test_circuit_breaker_starts_closed():
     cb = CircuitBreaker(failure_threshold=3, recovery_timeout=0.1)
     assert cb.state == "closed"
@@ -97,9 +96,6 @@ def test_circuit_breaker_closes_on_success():
     cb.allow_request()  # half_open
     cb.record_success()
     assert cb.state == "closed"
-
-
-from unittest.mock import patch, MagicMock
 
 
 def test_generator_retries_on_timeout():
@@ -143,4 +139,3 @@ def test_bloom_filter_allows_known_keys():
     bf = BloomFilter(capacity=100)
     bf.add("known")
     assert ("known" in bf) is True
-

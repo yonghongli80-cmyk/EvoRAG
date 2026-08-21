@@ -13,9 +13,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from rag.materials.models import CitationLocation, MaterialLocationQuery
-from rag.api_security import require_doc_view
 from fastapi import HTTPException
+
+from rag.api_security import require_doc_view
+from rag.materials.models import CitationLocation, MaterialLocationQuery
 from rag.user_db import UserDB
 
 

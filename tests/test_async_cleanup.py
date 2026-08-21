@@ -1,12 +1,10 @@
 """Tests for async cleanup fixes: _get_current_user, /me auth, feedback ownership,
 FeedbackProcessor singleton, and DB path unification."""
 
-import asyncio
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from rag.user_db import UserDB
@@ -143,7 +141,7 @@ class TestFeedbackOwnership:
         import rag.api as api_mod
 
         # Create user 1 and their message
-        token1 = _register_and_login(client, f"fb_u1_{uuid.uuid4().hex[:8]}")
+        _register_and_login(client, f"fb_u1_{uuid.uuid4().hex[:8]}")
         cid1 = api_mod.user_db.create_conversation(1)
         msg_id = api_mod.user_db.add_message(cid1, "assistant", "user1's answer")
 

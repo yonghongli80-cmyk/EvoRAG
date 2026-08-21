@@ -21,7 +21,12 @@ def _company_admin(user: dict) -> None:
 
 
 @router.get("/login/accounts")
-def login_accounts(request: Request, q: str = Query(default="", max_length=50)):
+def login_accounts(
+    request: Request,
+    q: str = Query(default="", max_length=50),
+    user: dict = Depends(require_user),
+):
+    _company_admin(user)
     term = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{term}%"
     with _db(request).locked_read() as conn:
@@ -118,8 +123,24 @@ def update_person(person_code: str, body: PersonUpdate, request: Request, user: 
         if body.job_title is not None:
             conn.execute("UPDATE org_people SET job_title=? WHERE person_code=?", (body.job_title.strip(), person_code))
         if body.primary_org_code is not None or body.secondary_org_codes is not None:
-            current_primary = body.primary_org_code or conn.execute("SELECT org_code FROM org_memberships WHERE person_code=? AND is_primary=1", (person_code,)).fetchone()[0]
-            secondaries = body.secondary_org_codes or []
+            primary_row = conn.execute(
+                "SELECT org_code FROM org_memberships "
+                "WHERE person_code=? AND is_primary=1",
+                (person_code,),
+            ).fetchone()
+            current_primary = body.primary_org_code or (primary_row[0] if primary_row else None)
+            if current_primary is None:
+                raise HTTPException(status_code=400, detail="必须指定主部门")
+            if body.secondary_org_codes is None:
+                secondaries = [
+                    membership[0] for membership in conn.execute(
+                        "SELECT org_code FROM org_memberships "
+                        "WHERE person_code=? AND is_primary=0 ORDER BY org_code",
+                        (person_code,),
+                    )
+                ]
+            else:
+                secondaries = body.secondary_org_codes
             conn.execute("DELETE FROM org_memberships WHERE person_code=?", (person_code,))
             conn.execute("INSERT INTO org_memberships VALUES(?,?,1)", (person_code, current_primary))
             conn.executemany("INSERT INTO org_memberships VALUES(?,?,0)", ((person_code, code) for code in secondaries if code != current_primary))

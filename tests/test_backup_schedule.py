@@ -25,7 +25,6 @@ from tests.backup_fixtures import (
     seed_verified_backups,
 )
 
-
 WEEK = 7 * 24 * 60 * 60
 
 

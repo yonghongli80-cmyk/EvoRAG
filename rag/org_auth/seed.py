@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
 
 from rag.auth import hash_password
-from rag.org_auth.repository import OrgRepository
 from rag.org_auth.migration import migrate_legacy_knowledge_bases
+from rag.org_auth.repository import OrgRepository
 from rag.org_auth.seed_manifest import build_seed_manifest
 from rag.user_db import UserDB
 
@@ -156,6 +156,7 @@ def main() -> int:
         indexer = None
         if args.index_content:
             from qdrant_client.models import Distance, VectorParams
+
             from config import settings
             from rag.knowledge_base import KnowledgeBaseManager
             manager = KnowledgeBaseManager()

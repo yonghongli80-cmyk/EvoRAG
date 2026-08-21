@@ -88,7 +88,7 @@ def replace(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
                 "metadata": chunk.metadata,
             },
         )
-        for chunk, embedding in zip(chunks, embeddings)
+        for chunk, embedding in zip(chunks, embeddings, strict=False)
     ]
 
     with _write_lock.write():

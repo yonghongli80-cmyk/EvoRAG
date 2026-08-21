@@ -426,6 +426,7 @@ def confirm_archive_import(
     if container is None:
         raise ArchiveConfirmationError("container_missing")
     from fastapi import HTTPException
+
     from rag.api_security import require_doc_edit
     try:
         require_doc_edit(db, container["doc_name"], container["kb_id"], actor)

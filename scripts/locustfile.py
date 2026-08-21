@@ -19,10 +19,8 @@ RAG 系统极致压测脚本
 
 import random
 import string
-import json
-import time
-from locust import HttpUser, task, between, events
 
+from locust import HttpUser, between, events, task
 
 # ── 测试数据 ──────────────────────────────────────────────────────
 

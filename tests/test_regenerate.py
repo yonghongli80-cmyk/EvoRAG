@@ -32,6 +32,7 @@ def test_user_db_update_message():
 def test_regenerate_endpoint_exists():
     """POST /regenerate 端点应该存在。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
     client = TestClient(app)
     response = client.post("/regenerate", json={"conversation_id": 1, "message_id": 1})

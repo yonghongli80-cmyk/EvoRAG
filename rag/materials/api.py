@@ -40,8 +40,8 @@ from rag.materials.organizer import (
 )
 from rag.materials.recycle import RecycleError, delete_to_recycle, restore_from_recycle
 from rag.materials.staging import MaterialTooLarge, stream_upload_to_stage
-from rag.org_auth.models import OrgRole
 from rag.org_auth.audit import OrgAuditService
+from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
 

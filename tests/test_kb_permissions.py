@@ -1,7 +1,9 @@
 """Phase 1 tests: KB ownership and scope-based access control."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from rag.user_db import UserDB
 
 
@@ -99,11 +101,7 @@ def test_list_kbs_filters_private_for_non_owner(db):
     meta_map = db.get_kb_metadata_by_names(["kb_private", "kb_public"])
     visible = []
     for kid, meta in meta_map.items():
-        if meta is None:
-            visible.append(kid)
-        elif meta["scope"] == "public":
-            visible.append(kid)
-        elif meta["owner_id"] == other:
+        if meta is None or meta["scope"] == "public" or meta["owner_id"] == other:
             visible.append(kid)
 
     assert "kb_public" in visible
@@ -118,11 +116,7 @@ def test_list_kbs_owner_sees_own_private(db):
     meta_map = db.get_kb_metadata_by_names(["kb_private"])
     visible = []
     for kid, meta in meta_map.items():
-        if meta is None:
-            visible.append(kid)
-        elif meta["scope"] == "public":
-            visible.append(kid)
-        elif meta["owner_id"] == owner:
+        if meta is None or meta["scope"] == "public" or meta["owner_id"] == owner:
             visible.append(kid)
 
     assert "kb_private" in visible
@@ -136,11 +130,7 @@ def test_list_kbs_old_kb_visible_to_all(db):
     meta_map = db.get_kb_metadata_by_names(["kb_old"])
     visible = []
     for kid, meta in meta_map.items():
-        if meta is None:
-            visible.append(kid)
-        elif meta["scope"] == "public":
-            visible.append(kid)
-        elif meta["owner_id"] == other:
+        if meta is None or meta["scope"] == "public" or meta["owner_id"] == other:
             visible.append(kid)
 
     assert "kb_old" in visible
@@ -158,13 +148,7 @@ def test_list_kbs_admin_sees_all(db):
     is_admin = True
     visible = []
     for kid, meta in meta_map.items():
-        if is_admin:
-            visible.append(kid)
-        elif meta is None:
-            visible.append(kid)
-        elif meta["scope"] == "public":
-            visible.append(kid)
-        elif meta["owner_id"] == admin:
+        if is_admin or meta is None or meta["scope"] == "public" or meta["owner_id"] == admin:
             visible.append(kid)
 
     assert "kb_private" in visible
@@ -246,7 +230,7 @@ def test_query_private_kb_requires_owner(db):
 def test_query_public_kb_allowed(db):
     """公开 KB 所有人可查询。"""
     owner = db.create_user("alice", "pwd")
-    other = db.create_user("bob", "pwd")
+    db.create_user("bob", "pwd")
     db.create_kb_metadata("kb_test", "测试库", owner_id=owner, scope="public")
 
     meta = db.get_kb_metadata("kb_test")
@@ -255,7 +239,7 @@ def test_query_public_kb_allowed(db):
 
 def test_query_old_kb_allowed(db):
     """旧 KB（owner_id=0）所有人可查询。"""
-    other = db.create_user("bob", "pwd")
+    db.create_user("bob", "pwd")
     db.create_kb_metadata("kb_old", "旧库", owner_id=0, scope="public")
 
     meta = db.get_kb_metadata("kb_old")
@@ -266,96 +250,80 @@ def test_query_old_kb_allowed(db):
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_api_delete_kb_non_owner_returns_403(mock_kb_cls, monkeypatch):
-    """非 owner 删除 KB 应返回 403。"""
+def test_api_delete_kb_requires_administer_role(mock_kb_cls, isolated_api, make_user):
+    """Organization content managers cannot delete the knowledge base itself."""
     mock_manager = MagicMock()
-    mock_manager.create_kb.return_value = "kb_perm_test"
     mock_manager.delete_kb.return_value = None
     mock_kb_cls.return_value = mock_manager
+    manager, manager_headers = make_user("org-manager")
+    _admin, admin_headers = make_user("org-admin", is_admin=True)
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEAM','团队','team')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P-MANAGER',?,'负责人','经理')",
+            (manager["id"],),
+        )
+        conn.execute("INSERT INTO org_memberships VALUES('P-MANAGER','TEAM',1)")
+        conn.execute("INSERT INTO org_manager_scopes VALUES('P-MANAGER','TEAM')")
+        conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb_perm_test','组织库')")
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+            "VALUES('kb_perm_test','TEAM','organization')"
+        )
 
-    from fastapi.testclient import TestClient
-    from config import settings
-    from rag.api import app, user_db
-    from rag.auth import create_token
-
-    client = TestClient(app)
-    monkeypatch.setattr(settings, "auth_enabled", True)
-
-    # 创建 owner 和 other 用户
-    try:
-        owner_id = user_db.create_user("_perm_owner", "pwd")
-    except ValueError:
-        owner_id = user_db.get_user_by_username("_perm_owner")["id"]
-    try:
-        other_id = user_db.create_user("_perm_other", "pwd")
-    except ValueError:
-        other_id = user_db.get_user_by_username("_perm_other")["id"]
-
-    owner_token = create_token({"user_id": owner_id, "username": "_perm_owner"})
-    other_token = create_token({"user_id": other_id, "username": "_perm_other"})
-
-    # owner 创建 KB
-    res = client.post("/knowledge-bases", json={"name": "perm_test", "scope": "private"},
-                      headers={"Authorization": f"Bearer {owner_token}"})
-    assert res.status_code == 200
-    kb_id = res.json()["kb_id"]
-
-    # other 尝试删除 → 403
-    res = client.delete(f"/knowledge-bases/{kb_id}",
-                        headers={"Authorization": f"Bearer {other_token}"})
-    assert res.status_code == 403
-
-    # owner 删除 → 200
-    res = client.delete(f"/knowledge-bases/{kb_id}",
-                        headers={"Authorization": f"Bearer {owner_token}"})
-    assert res.status_code == 200
+    assert isolated_api.delete(
+        "/knowledge-bases/kb_perm_test", headers=manager_headers
+    ).status_code == 404
+    assert isolated_api.delete(
+        "/knowledge-bases/kb_perm_test", headers=admin_headers
+    ).status_code == 200
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_api_query_private_kb_non_owner_returns_403(mock_kb_cls, monkeypatch):
-    """非 owner 查询私有 KB 应返回 403。"""
+def test_api_query_organization_kb_rejects_outside_user(
+    mock_kb_cls, isolated_api, make_user
+):
+    """Organization membership, not legacy private ownership, controls queries."""
+    from rag.models import Chunk
+
     mock_manager = MagicMock()
-    mock_manager.create_kb.return_value = "kb_priv_test"
+    mock_manager.search.return_value = [Chunk("allowed", "doc.txt", 0)]
     mock_kb_cls.return_value = mock_manager
+    member, member_headers = make_user("org-member")
+    _outsider, outsider_headers = make_user("org-outsider")
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEAM','团队','team')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P-MEMBER',?,'成员','专员')",
+            (member["id"],),
+        )
+        conn.execute("INSERT INTO org_memberships VALUES('P-MEMBER','TEAM',1)")
+        conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb_org_test','组织库')")
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+            "VALUES('kb_org_test','TEAM','organization')"
+        )
 
-    from fastapi.testclient import TestClient
-    from config import settings
-    from rag.api import app, user_db
-    from rag.auth import create_token
-
-    client = TestClient(app)
-    monkeypatch.setattr(settings, "auth_enabled", True)
-
-    try:
-        owner_id = user_db.create_user("_perm_owner2", "pwd")
-    except ValueError:
-        owner_id = user_db.get_user_by_username("_perm_owner2")["id"]
-    try:
-        other_id = user_db.create_user("_perm_other2", "pwd")
-    except ValueError:
-        other_id = user_db.get_user_by_username("_perm_other2")["id"]
-
-    owner_token = create_token({"user_id": owner_id, "username": "_perm_owner2"})
-    other_token = create_token({"user_id": other_id, "username": "_perm_other2"})
-
-    # owner 创建私有 KB
-    res = client.post("/knowledge-bases", json={"name": "priv_test", "scope": "private"},
-                      headers={"Authorization": f"Bearer {owner_token}"})
-    assert res.status_code == 200
-    kb_id = res.json()["kb_id"]
-
-    # other 查询 → 403
-    res = client.post(f"/knowledge-bases/{kb_id}/query",
-                      json={"question": "test"},
-                      headers={"Authorization": f"Bearer {other_token}"})
-    assert res.status_code == 403
-    client.delete(f"/knowledge-bases/{kb_id}",
-                  headers={"Authorization": f"Bearer {owner_token}"})
+    assert isolated_api.post(
+        "/knowledge-bases/kb_org_test/query",
+        json={"question": "test"},
+        headers=outsider_headers,
+    ).status_code == 404
+    assert isolated_api.post(
+        "/knowledge-bases/kb_org_test/query",
+        json={"question": "test"},
+        headers=member_headers,
+    ).status_code == 200
 
 
 def test_api_no_auth_returns_401(monkeypatch):
     """未登录访问 KB 端点应返回 401。"""
     from fastapi.testclient import TestClient
+
     from config import settings
     from rag.api import app
 
@@ -490,7 +458,7 @@ def test_reset_password_invalidates_old_token(db):
     """重置密码后旧 token 应失效。"""
     uid = db.create_user("alice", "OldPass1")
     from rag.auth import create_token
-    token = create_token({"user_id": uid, "username": "alice"})
+    create_token({"user_id": uid, "username": "alice"})
     # 重置密码
     db.reset_password(uid, "NewPass1")
     # 检查 password_changed_at 已更新
@@ -504,7 +472,7 @@ def test_reset_password_invalidates_old_token(db):
 def test_search_conversations_by_title(db):
     """搜索对话标题应返回匹配结果。"""
     uid = db.create_user("alice", "pwd")
-    cid = db.create_conversation(uid, title="RAG 技术讨论")
+    db.create_conversation(uid, title="RAG 技术讨论")
     results = db.search_conversations(uid, "RAG")
     assert len(results) >= 1
     assert any(r["title"] == "RAG 技术讨论" for r in results)
@@ -709,7 +677,7 @@ def test_scope_switch_clears_shares_on_public(db):
 
 def test_protected_file_scope_cannot_change(db):
     """protected 文件的 scope 不可修改。"""
-    uid = db.create_user("alice", "pwd")
+    db.create_user("alice", "pwd")
     with db._lock:
         db._conn.execute(
             "INSERT INTO document_permissions (doc_name, kb_id, owner_id, is_public, protected, scope) "
@@ -742,9 +710,10 @@ def test_protected_file_scope_cannot_change(db):
 
 def test_check_doc_permission_scope_private_only_owner(db):
     """scope=private 时只有 owner 可查看。"""
-    from rag.permissions import check_doc_permission
     import pytest
     from fastapi import HTTPException
+
+    from rag.permissions import check_doc_permission
 
     owner = db.create_user("alice", "pwd")
     other = db.create_user("bob", "pwd")
@@ -775,9 +744,10 @@ def test_check_doc_permission_scope_public_anyone(db):
 
 def test_check_doc_permission_scope_shared_view(db):
     """scope=shared + permission=view 时共享用户可查看但不可编辑。"""
-    from rag.permissions import check_doc_permission
     import pytest
     from fastapi import HTTPException
+
+    from rag.permissions import check_doc_permission
 
     owner = db.create_user("alice", "pwd")
     viewer = db.create_user("bob", "pwd")
@@ -842,9 +812,10 @@ def test_check_doc_permission_admin_bypasses_scope(db):
 
 def test_check_kb_permission_scope_private_only_owner(db):
     """KB scope=private 时只有 owner 可查看。"""
-    from rag.permissions import check_kb_permission
     import pytest
     from fastapi import HTTPException
+
+    from rag.permissions import check_kb_permission
 
     owner = db.create_user("alice", "pwd")
     other = db.create_user("bob", "pwd")
@@ -988,6 +959,7 @@ def test_create_document_permission_default_downloadable(db):
 def test_download_requires_auth():
     """下载文件需要认证。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
 
     client = TestClient(app)
@@ -998,6 +970,7 @@ def test_download_requires_auth():
 def test_download_file_not_found():
     """下载不存在的文件应返回 404。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app, user_db
     from rag.auth import create_token
 

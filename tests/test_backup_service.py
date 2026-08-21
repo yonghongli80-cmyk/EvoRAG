@@ -1,9 +1,9 @@
 import hashlib
 import json
+import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-import shutil
 
 import pytest
 
@@ -146,7 +146,7 @@ def test_copy_returns_only_logical_path_size_and_hash(tmp_path):
 
     assert target.read_text(encoding="utf-8") == "内容"
     assert entry.path == "upload/source.txt"
-    assert entry.size == len("内容".encode("utf-8"))
+    assert entry.size == len("内容".encode())
     assert len(entry.sha256) == 64
     assert str(tmp_path) not in repr(entry)
 

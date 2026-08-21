@@ -2,8 +2,8 @@
 
 import pytest
 
-from rag.materials.jobs import claim_material_jobs, enqueue_latest_index_job
 from rag.materials.formats import build_default_format_registry
+from rag.materials.jobs import claim_material_jobs, enqueue_latest_index_job
 from rag.materials.worker import JobResult, MaterialWorker, WorkerServices
 from rag.user_db import UserDB
 
@@ -40,7 +40,6 @@ def test_claim_marks_job_running_with_lease(job_db):
 
 
 def test_unavailable_job_is_not_claimed(job_db):
-    from rag.user_db import UserDB as _U
     # available_at is 0 by helper; bump it to force waiting
     job_db.enqueue_material_job(document_id=7, version_id=11)
     job_db._conn.execute(

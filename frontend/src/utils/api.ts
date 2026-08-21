@@ -7,29 +7,18 @@ export function resolveApiBase(configured: string | undefined, isDev: boolean): 
 
 const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE, import.meta.env.DEV)
 
-const api = axios.create({
-  baseURL: API_BASE
-})
+// Remove bearer tokens left by releases that stored browser sessions in JS.
+if (typeof localStorage !== 'undefined') localStorage.removeItem('rag_token')
 
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('rag_token')
-  if (!token) return config
-  if (typeof config.headers?.set === 'function') {
-    config.headers.set('Authorization', `Bearer ${token}`)
-  } else {
-    config.headers = {
-      ...config.headers,
-      Authorization: `Bearer ${token}`
-    } as any
-  }
-  return config
+const api = axios.create({
+  baseURL: API_BASE,
+  withCredentials: true
 })
 
 async function rejectRequest(error: any): Promise<never> {
   if (error.response) {
     const { status, data } = error.response
     if (status === 401) {
-      localStorage.removeItem('rag_token')
       window.location.href = '/login'
     } else if (status === 403) {
       ElMessage.error('权限不足，无法执行此操作')
@@ -54,11 +43,7 @@ api.interceptors.response.use(
 export async function streamRequest(path: string, init: RequestInit): Promise<Response> {
   const url = `${API_BASE.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
   const headers = new Headers(init.headers)
-  const token = localStorage.getItem('rag_token')
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
-  const requestInit = { ...init, headers }
+  const requestInit = { ...init, headers, credentials: 'same-origin' as const }
   let response: Response
   try {
     response = await fetch(url, requestInit)

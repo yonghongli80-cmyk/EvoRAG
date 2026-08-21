@@ -3,8 +3,8 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from rag.auth import create_token, verify_api_key
 from config import settings
+from rag.auth import create_token, verify_api_key
 
 
 def test_verify_api_key_rejects_token_issued_before_password_change(monkeypatch):

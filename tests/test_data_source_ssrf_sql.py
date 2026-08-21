@@ -22,9 +22,8 @@ def test_http_data_sources_reject_hostnames_resolving_to_private_ips():
     with patch(
         "rag.data_sources.base.socket.getaddrinfo",
         return_value=[(None, None, None, None, ("127.0.0.1", 0))],
-    ):
-        with pytest.raises(ValueError, match="内网"):
-            APISource("https://internal.example.test/data")
+    ), pytest.raises(ValueError, match="内网"):
+        APISource("https://internal.example.test/data")
 
 
 def test_database_source_rejects_private_remote_host():

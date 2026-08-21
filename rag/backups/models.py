@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
 import json
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Mapping
 
 from config import Settings
 

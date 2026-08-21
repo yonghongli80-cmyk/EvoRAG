@@ -3,12 +3,10 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
-import AccountPicker from '../components/AccountPicker.vue'
 
 const router = useRouter()
 const authStore = useAuthStore()
 
-const isLogin = ref(true)
 const username = ref('')
 const password = ref('')
 const loading = ref(false)
@@ -20,11 +18,7 @@ async function handleSubmit() {
   }
   loading.value = true
   try {
-    if (isLogin.value) {
-      await authStore.login(username.value, password.value)
-    } else {
-      await authStore.register(username.value, password.value)
-    }
+    await authStore.login(username.value, password.value)
     router.push('/')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '操作失败')
@@ -56,23 +50,16 @@ async function handleSubmit() {
 
       <!-- Form -->
       <div class="form-card">
-        <div class="tabs">
-          <button :class="['tab', { active: isLogin }]" @click="isLogin = true">登录</button>
-          <button :class="['tab', { active: !isLogin }]" @click="isLogin = false">注册</button>
-        </div>
+        <h2 class="form-title">登录</h2>
 
         <form @submit.prevent="handleSubmit" class="form">
-          <div v-if="isLogin" class="field">
-            <label class="label">选择员工</label>
-            <AccountPicker v-model="username" />
-          </div>
           <div class="field">
-            <label class="label">用户名</label>
+            <label class="label">姓名或账号编号</label>
             <input
               v-model="username"
               type="text"
               class="input"
-              placeholder="输入用户名"
+              placeholder="输入姓名或 demo001 等编号"
               autocomplete="username"
             />
           </div>
@@ -83,11 +70,11 @@ async function handleSubmit() {
               type="password"
               class="input"
               placeholder="输入密码"
-              :autocomplete="isLogin ? 'current-password' : 'new-password'"
+              autocomplete="current-password"
             />
           </div>
           <button type="submit" class="submit-btn" :disabled="loading">
-            {{ loading ? '处理中...' : (isLogin ? '登录' : '注册') }}
+            {{ loading ? '登录中...' : '登录' }}
           </button>
         </form>
       </div>
@@ -218,6 +205,12 @@ async function handleSubmit() {
   border-radius: var(--radius-xl);
   padding: var(--space-8);
   box-shadow: var(--shadow-lg);
+}
+
+.form-title {
+  margin: 0 0 var(--space-6);
+  text-align: center;
+  font-size: var(--text-xl);
 }
 
 /* ── Tabs ────────────────────────────────────────────── */

@@ -1,6 +1,7 @@
 """TDD tests for data source management API endpoints."""
 
-from unittest.mock import MagicMock, patch
+import sys
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,8 +12,9 @@ from rag.auth import create_token
 
 
 @pytest.fixture(autouse=True)
-def _clean_data_sources():
+def _clean_data_sources(sandbox_api_storage, monkeypatch):
     """Delete all data_sources rows before and after each test to avoid cross-test pollution."""
+    monkeypatch.setattr(sys.modules[__name__], "user_db", sandbox_api_storage)
     with user_db._lock:
         user_db._conn.execute("DELETE FROM data_sources")
         user_db._conn.commit()

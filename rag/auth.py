@@ -8,9 +8,9 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import HTTPException, Header, Security
+import jwt
+from fastapi import Header, HTTPException, Security
 from fastapi.security import APIKeyHeader
-from jose import JWTError, jwt
 
 from config import settings
 
@@ -86,7 +86,7 @@ def decode_token(token: str, password_changed_at: float = None) -> dict | None:
     """
     try:
         payload = jwt.decode(token, _JWT_SECRET, algorithms=[_JWT_ALGORITHM])
-    except JWTError:
+    except jwt.PyJWTError:
         return None
     # NULL 跳过检查（迁移后不踢用户）
     if password_changed_at and payload.get("iat", 0) < password_changed_at:
@@ -105,24 +105,18 @@ def verify_api_key(api_key: str = Security(api_key_header), authorization: str =
     if api_key:
         try:
             keys = json.loads(settings.auth_keys)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=500, detail="鉴权配置格式错误")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail="鉴权配置格式错误") from exc
         for user_id, key in keys.items():
             if hmac.compare_digest(api_key, key):
                 return user_id
-    # Fallback: try JWT Bearer token
+    # Fallback: resolve JWT through the same principal boundary as modern APIs.
+    # Import lazily to avoid the api.py -> auth.py import cycle.
     if authorization.startswith("Bearer "):
-        token = authorization.replace("Bearer ", "")
-        payload = decode_token(token)
-        if payload and "user_id" in payload:
-            # Import lazily to avoid the api.py -> auth.py import cycle.
-            from rag.api import user_db
+        from rag.api import user_db
+        from rag.api_security import resolve_principal
 
-            user = user_db.get_user_by_id(payload["user_id"])
-            if not user:
-                payload = None
-            else:
-                payload = decode_token(token, user.get("password_changed_at"))
-        if payload and "user_id" in payload:
-            return str(payload["user_id"])
+        user = resolve_principal(user_db, authorization, None)
+        if user:
+            return str(user["id"])
     raise HTTPException(status_code=403, detail="认证失败，请提供有效的 API Key 或 JWT Token")

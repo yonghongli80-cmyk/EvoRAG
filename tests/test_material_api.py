@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import zipfile
-
 from pathlib import Path
 
 from rag.materials.formats import build_default_format_registry

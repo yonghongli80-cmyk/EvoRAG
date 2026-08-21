@@ -1,5 +1,7 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from fastapi.testclient import TestClient
+
 from rag.api import app
 
 client = TestClient(app)
@@ -14,7 +16,26 @@ def _auth_headers():
     except ValueError:
         uid = user_db.get_user_by_username("_test_admin")["id"]
     user_db.set_user_admin(uid, True)
-    token = create_token({"user_id": uid, "username": "_test_admin"})
+    with user_db.locked_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO org_units(code,name,kind) "
+            "VALUES('TEST-ROOT','测试组织','company')"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO org_people"
+            "(person_code,user_id,display_name,job_title) "
+            "VALUES('P-TEST-ADMIN',?,'测试管理员','管理员')",
+            (uid,),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO org_memberships(person_code,org_code,is_primary) "
+            "VALUES('P-TEST-ADMIN','TEST-ROOT',1)"
+        )
+    token = create_token({
+        "user_id": uid,
+        "username": "_test_admin",
+        "security_version": 1,
+    })
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -156,6 +177,7 @@ def test_health_returns_503_when_a_critical_component_is_unavailable():
 def test_query_stream_endpoint_exists():
     """POST /query/stream 端点应该存在。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
     client = TestClient(app)
     response = client.post("/query/stream", json={"question": "test"})
@@ -165,6 +187,7 @@ def test_query_stream_endpoint_exists():
 def test_suggest_endpoint_exists():
     """POST /suggest 端点应该存在。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
     client = TestClient(app)
     response = client.post("/suggest", json={"question": "test", "answer": "test"})
@@ -212,12 +235,17 @@ def test_list_tags(mock_get_client):
     mock_client.collection_exists.return_value = True
 
     p1 = MagicMock()
-    p1.payload = {"tags": ["finance", "q3"]}
+    p1.payload = {"doc_name": "finance.txt", "tags": ["finance", "q3"]}
     p2 = MagicMock()
-    p2.payload = {"tags": ["finance", "annual"]}
+    p2.payload = {"doc_name": "annual.txt", "tags": ["finance", "annual"]}
     p3 = MagicMock()
-    p3.payload = {"tags": []}
+    p3.payload = {"doc_name": "empty.txt", "tags": []}
     mock_client.scroll.return_value = ([p1, p2, p3], None)
+
+    from rag.api import user_db
+    user_db.create_document_permission("finance.txt", "rag_docs", 0, scope="public")
+    user_db.create_document_permission("annual.txt", "rag_docs", 0, scope="public")
+    user_db.create_document_permission("empty.txt", "rag_docs", 0, scope="public")
 
     response = client.get("/tags", headers=_auth_headers())
     assert response.status_code == 200
@@ -264,6 +292,7 @@ def test_stream_query_request_accepts_tags():
 def test_files_endpoint_returns_in_kb_field():
     """/files 返回的每个文件应该有 in_kb 字段。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
     client = TestClient(app)
     response = client.get("/files", headers=_auth_headers())
@@ -277,7 +306,7 @@ def test_files_endpoint_returns_in_kb_field():
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_get_kb_detail(mock_kb_cls):
+def test_get_kb_detail(mock_kb_cls, isolated_api):
     """GET /knowledge-bases/{id} 应该返回知识库详情。"""
     mock_manager = MagicMock()
     mock_manager.create_kb.return_value = "kb_test123"
@@ -286,12 +315,10 @@ def test_get_kb_detail(mock_kb_cls):
     ]
     mock_kb_cls.return_value = mock_manager
 
-    from fastapi.testclient import TestClient
-    from rag.api import app
-    client = TestClient(app)
+    client = isolated_api
     headers = _auth_headers()
     # 先创建一个知识库
-    res = client.post("/knowledge-bases", json={"name": "test_kb_detail"}, headers=headers)
+    res = client.post("/knowledge-bases", json={"name": "test_kb_detail", "org_unit_code": "TEST-ROOT"}, headers=headers)
     assert res.status_code == 200
     kb_id = res.json()["kb_id"]
     # 获取详情
@@ -302,7 +329,7 @@ def test_get_kb_detail(mock_kb_cls):
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_update_kb_overview(mock_kb_cls):
+def test_update_kb_overview(mock_kb_cls, isolated_api):
     """PUT /knowledge-bases/{id}/overview 应该更新概述。"""
     mock_manager = MagicMock()
     mock_manager.create_kb.return_value = "kb_test_overview"
@@ -311,11 +338,9 @@ def test_update_kb_overview(mock_kb_cls):
     ]
     mock_kb_cls.return_value = mock_manager
 
-    from fastapi.testclient import TestClient
-    from rag.api import app
-    client = TestClient(app)
+    client = isolated_api
     headers = _auth_headers()
-    res = client.post("/knowledge-bases", json={"name": "test_overview"}, headers=headers)
+    res = client.post("/knowledge-bases", json={"name": "test_overview", "org_unit_code": "TEST-ROOT"}, headers=headers)
     assert res.status_code == 200
     kb_id = res.json()["kb_id"]
     response = client.put(f"/knowledge-bases/{kb_id}/overview", json={"overview": "这是概述"}, headers=headers)
@@ -323,7 +348,7 @@ def test_update_kb_overview(mock_kb_cls):
 
 
 @patch("rag.api.KnowledgeBaseManager")
-def test_update_doc_toc(mock_kb_cls):
+def test_update_doc_toc(mock_kb_cls, isolated_api):
     """PUT /knowledge-bases/{id}/documents/{name}/toc 应该更新目录。"""
     mock_manager = MagicMock()
     mock_manager.create_kb.return_value = "kb_test_toc"
@@ -332,11 +357,9 @@ def test_update_doc_toc(mock_kb_cls):
     ]
     mock_kb_cls.return_value = mock_manager
 
-    from fastapi.testclient import TestClient
-    from rag.api import app
-    client = TestClient(app)
+    client = isolated_api
     headers = _auth_headers()
-    res = client.post("/knowledge-bases", json={"name": "test_toc"}, headers=headers)
+    res = client.post("/knowledge-bases", json={"name": "test_toc", "org_unit_code": "TEST-ROOT"}, headers=headers)
     assert res.status_code == 200
     kb_id = res.json()["kb_id"]
     response = client.put(f"/knowledge-bases/{kb_id}/documents/test.txt/toc", json={"toc": {"title": "test", "sections": []}}, headers=headers)

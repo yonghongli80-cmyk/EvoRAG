@@ -1,8 +1,8 @@
 """Tests for BM25 persistence integration in Retriever."""
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from rag.models import Chunk
 from rag.bm25_store import BM25Store
+from rag.models import Chunk
 
 
 def _make_chunks(n: int = 3) -> list[Chunk]:
@@ -37,7 +37,7 @@ def test_retriever_uses_bm25store_when_data_exists(tmp_path):
 
 def test_retriever_falls_back_to_load_all_when_store_empty(tmp_path):
     """When BM25Store has no chunks, Retriever should call _load_all_chunks and store into BM25Store."""
-    db = str(tmp_path / "test.db")
+    str(tmp_path / "test.db")
     fresh_chunks = _make_chunks(4)
 
     with patch("rag.retriever.BM25Store") as MockStore, \

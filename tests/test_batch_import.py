@@ -1,12 +1,12 @@
 """批量导入测试。"""
 import os
 import tempfile
-from unittest.mock import patch, MagicMock
 
 
 def test_batch_import_endpoint_exists():
     """POST /batch-import 端点应该存在。"""
     from fastapi.testclient import TestClient
+
     from rag.api import app
     client = TestClient(app)
     response = client.post("/batch-import")
@@ -16,6 +16,7 @@ def test_batch_import_endpoint_exists():
 def test_batch_importer_parses_csv_qa_pair():
     """CSV QA 对模式：每行是一个问答对。"""
     import csv
+
     from rag.batch_importer import BatchImporter
 
     # 创建临时 CSV 文件
@@ -39,6 +40,7 @@ def test_batch_importer_parses_csv_qa_pair():
 def test_batch_importer_parses_csv_document():
     """CSV document 模式：每行是一个文档片段。"""
     import csv
+
     from rag.batch_importer import BatchImporter
 
     csv_path = tempfile.mktemp(suffix=".csv")
@@ -85,7 +87,7 @@ def test_batch_importer_unsupported_format():
     importer = BatchImporter()
     try:
         importer.parse("test.xyz", mode="qa_pair")
-        assert False, "应该抛 ValueError"
+        raise AssertionError("应该抛 ValueError")
     except ValueError as e:
         assert "不支持" in str(e)
 
@@ -93,6 +95,7 @@ def test_batch_importer_unsupported_format():
 def test_batch_importer_table_mode():
     """table 模式应该将整张表转为文本。"""
     import csv
+
     from rag.batch_importer import BatchImporter
 
     csv_path = tempfile.mktemp(suffix=".csv")

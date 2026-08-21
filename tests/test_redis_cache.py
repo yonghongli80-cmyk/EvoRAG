@@ -1,7 +1,8 @@
 """Redis 缓存模块测试。"""
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 
 @pytest.fixture()
@@ -83,8 +84,9 @@ def test_redis_cache_connection_error_fallback():
 
 def test_redis_cache_fallback_ttl():
     """内存降级缓存应支持 TTL。"""
-    from rag.redis_cache import RedisCache
     import time
+
+    from rag.redis_cache import RedisCache
 
     cache = RedisCache(ttl_seconds=1)
     cache._redis = None

@@ -13,11 +13,11 @@ from fastapi.security import APIKeyHeader
 
 from config import settings
 from rag.auth import decode_token
-from rag.permissions import check_doc_permission, check_kb_permission
-from rag.org_auth.repository import OrgRepository, is_org_policy
-from rag.org_auth.models import OrgRole
 from rag.org_auth.audit import OrgAuditService
+from rag.org_auth.models import OrgRole
+from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
+from rag.permissions import check_doc_permission, check_kb_permission
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)

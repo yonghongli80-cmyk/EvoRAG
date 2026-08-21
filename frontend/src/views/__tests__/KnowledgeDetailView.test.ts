@@ -110,4 +110,35 @@ describe('KnowledgeDetailView', () => {
 
     expect(wrapper.find('[data-test="open-spreadsheet-7-9"]').exists()).toBe(true)
   })
+
+  it('does not offer knowledge-base deletion to a content manager', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: { name: 'Managed KB', documents: [], effective_role: 'manage' }
+    } as any)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/kb/:id', component: KnowledgeDetailView }]
+    })
+    await router.push('/kb/managed')
+    await router.isReady()
+
+    const wrapper = mount(KnowledgeDetailView, {
+      global: {
+        plugins: [router, createTestingPinia({ createSpy: vi.fn })],
+        stubs: {
+          MessageBubble: true, ChatInput: true, AddToAnalysisDialog: true,
+          'el-button': { template: '<button><slot /></button>' },
+          'el-icon': { template: '<i><slot /></i>' },
+          'el-dropdown': { template: '<div><slot /><slot name="dropdown" /></div>' },
+          'el-dropdown-menu': { template: '<div><slot /></div>' },
+          'el-dropdown-item': { template: '<button><slot /></button>' },
+          'el-tag': true, 'el-dialog': true, 'el-input': true,
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('删除知识库')
+    expect(wrapper.text()).toContain('添加文件')
+  })
 })

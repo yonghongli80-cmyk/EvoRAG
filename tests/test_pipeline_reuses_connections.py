@@ -138,11 +138,12 @@ async def test_gap_analytics_endpoints_reuse_api_singleton():
     gap_analyzer.get_gaps.return_value = []
 
     with patch.object(api, "get_gap_analyzer", return_value=gap_analyzer) as get_singleton:
-        assert await api.get_gap_summary(user_id="admin") == {
+        admin = {"id": 1, "is_admin": True}
+        assert await api.get_gap_summary(user=admin) == {
             "total": 0,
             "top_questions": [],
         }
-        assert await api.get_gaps(limit=25, user_id="admin") == []
+        assert await api.get_gaps(limit=25, user=admin) == []
 
     assert get_singleton.call_count == 2
     gap_analyzer.get_gaps.assert_called_once_with(limit=25)

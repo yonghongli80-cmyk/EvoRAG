@@ -181,9 +181,8 @@ class UserDB:
     @contextmanager
     def locked_transaction(self, immediate: bool = False):
         """Yield the shared connection inside the database lock and one transaction."""
-        with self._lock:
-            with self.transaction(immediate=immediate):
-                yield self._conn
+        with self._lock, self.transaction(immediate=immediate):
+            yield self._conn
 
     @contextmanager
     def locked_read(self):
@@ -811,7 +810,8 @@ class UserDB:
     def change_password(self, user_id: int, old_password: str, new_password: str) -> None:
         """修改密码。验证旧密码、新密码强度、新旧密码不同。"""
         import time
-        from rag.auth import verify_password, hash_password
+
+        from rag.auth import hash_password, verify_password
 
         _validate_password_strength(new_password)
         if old_password == new_password:
@@ -835,6 +835,7 @@ class UserDB:
     def reset_password(self, user_id: int, new_password: str) -> None:
         """重置密码（不验证旧密码）。仅 admin 调用。"""
         import time
+
         from rag.auth import hash_password
 
         _validate_password_strength(new_password)
@@ -859,14 +860,12 @@ class UserDB:
     def create_kb_metadata(self, kb_id: str, name: str, owner_id: int = 0, scope: str = "private") -> None:
         """创建 KB 元数据（仅新 KB 调用，不覆盖已有数据）。"""
         with self._lock:
-            try:
-                self._conn.execute(
-                    "INSERT INTO kb_metadata (kb_id, name, owner_id, scope) VALUES (?, ?, ?, ?)",
-                    (kb_id, name, owner_id, scope),
-                )
-                self._conn.commit()
-            except sqlite3.IntegrityError:
-                pass  # 已存在，忽略（Qdrant KB 已创建但 metadata 重复插入的情况）
+            self._conn.execute(
+                "INSERT OR IGNORE INTO kb_metadata "
+                "(kb_id, name, owner_id, scope) VALUES (?, ?, ?, ?)",
+                (kb_id, name, owner_id, scope),
+            )
+            self._conn.commit()
 
     def get_kb_metadata(self, kb_id: str) -> dict[str, Any] | None:
         """获取 KB 元数据。不存在返回 None。"""
@@ -1015,8 +1014,8 @@ class UserDB:
                 )
                 self._conn.commit()
                 return cur.lastrowid  # type: ignore[return-value]
-            except sqlite3.IntegrityError:
-                raise ValueError(f"Username '{username}' already exists")
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"Username '{username}' already exists") from exc
 
     def ensure_development_user(self) -> dict[str, Any]:
         """Ensure the auth-disabled principal has a real FK-safe user row."""
@@ -1788,10 +1787,7 @@ class UserDB:
                 ).fetchall()
             else:
                 prefix = "not_useful:"
-                if task["cluster_key"].startswith(prefix):
-                    qh = task["cluster_key"].split(":")[1]
-                else:
-                    qh = None
+                qh = task["cluster_key"].split(":")[1] if task["cluster_key"].startswith(prefix) else None
                 if qh is None:
                     return []
                 rows = self._conn.execute(

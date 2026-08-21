@@ -1,5 +1,8 @@
+import pytest
+from fastapi import HTTPException
+
 from rag.api_security import resolve_principal
-from rag.auth import create_token
+from rag.auth import create_token, verify_api_key
 from rag.org_auth.repository import OrgRepository
 from rag.user_db import UserDB
 
@@ -56,5 +59,33 @@ def test_api_key_principal_respects_inactive_org_identity(tmp_path, monkeypatch)
         with db.locked_transaction() as conn:
             conn.execute("UPDATE org_people SET active=0 WHERE user_id=?", (user_id,))
         assert resolve_principal(db, "", "key") is None
+    finally:
+        db.close()
+
+
+def test_legacy_verifier_rejects_revoked_organization_token(tmp_path, monkeypatch):
+    """Legacy-protected routes must not bypass organization token revocation."""
+    import rag.api as api
+    from config import settings
+
+    db, user_id, _ = _identity_db(tmp_path)
+    try:
+        monkeypatch.setattr(settings, "auth_enabled", True)
+        monkeypatch.setattr(api, "user_db", db)
+        token = create_token({
+            "user_id": user_id,
+            "username": "fixed001",
+            "security_version": 1,
+        })
+        assert verify_api_key(None, f"Bearer {token}") == str(user_id)
+
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "UPDATE org_people SET active=0,security_version=2 WHERE user_id=?",
+                (user_id,),
+            )
+
+        with pytest.raises(HTTPException, match="认证失败"):
+            verify_api_key(None, f"Bearer {token}")
     finally:
         db.close()

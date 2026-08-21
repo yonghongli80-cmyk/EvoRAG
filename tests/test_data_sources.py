@@ -1,13 +1,10 @@
 """TDD tests for rag.data_sources – abstract base, RSS, DB, and API sources."""
 
 import asyncio
-import json
 import sqlite3
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -202,23 +199,23 @@ class TestDBSource:
 
     def test_sqlite_connection_success(self):
         """Test connection to a real SQLite in-memory database."""
-        import tempfile
         import os
+        import tempfile
 
         from rag.data_sources.db_source import DBSource
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_name = tmp.name
         try:
-            conn = sqlite3.connect(tmp.name)
+            conn = sqlite3.connect(tmp_name)
             conn.execute("CREATE TABLE test (id INTEGER, name TEXT)")
             conn.commit()
             conn.close()
 
-            src = DBSource(connection_string=f"sqlite:///{tmp.name}", query="SELECT * FROM test")
+            src = DBSource(connection_string=f"sqlite:///{tmp_name}", query="SELECT * FROM test")
             assert src.test_connection() is True
         finally:
-            os.unlink(tmp.name)
+            os.unlink(tmp_name)
 
     def test_sqlite_connection_failure(self):
         from rag.data_sources.db_source import DBSource
@@ -227,15 +224,15 @@ class TestDBSource:
         assert src.test_connection() is False
 
     def test_fetch_sqlite(self):
-        import tempfile
         import os
+        import tempfile
 
         from rag.data_sources.db_source import DBSource
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_name = tmp.name
         try:
-            conn = sqlite3.connect(tmp.name)
+            conn = sqlite3.connect(tmp_name)
             conn.execute("CREATE TABLE articles (title TEXT, content TEXT, url TEXT, published_at TEXT)")
             conn.execute("INSERT INTO articles VALUES ('Hello', 'World', 'http://example.com', '2025-01-01')")
             conn.execute("INSERT INTO articles VALUES ('Hi', 'Earth', 'http://example.org', '2025-01-02')")
@@ -243,7 +240,7 @@ class TestDBSource:
             conn.close()
 
             src = DBSource(
-                connection_string=f"sqlite:///{tmp.name}",
+                connection_string=f"sqlite:///{tmp_name}",
                 query="SELECT title, content, url, published_at FROM articles",
             )
             results = _run(src.fetch())
@@ -252,30 +249,30 @@ class TestDBSource:
             assert results[0]["content"] == "World"
             assert results[1]["title"] == "Hi"
         finally:
-            os.unlink(tmp.name)
+            os.unlink(tmp_name)
 
     def test_fetch_empty_result(self):
-        import tempfile
         import os
+        import tempfile
 
         from rag.data_sources.db_source import DBSource
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            tmp_name = tmp.name
         try:
-            conn = sqlite3.connect(tmp.name)
+            conn = sqlite3.connect(tmp_name)
             conn.execute("CREATE TABLE empty_table (id INTEGER)")
             conn.commit()
             conn.close()
 
             src = DBSource(
-                connection_string=f"sqlite:///{tmp.name}",
+                connection_string=f"sqlite:///{tmp_name}",
                 query="SELECT * FROM empty_table",
             )
             results = _run(src.fetch())
             assert results == []
         finally:
-            os.unlink(tmp.name)
+            os.unlink(tmp_name)
 
 
 # ── API source tests ────────────────────────────────────────────────────────

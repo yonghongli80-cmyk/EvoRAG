@@ -1,8 +1,7 @@
 """Tests for eval module."""
 import json
-import sys
-import pytest
 from unittest.mock import MagicMock, patch
+
 from rag.models import Chunk
 
 
@@ -74,7 +73,7 @@ def test_evaluate_miss():
 
 def test_compute_metrics():
     """compute_metrics should calculate hit_rate, avg_latency, pass/fail."""
-    from rag.eval import compute_metrics, EvalResult
+    from rag.eval import EvalResult, compute_metrics
 
     results = [
         EvalResult(question="Q1", expected_keywords=["A"], answer="A found", hit=True, sources=[], latency_ms=100),
@@ -105,8 +104,8 @@ def test_compute_metrics_empty():
 @patch("rag.pipeline.RAGPipeline")
 def test_cli_main(mock_pipeline_cls, tmp_path):
     """CLI main() should run evaluation and write history file."""
-    from rag.pipeline import QueryResult
     from rag.eval import main
+    from rag.pipeline import QueryResult
 
     # Prepare dataset file
     dataset_path = tmp_path / "eval.jsonl"
@@ -138,7 +137,7 @@ def test_cli_main(mock_pipeline_cls, tmp_path):
 
 
 def test_compute_metrics_includes_p95():
-    from rag.eval import compute_metrics, EvalResult
+    from rag.eval import EvalResult, compute_metrics
 
     results = [
         EvalResult("q1", ["k1"], "a1", True, [], 100.0),
@@ -151,7 +150,7 @@ def test_compute_metrics_includes_p95():
 
 
 def test_save_bad_case(tmp_path):
-    from rag.eval import save_bad_case, EvalResult
+    from rag.eval import EvalResult, save_bad_case
 
     path = str(tmp_path / "bad_cases.jsonl")
     result = EvalResult("test question", ["keyword"], "wrong answer", False, [], 100.0)

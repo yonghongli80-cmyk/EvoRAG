@@ -1,7 +1,7 @@
 """知识库元数据表测试。"""
 import os
-import tempfile
 import sqlite3
+import tempfile
 
 
 def test_kb_metadata_table_exists():
@@ -61,7 +61,7 @@ def test_kb_documents_unique_constraint():
         conn.execute("INSERT INTO kb_documents (kb_id, filename, file_path) VALUES (?, ?, ?)", ("kb_test", "a.txt", "/a.txt"))
         try:
             conn.execute("INSERT INTO kb_documents (kb_id, filename, file_path) VALUES (?, ?, ?)", ("kb_test", "a.txt", "/a.txt"))
-            assert False, "应该抛出 IntegrityError"
+            raise AssertionError("应该抛出 IntegrityError")
         except sqlite3.IntegrityError:
             pass
         conn.close()

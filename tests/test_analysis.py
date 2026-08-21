@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from rag.user_db import UserDB
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -159,7 +158,7 @@ class TestAnalysisCardsDB:
     def test_add_question_with_all_fields(self, db):
         uid = db.create_user("alice", "s3cret")
         card_id = db.create_card(uid, "Card")
-        qid = db.add_question(
+        db.add_question(
             card_id,
             "What is RAG?",
             answer="Retrieval-Augmented Generation",

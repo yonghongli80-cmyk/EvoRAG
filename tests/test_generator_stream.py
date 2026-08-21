@@ -1,7 +1,7 @@
 """流式生成器测试。"""
 import asyncio
 import inspect
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 async def _coroutine_wrap(async_gen):
@@ -96,7 +96,7 @@ def test_generate_stream_strips_reasoning_content():
 
 def test_generate_stream_respects_circuit_breaker():
     """熔断时 generate_stream 应该 yield 降级提示。"""
-    from rag.generator import generate_stream, _breaker
+    from rag.generator import _breaker, generate_stream
     for _ in range(5):
         _breaker.record_failure()
 

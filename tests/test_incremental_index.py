@@ -1,5 +1,4 @@
 """增量索引测试。"""
-import json
 import os
 import tempfile
 
@@ -7,32 +6,32 @@ import tempfile
 def test_compute_file_hash():
     """compute_file_hash 应该对同一文件返回相同 hash。"""
     from rag.folder_indexer import compute_file_hash
-    path = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-    path.write("test content")
-    path.close()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as path:
+        path.write("test content")
+        path_name = path.name
     try:
-        h1 = compute_file_hash(path.name)
-        h2 = compute_file_hash(path.name)
+        h1 = compute_file_hash(path_name)
+        h2 = compute_file_hash(path_name)
         assert h1 == h2
         assert len(h1) == 32  # MD5 hex
     finally:
-        os.unlink(path.name)
+        os.unlink(path_name)
 
 
 def test_compute_file_hash_different_for_different_content():
     """不同内容的文件应该有不同的 hash。"""
     from rag.folder_indexer import compute_file_hash
-    p1 = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-    p1.write("content A")
-    p1.close()
-    p2 = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-    p2.write("content B")
-    p2.close()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as p1:
+        p1.write("content A")
+        p1_name = p1.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as p2:
+        p2.write("content B")
+        p2_name = p2.name
     try:
-        assert compute_file_hash(p1.name) != compute_file_hash(p2.name)
+        assert compute_file_hash(p1_name) != compute_file_hash(p2_name)
     finally:
-        os.unlink(p1.name)
-        os.unlink(p2.name)
+        os.unlink(p1_name)
+        os.unlink(p2_name)
 
 
 def test_load_index_state_empty():
@@ -44,7 +43,7 @@ def test_load_index_state_empty():
 
 def test_save_and_load_index_state():
     """保存后加载应该返回相同数据。"""
-    from rag.folder_indexer import save_index_state, load_index_state
+    from rag.folder_indexer import load_index_state, save_index_state
     path = tempfile.mktemp(suffix=".json")
     try:
         state = {"files": {"test.txt": {"hash": "abc123"}}}

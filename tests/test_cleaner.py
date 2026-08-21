@@ -1,7 +1,11 @@
 """Tests for data cleaning pipeline."""
 from rag.cleaner import (
-    detect_and_decode, clean_text, document_hash,
-    deduplicate_chunks, extract_metadata, clean_document,
+    clean_document,
+    clean_text,
+    deduplicate_chunks,
+    detect_and_decode,
+    document_hash,
+    extract_metadata,
 )
 
 
@@ -14,7 +18,7 @@ def test_detect_and_decode_gbk():
 
 def test_detect_and_decode_utf8():
     """UTF-8 编码正确解码。"""
-    raw = "Hello World".encode("utf-8")
+    raw = b"Hello World"
     result = detect_and_decode(raw)
     assert result == "Hello World"
 
@@ -129,12 +133,14 @@ def test_clean_document_full_pipeline():
 
 def test_load_text_uses_cleaner():
     """loader 加载 txt 应经过 cleaner 处理。"""
-    import tempfile, os
+    import os
+    import tempfile
+
     from rag.loader import load
 
     # Create a temp file with BOM
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as f:
-        f.write("﻿测试内容".encode("utf-8"))
+        f.write("﻿测试内容".encode())
         tmp_path = f.name
 
     try:
@@ -147,7 +153,9 @@ def test_load_text_uses_cleaner():
 
 def test_load_text_handles_gbk():
     """loader 加载 GBK 编码文件应自动检测。"""
-    import tempfile, os
+    import os
+    import tempfile
+
     from rag.loader import load
 
     with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as f:

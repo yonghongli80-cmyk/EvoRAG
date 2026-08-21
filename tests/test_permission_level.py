@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 DOC = Path(__file__).parents[1] / "docs" / "permission-design.md"
 
 

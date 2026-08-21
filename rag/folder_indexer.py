@@ -24,7 +24,7 @@ def load_index_state(state_path: str) -> dict:
     """加载索引状态文件。"""
     if not os.path.exists(state_path):
         return {}
-    with open(state_path, 'r', encoding='utf-8') as f:
+    with open(state_path, encoding='utf-8') as f:
         return json.load(f)
 
 

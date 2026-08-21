@@ -1,7 +1,7 @@
-from unittest.mock import patch, MagicMock, PropertyMock
-import tempfile
 import os
-from rag.models import Chunk
+import tempfile
+from unittest.mock import MagicMock, patch
+
 from rag.pipeline import RAGPipeline
 
 

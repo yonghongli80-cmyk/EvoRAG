@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
-from dataclasses import replace
-from datetime import datetime, timezone
 import hashlib
-from importlib.metadata import PackageNotFoundError, version
 import json
 import logging
 import os
-from pathlib import Path
-from pathlib import PurePosixPath
 import re
 import shutil
 import sqlite3
 import sys
 import time
-from typing import Iterator
 import uuid
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path, PurePosixPath
 
 from rag.backups.models import (
     BackupContext,
@@ -29,7 +28,6 @@ from rag.backups.models import (
     RestoreReport,
     deterministic_json_bytes,
 )
-
 
 _MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 _CHECKSUM_PATTERN = re.compile(r"[0-9a-f]{64}\n?\Z")
@@ -507,7 +505,7 @@ def create_backup(
         raise BackupError("invalid_backup_trigger")
 
     validated.backup_root.mkdir(parents=True, exist_ok=True)
-    backup_id = datetime.fromtimestamp(timestamp, timezone.utc).strftime(
+    backup_id = datetime.fromtimestamp(timestamp, UTC).strftime(
         "%Y%m%dT%H%M%SZ"
     ) + f"-{uuid.uuid4().hex[:12]}"
     staging = validated.backup_root / f".incomplete-{backup_id}"
@@ -737,6 +735,6 @@ def restore_test(
                 resolved_temporary.parent != isolation
                 or ".restore-" not in temporary.name
             ):
-                raise BackupError("unsafe_restore_path")
+                raise BackupError("unsafe_restore_path") from None
             shutil.rmtree(temporary)
         raise

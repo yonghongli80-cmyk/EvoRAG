@@ -1,7 +1,9 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from qdrant_client.models import Distance, VectorParams
-from rag.vector_store import add, search, add_to_collection, search_collection, delete_doc
+
 from rag.models import Chunk
+from rag.vector_store import add, add_to_collection, delete_doc, search, search_collection
 
 
 @patch("rag.vector_store.QdrantClient")
@@ -188,7 +190,7 @@ def test_add_to_collection_empty_tags_default(mock_client_class):
 @patch("rag.vector_store.QdrantClient")
 def test_search_collection_filters_by_tags(mock_client_class):
     """search_collection with tags should build a filter with FieldCondition for each tag."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import Filter
 
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
@@ -252,8 +254,9 @@ def test_search_collection_no_filter_when_no_doc_no_tags(mock_client_class):
 
 def test_add_to_collection_with_permission_id(tmp_path):
     """add_to_collection 写入 doc_permission_id 到 payload。"""
-    import rag.vector_store as vs
     from qdrant_client import QdrantClient
+
+    import rag.vector_store as vs
     vs._client = QdrantClient(path=str(tmp_path / "qdrant"))
     vs._ensure_collection_name("test_col")
 
@@ -270,8 +273,9 @@ def test_add_to_collection_with_permission_id(tmp_path):
 
 def test_search_collection_returns_doc_permission_id(tmp_path):
     """search_collection 返回的 Chunk 包含 doc_permission_id。"""
-    import rag.vector_store as vs
     from qdrant_client import QdrantClient
+
+    import rag.vector_store as vs
     vs._client = QdrantClient(path=str(tmp_path / "qdrant"))
     vs._ensure_collection_name("test_col")
 
@@ -287,8 +291,9 @@ def test_search_collection_returns_doc_permission_id(tmp_path):
 
 def test_add_to_collection_without_permission_id(tmp_path):
     """不传 doc_permission_id 时，payload 中不包含该字段。"""
-    import rag.vector_store as vs
     from qdrant_client import QdrantClient
+
+    import rag.vector_store as vs
     vs._client = QdrantClient(path=str(tmp_path / "qdrant"))
     vs._ensure_collection_name("test_col")
 

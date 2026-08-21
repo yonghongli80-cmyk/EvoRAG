@@ -6,6 +6,7 @@ import os
 # 把 RAG_AUTH_ENABLED 预置为 "false"。
 # tests/test_auth_default_enabled.py 用 monkeypatch.delenv 恢复未设置态来测默认值。
 os.environ.setdefault("RAG_AUTH_ENABLED", "false")
+os.environ.setdefault("RAG_SELF_REGISTRATION_ENABLED", "true")
 os.environ.setdefault("RAG_MATERIAL_WORKER_ENABLED", "false")
 os.environ.setdefault("RAG_BACKUP_ENABLED", "false")
 
@@ -14,6 +15,38 @@ from fastapi.testclient import TestClient
 
 from rag.auth import create_token
 from rag.user_db import UserDB
+
+
+@pytest.fixture(autouse=True)
+def sandbox_api_storage(tmp_path_factory, monkeypatch):
+    """Force every API test away from repository databases and vector files."""
+    import rag.api as api
+    from config import settings
+
+    sandbox = tmp_path_factory.mktemp("api-sandbox")
+    db = UserDB(str(sandbox / "users.db"))
+    db.create_material_schema()
+    upload_dir = sandbox / "upload"
+    kb_files_root = sandbox / "kb_files"
+    versions_root = sandbox / "document_versions"
+    structured_root = sandbox / "structured_datasets"
+
+    monkeypatch.setattr(api, "user_db", db)
+    monkeypatch.setattr(api, "_DB_PATH", sandbox / "users.db")
+    monkeypatch.setattr(api, "DATA_DIR", upload_dir)
+    monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root)
+    monkeypatch.setattr(settings, "qdrant_path", str(sandbox / "qdrant"))
+    monkeypatch.setattr(settings, "analysis_db_path", str(sandbox / "analysis.db"))
+    monkeypatch.setattr(settings, "memory_db_path", str(sandbox / "memory.db"))
+    monkeypatch.setattr(settings, "document_versions_root", str(versions_root))
+    monkeypatch.setattr(settings, "structured_datasets_root", str(structured_root))
+    monkeypatch.setattr(api.app.state, "user_db", db)
+    monkeypatch.setattr(api.app.state, "upload_dir", upload_dir, raising=False)
+    monkeypatch.setattr(api.app.state, "kb_files_root", kb_files_root)
+    monkeypatch.setattr(api.app.state, "document_versions_root", versions_root)
+    monkeypatch.setattr(api.app.state, "structured_datasets_root", structured_root)
+    yield db
+    db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -136,7 +169,11 @@ def make_user(isolated_api):
         if is_admin:
             api.app.state.user_db.set_user_admin(user_id, True)
         user = api.app.state.user_db.get_user_by_id(user_id)
-        token = create_token({"user_id": user_id, "username": username})
+        token = create_token({
+            "user_id": user_id,
+            "username": username,
+            "security_version": 1,
+        })
         return user, {"Authorization": f"Bearer {token}"}
 
     return _make

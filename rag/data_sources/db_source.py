@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import asyncio
 from urllib.parse import urlparse
 
 from rag.data_sources.base import DataSource, validate_external_host
@@ -98,7 +98,7 @@ class DBSource(DataSource):
             cursor = conn.execute(self.query)
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             rows = cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
         finally:
             conn.close()
 
@@ -132,8 +132,8 @@ class DBSource(DataSource):
     def _mysql_fetch(self) -> list[dict]:
         try:
             import pymysql
-        except ImportError:
-            raise RuntimeError("pymysql is required for MySQL sources")
+        except ImportError as exc:
+            raise RuntimeError("pymysql is required for MySQL sources") from exc
 
         validate_read_only_sql(self.query)
         parsed = urlparse(self.connection_string)
@@ -149,7 +149,7 @@ class DBSource(DataSource):
             cur.execute(self.query)
             columns = [desc[0] for desc in cur.description] if cur.description else []
             rows = cur.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
         finally:
             conn.close()
 
@@ -176,8 +176,8 @@ class DBSource(DataSource):
     def _pg_fetch(self) -> list[dict]:
         try:
             import psycopg2
-        except ImportError:
-            raise RuntimeError("psycopg2 is required for PostgreSQL sources")
+        except ImportError as exc:
+            raise RuntimeError("psycopg2 is required for PostgreSQL sources") from exc
 
         validate_read_only_sql(self.query)
         conn = psycopg2.connect(self.connection_string)
@@ -186,7 +186,7 @@ class DBSource(DataSource):
             cur.execute(self.query)
             columns = [desc[0] for desc in cur.description] if cur.description else []
             rows = cur.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
         finally:
             conn.close()
 

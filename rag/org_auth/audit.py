@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 
-
 _SECRET_KEYS = {"password", "token", "authorization", "secret", "query", "content", "document_text"}
 
 

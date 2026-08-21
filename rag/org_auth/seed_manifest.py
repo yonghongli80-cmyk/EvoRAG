@@ -5,27 +5,43 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class UnitSeed:
-    code: str; parent_code: str | None; name: str; kind: str; depth: int
+    code: str
+    parent_code: str | None
+    name: str
+    kind: str
+    depth: int
 
 
 @dataclass(frozen=True)
 class PersonSeed:
-    person_code: str; username: str; display_name: str; job_title: str; is_admin: bool
+    person_code: str
+    username: str
+    display_name: str
+    job_title: str
+    is_admin: bool
 
 
 @dataclass(frozen=True)
 class MembershipSeed:
-    person_code: str; org_code: str; is_primary: bool
+    person_code: str
+    org_code: str
+    is_primary: bool
 
 
 @dataclass(frozen=True)
 class ManagerSeed:
-    person_code: str; org_code: str
+    person_code: str
+    org_code: str
 
 
 @dataclass(frozen=True)
 class KnowledgeBaseSeed:
-    kb_id: str; name: str; org_code: str; kb_type: str; sensitivity: str | None; documents: tuple[tuple[str, str], ...]
+    kb_id: str
+    name: str
+    org_code: str
+    kb_type: str
+    sensitivity: str | None
+    documents: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -52,7 +68,7 @@ def build_seed_manifest() -> SeedManifest:
             units.append(dep)
     team_no = 0
     for dep_index, dep in enumerate(departments):
-        for local in range(2 if dep_index < 11 else 1):
+        for _local in range(2 if dep_index < 11 else 1):
             team_no += 1
             units.append(UnitSeed(f"ORG-T{team_no:02d}", dep.code, f"协作{team_no:02d}组", "team", 4))
     assert len(units) == 61

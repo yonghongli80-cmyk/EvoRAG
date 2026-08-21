@@ -1,6 +1,7 @@
 """Tests that RAGPipeline.__init__ calls clean_document and passes cleaned text to chunker."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
 from rag.models import Chunk
 
 

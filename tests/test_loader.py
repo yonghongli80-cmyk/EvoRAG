@@ -1,4 +1,5 @@
 import pytest
+
 from rag.loader import load
 
 

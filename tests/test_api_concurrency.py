@@ -1,9 +1,7 @@
 """api.py 并发测试 — 验证读写锁允许并发查询。"""
 
-import asyncio
 import threading
 import time
-from unittest.mock import MagicMock, patch
 
 
 def test_pipeline_lock_is_read_write_lock():
@@ -18,7 +16,6 @@ def test_pipeline_lock_is_read_write_lock():
 
 def test_concurrent_queries_allowed():
     """多个查询可以并发执行（read lock 不互斥）。"""
-    import rag.api as api_module
     from rag.concurrency import ReadWriteLock
 
     lock = ReadWriteLock()

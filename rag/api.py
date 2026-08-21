@@ -1,63 +1,64 @@
 import asyncio
 import contextvars
 import hashlib
+import json as _json
 import logging
 import os
 import re
 import tempfile
 import threading
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Security, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, Security, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
-
-from rag.auth import create_token, decode_token, verify_api_key
-from rag.backups.scheduler import start_backup_scheduler, stop_backup_scheduler
 from rag.api_security import (
     log_security_mode,
     redact_source_config,
     require_admin,
     require_data_sources_admin,
     require_doc_edit,
-    require_personal_document_acl,
-    require_kb_edit,
     require_kb_administer,
+    require_kb_edit,
     require_kb_view,
+    require_personal_document_acl,
     require_user,
 )
+from rag.auth import create_token, decode_token, verify_api_key
+from rag.backups.scheduler import start_backup_scheduler, stop_backup_scheduler
+from rag.concurrency import ReadWriteLock
+from rag.document_sources.upload import UploadDocumentSource
 from rag.document_versions import (
     DuplicateDocument,
     choose_document_name,
     ingest_document_version,
 )
-from rag.document_sources.upload import UploadDocumentSource
-from rag.kb_metadata import generate_summary, generate_toc
 from rag.kb_file_store import resolve_stored_path
-from rag.loader import load as load_document
+from rag.kb_metadata import generate_summary, generate_toc
 from rag.knowledge_base import KnowledgeBaseManager
+from rag.loader import load as load_document
 from rag.logging_config import set_request_id, setup_logging
-from rag.org_auth.repository import OrgRepository, is_org_policy
-from rag.org_auth.audit import OrgAuditService
+from rag.login_throttle import LoginThrottle
 from rag.materials.api import router as materials_router
-from rag.spreadsheets.api import router as spreadsheets_router
 from rag.operations_api import router as operations_router
 from rag.org_auth.api import router as organization_router
+from rag.org_auth.audit import OrgAuditService
+from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.permissions import filter_chunks_by_permission
-from rag.reliability.api import answers_router, router as reliability_router
+from rag.reliability.api import answers_router
+from rag.reliability.api import router as reliability_router
+from rag.spreadsheets.api import router as spreadsheets_router
 from rag.user_db import UserDB
 
 # Initialize logging at module level so it is active before any request arrives.
 setup_logging()
 
 logger = logging.getLogger(__name__)
-
-from rag.concurrency import ReadWriteLock
 
 
 @asynccontextmanager
@@ -75,6 +76,11 @@ app = FastAPI(
     title="RAG 知识库 API",
     description="基于检索增强生成的智能知识库系统",
     lifespan=lifespan,
+)
+_SESSION_COOKIE = "rag_session"
+_login_throttle = LoginThrottle(
+    settings.login_failure_limit,
+    settings.login_failure_window_seconds,
 )
 pipeline = None
 _pipelines = {}
@@ -217,7 +223,7 @@ def auto_index_on_startup():
         _start_material_worker()
         return
 
-    from rag.folder_indexer import compute_file_hash, load_index_state, save_index_state, diff_index, index_folder
+    from rag.folder_indexer import compute_file_hash, diff_index, index_folder, load_index_state, save_index_state
     state_path = str(DATA_DIR.parent / "index_state.json")
     stored_state = load_index_state(state_path)
 
@@ -353,6 +359,28 @@ def auto_index_on_startup():
     except Exception as e:
         logger.warning("管理员初始化失败: %s", e)
     _start_material_worker()
+
+
+@app.middleware("http")
+async def browser_session_middleware(request, call_next):
+    """Translate the HttpOnly browser cookie into the existing auth header path."""
+    header_names = {key.lower() for key, _ in request.scope["headers"]}
+    token = request.cookies.get(_SESSION_COOKIE)
+    if token and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        expected_origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
+        fetch_site = request.headers.get("sec-fetch-site", "")
+        if (
+            (origin and origin.rstrip("/") != expected_origin.rstrip("/"))
+            or fetch_site == "cross-site"
+        ):
+            return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
+    if token and b"authorization" not in header_names:
+        request.scope["headers"] = [
+            *request.scope["headers"],
+            (b"authorization", f"Bearer {token}".encode("latin-1")),
+        ]
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -506,12 +534,11 @@ class UpdateRoleRequest(BaseModel):
 
 
 # Module-level UserDB instance
-from config import settings as _settings
-_DB_PATH = Path(_settings.users_db_path)
+_DB_PATH = Path(settings.users_db_path)
 user_db = UserDB(str(_DB_PATH))
 app.state.user_db = user_db
-app.state.document_versions_root = _settings.document_versions_root
-app.state.structured_datasets_root = _settings.structured_datasets_root
+app.state.document_versions_root = settings.document_versions_root
+app.state.structured_datasets_root = settings.structured_datasets_root
 app.state.kb_files_root = str(KB_FILES_ROOT)
 
 
@@ -528,7 +555,7 @@ def get_feedback_processor():
         if _feedback_processor is None:
             from rag.feedback_processor import FeedbackProcessor
 
-            _feedback_processor = FeedbackProcessor(_settings.memory_db_path)
+            _feedback_processor = FeedbackProcessor(settings.memory_db_path)
     return _feedback_processor
 
 
@@ -539,7 +566,7 @@ def get_gap_analyzer():
         if _gap_analyzer is None:
             from rag.gap_analyzer import GapAnalyzer
 
-            _gap_analyzer = GapAnalyzer(_settings.memory_db_path)
+            _gap_analyzer = GapAnalyzer(settings.memory_db_path)
     return _gap_analyzer
 
 
@@ -626,9 +653,7 @@ def health():
     try:
         import sqlite3
 
-        from config import settings as _settings
-
-        conn = sqlite3.connect(_settings.analysis_db_path)
+        conn = sqlite3.connect(settings.analysis_db_path)
         try:
             conn.execute("SELECT 1")
         finally:
@@ -647,11 +672,13 @@ def health():
 
 @app.post("/register", response_model=TokenResponse, summary="用户注册")
 async def register(req: RegisterRequest):
+    if not settings.self_registration_enabled:
+        raise HTTPException(status_code=404, detail="资源不存在")
     from rag.user_db import _validate_password_strength
     try:
         _validate_password_strength(req.password)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     try:
         user_id = await asyncio.to_thread(user_db.create_user, req.username, req.password)
     except ValueError as e:
@@ -663,9 +690,25 @@ async def register(req: RegisterRequest):
 
 
 @app.post("/login", response_model=TokenResponse, summary="用户登录")
-async def login(req: LoginRequest):
-    user = await asyncio.to_thread(user_db.authenticate, req.username, req.password)
+async def login(req: LoginRequest, request: Request, response: Response):
+    client_host = request.client.host if request.client else "unknown"
+    throttle_key = f"{client_host}:{req.username.strip().casefold()}"
+    if _login_throttle.blocked(throttle_key):
+        raise HTTPException(status_code=429, detail="登录尝试过多，请稍后重试")
+
+    def _resolve_login_name(value: str) -> str:
+        with user_db.locked_read() as conn:
+            rows = conn.execute(
+                "SELECT u.username FROM org_people p JOIN users u ON u.id=p.user_id "
+                "WHERE p.active=1 AND p.display_name=? LIMIT 2",
+                (value.strip(),),
+            ).fetchall()
+        return rows[0]["username"] if len(rows) == 1 else value.strip()
+
+    login_name = await asyncio.to_thread(_resolve_login_name, req.username)
+    user = await asyncio.to_thread(user_db.authenticate, login_name, req.password)
     if not user:
+        _login_throttle.record_failure(throttle_key)
         await asyncio.to_thread(
             OrgAuditService(user_db).record,
             None, "login_failed", "authentication", "", "denied", "invalid_credentials",
@@ -679,6 +722,7 @@ async def login(req: LoginRequest):
             "denied", "account_inactive",
         )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
+    _login_throttle.clear(throttle_key)
     token = create_token({
         "user_id": user["id"], "username": user["username"],
         "security_version": profile.security_version if profile else None,
@@ -689,12 +733,27 @@ async def login(req: LoginRequest):
             int(user["id"]), "login_success", "person", profile.person_code,
             "success", "authenticated",
         )
+    response.set_cookie(
+        _SESSION_COOKIE,
+        token,
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+        max_age=86400,
+        path="/",
+    )
     return TokenResponse(token=token, username=user["username"])
+
+
+@app.post("/logout", status_code=204, summary="退出登录")
+async def logout(response: Response):
+    response.delete_cookie(_SESSION_COOKIE, path="/", samesite="strict")
 
 
 @app.get("/me", summary="获取当前用户信息")
 async def get_me(user: dict = Depends(require_user)):
     from dataclasses import asdict
+
     from rag.org_auth.repository import OrgRepository
     profile = await asyncio.to_thread(OrgRepository(user_db).get_profile_for_user, user["id"])
     result = {"id": user["id"], "username": user["username"]}
@@ -721,7 +780,7 @@ async def _resolve_upload_user(authorization: str = Header(default="")) -> dict 
         认证开启：完整 user dict（缺失/无效 token 抛 401）
         认证关闭：None（匿名上传，兼容既有行为，不创建权限记录）
     """
-    if not _settings.auth_enabled:
+    if not settings.auth_enabled:
         return None
     return await _require_auth(authorization)
 
@@ -815,7 +874,7 @@ async def change_password(req: ChangePasswordRequest, authorization: str = Heade
     try:
         await asyncio.to_thread(user_db.change_password, user_dict["id"], req.old_password, req.new_password)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return {"message": "密码已修改，请重新登录"}
 
@@ -829,7 +888,7 @@ async def reset_password(uid: int, req: ResetPasswordRequest, authorization: str
     try:
         await asyncio.to_thread(user_db.reset_password, uid, req.new_password)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return {"message": "密码已重置"}
 
@@ -846,7 +905,8 @@ async def search_conversations(q: str = Query(..., min_length=1, description="�
 
 
 @app.post("/conversations", summary="新建对话")
-async def create_conversation(req: CreateConversationRequest = CreateConversationRequest(), authorization: str = Header(default="")):
+async def create_conversation(req: CreateConversationRequest | None = None, authorization: str = Header(default="")):
+    req = req or CreateConversationRequest()
     if not authorization:
         raise HTTPException(status_code=401, detail="未提供认证信息")
     token = authorization.replace("Bearer ", "")
@@ -1135,9 +1195,7 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
         return False
     if existing_perm["owner_id"] == user["id"]:
         return True
-    if existing_perm.get("scope") == "public":
-        return True
-    return False
+    return existing_perm.get("scope") == "public"
 
 
 async def _ingest_default_document(
@@ -1264,7 +1322,7 @@ async def delete_file(filename: str, authorization: str = Header(default="")):
         logger.info("向量已删除: %s", safe_name)
     except Exception as e:
         logger.error("删除向量失败: %s", e)
-        raise HTTPException(status_code=500, detail=f"删除向量失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除向量失败: {e}") from e
 
     # 向量删除成功后，再删文件
     legacy_path.unlink(missing_ok=True)
@@ -1381,7 +1439,8 @@ async def download_file(
 @app.post("/files/{filename}/tags", summary="为文档添加标签", description="为指定文档的所有分块添加标签")
 async def add_tags_to_file(filename: str, tags: list[str], authorization: str = Header(default="")):
     from qdrant_client.models import FieldCondition, Filter, MatchValue
-    from rag.vector_store import _get_client, COLLECTION_NAME
+
+    from rag.vector_store import COLLECTION_NAME, _get_client
 
     safe_name = Path(filename).name
 
@@ -1440,12 +1499,22 @@ async def add_tags_to_file(filename: str, tags: list[str], authorization: str = 
 
 
 @app.get("/tags", summary="获取所有标签", description="获取当前知识库中所有已使用的标签")
-async def list_tags(user_id: str = Security(verify_api_key)):
-    from rag.vector_store import _get_client, COLLECTION_NAME
+async def list_tags(user: dict = Depends(require_user)):
+    from rag.vector_store import COLLECTION_NAME, _get_client
 
     client = _get_client()
     if not client.collection_exists(COLLECTION_NAME):
         return {"tags": []}
+
+    if user.get("is_admin"):
+        permissions = await asyncio.to_thread(user_db.list_document_permissions_all)
+        visible_names = {
+            item["doc_name"] for item in permissions if item["kb_id"] == "rag_docs"
+        }
+    else:
+        visible_names = set(await asyncio.to_thread(
+            user_db.get_accessible_doc_names, "rag_docs", int(user["id"])
+        ))
 
     all_tags = set()
     offset = None
@@ -1457,7 +1526,11 @@ async def list_tags(user_id: str = Security(verify_api_key)):
             with_payload=True,
         )
         for p in points:
-            if p.payload and "tags" in p.payload:
+            if (
+                p.payload
+                and p.payload.get("doc_name") in visible_names
+                and "tags" in p.payload
+            ):
                 all_tags.update(p.payload["tags"])
         if offset is None:
             break
@@ -1518,6 +1591,7 @@ async def batch_import(
     user: dict = Depends(require_user),
 ):
     import json as _json
+
     from rag.batch_importer import BatchImporter
 
     content = await file.read(MAX_FILE_SIZE + 1)
@@ -1533,12 +1607,9 @@ async def batch_import(
         raise HTTPException(status_code=409, detail="同名文件已存在")
 
     # 保存临时文件
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    try:
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
-    finally:
-        tmp.close()
 
     try:
         parsed_config = _json.loads(config)
@@ -1770,7 +1841,6 @@ async def query_stream(
             return
         # 流式完成后持久化 assistant 消息与引用（一个事务内）
         assistant_message_id = None
-        assistant_message_id = None
         if reliability and reliability.get("answerability_kind") == "insufficient_evidence":
             await asyncio.to_thread(
                 _record_refusal_task,
@@ -1871,30 +1941,22 @@ async def create_knowledge_base(req: CreateKBRequest, user: dict = Depends(requi
     from rag.org_auth.repository import OrgRepository
     from rag.org_auth.service import OrgAuthorizationService
     org_repo = OrgRepository(user_db)
-    if org_repo.get_person_for_user(int(user["id"])) is not None:
-        if not req.org_unit_code or not OrgAuthorizationService(user_db).can_manage_org(int(user["id"]), req.org_unit_code):
-            raise HTTPException(status_code=404, detail="资源不存在")
+    if org_repo.get_person_for_user(int(user["id"])) is None:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    if not req.org_unit_code or not OrgAuthorizationService(user_db).can_manage_org(int(user["id"]), req.org_unit_code):
+        raise HTTPException(status_code=404, detail="资源不存在")
 
-        def _create_org_kb():
-            manager = KnowledgeBaseManager()
-            kb_id = manager.create_kb(req.name)
-            with user_db.locked_transaction() as conn:
-                conn.execute("INSERT INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb_id, req.name))
-                conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, req.org_unit_code))
-            return kb_id
-
-        kb_id = await asyncio.to_thread(_create_org_kb)
-        await asyncio.to_thread(_audit_org_event, user, "kb_created", kb_id)
-        return {"kb_id": kb_id, "name": req.name, "kb_type": "organization", "org_unit_code": req.org_unit_code, "effective_role": "manage"}
-
-    def _create():
+    def _create_org_kb():
         manager = KnowledgeBaseManager()
         kb_id = manager.create_kb(req.name)
-        user_db.create_kb_metadata(kb_id, req.name, owner_id=user["id"], scope=req.scope)
+        with user_db.locked_transaction() as conn:
+            conn.execute("INSERT INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb_id, req.name))
+            conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, req.org_unit_code))
         return kb_id
 
-    kb_id = await asyncio.to_thread(_create)
-    return {"kb_id": kb_id, "name": req.name, "scope": req.scope}
+    kb_id = await asyncio.to_thread(_create_org_kb)
+    await asyncio.to_thread(_audit_org_event, user, "kb_created", kb_id)
+    return {"kb_id": kb_id, "name": req.name, "kb_type": "organization", "org_unit_code": req.org_unit_code, "effective_role": "manage"}
 
 
 class KBScopeRequest(BaseModel):
@@ -1917,7 +1979,7 @@ async def update_kb_scope(
     try:
         await asyncio.to_thread(user_db.update_kb_scope, kb_id, req.scope)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return {"kb_id": kb_id, "scope": req.scope}
 
@@ -1942,16 +2004,14 @@ async def delete_knowledge_base(kb_id: str, user: dict = Depends(require_user)):
             if record["file_path"]:
                 stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
                 stored.unlink(missing_ok=True)
-                try:
+                with suppress(OSError):
                     stored.parent.rmdir()
-                except OSError:
-                    pass
             await asyncio.to_thread(user_db.delete_kb_document, record["id"])
         manager.delete_kb(kb_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在") from exc
     await asyncio.to_thread(_audit_org_event, user, "kb_deleted", kb_id)
     # Clean up SQLite metadata
     def _cleanup():
@@ -2097,10 +2157,8 @@ async def remove_document_from_kb(
         if record["file_path"]:
             stored = resolve_stored_path(KB_FILES_ROOT, record["file_path"])
             stored.unlink(missing_ok=True)
-            try:
+            with suppress(OSError):
                 stored.parent.rmdir()
-            except OSError:
-                pass
         await asyncio.to_thread(user_db.delete_kb_document, record["id"])
     except Exception as exc:
         await asyncio.to_thread(
@@ -2149,7 +2207,7 @@ async def query_knowledge_base(
     try:
         chunks = manager.search(kb_id, req.question, top_k=req.top_k * 3)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     visible_chunks = await asyncio.to_thread(
         filter_chunks_by_permission, user_db, kb_id, chunks, user
     )
@@ -2389,8 +2447,8 @@ async def share_knowledge_base(kb_id: str, req: ShareRequest, authorization: str
         await asyncio.to_thread(user_db.share_kb, kb_id, req.user_id, user_dict["id"], req.permission)
     except Exception as e:
         if "UNIQUE" in str(e):
-            raise HTTPException(status_code=409, detail="该用户已被共享")
-        raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=409, detail="该用户已被共享") from e
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {"kb_id": kb_id, "user_id": req.user_id, "permission": req.permission}
 
@@ -2513,8 +2571,8 @@ async def share_document(doc_id: int, req: ShareRequest, authorization: str = He
             raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
         try:
             user_db.share_document(doc_id, req.user_id, user_dict["id"], req.permission)
-        except _sqlite3.IntegrityError:
-            raise HTTPException(status_code=409, detail="该用户已被共享")
+        except _sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="该用户已被共享") from exc
         return {
             "doc_id": doc_id,
             "user_id": req.user_id,
@@ -2573,12 +2631,14 @@ async def set_user_role(uid: int, req: UpdateRoleRequest, authorization: str = H
 # ── 分析端点 ──────────────────────────────────────────────────────
 
 @app.get("/analytics/gaps/summary", summary="检索空白分析统计")
-async def get_gap_summary(user_id: str = Security(verify_api_key)):
+async def get_gap_summary(user: dict = Depends(require_user)):
+    require_admin(user)
     return await asyncio.to_thread(get_gap_analyzer().get_summary)
 
 
 @app.get("/analytics/gaps", summary="未解答问题列表")
-async def get_gaps(limit: int = 50, user_id: str = Security(verify_api_key)):
+async def get_gaps(limit: int = 50, user: dict = Depends(require_user)):
+    require_admin(user)
     return await asyncio.to_thread(get_gap_analyzer().get_gaps, limit=limit)
 
 
@@ -2882,8 +2942,6 @@ async def suggest_card(req: SuggestCardRequest, authorization: str = Header(defa
 
 # ── 数据源管理 ────────────────────────────────────────────────────────
 
-import json as _json
-
 
 class CreateSourceRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="数据源名称")
@@ -3055,7 +3113,7 @@ async def sync_source(source_id: int, user: dict = Depends(require_data_sources_
         result = await asyncio.to_thread(_sync_source, source_id)
     except ValueError as exc:
         # 只读 SQL 白名单等业务校验失败 → 400，而不是 500
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
 
 

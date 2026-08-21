@@ -21,7 +21,7 @@ import requests
 def load_dataset(path: str) -> list[dict]:
     """加载 JSONL 格式的评估数据集。"""
     items = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

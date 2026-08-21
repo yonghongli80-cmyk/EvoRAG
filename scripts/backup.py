@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import re
 import sys
 import time
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -19,7 +19,6 @@ from rag.backups.service import (
     restore_test,
     verify_backup,
 )
-
 
 _BACKUP_ID_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}\Z")
 

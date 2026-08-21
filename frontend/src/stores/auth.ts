@@ -1,66 +1,68 @@
+import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
 import api from '../utils/api'
 
-export const useAuthStore = defineStore('auth', () => {
-  const token = ref(localStorage.getItem('rag_token') || '')
-  const user = ref<{ id: number; username: string; is_admin?: boolean; profile?: { person_code:string; display_name:string; job_title:string; primary_org:{code:string;name:string}|null; secondary_orgs:{code:string;name:string}[] } } | null>(null)
+interface AuthUser {
+  id: number
+  username: string
+  is_admin?: boolean
+  profile?: {
+    person_code: string
+    display_name: string
+    job_title: string
+    primary_org: { code: string; name: string } | null
+    secondary_orgs: { code: string; name: string }[]
+  }
+}
 
-  const isAuthenticated = computed(() => !!token.value)
+export const useAuthStore = defineStore('auth', () => {
+  const user = ref<AuthUser | null>(null)
+  const sessionChecked = ref(false)
+  const isAuthenticated = computed(() => user.value !== null)
 
   async function login(username: string, password: string) {
-    const res = await api.post('/login', { username, password })
-    token.value = res.data.token
-    localStorage.setItem('rag_token', token.value)
-    // Fetch user info immediately after login
+    const response = await api.post('/login', { username, password })
     user.value = null
-    await fetchUser()
-    return res.data
+    sessionChecked.value = false
+    await fetchUser(true)
+    return response.data
   }
 
-  async function register(username: string, password: string) {
-    const res = await api.post('/register', { username, password })
-    token.value = res.data.token
-    localStorage.setItem('rag_token', token.value)
-    // Fetch user info immediately after register
-    user.value = null
-    await fetchUser()
-    return res.data
-  }
-
-  async function fetchUser() {
-    if (!token.value) return
-    // Allow re-fetch if user is null (e.g. after page refresh)
-    if (user.value) return
+  async function fetchUser(force = false) {
+    if (user.value && !force) {
+      sessionChecked.value = true
+      return
+    }
     try {
-      const res = await api.get('/me')
-      user.value = res.data
-    } catch (err: any) {
-      if (err.response?.status === 401) {
-        logout()
-      }
-      // Other errors (network, 500) — keep token, user can retry
+      const response = await api.get('/me')
+      user.value = response.data
+    } catch (error: any) {
+      if (error.response?.status === 401) user.value = null
+    } finally {
+      sessionChecked.value = true
     }
   }
 
-  function logout() {
-    token.value = ''
-    user.value = null
-    localStorage.removeItem('rag_token')
+  async function logout() {
+    try {
+      await api.post('/logout')
+    } finally {
+      user.value = null
+      sessionChecked.value = true
+    }
   }
 
   function getAuthHeaders() {
-    return { Authorization: `Bearer ${token.value}` }
+    return {}
   }
 
   return {
-    token,
     user,
+    sessionChecked,
     isAuthenticated,
     login,
-    register,
     fetchUser,
     logout,
-    getAuthHeaders
+    getAuthHeaders,
   }
 })

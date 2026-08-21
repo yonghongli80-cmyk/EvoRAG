@@ -6,8 +6,10 @@ import socket
 import urllib.error
 import urllib.request
 import webbrowser
+from types import SimpleNamespace
 
 import start
+from rag.user_db import UserDB
 
 
 def _unused_local_port() -> int:
@@ -71,3 +73,37 @@ def test_main_does_not_report_ready_after_uvicorn_exits(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert result == 1
     assert "服务已就绪" not in output
+
+
+def test_remote_binding_rejects_active_org_accounts_with_initial_password(tmp_path):
+    db = UserDB(str(tmp_path / "remote.db"))
+    try:
+        user_id = db.create_user("demo001", "123456")
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P-001',?,'员工','专员')",
+                (user_id,),
+            )
+        config = SimpleNamespace(
+            auth_enabled=True,
+            allow_initial_passwords_remote=False,
+        )
+
+        error = start._remote_deployment_error("0.0.0.0", config, db)
+
+        assert "初始密码" in error
+    finally:
+        db.close()
+
+
+def test_loopback_binding_allows_initial_password_for_local_use(tmp_path):
+    db = UserDB(str(tmp_path / "local.db"))
+    try:
+        config = SimpleNamespace(
+            auth_enabled=True,
+            allow_initial_passwords_remote=False,
+        )
+        assert start._remote_deployment_error("127.0.0.1", config, db) is None
+    finally:
+        db.close()

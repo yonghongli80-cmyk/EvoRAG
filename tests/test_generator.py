@@ -1,4 +1,5 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from rag.generator import generate
 
 
@@ -52,7 +53,7 @@ def test_generate_accepts_temperature_parameter():
     mock_client.chat.completions.create = MagicMock(return_value=mock_response)
 
     with patch("rag.generator.client", mock_client):
-        result = generate([{"role": "user", "content": "test"}], temperature=0.7)
+        generate([{"role": "user", "content": "test"}], temperature=0.7)
 
     call_kwargs = mock_client.chat.completions.create.call_args[1]
     assert call_kwargs.get("temperature") == 0.7

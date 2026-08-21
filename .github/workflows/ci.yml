@@ -13,9 +13,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.lock
-      # Existing style debt is tracked in pyproject.toml; keep CI's baseline
-      # gate focused on syntax and undefined-name errors until it is cleaned up.
-      - run: ruff check . --select E9,F63,F7,F82
+      - run: pip install "pip-audit>=2.9,<3"
+      - run: pip-audit -r requirements.lock
+      - run: ruff check .
       - run: pytest tests/ -q
   frontend:
     runs-on: ubuntu-latest
@@ -31,3 +31,5 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high

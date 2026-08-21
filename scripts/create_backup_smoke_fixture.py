@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from contextlib import closing
-from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
+from pathlib import Path
 
 
 def _write_fixture(path: Path, content: str) -> None:

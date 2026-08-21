@@ -63,6 +63,7 @@ data/index_state.json
 /data/structured_datasets/
 /data/kb_files/
 /data/runtime-*.log
+/logs/
 
 # Backup payloads. The default ../RAGv3-backups sibling is outside this repo;
 # these rules protect explicitly configured in-repository roots.

@@ -4,6 +4,7 @@ import threading
 
 from config import settings
 
+
 class BM25Store:
     def __init__(self, db_path: str = None):
         db_path = db_path or settings.bm25_db_path

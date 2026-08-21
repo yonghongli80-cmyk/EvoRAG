@@ -19,7 +19,7 @@ def test_save_and_load_roundtrip(tmp_path):
     loaded = store.load_chunks("col1")
 
     assert len(loaded) == len(chunks)
-    for orig, got in zip(chunks, loaded):
+    for orig, got in zip(chunks, loaded, strict=False):
         assert got.text == orig.text
         assert got.doc_name == orig.doc_name
         assert got.chunk_index == orig.chunk_index

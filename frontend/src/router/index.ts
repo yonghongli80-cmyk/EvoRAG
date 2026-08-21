@@ -70,8 +70,9 @@ const router = createRouter({
 })
 
 // Navigation guard
-router.beforeEach((to, _from, next) => {
+router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore()
+  if (!authStore.sessionChecked) await authStore.fetchUser()
 
   if (to.meta.requiresAuth !== false && !authStore.isAuthenticated) {
     next('/login')

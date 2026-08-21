@@ -1,5 +1,6 @@
 """Multi-turn dialogue memory with SQLite persistence and auto-summary."""
 
+import contextlib
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -32,10 +33,10 @@ SYSTEM_PROMPT = (
 class DialogueMemory:
     def __init__(
         self,
-        db_path: str = settings.memory_db_path,
+        db_path: str | None = None,
         generate_fn: Callable[[list[dict]], str] | None = None,
     ) -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path or settings.memory_db_path, check_same_thread=False)
         self._generate_fn = generate_fn
         self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -58,10 +59,8 @@ class DialogueMemory:
             )
         """)
         # Migration: add last_summarized_count to existing sessions tables
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             self._conn.execute("ALTER TABLE sessions ADD COLUMN last_summarized_count INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
         self._conn.commit()
 
     def add_message(self, session_id: str, role: str, content: str) -> None:

@@ -1,6 +1,5 @@
 """Tests for agent module."""
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_agent_has_four_tools():
@@ -58,8 +57,9 @@ def test_agent_disables_thinking_mode(mock_chat_cls):
 
 def test_tool_wrapper_retries_on_exception():
     """包装后的工具在异常时自动重试。"""
-    from rag.agent import _wrap_tool_with_reflection
     from langchain_core.tools import Tool
+
+    from rag.agent import _wrap_tool_with_reflection
 
     call_count = 0
 
@@ -80,8 +80,9 @@ def test_tool_wrapper_retries_on_exception():
 
 def test_tool_wrapper_returns_error_after_retry_fails():
     """重试仍失败时返回错误信息而非抛异常。"""
-    from rag.agent import _wrap_tool_with_reflection
     from langchain_core.tools import Tool
+
+    from rag.agent import _wrap_tool_with_reflection
 
     def always_fail(inp):
         raise ValueError("permanent error")
@@ -95,8 +96,9 @@ def test_tool_wrapper_returns_error_after_retry_fails():
 
 def test_tool_wrapper_passes_through_on_success():
     """正常调用不触发重试。"""
-    from rag.agent import _wrap_tool_with_reflection
     from langchain_core.tools import Tool
+
+    from rag.agent import _wrap_tool_with_reflection
 
     tool = Tool(name="test_tool", description="test", func=lambda x: f"result: {x}")
     wrapped = _wrap_tool_with_reflection(tool)

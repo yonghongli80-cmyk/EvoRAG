@@ -1,5 +1,7 @@
 import threading
 import time
+from unittest.mock import MagicMock, patch
+
 from rag.concurrency import ReadWriteLock
 
 
@@ -72,13 +74,10 @@ def test_read_write_lock_blocks_write_during_read():
     assert order.index("write") > order.index("read_end")
 
 
-from unittest.mock import patch, MagicMock
-
-
 def test_vector_store_uses_lock_for_writes():
     """vector_store.add() should acquire write lock."""
-    from rag.vector_store import add
     from rag.models import Chunk
+    from rag.vector_store import add
 
     with patch("rag.vector_store._get_client") as mock_get_client, \
          patch("rag.vector_store._write_lock") as mock_write_lock, \

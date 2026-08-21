@@ -34,6 +34,7 @@ class TestCalculateTool:
 class TestSqlQueryTool:
     def test_select_query(self, tmp_path):
         import sqlite3
+
         from rag.tools import create_sql_tool
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
@@ -50,6 +51,7 @@ class TestSqlQueryTool:
 
     def test_rejects_non_select(self, tmp_path):
         import sqlite3
+
         from rag.tools import create_sql_tool
         db_path = str(tmp_path / "test.db")
         conn = sqlite3.connect(db_path)
@@ -93,6 +95,7 @@ class TestPlotChartTool:
 class TestImportDataTool:
     def test_import_csv(self, tmp_path):
         import sqlite3
+
         from rag.tools import import_data
         csv_file = tmp_path / "sales.csv"
         csv_file.write_text("product,amount\nA,100\nB,200\n", encoding="utf-8")
@@ -109,8 +112,10 @@ class TestImportDataTool:
 
     def test_import_excel(self, tmp_path):
         import sqlite3
-        from rag.tools import import_data
+
         import openpyxl
+
+        from rag.tools import import_data
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.append(["name", "score"])

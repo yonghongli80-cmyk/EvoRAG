@@ -18,12 +18,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
 
+from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from rag.api_security import require_doc_edit
 from rag.generator import generate_structured
 from rag.user_db import UserDB
-from fastapi import HTTPException
-from rag.api_security import require_doc_edit
 
 MIN_CONFIDENCE = 0.70
 PROPOSAL_TTL_SECONDS = 15 * 60

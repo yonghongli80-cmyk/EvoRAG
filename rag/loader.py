@@ -22,8 +22,8 @@ def load(file_path: str) -> str:
         raise ValueError(f"文件大小超过 {settings.max_upload_bytes} 字节限制")
     path = Path(file_path)
     ext = path.suffix.lower()
-    from rag.materials.formats import build_default_format_registry
     from rag.materials.extraction import extract_material
+    from rag.materials.formats import build_default_format_registry
 
     with path.open("rb") as source:
         signature = source.read(16)
@@ -100,7 +100,7 @@ def load_pdf(file_path: str) -> str:
         md_path = Path(tmp_dir) / f"{stem}.md"
         if md_path.exists():
             return md_path.read_text(encoding="utf-8")
-        warnings.warn(f"OpenDataLoader PDF 未生成输出文件: {md_path}")
+        warnings.warn(f"OpenDataLoader PDF 未生成输出文件: {md_path}", stacklevel=2)
         return ""
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -140,7 +140,7 @@ def load_excel(file_path: str) -> str:
     try:
         wb = load_workbook(file_path, read_only=True, data_only=True)
     except Exception as e:
-        raise ValueError(f"无法读取 Excel 文件: {file_path} ({e})")
+        raise ValueError(f"无法读取 Excel 文件: {file_path} ({e})") from e
     parts = []
     for sheet in wb.sheetnames:
         ws = wb[sheet]

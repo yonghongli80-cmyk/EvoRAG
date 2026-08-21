@@ -4,8 +4,8 @@ from fastapi import HTTPException
 from rag.api_security import (
     require_doc_edit,
     require_doc_view,
-    require_kb_edit,
     require_kb_administer,
+    require_kb_edit,
     require_kb_view,
     require_personal_document_acl,
 )

@@ -1,8 +1,8 @@
 """Abstract base class for all data sources."""
 
-from abc import ABC, abstractmethod
 import ipaddress
 import socket
+from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 
 
@@ -13,9 +13,9 @@ def validate_external_host(hostname: str) -> None:
 
     try:
         addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
+    except ValueError as exc:
         if hostname.lower() == "localhost":
-            raise ValueError("不允许访问内网或保留地址")
+            raise ValueError("不允许访问内网或保留地址") from exc
         try:
             resolved = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
         except OSError as exc:

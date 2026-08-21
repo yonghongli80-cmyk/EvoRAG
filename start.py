@@ -18,6 +18,32 @@ def _port_is_available(host: str, port: int) -> bool:
     return True
 
 
+def _remote_deployment_error(host: str, config, db) -> str | None:
+    """Return a fail-closed deployment error for unsafe remote authentication."""
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return None
+    if not config.auth_enabled:
+        return "认证已关闭，不能绑定非回环地址。"
+    if config.allow_initial_passwords_remote:
+        return None
+
+    from rag.auth import verify_password
+
+    with db.locked_read() as conn:
+        password_hashes = [
+            row[0] for row in conn.execute(
+                "SELECT u.password FROM users u JOIN org_people p ON p.user_id=u.id "
+                "WHERE p.active=1"
+            )
+        ]
+    if any(verify_password("123456", value) for value in password_hashes):
+        return (
+            "仍有启用的组织账号使用统一初始密码 123456，不能绑定非回环地址。"
+            "请先修改密码，或明确设置 RAG_ALLOW_INITIAL_PASSWORDS_REMOTE=true 承担风险。"
+        )
+    return None
+
+
 def main() -> int:
     print()
     print("  ╔══════════════════════════════════╗")
@@ -38,19 +64,22 @@ def main() -> int:
         print(f"  [错误] 端口 {port} 已被占用，服务未启动。请先关闭已有实例。")
         return 1
 
-    # 非回环地址绑定 + 认证关闭时强制告警（不阻断启动）
+    # 非回环地址必须满足企业账号的最低安全条件。
     if host not in ("127.0.0.1", "localhost"):
         try:
             from config import settings
+            from rag.user_db import UserDB
 
-            auth_enabled = settings.auth_enabled
-        except Exception:
-            auth_enabled = False
-        if not auth_enabled:
-            print(
-                f"  [ERROR] ⚠️ 认证已关闭，服务绑定 {host}，存在未授权访问风险。"
-                "上线前请在 .env 设置 RAG_AUTH_ENABLED=true"
-            )
+            security_db = UserDB(settings.users_db_path)
+            try:
+                deployment_error = _remote_deployment_error(host, settings, security_db)
+            finally:
+                security_db.close()
+        except Exception as exc:
+            deployment_error = f"无法完成远程部署安全检查：{exc}"
+        if deployment_error:
+            print(f"  [错误] {deployment_error}")
+            return 1
 
     # 启动 API
     proc = subprocess.Popen(

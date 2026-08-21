@@ -18,7 +18,7 @@ class EvalResult:
 
 
 def load_dataset(path: str) -> list[dict]:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
 

@@ -54,13 +54,15 @@ describe('api base URL', () => {
     vi.resetModules()
     await import('../api')
 
-    expect(axios.create).toHaveBeenCalledWith({ baseURL: '/api' })
+    expect(axios.create).toHaveBeenCalledWith({
+      baseURL: '/api',
+      withCredentials: true,
+    })
   })
 
   it('routes streaming fetches through the same base URL', async () => {
     const response = { ok: true }
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
-    localStorage.setItem('rag_token', 'stream-token')
     const { streamRequest } = await import('../api')
 
     await streamRequest('/query/stream', { method: 'POST' })
@@ -68,12 +70,12 @@ describe('api base URL', () => {
     const [url, init] = vi.mocked(fetch).mock.calls[0]
     expect(url).toBe('/api/query/stream')
     expect(init?.method).toBe('POST')
-    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer stream-token')
+    expect(new Headers(init?.headers).get('Authorization')).toBeNull()
+    expect(init?.credentials).toBe('same-origin')
   })
 })
 
 describe('api interceptor', () => {
-  let requestInterceptor: (config: any) => any
   let responseErrorInterceptor: (error: any) => Promise<never>
 
   beforeEach(async () => {
@@ -81,26 +83,20 @@ describe('api interceptor', () => {
     vi.resetModules()
     localStorage.clear()
     await import('../api')
-    requestInterceptor = mockRequestInterceptorUse.mock.calls[0]?.[0]
     const calls = mockInterceptorUse.mock.calls
     responseErrorInterceptor = calls[0]?.[1]
   })
 
-  it('injects the current token into every axios request', () => {
+  it('does not install a local-storage bearer interceptor', () => {
     localStorage.setItem('rag_token', 'current-token')
-
-    const config = requestInterceptor({ headers: {} })
-
-    expect(config.headers.Authorization).toBe('Bearer current-token')
+    expect(mockRequestInterceptorUse).not.toHaveBeenCalled()
   })
 
-  it('401 response clears token and rejects', async () => {
-    localStorage.setItem('rag_token', 'expired')
+  it('401 response rejects without relying on browser token storage', async () => {
     const error = { response: { status: 401 } }
 
     await expect(responseErrorInterceptor(error)).rejects.toBeDefined()
-
-    expect(localStorage.getItem('rag_token')).toBeNull()
+    expect(mockRequestInterceptorUse).not.toHaveBeenCalled()
   })
 
   it('403 response shows permission error', async () => {

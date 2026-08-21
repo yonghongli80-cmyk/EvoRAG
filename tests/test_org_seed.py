@@ -1,10 +1,11 @@
-import pytest
 from pathlib import Path
 
+import pytest
+
+from rag.kb_file_store import resolve_stored_path
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.seed import seed_organization
 from rag.org_auth.seed_manifest import build_seed_manifest
-from rag.kb_file_store import resolve_stored_path
 from rag.user_db import UserDB
 
 

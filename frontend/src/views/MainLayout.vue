@@ -24,8 +24,8 @@ function handleMenuSelect(index: string) {
   router.push(`/${index}`)
 }
 
-function handleLogout() {
-  authStore.logout()
+async function handleLogout() {
+  await authStore.logout()
   router.push('/login')
 }
 </script>

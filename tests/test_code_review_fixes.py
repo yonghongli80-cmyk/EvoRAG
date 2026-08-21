@@ -1,7 +1,7 @@
 """TDD tests for code review fixes (C26, C8, I19, I17)."""
 
+
 import pytest
-from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 

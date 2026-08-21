@@ -63,6 +63,7 @@ def test_version_not_found(pm):
 def test_query_rewriter_uses_prompt_manager():
     """query_rewriter 应从 prompt_manager 加载 prompt。"""
     from unittest.mock import patch
+
     from rag.query_rewriter import rewrite_query
 
     with patch("rag.generator.generate", return_value="改写结果"):
@@ -73,6 +74,7 @@ def test_query_rewriter_uses_prompt_manager():
 def test_route_question_uses_prompt_manager():
     """route_question 应从 prompt_manager 加载 prompt。"""
     from unittest.mock import patch
+
     from rag.agent import route_question
 
     with patch("rag.agent.generate", return_value="rag"):

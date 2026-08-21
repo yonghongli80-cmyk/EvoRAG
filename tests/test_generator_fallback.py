@@ -1,8 +1,8 @@
 """Tests for generator circuit-breaker fallback (graceful degradation)."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from rag.generator import generate, _breaker
+from rag.generator import _breaker, generate
 
 
 def _force_breaker_open():

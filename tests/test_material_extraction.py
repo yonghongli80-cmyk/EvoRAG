@@ -1,6 +1,5 @@
 """Task 3: normalized extraction dispatch over the format registry."""
 
-from pathlib import Path
 
 import pytest
 

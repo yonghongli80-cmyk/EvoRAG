@@ -1,10 +1,11 @@
 """Phase 3: 测试 POST /knowledge-bases/{id}/toc/generate 和 /overview/generate 端点。"""
 import sqlite3
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+
 from rag.api import app
 from rag.user_db import UserDB
 
@@ -17,13 +18,23 @@ def test_client(tmp_path: Path):
 
     with patch("rag.api.user_db", patched_user_db), \
          patch("rag.api._DB_PATH", db_path), \
+         patch.object(app.state, "user_db", patched_user_db), \
+         patch("config.settings.auth_enabled", True), \
          patch("rag.vector_store._get_client"):
         client = TestClient(app)
         # 创建测试用户并获取 token
         from rag.auth import create_token
         uid = patched_user_db.create_user("_test_admin", "test123")
         patched_user_db.set_user_admin(uid, True)
-        token = create_token({"user_id": uid, "username": "_test_admin"})
+        with patched_user_db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEST-ROOT','测试组织','company')")
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P-ADMIN',?,'测试管理员','管理员')",
+                (uid,),
+            )
+            conn.execute("INSERT INTO org_memberships VALUES('P-ADMIN','TEST-ROOT',1)")
+        token = create_token({"user_id": uid, "username": "_test_admin", "security_version": 1})
         headers = {"Authorization": f"Bearer {token}"}
         yield client, db_path, headers
 
@@ -42,7 +53,7 @@ def test_generate_toc_endpoint(test_client):
         }
 
         # 先创建一个知识库
-        res = client.post("/knowledge-bases", json={"name": "test_toc_gen"}, headers=headers)
+        res = client.post("/knowledge-bases", json={"name": "test_toc_gen", "org_unit_code": "TEST-ROOT"}, headers=headers)
         kb_id = res.json()["kb_id"]
 
         # 模拟 kb_documents 中有一个文档
@@ -89,7 +100,7 @@ def test_generate_toc_no_documents_returns_400(test_client):
     """POST /knowledge-bases/{id}/toc/generate 当 KB 无文档时应返回 400。"""
     client, db_path, headers = test_client
 
-    res = client.post("/knowledge-bases", json={"name": "test_toc_empty"}, headers=headers)
+    res = client.post("/knowledge-bases", json={"name": "test_toc_empty", "org_unit_code": "TEST-ROOT"}, headers=headers)
     kb_id = res.json()["kb_id"]
 
     # API 已经创建了 kb_metadata 记录，不需要手动插入
@@ -116,7 +127,7 @@ def test_generate_toc_llm_failure(test_client):
     with patch("rag.api.generate_toc") as mock_generate_toc:
         mock_generate_toc.side_effect = Exception("LLM error")
 
-        res = client.post("/knowledge-bases", json={"name": "test_toc_fail"}, headers=headers)
+        res = client.post("/knowledge-bases", json={"name": "test_toc_fail", "org_unit_code": "TEST-ROOT"}, headers=headers)
         kb_id = res.json()["kb_id"]
 
         conn = sqlite3.connect(str(db_path))
@@ -155,7 +166,7 @@ def test_generate_overview_endpoint(test_client):
     with patch("rag.api.generate_summary") as mock_generate_summary:
         mock_generate_summary.return_value = "这是一个关于RAG系统的知识库，涵盖了检索增强生成的核心概念。"
 
-        res = client.post("/knowledge-bases", json={"name": "test_overview_gen"}, headers=headers)
+        res = client.post("/knowledge-bases", json={"name": "test_overview_gen", "org_unit_code": "TEST-ROOT"}, headers=headers)
         kb_id = res.json()["kb_id"]
 
         conn = sqlite3.connect(str(db_path))
@@ -201,7 +212,7 @@ def test_generate_overview_no_documents_returns_400(test_client):
     """POST /knowledge-bases/{id}/overview/generate 当 KB 无文档时应返回 400。"""
     client, db_path, headers = test_client
 
-    res = client.post("/knowledge-bases", json={"name": "test_ov_empty"}, headers=headers)
+    res = client.post("/knowledge-bases", json={"name": "test_ov_empty", "org_unit_code": "TEST-ROOT"}, headers=headers)
     kb_id = res.json()["kb_id"]
 
     # API 已经创建了 kb_metadata 记录，不需要手动插入

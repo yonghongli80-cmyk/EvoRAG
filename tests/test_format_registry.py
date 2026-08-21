@@ -3,7 +3,6 @@
 import pytest
 
 from rag.materials.formats import build_default_format_registry
-from rag.materials.models import FormatResolution
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 

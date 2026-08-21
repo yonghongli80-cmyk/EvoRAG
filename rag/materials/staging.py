@@ -7,6 +7,7 @@ before the next chunk is requested.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import uuid
@@ -81,8 +82,6 @@ async def stream_upload_to_stage(
         )
     except BaseException:
         stage.unlink(missing_ok=True)
-        try:
+        with contextlib.suppress(OSError):
             stage_dir.rmdir()
-        except OSError:
-            pass
         raise

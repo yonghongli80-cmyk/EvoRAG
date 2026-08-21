@@ -1,5 +1,6 @@
 """Tests for folder_indexer module."""
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -50,9 +51,6 @@ def test_scan_folder_recursive(tmp_path):
     basenames = [os.path.basename(f) for f in result]
     assert "deep.txt" in basenames
     assert "root.md" in basenames
-
-
-from unittest.mock import patch
 
 
 @patch("rag.embedder.embed")

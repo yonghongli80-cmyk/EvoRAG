@@ -1,13 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { setActivePinia, createPinia } from 'pinia'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import { useAuthStore } from '../auth'
 
 vi.mock('../../utils/api', () => ({
-  default: {
-    post: vi.fn(),
-    get: vi.fn(),
-    delete: vi.fn()
-  }
+  default: { post: vi.fn(), get: vi.fn() }
 }))
 
 import api from '../../utils/api'
@@ -18,65 +14,56 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-describe('auth store', () => {
-  it('login success saves token and sets user to null', async () => {
-    vi.mocked(api.post).mockResolvedValue({
-      data: { token: 'abc123', username: 'testuser' }
-    } as any)
-
+describe('cookie auth store', () => {
+  it('logs in through the HttpOnly session without storing a token', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { username: 'testuser' } } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: { id: 1, username: 'testuser' } } as any)
     const store = useAuthStore()
+
     await store.login('testuser', 'password')
 
-    expect(store.token).toBe('abc123')
-    // user is set to null to force fetchUser to get the real user id from /me
-    expect(store.user).toBeNull()
-    expect(localStorage.getItem('rag_token')).toBe('abc123')
-  })
-
-  it('login failure throws error', async () => {
-    vi.mocked(api.post).mockRejectedValue(new Error('Invalid credentials'))
-
-    const store = useAuthStore()
-    await expect(store.login('wrong', 'creds')).rejects.toThrow('Invalid credentials')
-    expect(store.token).toBe('')
-  })
-
-  it('fetchUser success sets user', async () => {
-    vi.mocked(api.get).mockResolvedValue({
-      data: { id: 1, username: 'alice' }
-    } as any)
-
-    const store = useAuthStore()
-    store.token = 'valid-token'
-    await store.fetchUser()
-
-    expect(store.user).toEqual({ id: 1, username: 'alice' })
-  })
-
-  it('fetchUser 401 triggers logout', async () => {
-    const error = new Error('Unauthorized') as any
-    error.response = { status: 401 }
-    vi.mocked(api.get).mockRejectedValue(error)
-
-    const store = useAuthStore()
-    store.token = 'expired-token'
-
-    await store.fetchUser()
-
-    expect(store.token).toBe('')
-    expect(store.user).toBeNull()
+    expect(store.user).toEqual({ id: 1, username: 'testuser' })
+    expect(store.isAuthenticated).toBe(true)
     expect(localStorage.getItem('rag_token')).toBeNull()
   })
 
-  it('logout clears token and user', () => {
+  it('discovers an existing cookie session on refresh', async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: { id: 2, username: 'alice' } } as any)
     const store = useAuthStore()
-    store.token = 'some-token'
+
+    await store.fetchUser()
+
+    expect(store.user?.username).toBe('alice')
+    expect(store.sessionChecked).toBe(true)
+  })
+
+  it('treats a 401 session probe as signed out', async () => {
+    const error = Object.assign(new Error('Unauthorized'), { response: { status: 401 } })
+    vi.mocked(api.get).mockRejectedValue(error)
+    const store = useAuthStore()
+
+    await store.fetchUser()
+
+    expect(store.user).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.sessionChecked).toBe(true)
+  })
+
+  it('logs out on the server and clears user state', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: undefined } as any)
+    const store = useAuthStore()
     store.user = { id: 1, username: 'bob' }
 
-    store.logout()
+    await store.logout()
 
-    expect(store.token).toBe('')
+    expect(api.post).toHaveBeenCalledWith('/logout')
     expect(store.user).toBeNull()
-    expect(localStorage.getItem('rag_token')).toBeNull()
+  })
+
+  it('returns no bearer header for browser requests', () => {
+    const store = useAuthStore()
+    localStorage.setItem('rag_token', 'must-not-be-used')
+
+    expect(store.getAuthHeaders()).toEqual({})
   })
 })

@@ -1,8 +1,8 @@
+from rag.models import Chunk
 from rag.org_auth.repository import OrgRepository
+from rag.permissions import filter_chunks_by_permission
 from rag.user_db import UserDB
 from rag.versioned_retrieval import _visible_document_ids
-from rag.permissions import filter_chunks_by_permission
-from rag.models import Chunk
 
 
 def test_org_kb_scope_replaces_personal_document_scope(tmp_path):
