@@ -99,6 +99,13 @@ describe('api interceptor', () => {
     expect(mockRequestInterceptorUse).not.toHaveBeenCalled()
   })
 
+  it('does not redirect an unauthenticated login page back to itself', async () => {
+    const { shouldRedirectToLogin } = await import('../api')
+
+    expect(shouldRedirectToLogin('/login')).toBe(false)
+    expect(shouldRedirectToLogin('/files')).toBe(true)
+  })
+
   it('403 response shows permission error', async () => {
     const error = { response: { status: 403 } }
 

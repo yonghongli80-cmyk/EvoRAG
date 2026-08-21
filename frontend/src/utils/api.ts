@@ -15,10 +15,14 @@ const api = axios.create({
   withCredentials: true
 })
 
+export function shouldRedirectToLogin(pathname: string): boolean {
+  return pathname !== '/login'
+}
+
 async function rejectRequest(error: any): Promise<never> {
   if (error.response) {
     const { status, data } = error.response
-    if (status === 401) {
+    if (status === 401 && shouldRedirectToLogin(window.location.pathname)) {
       window.location.href = '/login'
     } else if (status === 403) {
       ElMessage.error('权限不足，无法执行此操作')
