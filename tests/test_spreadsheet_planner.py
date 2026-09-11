@@ -31,6 +31,11 @@ def test_compatible_tables_produce_union_sum_plan():
     assert result.plan.metrics[0].function == "sum"
 
 
+def test_each_category_maps_to_grouped_sum():
+    result = plan_spreadsheet_query("各品类销售额合计是多少", _catalog())
+    assert result.plan.group_by == ("c_0001",)
+
+
 def test_incompatible_units_require_clarification():
     result = plan_spreadsheet_query("销售额合计是多少", _catalog(("元", "万元")))
     assert result.kind == "clarification_required"

@@ -80,3 +80,15 @@ def test_sum_combines_compatible_datasets(tmp_path):
     result = execute_multi_dataset_query(plan, QueryScope({1: first, 2: second}, frozenset({1, 2})))
     assert result.values[0].canonical == "100"
     assert {citation.dataset_id for citation in result.citations} == {1, 2}
+
+
+def test_grouped_sum_combines_compatible_datasets(tmp_path):
+    first, second = tmp_path / "one.sqlite3", tmp_path / "two.sqlite3"
+    _sales_dataset(first, [(2, "相机", "30"), (3, "镜头", "20")])
+    _sales_dataset(second, [(2, "相机", "40"), (3, "镜头", "10")])
+    plan = StructuredQueryPlan(dataset_ids=(1, 2), operation="aggregate", group_by=("c_0001",), metrics=(Metric(column_key="c_0002", function="sum"),))
+    result = execute_multi_dataset_query(plan, QueryScope({1: first, 2: second}, frozenset({1, 2})))
+    assert [row.values for row in result.rows] == [
+        {"c_0001": "相机", "c_0002_sum": "70"},
+        {"c_0001": "镜头", "c_0002_sum": "30"},
+    ]

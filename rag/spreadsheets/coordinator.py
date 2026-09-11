@@ -55,6 +55,14 @@ class SpreadsheetQueryCoordinator:
         paths = {item.dataset_id: item.path for item in catalog.datasets}
         result = execute_multi_dataset_query(planning.plan, QueryScope(paths, frozenset(paths)))
         facts = tuple(ComputedFact(f"{value.metric.column_key} {value.metric.function}", value.canonical) for value in result.values)
+        if result.rows:
+            facts = tuple(
+                ComputedFact(
+                    "，".join(f"{key}={value}" for key, value in list(row.values.items())[:-1]),
+                    str(list(row.values.values())[-1]),
+                )
+                for row in result.rows
+            )
         kind = "hybrid_result" if planning.intent == QueryIntent.HYBRID else "structured_result"
         self._audit(user, planning.plan.selected_dataset_ids(), planning.plan.model_dump(), "success", "", result.rows_scanned, started)
         return self._remember(cache_key, SpreadsheetQueryOutcome(kind, facts, result.citations, result.rows_scanned))

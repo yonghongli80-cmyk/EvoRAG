@@ -56,19 +56,23 @@ def plan_spreadsheet_query(question: str, catalog: SpreadsheetCatalog) -> Planni
                     matches.append((dataset, sheet, column))
     if not matches:
         return PlanningResult(kind="clarification_required", intent=intent, clarification=Clarification(code="unknown_field", question="请说明要查询的字段", options=()))
-    names = {item[2].normalized_name for item in matches}
+    numeric_matches = [item for item in matches if item[2].inferred_type in {"integer", "decimal"}]
+    group_matches = [item for item in matches if f"各{item[2].display_name}" in question]
+    metric_matches = numeric_matches or [item for item in matches if item not in group_matches]
+    names = {item[2].normalized_name for item in metric_matches}
     if len(names) != 1:
         return PlanningResult(kind="clarification_required", intent=intent, clarification=Clarification(code="ambiguous_field", question="请选择要计算的字段", options=tuple(sorted({item[2].display_name for item in matches}))))
-    types = {item[2].inferred_type for item in matches}
-    units = {item[2].unit_hint for item in matches if item[2].unit_hint}
+    types = {item[2].inferred_type for item in metric_matches}
+    units = {item[2].unit_hint for item in metric_matches if item[2].unit_hint}
     if len(types) != 1:
         return PlanningResult(kind="clarification_required", intent=intent, clarification=Clarification(code="incompatible_types", question="相关表格字段类型不一致", options=tuple(sorted(types))))
     if len(units) > 1:
         return PlanningResult(kind="clarification_required", intent=intent, clarification=Clarification(code="incompatible_units", question="相关表格单位不一致，请选择统一口径", options=tuple(sorted(units))))
     function = _metric_function(question)
-    column_key = matches[0][2].column_key
-    dataset_ids = tuple(dict.fromkeys(item[0].dataset_id for item in matches))
-    plan = StructuredQueryPlan(dataset_ids=dataset_ids, operation="aggregate", metrics=(Metric(column_key=column_key, function=function),))
+    column_key = metric_matches[0][2].column_key
+    dataset_ids = tuple(dict.fromkeys(item[0].dataset_id for item in metric_matches))
+    group_by = tuple(dict.fromkeys(item[2].column_key for item in group_matches))
+    plan = StructuredQueryPlan(dataset_ids=dataset_ids, operation="aggregate", group_by=group_by, metrics=(Metric(column_key=column_key, function=function),))
     return PlanningResult(kind="planned", intent=intent, plan=plan)
 
 

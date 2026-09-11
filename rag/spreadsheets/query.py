@@ -41,6 +41,7 @@ class StructuredQueryPlan(BaseModel):
     dataset_ids: tuple[int, ...] = ()
     operation: Literal["lookup", "aggregate", "compare"]
     select_columns: tuple[str, ...] = ()
+    group_by: tuple[str, ...] = ()
     metrics: tuple[Metric, ...] = ()
     filters: tuple[FilterClause, ...] = ()
     order_by: tuple[SortClause, ...] = ()
@@ -135,6 +136,8 @@ def execute_multi_dataset_query(plan: StructuredQueryPlan, scope: QueryScope) ->
         raise PermissionError("dataset is outside query scope")
     if plan.operation == "lookup":
         return _execute_multi_lookup(plan, scope, dataset_ids)
+    if plan.group_by:
+        return _execute_grouped_aggregate(plan, scope, dataset_ids)
     if not plan.metrics:
         raise ValueError("query requires at least one metric")
     values_by_metric: list[list[Any]] = [[] for _ in plan.metrics]
@@ -162,6 +165,39 @@ def execute_multi_dataset_query(plan: StructuredQueryPlan, scope: QueryScope) ->
         for index, (metric, items) in enumerate(zip(plan.metrics, values_by_metric, strict=True))
     )
     return StructuredQueryResult(values, tuple(citations), scanned)
+
+
+def _execute_grouped_aggregate(plan, scope, dataset_ids):
+    metric = plan.metrics[0]
+    grouped: dict[tuple, list[Any]] = {}
+    citations, scanned = [], 0
+    inferred = None
+    for dataset_id in dataset_ids:
+        connection = _open_dataset(scope, dataset_id)
+        try:
+            columns = _columns(connection)
+            sheet_key, metric_type = _resolve_column(columns, metric.column_key)
+            for key in plan.group_by:
+                group_sheet, _ = _resolve_column(columns, key)
+                if group_sheet != sheet_key:
+                    raise ValueError("cross-sheet grouping is not supported")
+            where, parameters = _filter_sql(plan.filters, columns, sheet_key)
+            selected = ", ".join(f'"{key}"' for key in (*plan.group_by, metric.column_key))
+            rows = connection.execute(f'SELECT __row_number, {selected} FROM "{sheet_key}"{where}', parameters).fetchall()
+            scanned += len(rows)
+            for row in rows:
+                grouped.setdefault(tuple(row[1:1 + len(plan.group_by)]), []).append(row[-1])
+            if rows:
+                citations.append(StructuredCitation(dataset_id, sheet_key, f"{sheet_key}!rows:{rows[0][0]}-{rows[-1][0]}"))
+            inferred = metric_type
+        finally:
+            connection.close()
+    result_rows = []
+    for index, (key, values) in enumerate(grouped.items(), start=1):
+        payload = dict(zip(plan.group_by, key, strict=True))
+        payload[f"{metric.column_key}_{metric.function}"] = _aggregate(values, metric.function, inferred or "text")
+        result_rows.append(QueryRow(0, "combined", index, payload))
+    return StructuredQueryResult((), tuple(citations), scanned, tuple(result_rows[:plan.limit]))
 
 
 def _open_dataset(scope: QueryScope, dataset_id: int):
