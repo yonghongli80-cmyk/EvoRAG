@@ -2814,6 +2814,16 @@ class UserDB:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def record_structured_query_run(self, user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms) -> int:
+        plan_text = json.dumps(plan or {}, ensure_ascii=False, sort_keys=True, default=str)
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO structured_query_runs (user_id,dataset_version_ids,plan_json,used_columns_json,filter_summary_json,rows_scanned,rows_returned,status,error_code,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (user_id, json.dumps(list(dataset_ids)), plan_text, "[]", "[]", rows_scanned, 0, status, error_code, duration_ms),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
     # ------------------------------------------------------------------
     # Document Versions (trusted knowledge loop)
     # ------------------------------------------------------------------
