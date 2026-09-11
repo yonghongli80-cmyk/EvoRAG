@@ -30,6 +30,13 @@ interface Message {
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
   answerability_kind?: string
+  structuredResult?: {
+    kind: 'structured_result' | 'hybrid_result' | 'clarification_required'
+    facts: Array<{ label: string; value: string }>
+    sources: Array<{ dataset_id: number; sheet_key: string; cell_range: string }>
+    rowsScanned: number
+    clarification?: { code: string; question: string; options: string[] }
+  }
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -212,6 +219,14 @@ export const useChatStore = defineStore('chat', () => {
               assistantMsg.content = answer
             } else if (event.type === 'sources') {
               sources = event.sources
+            } else if (event.type === 'structured_result') {
+              assistantMsg.structuredResult = {
+                kind: event.kind,
+                facts: event.facts || [],
+                sources: event.sources || [],
+                rowsScanned: event.rows_scanned || 0,
+                clarification: event.clarification
+              }
             } else if (event.type === 'done') {
               if (typeof event.assistant_message_id === 'number') {
                 assistantMsg.id = event.assistant_message_id
