@@ -2784,6 +2784,46 @@ class UserDB:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_current_ready_spreadsheet_datasets(self, kb_id: str) -> list[dict[str, Any]]:
+        """Return ready datasets attached to current documents in one knowledge base."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT sd.id, sd.document_id, sd.document_version_id, sd.format, "
+                "sd.storage_key, sd.content_hash, sd.sheet_count, sd.total_rows, "
+                "sd.total_columns, sd.ready_at, dp.doc_name, dp.kb_id, dp.owner_id, dp.scope "
+                "FROM structured_datasets sd "
+                "JOIN document_versions dv ON dv.id = sd.document_version_id "
+                "JOIN document_permissions dp ON dp.id = sd.document_id "
+                "WHERE dp.kb_id = ? AND sd.status = 'ready' AND dv.status = 'current' "
+                "AND dv.validity_status = 'valid' "
+                "ORDER BY dp.doc_name, sd.id",
+                (kb_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_structured_dataset_schema(self, dataset_id: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ss.sheet_key, ss.name AS sheet_name, ss.ordinal AS sheet_ordinal, "
+                "ss.row_count, ss.column_count, sc.column_key, sc.ordinal AS column_ordinal, "
+                "sc.display_name, sc.normalized_name, sc.inferred_type, sc.number_format, "
+                "sc.unit, sc.sample_values_json "
+                "FROM structured_sheets ss JOIN structured_columns sc ON sc.sheet_id = ss.id "
+                "WHERE ss.dataset_id = ? ORDER BY ss.ordinal, sc.ordinal",
+                (dataset_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_structured_query_run(self, user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms) -> int:
+        plan_text = json.dumps(plan or {}, ensure_ascii=False, sort_keys=True, default=str)
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO structured_query_runs (user_id,dataset_version_ids,plan_json,used_columns_json,filter_summary_json,rows_scanned,rows_returned,status,error_code,duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (user_id, json.dumps(list(dataset_ids)), plan_text, "[]", "[]", rows_scanned, 0, status, error_code, duration_ms),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
     # ------------------------------------------------------------------
     # Document Versions (trusted knowledge loop)
     # ------------------------------------------------------------------

@@ -338,6 +338,18 @@ describe('chat store', () => {
     expect(assistantMsg.sources).toEqual([{ doc_name: 'test.pdf', chunk_index: 0 }])
   })
 
+  it('stores structured result values without numeric coercion', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, body: { getReader: () => ({ read: vi.fn()
+      .mockResolvedValueOnce({ done: false, value: encoder.encode('data: {"type":"structured_result","kind":"structured_result","facts":[{"label":"销售额 sum","value":"100.00"}],"sources":[],"rows_scanned":42}\n') })
+      .mockResolvedValueOnce({ done: true, value: undefined }) }) } } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+    const store = useChatStore()
+    await store.sendMessage('销售额合计', 'kb', 'kb_sales')
+    expect(store.messages[1].structuredResult?.facts[0].value).toBe('100.00')
+    expect(store.messages[1].structuredResult?.rowsScanned).toBe(42)
+  })
+
   it('sendMessage includes selectedFile as doc_name in payload', async () => {
     const mockResponse = {
       ok: true,

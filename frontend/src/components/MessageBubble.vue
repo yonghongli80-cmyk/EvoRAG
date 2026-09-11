@@ -10,6 +10,13 @@ interface Message {
   feedback?: string
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
+  structuredResult?: {
+    kind: string
+    facts: Array<{ label: string; value: string }>
+    sources: Array<{ dataset_id: number; sheet_key: string; cell_range: string }>
+    rowsScanned: number
+    clarification?: { question: string }
+  }
 }
 
 const props = defineProps<{
@@ -50,6 +57,21 @@ function handleAddToAnalysis() {
 
     <div class="msg-body">
       <div class="bubble" v-html="formatContent(message.content)" />
+
+      <div v-if="message.structuredResult?.facts.length" class="structured-result" data-test="structured-facts">
+        <div v-for="fact in message.structuredResult.facts" :key="fact.label" class="structured-fact">
+          <span>{{ fact.label }}</span><strong>{{ fact.value }}</strong>
+        </div>
+        <small>扫描 {{ message.structuredResult.rowsScanned }} 行</small>
+        <div v-if="message.structuredResult.sources.length" class="structured-sources">
+          <span v-for="source in message.structuredResult.sources" :key="`${source.dataset_id}-${source.cell_range}`">
+            {{ source.sheet_key }} · {{ source.cell_range }}
+          </span>
+        </div>
+      </div>
+      <div v-else-if="message.structuredResult?.clarification" class="structured-clarification" data-test="structured-clarification">
+        {{ message.structuredResult.clarification.question }}
+      </div>
 
       <ReliabilityBadge
         v-if="message.role === 'assistant' && message.confidence_level"

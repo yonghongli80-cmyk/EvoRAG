@@ -167,6 +167,14 @@ describe('MessageBubble', () => {
     expect(wrapper.find('.sources').exists()).toBe(false)
   })
 
+  it('renders exact structured facts and scanned rows', () => {
+    const wrapper = mount(MessageBubble, { props: { message: { role: 'assistant', content: '结果', structuredResult: {
+      kind: 'structured_result', facts: [{ label: '销售额 sum', value: '100.00' }], sources: [], rowsScanned: 42
+    } }, index: 1 } })
+    expect(wrapper.get('[data-test="structured-facts"]').text()).toContain('100.00')
+    expect(wrapper.text()).toContain('扫描 42 行')
+  })
+
   // ── Action buttons ──────────────────────────────────────
   it('shows action buttons for assistant messages with content', () => {
     const wrapper = mount(MessageBubble, {

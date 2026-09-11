@@ -126,6 +126,13 @@ class RAGPipeline:
         self._user_db = user_db
         self._kb_id = kb_id or "rag_docs"
         self._enterprise_mode = kb_id is not None
+        self._spreadsheet_coordinator = None
+        if user_db is not None and kb_id is not None:
+            from pathlib import Path
+            from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
+            self._spreadsheet_coordinator = SpreadsheetQueryCoordinator(
+                user_db, Path(settings.structured_datasets_root)
+            )
 
     def close(self) -> None:
         """Close connections owned by this pipeline; safe to call more than once."""
@@ -167,6 +174,25 @@ class RAGPipeline:
                 "confidence": confidence,
                 "evidence_bundle": bundle,
             }, None
+
+        coordinator = getattr(self, "_spreadsheet_coordinator", None)
+        if coordinator is not None and user is not None and effective_kb_id != "rag_docs":
+            outcome = coordinator.query(question, kb_id=effective_kb_id, user=user)
+            if outcome.kind in {"structured_result", "hybrid_result"}:
+                answer = "\n".join(f"{fact.label}：{fact.value}" for fact in outcome.computed_facts)
+                payload = {
+                    "kind": outcome.kind,
+                    "facts": [{"label": fact.label, "value": fact.value} for fact in outcome.computed_facts],
+                    "sources": [
+                        {"dataset_id": source.dataset_id, "sheet_key": source.sheet_key, "cell_range": source.cell_range}
+                        for source in outcome.citations
+                    ],
+                    "rows_scanned": outcome.rows_scanned,
+                }
+                return {"route": "structured", "answer": answer, "context": [], "sources": [], "structured_result": payload}, None
+            if outcome.kind == "clarification_required":
+                question_text = outcome.clarification.question if outcome.clarification else "请补充表格查询条件"
+                return {"route": "structured", "answer": question_text, "context": [], "sources": [], "structured_result": {"kind": "clarification_required", "facts": [], "sources": [], "rows_scanned": 0, "clarification": outcome.clarification.model_dump() if outcome.clarification else None}}, None
 
         cache_key_kb = effective_kb_id
         cached = None  # Final-answer caching is disabled until ACL versioning is end-to-end.
@@ -353,7 +379,7 @@ class RAGPipeline:
                 self.memory.summarize_old_rounds(sid)
             return QueryResult(answer=prepared["answer"], context=[], sources=prepared["sources"])
 
-        if prepared["route"] == "fixed":
+        if prepared["route"] in {"fixed", "structured"}:
             answer = prepared["answer"]
             context = prepared["context"]
             sources = prepared["sources"]
@@ -431,9 +457,11 @@ class RAGPipeline:
             yield 'data: {"type": "done"}\n\n'
             return
 
-        if prepared["route"] == "fixed":
+        if prepared["route"] in {"fixed", "structured"}:
             answer = prepared["answer"]
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
+            if prepared["route"] == "structured":
+                yield f'data: {_json.dumps({"type": "structured_result", **prepared["structured_result"]}, ensure_ascii=False)}\n\n'
             sources = prepared["sources"]
             tool_calls = []
         elif prepared["route"] == "agent":
