@@ -8,9 +8,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _IDENTIFIER = re.compile(r"^(?:sheet_\d{4}|c_\d{4})$")
 
@@ -29,13 +29,32 @@ class Metric(BaseModel):
     function: Literal["count", "distinct_count", "sum", "average", "min", "max"]
 
 
+class SortClause(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    column_key: str
+    direction: Literal["asc", "desc"] = "asc"
+
+
 class StructuredQueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    dataset_id: int
+    dataset_id: int | None = None
+    dataset_ids: tuple[int, ...] = ()
     operation: Literal["lookup", "aggregate", "compare"]
+    select_columns: tuple[str, ...] = ()
     metrics: tuple[Metric, ...] = ()
     filters: tuple[FilterClause, ...] = ()
-    limit: int = Field(default=100, ge=1, le=500)
+    order_by: tuple[SortClause, ...] = ()
+    limit: int = Field(default=100, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def require_datasets(self):
+        if self.dataset_id is None and not self.dataset_ids:
+            raise ValueError("query requires a dataset")
+        return self
+
+    def selected_dataset_ids(self) -> tuple[int, ...]:
+        values = self.dataset_ids or ((self.dataset_id,) if self.dataset_id is not None else ())
+        return tuple(dict.fromkeys(values))
 
 
 @dataclass(frozen=True)
@@ -58,14 +77,25 @@ class StructuredCitation:
 
 
 @dataclass(frozen=True)
+class QueryRow:
+    dataset_id: int
+    sheet_key: str
+    row_number: int
+    values: dict[str, str | int | float | bool | None]
+
+
+@dataclass(frozen=True)
 class StructuredQueryResult:
     values: tuple[QueryValue, ...]
     citations: tuple[StructuredCitation, ...]
     rows_scanned: int
+    rows: tuple[QueryRow, ...] = ()
 
 
 def execute_structured_query(plan: StructuredQueryPlan, scope: QueryScope) -> StructuredQueryResult:
     """Evaluate an allowlisted plan against an authorized dataset in read-only mode."""
+    if plan.dataset_id is None:
+        raise ValueError("single dataset query requires dataset_id")
     if plan.dataset_id not in scope.allowed_dataset_ids:
         raise PermissionError("dataset is outside query scope")
     path = scope.dataset_paths.get(plan.dataset_id)
@@ -98,6 +128,91 @@ def execute_structured_query(plan: StructuredQueryPlan, scope: QueryScope) -> St
         connection.close()
 
 
+def execute_multi_dataset_query(plan: StructuredQueryPlan, scope: QueryScope) -> StructuredQueryResult:
+    """Execute one allowlisted plan across authorized compatible datasets."""
+    dataset_ids = plan.selected_dataset_ids()
+    if any(item not in scope.allowed_dataset_ids for item in dataset_ids):
+        raise PermissionError("dataset is outside query scope")
+    if plan.operation == "lookup":
+        return _execute_multi_lookup(plan, scope, dataset_ids)
+    if not plan.metrics:
+        raise ValueError("query requires at least one metric")
+    values_by_metric: list[list[Any]] = [[] for _ in plan.metrics]
+    citations: list[StructuredCitation] = []
+    scanned = 0
+    inferred_types: list[str | None] = [None for _ in plan.metrics]
+    for dataset_id in dataset_ids:
+        connection = _open_dataset(scope, dataset_id)
+        try:
+            columns = _columns(connection)
+            for index, metric in enumerate(plan.metrics):
+                sheet_key, inferred = _resolve_column(columns, metric.column_key)
+                if inferred_types[index] not in (None, inferred):
+                    raise ValueError("incompatible metric types")
+                inferred_types[index] = inferred
+                rows = _select_rows(connection, sheet_key, metric.column_key, plan.filters, columns, plan.limit)
+                scanned += len(rows)
+                values_by_metric[index].extend(row[1] for row in rows)
+                if rows:
+                    citations.append(StructuredCitation(dataset_id, sheet_key, f"{sheet_key}!{metric.column_key}:{rows[0][0]}-{rows[-1][0]}"))
+        finally:
+            connection.close()
+    values = tuple(
+        QueryValue(metric, _aggregate(items, metric.function, inferred_types[index] or "text"))
+        for index, (metric, items) in enumerate(zip(plan.metrics, values_by_metric, strict=True))
+    )
+    return StructuredQueryResult(values, tuple(citations), scanned)
+
+
+def _open_dataset(scope: QueryScope, dataset_id: int):
+    path = scope.dataset_paths.get(dataset_id)
+    if path is None:
+        raise ValueError("dataset path is unavailable")
+    return sqlite3.connect(f"file:{Path(path).resolve().as_posix()}?mode=ro", uri=True)
+
+
+def _execute_multi_lookup(plan, scope, dataset_ids):
+    gathered: list[tuple[QueryRow, dict[str, str]]] = []
+    citations: list[StructuredCitation] = []
+    for dataset_id in dataset_ids:
+        connection = _open_dataset(scope, dataset_id)
+        try:
+            columns = _columns(connection)
+            keys = plan.select_columns or tuple(item.column_key for item in plan.order_by)
+            if not keys:
+                raise ValueError("lookup requires selected columns")
+            resolved = [_resolve_column(columns, key) for key in keys]
+            sheet_keys = {item[0] for item in resolved}
+            if len(sheet_keys) != 1:
+                raise ValueError("cross-sheet lookup is not supported")
+            sheet_key = next(iter(sheet_keys))
+            filter_clauses, parameters = _filter_sql(plan.filters, columns, sheet_key)
+            quoted = ", ".join(f'"{key}"' for key in keys)
+            sql = f'SELECT __row_number, {quoted} FROM "{sheet_key}"{filter_clauses}'
+            for raw in connection.execute(sql, parameters).fetchall():
+                values = {key: raw[index + 1] for index, key in enumerate(keys)}
+                types = {key: resolved[index][1] for index, key in enumerate(keys)}
+                gathered.append((QueryRow(dataset_id, sheet_key, raw[0], values), types))
+        finally:
+            connection.close()
+    for sort in reversed(plan.order_by):
+        gathered.sort(key=lambda item: _typed_sort_value(item[0].values.get(sort.column_key), item[1].get(sort.column_key, "text")), reverse=sort.direction == "desc")
+    selected = tuple(item[0] for item in gathered[:plan.limit])
+    for dataset_id in dataset_ids:
+        rows = [item.row_number for item in selected if item.dataset_id == dataset_id]
+        if rows:
+            citations.append(StructuredCitation(dataset_id, selected[0].sheet_key, f"{selected[0].sheet_key}!rows:{min(rows)}-{max(rows)}"))
+    return StructuredQueryResult((), tuple(citations), len(gathered), selected)
+
+
+def _typed_sort_value(value, inferred):
+    if value is None:
+        return (0, "")
+    if inferred in {"integer", "decimal"}:
+        return (1, Decimal(str(value)))
+    return (1, str(value).casefold())
+
+
 def _columns(connection):
     rows = connection.execute(
         "SELECT sheet_key, column_key, inferred_type FROM column_manifest"
@@ -115,6 +230,12 @@ def _resolve_column(columns, column_key: str) -> tuple[str, str]:
 def _select_rows(connection, sheet_key, metric_key, filters, columns, limit):
     if not _IDENTIFIER.match(sheet_key):
         raise ValueError("invalid sheet key")
+    where, values = _filter_sql(filters, columns, sheet_key)
+    sql = f'SELECT __row_number, "{metric_key}" FROM "{sheet_key}"{where} ORDER BY __row_number LIMIT ?'
+    return connection.execute(sql, (*values, limit)).fetchall()
+
+
+def _filter_sql(filters, columns, sheet_key):
     clauses, values = [], []
     for item in filters:
         filter_sheet, _ = _resolve_column(columns, item.column_key)
@@ -139,8 +260,7 @@ def _select_rows(connection, sheet_key, metric_key, filters, columns, limit):
             clauses.append(f"{quoted} {op} ?")
             values.append(item.value)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = f'SELECT __row_number, "{metric_key}" FROM "{sheet_key}"{where} ORDER BY __row_number LIMIT ?'
-    return connection.execute(sql, (*values, limit)).fetchall()
+    return where, values
 
 
 def _aggregate(values, function: str, inferred: str) -> str:
