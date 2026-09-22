@@ -1,9 +1,19 @@
 """Public Jev decision facade used by the pipeline."""
 
+from collections.abc import Sequence
+
 from config import settings
 from rag.jev.client import JevClient
 from rag.jev.models import JevBatchResult, PreflightDecision
-from rag.jev.policy import JevPolicy, KbCapabilities, RouteDecision, choose_route
+from rag.jev.policy import (
+    JevPolicy,
+    KbCapabilities,
+    PassageSelection,
+    RouteDecision,
+    choose_route,
+    select_passages,
+)
+from rag.models import Chunk
 
 
 class JevDecisionService:
@@ -43,6 +53,33 @@ class JevDecisionService:
                 preflight=None,
             )
         return choose_route(result.value, capabilities=capabilities, policy=self._policy)
+
+    def select(
+        self,
+        question: str,
+        query: str,
+        candidates: Sequence[Chunk],
+        top_k: int | None = None,
+    ) -> PassageSelection | None:
+        """Judge ACL-visible candidates and apply passage policy.
+
+        Returns ``None`` when Jev is unavailable so the caller falls back to the legacy reranker.
+        """
+        if not candidates:
+            return PassageSelection(accepted=(), conflicts=(), excluded_ids=(), has_answer_evidence=False)
+        chunk_ids = [f"c{index}" for index in range(len(candidates))]
+        state = {
+            "question": question,
+            "query": query,
+            "passages": {
+                chunk_id: {"text": candidate.text}
+                for chunk_id, candidate in zip(chunk_ids, candidates, strict=True)
+            },
+        }
+        result = self._client.judge_passages(state, chunk_ids)
+        if not result.available or result.value is None:
+            return None
+        return select_passages(candidates, result.value, policy=self._policy, top_k=top_k)
 
     def close(self) -> None:
         """Release the underlying adapter client."""

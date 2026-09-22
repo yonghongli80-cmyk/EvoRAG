@@ -16,7 +16,7 @@ AnswerabilityKind = Literal[
     "permission_limited",
 ]
 ConfidenceLevel = Literal["high", "medium", "low", "unavailable"]
-ScoreSource = Literal["reranker", "unavailable"]
+ScoreSource = Literal["reranker", "jev", "unavailable"]
 
 
 class EvidenceRef(BaseModel):
