@@ -80,6 +80,16 @@ async function handleLogout() {
         </button>
         <button
           v-if="authStore.user?.is_admin"
+          :class="['nav-item', { active: route.path === '/operations/evolution' }]"
+          data-test="evolution-nav"
+          @click="handleMenuSelect('operations/evolution')"
+          aria-label="进化中心"
+        >
+          <span class="nav-icon">🧬</span>
+          <span class="nav-label">进化中心</span>
+        </button>
+        <button
+          v-if="authStore.user?.is_admin"
           :class="['nav-item', { active: activeMenu === 'organization' }]"
           @click="handleMenuSelect('organization')"
           aria-label="组织权限管理"

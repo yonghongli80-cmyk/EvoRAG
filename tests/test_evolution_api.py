@@ -126,19 +126,19 @@ def test_observation_list_is_admin_only(evolution_client, user_headers, admin_he
 
 
 def test_every_endpoint_rejects_non_admins(evolution_client, user_headers):
-    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine"):
+    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine", "/metrics"):
         response = evolution_client.get(f"{PREFIX}{path}", headers=user_headers)
         assert response.status_code == 403, path
 
 
 def test_endpoints_require_authentication(evolution_client):
-    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine"):
+    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine", "/metrics"):
         assert evolution_client.get(f"{PREFIX}{path}").status_code == 401, path
 
 
 def test_phase_two_exposes_no_state_changing_method(evolution_client, admin_headers):
     """Phase 2 has no write endpoint: every mutation attempt is a 405."""
-    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine"):
+    for path in ("/observations", "/clusters", "/clusters/1", "/state-machine", "/metrics"):
         for method in ("post", "put", "patch", "delete"):
             response = getattr(evolution_client, method)(
                 f"{PREFIX}{path}", headers=admin_headers
@@ -254,3 +254,36 @@ def test_state_machine_view_is_pure_read(evolution_client, admin_headers, store_
     assert first == third
     assert second["statuses"]
     assert [c["status"] for c in first["items"]] == ["awaiting_diagnosis_review"]
+
+
+def test_metrics_empty_store_returns_zero_safe_payload_without_creating_it(
+    evolution_client, admin_headers, tmp_path
+):
+    """Metrics must be zero-safe on a store that was never created."""
+    db_file = tmp_path / "evolution.db"
+    assert not db_file.exists()
+
+    body = evolution_client.get(f"{PREFIX}/metrics", headers=admin_headers).json()
+
+    assert body["counts"]["observations"] == 0
+    assert body["counts"]["clusters"] == 0
+    assert body["rates"]["problem_solve_rate"] is None
+    assert body["definitions"]["problem_solve_rate"]["available_from_phase"] == 2
+    assert not db_file.exists()
+
+
+def test_metrics_reports_phase_two_payload_without_text(
+    evolution_client, admin_headers, store_with_observation
+):
+    body = evolution_client.get(f"{PREFIX}/metrics", headers=admin_headers).json()
+
+    assert body["window_days"] == 30
+    assert body["counts"]["observations"] == 2
+    assert body["counts"]["skipped"] == 0
+    assert set(body["rates"]) >= {
+        "problem_solve_rate", "generalization_rate", "wrong_answer_rate",
+        "refusal_accuracy_rate", "avg_latency_ms",
+    }
+    assert "chunk-secret-text" not in evolution_client.get(
+        f"{PREFIX}/metrics", headers=admin_headers
+    ).text

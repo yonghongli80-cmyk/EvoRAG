@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config import settings
 from rag.api_security import require_admin, require_user
+from rag.evolution.metrics import compute_metrics
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
 from rag.evolution.store import FailureTraceStore
 
@@ -35,6 +36,7 @@ _ENDPOINTS = (
     {"path": "/knowledge-operations/evolution/clusters", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/clusters/{cluster_id}", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/state-machine", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/metrics", "methods": ("GET",)},
 )
 
 _STATE_MACHINE_NOTE = (
@@ -229,3 +231,21 @@ def state_machine(user: dict = Depends(_admin_user)) -> dict:
         ],
         "note": _STATE_MACHINE_NOTE,
     }
+
+
+@router.get("/metrics", summary="观测指标")
+def metrics(user: dict = Depends(_admin_user)) -> dict:
+    """Phase-2 observation metrics computed from stored signals only.
+
+    A missing database means nothing was ever recorded, so the payload is
+    computed against a private in-memory store instead of creating the file.
+    """
+    store = _open_store()
+    temporary = store is None
+    if store is None:
+        store = FailureTraceStore(":memory:")
+    try:
+        return compute_metrics(store)
+    finally:
+        if temporary:
+            store.close()

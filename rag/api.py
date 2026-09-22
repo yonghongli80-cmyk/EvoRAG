@@ -38,6 +38,8 @@ from rag.document_versions import (
     choose_document_name,
     ingest_document_version,
 )
+from rag.evolution.api import router as evolution_router
+from rag.evolution.worker import start_evolution_worker, stop_evolution_worker
 from rag.kb_file_store import resolve_stored_path
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.knowledge_base import KnowledgeBaseManager
@@ -65,10 +67,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(_app: FastAPI):
     auto_index_on_startup()
     start_backup_scheduler()
+    start_evolution_worker()
     try:
         yield
     finally:
         stop_backup_scheduler()
+        stop_evolution_worker()
         close_pipeline_processors()
 
 
@@ -91,6 +95,7 @@ _material_worker = None
 
 # Versioned document ingest (trusted knowledge loop).
 app.include_router(operations_router)
+app.include_router(evolution_router)
 app.include_router(materials_router)
 app.include_router(spreadsheets_router)
 app.include_router(reliability_router)
@@ -429,7 +434,7 @@ async def request_id_middleware(request, call_next):
 
 # Vue Router SPA fallback: browser requests to known frontend paths → serve index.html
 _VUE_ROUTES = {"/files", "/kb", "/analysis", "/analytics", "/operations", "/settings/password", "/mode/file", "/mode/kb", "/mode/analysis"}
-_VUE_ROUTE_PREFIXES = {"/kb/"}
+_VUE_ROUTE_PREFIXES = {"/kb/", "/operations/"}
 _VUE_ROUTE_PATTERNS = (
     re.compile(r"^/documents/\d+/versions/\d+/spreadsheet$"),
 )
@@ -691,7 +696,9 @@ def close_pipeline_processors():
         _feedback_processor = None
         _gap_analyzer = None
         _failure_recorder = None
+    from rag.evolution.api import close_store
     from rag.vector_store import close_client
+    close_store()
     close_client()
 
 
