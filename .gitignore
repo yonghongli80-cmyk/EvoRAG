@@ -9,7 +9,11 @@
 !/history/.gitkeep
 
 # Benchmark results
-/benchmarks/
+/benchmarks/*
+!/benchmarks/jev_retrieval_cases.json
+
+# Benchmark and live-run artifacts
+/artifacts/
 
 # Eval history (generated)
 /data/eval/eval_history.jsonl
