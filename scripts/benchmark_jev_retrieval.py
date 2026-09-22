@@ -478,12 +478,16 @@ def build_live_preparations(
     *,
     kb_id: str,
     memory_db_path: str = ":memory:",
+    user_id: int | None = None,
+    user_db_path: str | None = None,
 ) -> tuple[Callable[[BenchmarkCase], PreparationOutcome], Callable[[BenchmarkCase], PreparationOutcome]]:
     """Build in-process old/new preparation callables against one cached pipeline per KB.
 
     The same pipeline serves both paths: ``settings.jev_mode`` selects the legacy or the Jev
     preparation path per call, so the comparison isolates the path rather than the process.
     External-call counting wraps the real seams and still calls through to them.
+
+    ``user_id`` runs the enterprise path (permission filtering enabled) with that principal.
     """
     _ensure_project_root_on_path()
     from unittest.mock import patch
@@ -492,6 +496,15 @@ def build_live_preparations(
     import rag.pipeline
     from config import settings
     from rag.pipeline import RAGPipeline
+    from rag.user_db import UserDB
+
+    user_db = None
+    user = None
+    if user_id is not None:
+        user_db = UserDB(user_db_path or settings.users_db_path)
+        user = user_db.get_user_by_id(user_id)
+        if user is None:
+            raise ValueError(f"benchmark user not found: {user_id}")
 
     pipelines: dict[str, RAGPipeline] = {}
 
@@ -504,6 +517,7 @@ def build_live_preparations(
                 pipelines[target_kb] = RAGPipeline(
                     kb_id=target_kb,
                     memory_db_path=memory_db_path,
+                    user_db=user_db,
                 )
             finally:
                 settings.jev_mode = previous_mode
@@ -542,7 +556,9 @@ def build_live_preparations(
             for active in patches:
                 active.start()
             started = time.perf_counter_ns()
-            prepared, error = pipeline._prepare_context(case.question, "benchmark", None)
+            prepared, error = pipeline._prepare_context(
+                case.question, "benchmark", None, user=user, kb_id=case.kb_id
+            )
             preparation_ms = (time.perf_counter_ns() - started) / 1_000_000.0
         finally:
             for active in reversed(patches):
@@ -596,12 +612,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--include-questions", action="store_true")
     parser.add_argument("--kb-id", default="rag_docs")
     parser.add_argument("--memory-db-path", default=":memory:")
+    parser.add_argument("--user-id", type=int, default=None, help="Run the enterprise path with this principal")
+    parser.add_argument("--user-db", default=None, help="User database path for --user-id")
     args = parser.parse_args(argv)
 
     cases = load_cases(args.cases)
     old_prepare, new_prepare = build_live_preparations(
         kb_id=args.kb_id,
         memory_db_path=args.memory_db_path,
+        user_id=args.user_id,
+        user_db_path=args.user_db,
     )
     report = run_benchmark(cases, old_prepare, new_prepare, runs=args.runs, warmups=args.warmups)
 
