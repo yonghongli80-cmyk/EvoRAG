@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     typesafe_api_key: str = ""
     jev_mode: Literal["off", "shadow", "active"] = "off"
     jev_model: str = "jev-latest"
-    jev_timeout_seconds: float = Field(default=1.5, gt=0.0, le=10.0)
+    # 超时按实测校准：稳态预判 0.3-0.9s、段落判断 0.5-0.6s、冷启动约 1.35s；
+    # 1.5s 会让临界响应触发 SDK 重试并放大 P95，故取 3.0s 并保留最多 1 次重试。
+    jev_timeout_seconds: float = Field(default=3.0, gt=0.0, le=10.0)
     jev_route_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     jev_kb_allowlist: str = ""
 

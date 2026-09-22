@@ -68,19 +68,21 @@ class JevDecisionService:
         """
         if not candidates:
             return PassageSelection(accepted=(), conflicts=(), excluded_ids=(), has_answer_evidence=False)
-        chunk_ids = [f"c{index}" for index in range(len(candidates))]
+        # Judging every oversampled candidate makes one unbounded Jev batch; the policy caps it.
+        judged = list(candidates)[: self._policy.max_passage_candidates]
+        chunk_ids = [f"c{index}" for index in range(len(judged))]
         state = {
             "question": question,
             "query": query if query is not None else question,
             "passages": {
                 chunk_id: {"text": candidate.text}
-                for chunk_id, candidate in zip(chunk_ids, candidates, strict=True)
+                for chunk_id, candidate in zip(chunk_ids, judged, strict=True)
             },
         }
         result = self._client.judge_passages(state, chunk_ids)
         if not result.available or result.value is None:
             return None
-        return select_passages(candidates, result.value, policy=self._policy, top_k=top_k)
+        return select_passages(judged, result.value, policy=self._policy, top_k=top_k)
 
     def close(self) -> None:
         """Release the underlying adapter client."""

@@ -2,8 +2,9 @@
 
 import pytest
 
-from rag.jev.models import PassageJudgment
+from rag.jev.models import JevBatchResult, PassageJudgment
 from rag.jev.policy import JevPolicy, PassageSelection, select_passages
+from rag.jev.service import JevDecisionService
 from rag.models import Chunk
 
 
@@ -139,3 +140,36 @@ def test_irrelevant_chunk_is_dropped_without_exclusion_record():
     )
     assert selected.accepted == ()
     assert selected.excluded_ids == ()
+
+
+class RecordingJevClient:
+    def __init__(self):
+        self.chunk_ids = None
+
+    def judge_passages(self, state, chunk_ids):
+        self.chunk_ids = list(chunk_ids)
+        return JevBatchResult(
+            value=tuple(
+                PassageJudgment(
+                    chunk_id=chunk_id,
+                    relevance=0.9,
+                    answer_evidence=0.9,
+                    contradiction=0.0,
+                    prompt_injection=0.0,
+                )
+                for chunk_id in chunk_ids
+            ),
+            available=True,
+            duration_ms=1.0,
+        )
+
+
+def test_select_caps_judged_candidates_to_policy_budget():
+    client = RecordingJevClient()
+    service = JevDecisionService(client=client, policy=JevPolicy(max_passage_candidates=3))
+    candidates = [Chunk(text=f"chunk-{index}", doc_name="doc.md", chunk_index=index) for index in range(10)]
+
+    selection = service.select("问题", candidates, top_k=5)
+
+    assert client.chunk_ids == ["c0", "c1", "c2"]
+    assert [item.text for item in selection.accepted] == ["chunk-0", "chunk-1", "chunk-2"]

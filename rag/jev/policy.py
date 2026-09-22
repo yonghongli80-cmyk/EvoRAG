@@ -34,6 +34,9 @@ class JevPolicy:
     contradiction_threshold: float = 0.5
     evidence_threshold: float = 0.5
     relevance_threshold: float = 0.5
+    # Calibrated candidate budget for the batched passage judgment: one Jev request per
+    # candidate chunk, so an unbounded batch turns into an unbounded latency tail.
+    max_passage_candidates: int = 12
 
 
 @dataclass(frozen=True)

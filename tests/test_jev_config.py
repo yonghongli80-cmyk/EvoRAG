@@ -6,7 +6,7 @@ def test_jev_defaults_are_safe():
     assert configured.typesafe_api_key == ""
     assert configured.jev_mode == "off"
     assert configured.jev_model == "jev-latest"
-    assert configured.jev_timeout_seconds == 1.5
+    assert configured.jev_timeout_seconds == 3.0
     assert configured.jev_route_confidence == 0.75
     assert configured.jev_kb_allowlist == ""
 
