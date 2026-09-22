@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -19,6 +20,14 @@ class Settings(BaseSettings):
     # 百炼 Rerank
     bailian_rerank_model: str = "gte-rerank-v2"
     rerank_top_k: int = 5
+
+    # TypeSafe Jev（默认安全关闭；密钥只从被 Git 忽略的 .env 读取）
+    typesafe_api_key: str = ""
+    jev_mode: Literal["off", "shadow", "active"] = "off"
+    jev_model: str = "jev-latest"
+    jev_timeout_seconds: float = Field(default=1.5, gt=0.0, le=10.0)
+    jev_route_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    jev_kb_allowlist: str = ""
 
     # Agent
     agent_max_iterations: int = 5
