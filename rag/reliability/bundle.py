@@ -36,7 +36,7 @@ def build_evidence_bundle(
             section_title=item.section_title or "",
             chunk_index=item.chunk_index,
             score=item.rerank_score,
-            score_source="reranker" if item.rerank_score is not None else "unavailable",
+            score_source=item.score_source,
             rank=rank,
             is_current=is_current,
             validity_status=item.validity_status,

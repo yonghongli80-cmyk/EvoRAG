@@ -34,6 +34,7 @@ dependencies = [
     "py7zr>=1.0,<2",
     "rarfile>=4.2,<5",
     "llama-index-core>=0.14.23,<0.15",
+    "typesafe-sdk>=0.7,<0.8",
 ]
 
 [project.optional-dependencies]

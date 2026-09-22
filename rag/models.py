@@ -18,6 +18,8 @@ class Chunk:
     historical_weight: float = 1.0
     retrieval_score: float | None = field(default=None, compare=False)
     rerank_score: float | None = field(default=None, compare=False)
+    # Explicit score provenance: "reranker", "jev", or "unavailable".
+    score_source: str = "unavailable"
     dataset_id: int | None = None
     sheet_id: int | None = None
     sheet_key: str | None = None

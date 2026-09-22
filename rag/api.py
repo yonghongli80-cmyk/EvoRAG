@@ -212,6 +212,34 @@ def _stop_material_worker() -> bool:
     return True
 
 
+def _register_repo_document_version(doc_name: str, source_path: Path) -> bool:
+    """Register a repository fixture as an immutable document version when missing.
+
+    A fresh volume embeds repository files as unversioned vectors only; without a current
+    version the ACL/versioned retrieval path cannot see them at all. Idempotent: documents
+    that already have a current version are left untouched. Returns True when registered.
+    """
+    from rag.vector_store import delete_unversioned_points
+
+    permission = user_db.get_document_permission(doc_name, "rag_docs")
+    if permission is None or permission.get("current_version_id"):
+        return False
+    actor = user_db.ensure_development_user()
+    manager = KnowledgeBaseManager()
+    source = UploadDocumentSource.from_bytes(doc_name, source_path.read_bytes())
+    ingest_document_version(
+        user_db,
+        manager,
+        source,
+        "rag_docs",
+        actor,
+        "overwrite",
+        Path(settings.document_versions_root),
+    )
+    delete_unversioned_points("rag_docs", doc_name)
+    return True
+
+
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
     global pipeline
@@ -316,6 +344,13 @@ def auto_index_on_startup():
                     )
                     user_db._conn.commit()
                 logger.info("更新为受保护+公开: %s", fname)
+
+            # 版本登记：没有当前版本的仓库文件对企业级（版本化）检索不可见。
+            try:
+                if _register_repo_document_version(fname, dest):
+                    logger.info("已登记文档版本: %s", fname)
+            except Exception:
+                logger.exception("仓库文件版本登记失败: %s", fname)
 
     if collection_check_failed:
         try:

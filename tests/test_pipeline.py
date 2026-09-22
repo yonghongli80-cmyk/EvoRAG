@@ -236,6 +236,40 @@ def test_pipeline_returns_sources(
     assert isinstance(result.context[0], Chunk)
 
 
+def test_missing_jev_key_uses_legacy_path_without_leaking_config(monkeypatch):
+    """No TypeSafe key: the pipeline uses the legacy path without exposing configuration."""
+    from config import settings
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "rag_docs")
+    monkeypatch.setattr(settings, "typesafe_api_key", "")
+
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.deduplicate_chunks", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever") as retriever_cls, \
+         patch("rag.pipeline.Reranker") as reranker_cls:
+        c1 = Chunk(text="chunk1", doc_name="test.txt", chunk_index=0)
+        retriever_cls.return_value.retrieve.return_value = [c1]
+        reranker_cls.return_value.rerank.side_effect = lambda _query, chunks: chunks
+        pipeline = RAGPipeline("test.txt", session_id="s1", memory_db_path=":memory:")
+
+    with patch("rag.agent.route_question", return_value="rag") as mock_route, \
+         patch("rag.pipeline.rewrite_query", return_value="rewritten"), \
+         patch("rag.pipeline.generate", return_value="legacy answer"):
+        result = pipeline.query("年假有几天")
+
+    assert result.answer == "legacy answer"
+    mock_route.assert_called_once()
+    assert "typesafe" not in result.answer.lower()
+    assert "api_key" not in result.answer.lower()
+    pipeline.close()
+
+
 @patch("rag.pipeline.Reranker")
 @patch("rag.pipeline.clear")
 @patch("rag.pipeline.Retriever")

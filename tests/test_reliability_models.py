@@ -21,7 +21,7 @@ def test_reliability_settings_have_safe_defaults():
     assert isolated_settings.comparison_max_documents == 5
 
 
-def evidence_ref(*, acl_checked: bool = True, is_current: bool = True) -> EvidenceRef:
+def evidence_ref(*, acl_checked: bool = True, is_current: bool = True, score_source: str = "reranker") -> EvidenceRef:
     return EvidenceRef(
         document_id=7,
         document_version_id=11,
@@ -31,6 +31,7 @@ def evidence_ref(*, acl_checked: bool = True, is_current: bool = True) -> Eviden
         section_title="休假制度",
         chunk_index=2,
         score=0.8,
+        score_source=score_source,
         rank=1,
         is_current=is_current,
         validity_status="valid",
@@ -38,6 +39,23 @@ def evidence_ref(*, acl_checked: bool = True, is_current: bool = True) -> Eviden
         authority_level="authoritative",
         updated_at=1_786_176_000.0,
     )
+
+
+def test_evidence_ref_accepts_explicit_jev_score_source():
+    assert evidence_ref(score_source="jev").score_source == "jev"
+
+
+def test_evidence_ref_rejects_jev_source_without_score():
+    with pytest.raises(ValueError, match="score_source must match score availability"):
+        EvidenceRef(
+            document_id=7,
+            document_version_id=11,
+            score=None,
+            score_source="jev",
+            is_current=True,
+            validity_status="valid",
+            acl_checked=True,
+        )
 
 
 @pytest.mark.parametrize("bucket", ["current_evidence", "historical_evidence"])

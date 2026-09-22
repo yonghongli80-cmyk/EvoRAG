@@ -105,6 +105,7 @@ def scored_chunk(
         historical_weight=historical_weight,
         retrieval_score=0.03,
         rerank_score=rerank_score,
+        score_source="reranker" if rerank_score is not None else "unavailable",
     )
 
 

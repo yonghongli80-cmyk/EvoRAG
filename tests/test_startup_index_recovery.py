@@ -4,6 +4,46 @@ import json
 from unittest.mock import MagicMock
 
 
+def test_startup_registers_missing_repo_document_version(tmp_path, monkeypatch):
+    """Repo fixtures without a current version must become versioned documents, once."""
+    import rag.api as api
+    import rag.vector_store as vector_store
+    from rag.user_db import UserDB
+
+    user_db = UserDB(str(tmp_path / "users.db"))
+    monkeypatch.setattr(api, "user_db", user_db)
+    monkeypatch.setattr(vector_store, "_get_client", lambda: MagicMock())
+    ingest = MagicMock(
+        return_value=MagicMock(
+            document_id=1, version_id=1, filename="document.txt", version_no=1,
+            status="current", chunks=1,
+        )
+    )
+    monkeypatch.setattr(api, "ingest_document_version", ingest)
+    cleanup = MagicMock(return_value=1)
+    monkeypatch.setattr(vector_store, "delete_unversioned_points", cleanup)
+
+    source = tmp_path / "document.txt"
+    source.write_text("register me", encoding="utf-8")
+    user_db.create_document_permission("document.txt", "rag_docs", 0, is_public=True, protected=True)
+
+    assert api._register_repo_document_version("document.txt", source) is True
+    ingest.assert_called_once()
+    cleanup.assert_called_once_with("rag_docs", "document.txt")
+    permission = user_db.get_document_permission("document.txt", "rag_docs")
+    assert permission is not None
+
+    # Once a current version exists, registration is a no-op.
+    with user_db._lock:
+        user_db._conn.execute(
+            "UPDATE document_permissions SET current_version_id = 99 WHERE doc_name = 'document.txt'"
+        )
+        user_db._conn.commit()
+    assert api._register_repo_document_version("document.txt", source) is False
+    ingest.assert_called_once()
+    user_db.close()
+
+
 def test_startup_reindexes_when_index_state_exists_but_collection_is_missing(tmp_path, monkeypatch):
     import rag.api as api
     import rag.folder_indexer as folder_indexer

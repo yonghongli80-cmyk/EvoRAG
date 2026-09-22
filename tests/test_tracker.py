@@ -80,9 +80,10 @@ def test_tool_calls_serialized_as_json(tmp_path):
     row = conn.execute("SELECT details FROM execution_logs LIMIT 1").fetchone()
     conn.close()
     details = json.loads(row[0])
-    assert len(details) == 2
-    assert details[0]["tool"] == "calculate"
-    assert details[0]["input"] == "(1200-1068)/1068*100"
-    assert details[0]["output"] == "12.36"
-    assert details[0]["ms"] == 50.0
-    assert details[1]["tool"] == "sql_query"
+    tool_calls = details["tool_calls"]
+    assert len(tool_calls) == 2
+    assert tool_calls[0]["tool"] == "calculate"
+    assert tool_calls[0]["input"] == "(1200-1068)/1068*100"
+    assert tool_calls[0]["output"] == "12.36"
+    assert tool_calls[0]["ms"] == 50.0
+    assert tool_calls[1]["tool"] == "sql_query"

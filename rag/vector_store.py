@@ -1,13 +1,23 @@
 import uuid
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, Filter, PointStruct, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    PointIdsList,
+    PointStruct,
+    VectorParams,
+)
 
 from config import settings
 from rag.concurrency import ReadWriteLock
 from rag.models import Chunk
 
 COLLECTION_NAME = "rag_docs"
+
+_SCROLL_PAGE = 256
 
 _client = None
 _write_lock = ReadWriteLock()
@@ -37,6 +47,45 @@ def close_client() -> None:
     client, _client = _client, None
     if client is not None:
         client.close()
+
+
+def delete_unversioned_points(collection_name: str, doc_name: str) -> int:
+    """Delete points for a document that predate document versioning.
+
+    Pre-versioning writes (for example the folder indexer on a fresh volume) leave points
+    without ``document_version_id``; once a versioned write exists those stale points must go
+    so retrieval does not return the same chunk twice.
+    """
+    with _write_lock.read():
+        client = _get_client()
+        if not client.collection_exists(collection_name):
+            return 0
+        stale: list = []
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=collection_name,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))]
+                ),
+                limit=_SCROLL_PAGE,
+                offset=offset,
+                with_payload=True,
+            )
+            stale.extend(
+                record.id for record in records
+                if not (record.payload or {}).get("document_version_id")
+            )
+            if offset is None:
+                break
+        if not stale:
+            return 0
+        client.delete(
+            collection_name=collection_name,
+            points_selector=PointIdsList(points=stale),
+        )
+        _invalidate_bm25(collection_name)
+        return len(stale)
 
 
 def _ensure_collection():
