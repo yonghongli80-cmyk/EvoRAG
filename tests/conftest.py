@@ -18,6 +18,21 @@ from rag.user_db import UserDB
 
 
 @pytest.fixture(autouse=True)
+def deterministic_jev_mode(monkeypatch):
+    """Isolate the suite from a developer .env that enables the Jev path.
+
+    A live service may run with ``RAG_JEV_MODE=active`` (this machine does); without
+    this fixture the suite would inherit that configuration and take the Jev path in
+    tests written for the legacy chain. Tests that exercise Jev set the mode and
+    allowlist themselves, so their explicit values win.
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "jev_mode", "off")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "")
+
+
+@pytest.fixture(autouse=True)
 def sandbox_api_storage(tmp_path_factory, monkeypatch):
     """Force every API test away from repository databases and vector files."""
     import rag.api as api
