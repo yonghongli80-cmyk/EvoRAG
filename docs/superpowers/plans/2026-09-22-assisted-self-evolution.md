@@ -652,3 +652,13 @@ Run: `git diff --stat main...HEAD` 与 `git diff main...HEAD`。
 ---
 
 **本计划只覆盖设计第 12 节的第 2 阶段（观测基础）。后续阶段（诊断辅助、低风险候选、隔离代码进化）的实施计划，待本阶段观测数据积累并经管理员确认后再行编写。**
+
+---
+
+## 开放问题与决策记录（2026-09-22，管理员已确认）
+
+1. **evolution 数据落地与备份**：默认独立库 `data/evolution.db`；**纳入**既有备份策略（随 `RAG_BACKUP_ROOT`，保留 8 份）。落实于 `docs/evolution-observations.md` §2。
+2. **默认开关**：`RAG_EVOLUTION_ENABLED` **默认 false**（安全关闭，与 Jev 一致）；开启时也只观测、零在线影响。
+3. **管理员手动标记**（rejected / needs_more_evidence / blocked）：第 2 阶段**不开放**（纯只读），随第 3 阶段诊断辅助一起做；候选池目前只能靠"同类根因累计三次"自动准入。
+4. **进程隔离程度**：第 2 阶段按"进程内独立线程 + 独立库连接"实现，并支持 `python -m rag.evolution.worker` 单独启动；完整独立进程/容器留到第 5 阶段。
+5. **保留期与窗口**：聚类窗口 **30 天**（`RAG_EVOLUTION_CLUSTER_WINDOW_DAYS`）；观测保留 **90 天**（`RAG_EVOLUTION_OBSERVATION_RETENTION_DAYS`），由 worker 每轮清理（`store.purge_observations_before`，不动聚类）。
