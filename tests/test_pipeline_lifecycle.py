@@ -202,3 +202,68 @@ def test_api_shutdown_keeps_qdrant_open_until_material_worker_exits(monkeypatch)
     worker.shutdown.assert_not_called()
     qdrant_client.close.assert_not_called()
     assert api._material_worker is worker
+
+
+def test_pipeline_close_does_not_close_an_injected_failure_recorder():
+    """Injected recorders belong to the API lifecycle, mirroring jev_service ownership."""
+    from rag.pipeline import RAGPipeline
+
+    recorder = MagicMock()
+    with patch("rag.pipeline.Retriever"), patch("rag.pipeline.Reranker"), patch(
+        "rag.memory.DialogueMemory"
+    ), patch("rag.pipeline.ExecutionTracker"):
+        pipeline = RAGPipeline(
+            kb_id="test_kb",
+            memory_db_path=":memory:",
+            feedback_processor=MagicMock(),
+            gap_analyzer=MagicMock(),
+            failure_recorder=recorder,
+        )
+
+    assert pipeline._owns_failure_recorder is False
+    pipeline.close()
+    recorder.close.assert_not_called()
+
+
+def test_api_shutdown_closes_the_shared_failure_recorder(monkeypatch):
+    """The API-owned recorder is released once and reset, like the other processors."""
+    import rag.api as api
+
+    recorder = MagicMock()
+    monkeypatch.setattr(api, "_failure_recorder", recorder)
+
+    api.close_pipeline_processors()
+
+    recorder.close.assert_called_once_with()
+    assert api._failure_recorder is None
+
+
+def test_make_pipeline_injects_the_recorder_only_when_evolution_is_enabled(monkeypatch, tmp_path):
+    """Flag off: no recorder is created or injected. Flag on: the shared singleton is injected."""
+    import rag.api as api
+    import rag.pipeline as pipeline_module
+    from config import settings
+
+    monkeypatch.setattr(api, "_pipelines", {}, raising=False)
+    monkeypatch.setattr(api, "pipeline", None)
+
+    monkeypatch.setattr(settings, "evolution_enabled", False)
+    with patch.object(pipeline_module, "RAGPipeline") as rag_pipeline_cls:
+        api._get_or_create_pipeline("rag_docs")
+        assert api.get_failure_recorder() is None
+        assert rag_pipeline_cls.call_args.kwargs["user_db"] is api.user_db
+        assert "failure_recorder" not in rag_pipeline_cls.call_args.kwargs
+
+    monkeypatch.setattr(settings, "evolution_enabled", True)
+    monkeypatch.setattr(settings, "evolution_db_path", str(tmp_path / "evolution.db"))
+    with patch.object(pipeline_module, "RAGPipeline"):
+        api._pipelines.clear()
+        api.pipeline = None
+        recorder = api.get_failure_recorder()
+        assert recorder is not None
+        assert api.get_failure_recorder() is recorder
+        api._get_or_create_pipeline("rag_docs")
+
+    api.close_pipeline_processors()
+    assert api._failure_recorder is None
+    assert recorder.stats()["closed"] is True

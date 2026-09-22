@@ -9,6 +9,8 @@ from config import settings
 from rag.chunker import chunk
 from rag.cleaner import clean_document, deduplicate_chunks
 from rag.embedder import embed
+from rag.evolution.models import DiagnosticDetail, NonEvolvableReason
+from rag.evolution.recorder import FailureRecorder
 from rag.generator import generate, generate_stream
 from rag.guard import check_injection, check_output, sanitize_input
 from rag.jev.policy import KbCapabilities
@@ -56,6 +58,12 @@ def _reliability_payload(prepared: dict) -> dict | None:
     }
 
 
+def _bundle_top_score(prepared: dict) -> float | None:
+    """Best ACL-filtered retrieval score from the reliability bundle, when one was built."""
+    metrics = getattr(prepared.get("evidence_bundle"), "retrieval_metrics", None)
+    return getattr(metrics, "top_score", None)
+
+
 def _agent_run_kwargs(prepared: dict) -> dict:
     """从 prepared 中提取需要透传给 agent.run 的 user/kb_id。
 
@@ -94,6 +102,7 @@ class RAGPipeline:
         feedback_processor=None,
         gap_analyzer=None,
         jev_service: JevDecisionService | None = None,
+        failure_recorder: FailureRecorder | None = None,
     ):
         if kb_id:
             # 查询已有知识库，不重新索引
@@ -151,6 +160,19 @@ class RAGPipeline:
             gap_analyzer = GapAnalyzer(memory_db_path)
         self._feedback_processor = feedback_processor
         self._gap_analyzer = gap_analyzer
+        # 观测记录器：注入实例由调用方负责生命周期；自建实例仅在 flag 开启时创建。
+        self._failure_recorder = None
+        self._owns_failure_recorder = False
+        if failure_recorder is not None:
+            self._failure_recorder = failure_recorder
+        elif settings.evolution_enabled:
+            from rag.evolution.store import FailureTraceStore
+
+            self._failure_recorder = FailureRecorder(
+                FailureTraceStore(settings.evolution_db_path),
+                max_queue=settings.evolution_queue_limit,
+            )
+            self._owns_failure_recorder = True
         self._closed = False
         self._agent_lock = threading.Lock()
         self._async_agent_lock = asyncio.Lock()
@@ -183,6 +205,8 @@ class RAGPipeline:
             self._shadow_evaluator.close()
         if self._owns_jev_service and self.jev is not None:
             self.jev.close()
+        if self._owns_failure_recorder and self._failure_recorder is not None:
+            self._failure_recorder.close()
 
     def _jev_active(self, effective_kb_id: str) -> bool:
         """Active Jev routing requires mode=active and an allowlisted knowledge base."""
@@ -191,6 +215,47 @@ class RAGPipeline:
             return False
         allowlist = {item.strip() for item in settings.jev_kb_allowlist.split(",") if item.strip()}
         return effective_kb_id in allowlist
+
+    def _evolution_submission(self, question, prepared, error=None):
+        """Build a diagnosable detail from ACL-filtered prepared data; None means nothing to record.
+
+        The question text travels on the execution trace; this helper only decides
+        which stored signals describe one diagnosable failure.
+        """
+        if error is not None or prepared is None:
+            # guard 拦截：不产生观测，只计入跳过日志。
+            return DiagnosticDetail(
+                kb_id=self._kb_id, non_evolvable_reason=NonEvolvableReason.PERMISSION_DENIED
+            )
+        decision = prepared.get("decision")
+        if decision is None:
+            return None
+        if decision.kind == "insufficient_evidence":
+            confidence = prepared.get("confidence")
+            return DiagnosticDetail(
+                kb_id=self._kb_id,
+                failure_stage="generation" if prepared.get("chunk_hashes") else "retrieval",
+                answerability_kind=decision.kind,
+                confidence_level=confidence.level if confidence is not None else None,
+                chunk_hashes=tuple(prepared.get("chunk_hashes") or ()),
+                best_score=_bundle_top_score(prepared),
+            )
+        if decision.kind == "permission_limited":
+            # 权限不足：同样只计入跳过日志，绝不产生观测。
+            return DiagnosticDetail(
+                kb_id=self._kb_id, non_evolvable_reason=NonEvolvableReason.PERMISSION_DENIED
+            )
+        return None
+
+    def _submit_failure_observation(self, trace: ExecutionTrace, prepared, error=None):
+        """Queue one non-blocking failure observation; the online path never waits."""
+        recorder = self._failure_recorder
+        if recorder is None:
+            return
+        detail = self._evolution_submission(trace.question, prepared, error)
+        if detail is None:
+            return
+        recorder.submit(trace, detail)
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
@@ -661,7 +726,9 @@ class RAGPipeline:
 
         prepared, error = self._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
         if error:
-            self.tracker.save(ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0))
+            trace = ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
+            self.tracker.save(trace)
+            self._submit_failure_observation(trace, None, error)
             return QueryResult(answer=error, context=[], sources=[])
 
         if prepared["route"] == "cached":
@@ -697,12 +764,14 @@ class RAGPipeline:
 
         total_ms = (time.time() - start_time) * 1000
         chunk_hashes = prepared.get("chunk_hashes", [])
-        self.tracker.save(ExecutionTrace(
+        trace = ExecutionTrace(
             question=question, route=prepared["route"], answer=answer,
             total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
             stage_timings=prepared.get("stage_timings") or {},
             decision_metadata=prepared.get("decision_metadata") or {},
-        ))
+        )
+        self.tracker.save(trace)
+        self._submit_failure_observation(trace, prepared)
 
         # Gap analysis: check if this is a retrieval gap
         if prepared["route"] == "rag" and chunk_hashes:
@@ -736,9 +805,9 @@ class RAGPipeline:
         )
         if error:
             yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
-            await asyncio.to_thread(
-                self.tracker.save, ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
-            )
+            trace = ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
+            await asyncio.to_thread(self.tracker.save, trace)
+            self._submit_failure_observation(trace, None, error)
             return
 
         if prepared["route"] == "cached":
@@ -793,15 +862,14 @@ class RAGPipeline:
 
         total_ms = (time.time() - start_time) * 1000
         chunk_hashes = prepared.get("chunk_hashes", [])
-        await asyncio.to_thread(
-            self.tracker.save,
-            ExecutionTrace(
-                question=question, route=prepared["route"], answer=answer,
-                total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
-                stage_timings=prepared.get("stage_timings") or {},
-                decision_metadata=prepared.get("decision_metadata") or {},
-            ),
+        trace = ExecutionTrace(
+            question=question, route=prepared["route"], answer=answer,
+            total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
+            stage_timings=prepared.get("stage_timings") or {},
+            decision_metadata=prepared.get("decision_metadata") or {},
         )
+        await asyncio.to_thread(self.tracker.save, trace)
+        self._submit_failure_observation(trace, prepared)
 
         # Gap analysis for stream
         if prepared["route"] == "rag" and chunk_hashes:

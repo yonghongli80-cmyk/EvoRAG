@@ -580,6 +580,7 @@ app.state.kb_files_root = str(KB_FILES_ROOT)
 # ── Pipeline 数据处理器单例 ─────────────────────────────────────────────
 _feedback_processor = None
 _gap_analyzer = None
+_failure_recorder = None
 _processor_lock = threading.Lock()
 
 
@@ -605,6 +606,23 @@ def get_gap_analyzer():
     return _gap_analyzer
 
 
+def get_failure_recorder():
+    """返回模块级 FailureRecorder 单例；观测阶段关闭时不创建任何存储。"""
+    global _failure_recorder
+    if not settings.evolution_enabled:
+        return None
+    with _processor_lock:
+        if _failure_recorder is None:
+            from rag.evolution.recorder import FailureRecorder
+            from rag.evolution.store import FailureTraceStore
+
+            _failure_recorder = FailureRecorder(
+                FailureTraceStore(settings.evolution_db_path),
+                max_queue=settings.evolution_queue_limit,
+            )
+    return _failure_recorder
+
+
 def _make_pipeline(**kwargs):
     """构造使用 API 共享数据库连接的 pipeline。"""
     from rag.pipeline import RAGPipeline
@@ -614,6 +632,10 @@ def _make_pipeline(**kwargs):
         kwargs["feedback_processor"] = get_feedback_processor()
     if "gap_analyzer" not in kwargs:
         kwargs["gap_analyzer"] = get_gap_analyzer()
+    if "failure_recorder" not in kwargs:
+        recorder = get_failure_recorder()
+        if recorder is not None:
+            kwargs["failure_recorder"] = recorder
     return RAGPipeline(**kwargs)
 
 
@@ -651,7 +673,7 @@ app.state.comparison_document_tool_factory = _make_comparison_document_tool
 
 def close_pipeline_processors():
     """关闭由 API 生命周期持有的共享处理器。"""
-    global pipeline, _feedback_processor, _gap_analyzer
+    global pipeline, _feedback_processor, _gap_analyzer, _failure_recorder
     if not _stop_material_worker():
         return
     with _pipeline_lock.write():
@@ -663,11 +685,12 @@ def close_pipeline_processors():
         if callable(close):
             close()
     with _processor_lock:
-        for processor in (_feedback_processor, _gap_analyzer):
+        for processor in (_feedback_processor, _gap_analyzer, _failure_recorder):
             if processor is not None:
                 processor.close()
         _feedback_processor = None
         _gap_analyzer = None
+        _failure_recorder = None
     from rag.vector_store import close_client
     close_client()
 

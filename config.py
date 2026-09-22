@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     backup_retention_count: int = Field(default=8, ge=1)
     backup_check_interval_seconds: int = Field(default=3600, ge=1)
 
+    # 辅助自进化（观测阶段）：默认关闭；开启也只写观测，不改变任何在线行为。
+    evolution_enabled: bool = False
+    evolution_db_path: str = str(Path(__file__).resolve().parent / "data" / "evolution.db")
+    evolution_queue_limit: int = Field(default=256, ge=1, le=100_000)
+
     # 分块与检索
     chunk_size: int = 500
     chunk_overlap: int = 80
