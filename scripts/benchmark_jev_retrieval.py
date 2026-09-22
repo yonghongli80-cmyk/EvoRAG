@@ -18,6 +18,7 @@ Secrets: the benchmark never prints credentials, question text is redacted unles
 import argparse
 import json
 import math
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -366,7 +367,8 @@ def run_benchmark(
             return prepare(case)
         except Exception as error:  # a failed call is recorded, never silently dropped
             kind = type(error).__name__
-            failures.append(f"{case.id}: {kind}")
+            message = str(error).strip().replace("\n", " ")[:200]
+            failures.append(f"{case.id}: {kind}: {message}")
             return PreparationOutcome(preparation_ms=0.0, route="error", failure=kind)
 
     for case in cases:
@@ -456,6 +458,22 @@ def _optional(value: float | None) -> str:
     return "-" if value is None else f"{value:.1f}"
 
 
+def _ensure_project_root_on_path() -> None:
+    """Direct script execution must resolve the project's own packages.
+
+    With ``python scripts/benchmark_jev_retrieval.py`` the script directory comes first on
+    ``sys.path`` and ``config``/``rag`` would otherwise resolve to the editable-install copies in
+    site-packages, whose relative data paths point outside the repository.
+    """
+    root = str(Path(__file__).resolve().parents[1])
+    # The editable install already appends the project root via a .pth file, so a plain
+    # membership check would skip reordering; site-packages holds a stale config.py copy that
+    # must not win. Move the project root to the front instead.
+    if root in sys.path:
+        sys.path.remove(root)
+    sys.path.insert(0, root)
+
+
 def build_live_preparations(
     *,
     kb_id: str,
@@ -467,6 +485,7 @@ def build_live_preparations(
     preparation path per call, so the comparison isolates the path rather than the process.
     External-call counting wraps the real seams and still calls through to them.
     """
+    _ensure_project_root_on_path()
     from unittest.mock import patch
 
     import rag.agent
@@ -567,6 +586,7 @@ def _routing_domain(prepared: dict) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _ensure_project_root_on_path()
     parser = argparse.ArgumentParser(description="Benchmark legacy versus Jev preparation paths.")
     parser.add_argument("--cases", default="benchmarks/jev_retrieval_cases.json")
     parser.add_argument("--runs", type=int, default=5)
