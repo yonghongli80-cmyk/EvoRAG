@@ -186,7 +186,8 @@ class RAGPipeline:
 
     def _jev_active(self, effective_kb_id: str) -> bool:
         """Active Jev routing requires mode=active and an allowlisted knowledge base."""
-        if self.jev is None or settings.jev_mode != "active":
+        jev = getattr(self, "jev", None)
+        if jev is None or settings.jev_mode != "active":
             return False
         allowlist = {item.strip() for item in settings.jev_kb_allowlist.split(",") if item.strip()}
         return effective_kb_id in allowlist
