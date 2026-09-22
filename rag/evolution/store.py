@@ -119,8 +119,12 @@ class FailureTraceStore:
     """Persistence for the observation phase; content-free by construction."""
 
     def __init__(self, db_path=None):
+        # Recorder, worker, and API each hold their own connection to the same file; a busy
+        # timeout keeps concurrent rounds from failing with SQLITE_BUSY.
         self._conn = sqlite3.connect(
-            str(db_path or settings.evolution_db_path), check_same_thread=False
+            str(db_path or settings.evolution_db_path),
+            check_same_thread=False,
+            timeout=30.0,
         )
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
