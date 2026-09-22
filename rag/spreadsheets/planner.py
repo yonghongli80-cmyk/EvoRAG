@@ -1,7 +1,7 @@
 """Safe natural-language planning for spreadsheet questions."""
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -10,7 +10,7 @@ from rag.spreadsheets.catalog import SpreadsheetCatalog
 from rag.spreadsheets.query import Metric, StructuredQueryPlan
 
 
-class QueryIntent(str, Enum):
+class QueryIntent(StrEnum):
     STRUCTURED = "structured"
     SEMANTIC = "semantic"
     HYBRID = "hybrid"

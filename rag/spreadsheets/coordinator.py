@@ -9,7 +9,7 @@ from typing import Literal
 
 from rag.spreadsheets.catalog import build_authorized_catalog
 from rag.spreadsheets.planner import Clarification, QueryIntent, plan_spreadsheet_query
-from rag.spreadsheets.query import QueryScope, QueryValue, StructuredCitation, execute_multi_dataset_query
+from rag.spreadsheets.query import QueryScope, StructuredCitation, execute_multi_dataset_query
 
 
 @dataclass(frozen=True)
