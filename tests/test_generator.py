@@ -57,3 +57,59 @@ def test_generate_accepts_temperature_parameter():
 
     call_kwargs = mock_client.chat.completions.create.call_args[1]
     assert call_kwargs.get("temperature") == 0.7
+
+
+def test_deepseek_default_headers_empty_by_default(monkeypatch):
+    """Without configuration the standard Bearer authorization is the only scheme."""
+    from config import settings
+    from rag.generator import deepseek_default_headers
+
+    monkeypatch.setattr(settings, "deepseek_auth_header", "")
+    assert deepseek_default_headers() is None
+
+
+def test_deepseek_default_headers_carry_configured_scheme(monkeypatch):
+    """Some OpenAI-compatible providers authenticate with a custom header name."""
+    from config import settings
+    from rag.generator import deepseek_default_headers
+
+    monkeypatch.setattr(settings, "deepseek_auth_header", "x-api-key")
+    monkeypatch.setattr(settings, "deepseek_api_key", "key-value")
+    assert deepseek_default_headers() == {"x-api-key": "key-value"}
+
+
+def test_generate_builds_client_with_configured_headers(monkeypatch):
+    """The lazily built client forwards the configured authentication header."""
+    from config import settings
+
+    monkeypatch.setattr(settings, "deepseek_auth_header", "x-api-key")
+    monkeypatch.setattr(settings, "deepseek_api_key", "key-value")
+    monkeypatch.setattr(settings, "deepseek_base_url", "https://provider.example/v1")
+    monkeypatch.setattr(settings, "deepseek_model", "vendor/model")
+
+    import rag.generator as generator
+
+    monkeypatch.setattr(generator, "client", None)
+    recorded = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+    monkeypatch.setattr(generator, "OpenAI", FakeOpenAI)
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "answer"
+    fake = MagicMock()
+    fake.chat.completions.create.return_value = mock_response
+
+    def fake_openai(**kwargs):
+        recorded["instance"] = FakeOpenAI(**kwargs)
+        return fake
+
+    monkeypatch.setattr(generator, "OpenAI", fake_openai)
+    generator.generate([{"role": "user", "content": "hi"}])
+
+    assert recorded["default_headers"] == {"x-api-key": "key-value"}
+    assert recorded["base_url"] == "https://provider.example/v1"

@@ -5,7 +5,7 @@ import re as _re
 import threading as _threading
 import time as _time
 
-from rag.generator import generate
+from rag.generator import deepseek_default_headers, generate
 from rag.prompt_manager import PromptManager
 
 _pm = PromptManager()
@@ -159,6 +159,7 @@ class RAGAgent:
             base_url=settings.deepseek_base_url,
             temperature=0.3,
             extra_body={"thinking": {"type": "disabled"}},
+            default_headers=deepseek_default_headers(),
         )
 
         system_prompt = _pm.get("agent_system")

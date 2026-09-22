@@ -12,6 +12,18 @@ _client_lock = threading.Lock()
 _breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
 
 
+def deepseek_default_headers() -> dict[str, str] | None:
+    """Authentication headers for providers that do not accept Bearer tokens.
+
+    Returns ``None`` for the standard OpenAI-compatible scheme so the SDK's own
+    ``Authorization: Bearer`` stays the only credential carrier.
+    """
+    header = settings.deepseek_auth_header.strip()
+    if not header:
+        return None
+    return {header: settings.deepseek_api_key}
+
+
 @retry(max_attempts=3, backoff_base=1.0, retryable_exceptions=(TimeoutError, ConnectionError, OSError))
 def generate(messages: list[dict], temperature: float = 0.3) -> str:
     global client
@@ -24,6 +36,7 @@ def generate(messages: list[dict], temperature: float = 0.3) -> str:
                     api_key=settings.deepseek_api_key,
                     base_url=settings.deepseek_base_url,
                     timeout=30.0,
+                    default_headers=deepseek_default_headers(),
                 )
     # Strip reasoning_content (DeepSeek thinking mode) to avoid API rejection
     clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
@@ -105,6 +118,7 @@ async def generate_stream(messages: list[dict], temperature: float = 0.3, max_at
                     api_key=settings.deepseek_api_key,
                     base_url=settings.deepseek_base_url,
                     timeout=30.0,
+                    default_headers=deepseek_default_headers(),
                 )
     clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
 

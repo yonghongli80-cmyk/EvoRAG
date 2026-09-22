@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
+    # 部分 OpenAI 兼容提供商不用 Authorization: Bearer，而用自定义头携带密钥
+    # （例如 x-api-key）。为空时保持标准 Bearer 行为。
+    deepseek_auth_header: str = ""
 
     # 嵌入模型（硅基流动 bge-m3，OpenAI 兼容 API）
     bailian_api_key: str = ""
