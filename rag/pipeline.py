@@ -249,7 +249,7 @@ class RAGPipeline:
 
     def _submit_failure_observation(self, trace: ExecutionTrace, prepared, error=None):
         """Queue one non-blocking failure observation; the online path never waits."""
-        recorder = self._failure_recorder
+        recorder = getattr(self, "_failure_recorder", None)
         if recorder is None:
             return
         detail = self._evolution_submission(trace.question, prepared, error)
