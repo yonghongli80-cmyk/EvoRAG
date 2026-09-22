@@ -58,6 +58,22 @@ class FailureStage(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RootCauseFeature(StrEnum):
+    """Deterministic root-cause subset for phase 2 (design section 6).
+
+    The clusterer derives these from stored signals only; LLM diagnosis is the
+    phase-3 ``EvolutionDiagnoser``. ``UNDETERMINED`` can never be promoted: a
+    root cause that cannot be determined stays in the observation queue.
+    """
+
+    RECALL_MISS = "recall_miss"
+    GENERATOR_IGNORED_EVIDENCE = "generator_ignored_evidence"
+    PROMPT_OR_WORKFLOW_DEFECT = "prompt_or_workflow_defect"
+    CODE_DEFECT = "code_defect"
+    EVIDENCE_CONFLICT = "evidence_conflict"
+    UNDETERMINED = "undetermined"
+
+
 # Design section 7 transitions, single source for the read-only state-machine view.
 EVOLUTION_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "observed": ("clustered", "rejected", "blocked", "needs_more_evidence"),
@@ -136,4 +152,5 @@ __all__ = [
     "FailureStage",
     "NonEvolvableReason",
     "ObservationPool",
+    "RootCauseFeature",
 ]

@@ -15,6 +15,7 @@ import time
 
 from config import settings
 from rag.evolution.models import (
+    EVOLUTION_TRANSITIONS,
     EvolutionStatus,
     FailureObservation,
     FailureStage,
@@ -130,6 +131,11 @@ class FailureTraceStore:
             self._conn.execute(_OBSERVATIONS_TABLE_SQL)
             self._conn.execute(_CLUSTERS_TABLE_SQL)
             self._conn.execute(_SKIP_LOG_TABLE_SQL)
+            # Membership lookups and the in-window member count both filter on cluster_id.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_failure_observations_cluster "
+                "ON failure_observations(cluster_id)"
+            )
             self._conn.commit()
 
     def add_observation(self, observation: FailureObservation) -> dict:
@@ -216,6 +222,194 @@ class FailureTraceStore:
                 "SELECT reason, COUNT(*) AS cnt FROM evolution_skip_log GROUP BY reason"
             ).fetchall()
         return {row["reason"]: int(row["cnt"]) for row in rows}
+
+    # ------------------------------------------------------------------
+    # Clustering and admission (Task 2); read-only listing (Tasks 4 and 5).
+    # All state changes below are single-statement and run under the store
+    # lock, so repeated clustering can never double-count a member.
+    # ------------------------------------------------------------------
+
+    def list_pending_observations(self, *, cutoff: float, limit: int) -> list[dict]:
+        """Pending (observed, unattached) observations inside the window, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM failure_observations "
+                "WHERE status = ? AND cluster_id IS NULL AND created_at >= ? "
+                "ORDER BY id ASC LIMIT ?",
+                (EvolutionStatus.OBSERVED.value, float(cutoff), int(limit)),
+            ).fetchall()
+        return [_decode_row(row) for row in rows]
+
+    def count_stale_pending_observations(self, cutoff: float) -> int:
+        """Pending observations outside the window; they stay in the observation queue."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS cnt FROM failure_observations "
+                "WHERE status = ? AND cluster_id IS NULL AND created_at < ?",
+                (EvolutionStatus.OBSERVED.value, float(cutoff)),
+            ).fetchone()
+        return int(row["cnt"])
+
+    def upsert_cluster(
+        self,
+        *,
+        cluster_key: str,
+        kb_id: str,
+        failure_stage: str,
+        root_cause_feature: str,
+        seen_at: float,
+    ) -> dict:
+        """Insert the cluster for this key or return the existing row (idempotent)."""
+        now = float(seen_at)
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO failure_clusters ("
+                "cluster_key, kb_id, failure_stage, root_cause_feature, pool, status, "
+                "priority, member_count, first_seen_at, last_seen_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'normal', 0, ?, ?, ?, ?)",
+                (
+                    cluster_key,
+                    kb_id,
+                    failure_stage,
+                    root_cause_feature,
+                    ObservationPool.OBSERVATION_QUEUE.value,
+                    EvolutionStatus.CLUSTERED.value,
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE cluster_key = ?", (cluster_key,)
+            ).fetchone()
+        return dict(row)
+
+    def attach_cluster_member(
+        self,
+        observation_id: int,
+        cluster_id: int,
+        *,
+        failure_stage: str,
+        root_cause_feature: str,
+        now: float,
+    ) -> None:
+        """Attach one observation to a cluster and backfill the authoritative signals.
+
+        The observation stays ``observed`` until its cluster is admitted, so a
+        single or unattached failure keeps waiting in the observation queue.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE failure_observations SET cluster_id = ?, stage = ?, "
+                "root_cause_feature = ?, updated_at = ? WHERE id = ?",
+                (int(cluster_id), failure_stage, root_cause_feature, float(now), int(observation_id)),
+            )
+            self._conn.commit()
+
+    def refresh_cluster(self, cluster_id: int, *, cutoff: float, priority: str, now: float) -> dict:
+        """Atomically recount in-window members and refresh priority/last activity."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE failure_clusters SET "
+                "member_count = (SELECT COUNT(*) FROM failure_observations o "
+                "                 WHERE o.cluster_id = failure_clusters.id AND o.created_at >= ?), "
+                "priority = ?, last_seen_at = ?, updated_at = ? WHERE id = ?",
+                (float(cutoff), priority, float(now), float(now), int(cluster_id)),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+        return dict(row)
+
+    def promote_cluster(
+        self,
+        cluster_id: int,
+        *,
+        new_status: str,
+        pool: str,
+        member_status: str,
+        now: float,
+    ) -> dict | None:
+        """Admit one cluster and its members atomically; ``None`` when already admitted.
+
+        Both the cluster and its member observations move through the design
+        section 7 transition table; an illegal transition raises ``ValueError``
+        and nothing is written. Re-promoting an admitted cluster is a no-op.
+        """
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+            if cluster is None:
+                raise KeyError("cluster not found")
+            if cluster["pool"] != ObservationPool.OBSERVATION_QUEUE.value:
+                return None
+            current = cluster["status"]
+            if new_status not in EVOLUTION_TRANSITIONS.get(current, ()):
+                raise ValueError(f"invalid transition: {current} -> {new_status}")
+            members = self._conn.execute(
+                "SELECT id, status FROM failure_observations WHERE cluster_id = ?", (int(cluster_id),)
+            ).fetchall()
+            for member in members:
+                status = member["status"]
+                if status == member_status:
+                    continue
+                if member_status not in EVOLUTION_TRANSITIONS.get(status, ()):
+                    raise ValueError(f"invalid transition: {status} -> {member_status}")
+            self._conn.execute(
+                "UPDATE failure_clusters SET status = ?, pool = ?, updated_at = ? WHERE id = ?",
+                (new_status, pool, float(now), int(cluster_id)),
+            )
+            self._conn.execute(
+                "UPDATE failure_observations SET status = ?, updated_at = ? "
+                "WHERE cluster_id = ? AND status != ?",
+                (member_status, float(now), int(cluster_id), member_status),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+        return dict(row)
+
+    def list_clusters(self) -> list[dict]:
+        """All clusters, oldest first; callers filter or page in Python (Tasks 4 and 5)."""
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM failure_clusters ORDER BY id ASC").fetchall()
+        return [dict(row) for row in rows]
+
+    def list_observations(self, cluster_id: int | None = None) -> list[dict]:
+        """All observations, or the members of one cluster, oldest first.
+
+        JSON columns are decoded exactly like ``add_observation`` returns them,
+        so the read-only API and the metric layer see identical rows.
+        """
+        sql = "SELECT * FROM failure_observations"
+        params: tuple = ()
+        if cluster_id is not None:
+            sql += " WHERE cluster_id = ?"
+            params = (int(cluster_id),)
+        sql += " ORDER BY id ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_decode_row(row) for row in rows]
+
+    def purge_observations_before(self, timestamp: float) -> int:
+        """Delete observations created before ``timestamp``; returns the deleted count.
+
+        Task 3's retention step calls this with the configured cutoff. Clusters
+        are left untouched on purpose: the next clustering round recomputes each
+        touched cluster's ``member_count`` from its surviving members, so purging
+        can never silently promote or demote a cluster here.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM failure_observations WHERE created_at < ?", (float(timestamp),)
+            )
+            self._conn.commit()
+            return int(cursor.rowcount)
 
     def close(self) -> None:
         self._conn.close()

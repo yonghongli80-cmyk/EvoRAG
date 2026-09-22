@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     evolution_enabled: bool = False
     evolution_db_path: str = str(Path(__file__).resolve().parent / "data" / "evolution.db")
     evolution_queue_limit: int = Field(default=256, ge=1, le=100_000)
+    # 同类根因累计 threshold 次（窗口 window_days 内）即进入候选池；观测保留 retention_days 天。
+    evolution_cluster_threshold: int = Field(default=3, ge=1, le=100)
+    evolution_cluster_window_days: int = Field(default=30, ge=1)
+    evolution_observation_retention_days: int = Field(default=90, ge=1)
 
     # 分块与检索
     chunk_size: int = 500
