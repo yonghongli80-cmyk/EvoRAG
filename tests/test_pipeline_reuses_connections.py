@@ -110,6 +110,50 @@ async def test_streaming_pipeline_reuses_injected_gap_analyzer():
     gap_analyzer.close.assert_not_called()
 
 
+def test_shadow_mode_pipeline_reuses_service_and_closes_executor(monkeypatch):
+    from config import settings
+
+    monkeypatch.setattr(settings, "jev_mode", "shadow")
+    pipeline = _build_pipeline(MagicMock(), MagicMock())
+
+    assert pipeline.jev is not None
+    assert pipeline._shadow_evaluator is not None
+    assert pipeline._shadow_evaluator._jev is pipeline.jev
+
+    pipeline.close()
+    assert pipeline._shadow_evaluator.stats()["closed"] is True
+
+
+def test_shadow_mode_legacy_path_submits_case_without_altering_response(monkeypatch):
+    from config import settings
+    from rag.models import Chunk
+
+    monkeypatch.setattr(settings, "jev_mode", "shadow")
+    feedback_processor = MagicMock()
+    feedback_processor.get_weights.return_value = {}
+    pipeline = _build_pipeline(feedback_processor, MagicMock())
+    chunks = [Chunk(text="safe context", doc_name="doc.txt", chunk_index=0)]
+    pipeline.retriever.retrieve.return_value = chunks
+    pipeline.reranker.rerank.return_value = chunks
+    pipeline.memory = MagicMock()
+
+    with patch("rag.agent.route_question", return_value="rag"), patch(
+        "rag.pipeline.rewrite_query", return_value="rewritten"
+    ):
+        prepared, error = pipeline._prepare_context("first", "s1", None)
+
+    assert error is None
+    assert prepared["route"] == "rag"
+    assert [chunk.text for chunk in prepared["context"]] == ["safe context"]
+    assert prepared["decision_metadata"]["jev_mode"] == "shadow"
+    assert pipeline._shadow_evaluator.stats()["submitted"] == 1
+
+    pipeline.close()
+    stats = pipeline._shadow_evaluator.stats()
+    assert stats["completed"] == 1
+    assert stats["dropped"] == 0
+
+
 def test_api_pipeline_factory_injects_memory_db_singletons(monkeypatch):
     import rag.api as api
 

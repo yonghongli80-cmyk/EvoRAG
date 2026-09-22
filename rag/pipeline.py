@@ -13,6 +13,7 @@ from rag.generator import generate, generate_stream
 from rag.guard import check_injection, check_output, sanitize_input
 from rag.jev.policy import KbCapabilities
 from rag.jev.service import JevDecisionService
+from rag.jev.shadow import ShadowCase, ShadowComparison, ShadowEvaluator
 from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
@@ -69,6 +70,19 @@ def _agent_run_kwargs(prepared: dict) -> dict:
     return kwargs
 
 
+def _log_shadow_comparison(comparison: ShadowComparison) -> None:
+    """Record one shadow comparison without question text, chunk text, or credentials."""
+    logger.info(
+        "Jev shadow comparison: legacy_route=%s jev_route=%s agrees=%s available=%s failure=%s overlap=%.3f",
+        comparison.legacy_route,
+        comparison.jev_route,
+        comparison.route_agrees,
+        comparison.jev_available,
+        comparison.failure_kind,
+        comparison.top_k_overlap,
+    )
+
+
 class RAGPipeline:
     def __init__(
         self,
@@ -115,6 +129,12 @@ class RAGPipeline:
             self._owns_jev_service = True
         else:
             self.jev = None
+        # 影子模式：旧链路正常响应，后台比对 Jev 判断。
+        self._shadow_evaluator = None
+        self._owns_shadow_evaluator = False
+        if settings.jev_mode == "shadow" and self.jev is not None:
+            self._shadow_evaluator = ShadowEvaluator(self.jev, on_comparison=_log_shadow_comparison)
+            self._owns_shadow_evaluator = True
         from rag.agent import RAGAgent
 
         self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
@@ -159,6 +179,8 @@ class RAGPipeline:
             self._feedback_processor.close()
         if self._owns_gap_analyzer:
             self._gap_analyzer.close()
+        if self._owns_shadow_evaluator and self._shadow_evaluator is not None:
+            self._shadow_evaluator.close()
         if self._owns_jev_service and self.jev is not None:
             self.jev.close()
 
@@ -214,10 +236,14 @@ class RAGPipeline:
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
             )
-        return self._prepare_context_legacy(
+        prepared, error = self._prepare_context_legacy(
             question, session_id, doc_name, top_k, tags, user, kb_id,
             enterprise_request, effective_kb_id, coordinator,
         )
+        if error is None and settings.jev_mode != "off":
+            prepared.setdefault("stage_timings", {})
+            prepared.setdefault("decision_metadata", {}).setdefault("jev_mode", settings.jev_mode)
+        return prepared, error
 
     def _prepare_context_legacy(
         self, question, session_id, doc_name, top_k, tags, user, kb_id,
@@ -258,10 +284,27 @@ class RAGPipeline:
         )
         context = self._post_rank_acl(self.reranker.rerank(rewritten, candidates), user, effective_kb_id)
         context = self._drop_injected_chunks(context)[:top_k]
+        self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator)
         return self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request,
         ), None
+
+    def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator):
+        """Queue a non-blocking shadow comparison; never alters the current response."""
+        evaluator = getattr(self, "_shadow_evaluator", None)
+        if evaluator is None:
+            return
+        evaluator.submit(ShadowCase(
+            question=question,
+            query=query,
+            legacy_route=legacy_route,
+            legacy_ranks=tuple(
+                (f"{chunk.doc_name}#{chunk.chunk_index}", chunk.rerank_score) for chunk in context
+            ),
+            candidates=tuple(candidates),
+            capabilities=KbCapabilities(has_structured_data=coordinator is not None),
+        ))
 
     def _prepare_context_with_jev(
         self, question, session_id, doc_name, top_k, tags, user, kb_id,
@@ -269,37 +312,58 @@ class RAGPipeline:
     ):
         """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
         capabilities = KbCapabilities(has_structured_data=coordinator is not None)
+        started = time.perf_counter()
         route_decision = self.jev.route(question, capabilities)
+        preflight = route_decision.preflight
+        stage = {
+            "_started": started,
+            "preflight_ms": (time.perf_counter() - started) * 1000,
+            "passages_ms": 0.0,
+            "route": route_decision.route,
+            "reason": route_decision.reason,
+            "question_set_version": preflight.question_set_version if preflight is not None else "",
+            "intent_confidence": preflight.intent_confidence if preflight is not None else None,
+            "rewrite_probability": preflight.rewrite_probability if preflight is not None else None,
+            "failure_kind": (
+                route_decision.reason.split(":", 1)[1]
+                if route_decision.reason.startswith("preflight_unavailable:")
+                else None
+            ),
+            "attempts": 0,
+            "rewrites": 0,
+        }
 
         if route_decision.route == "clarification":
-            return self._fixed_decision(
+            prepared = self._fixed_decision(
                 question,
                 effective_kb_id,
                 "clarification_required",
                 (route_decision.reason,),
-            ), None
+            )
+            return self._attach_jev_stage(prepared, stage), None
 
         if route_decision.route == "structured":
             structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
             if structured is not None:
-                return structured, None
+                return self._attach_jev_stage(structured, stage), None
             # 结构化协调器无法处理时退回文档检索
 
         elif route_decision.route == "tool":
             if enterprise_request:
                 # 企业模式继续遵守既有 typed-evidence 限制
-                return self._fixed_decision(
+                prepared = self._fixed_decision(
                     question,
                     effective_kb_id,
                     "clarification_required",
                     ("jev tool route has no typed evidence",),
-                ), None
+                )
+                return self._attach_jev_stage(prepared, stage), None
             prepared = {"route": "agent", "question": question}
             if user is not None:
                 prepared["user"] = user
             if kb_id is not None:
                 prepared["kb_id"] = kb_id
-            return prepared, None
+            return self._attach_jev_stage(prepared, stage), None
 
         elif route_decision.route == "legacy":
             # 预判低置信度或 Jev 不可用：完整降级到旧路由与旧 reranker
@@ -308,14 +372,15 @@ class RAGPipeline:
                 enterprise_request, effective_kb_id, coordinator,
             )
 
-        return self._prepare_rag_with_jev(
+        prepared, stage = self._prepare_rag_with_jev(
             question, session_id, doc_name, top_k, tags, user, kb_id,
-            enterprise_request, effective_kb_id, route_decision,
+            enterprise_request, effective_kb_id, route_decision, stage,
         )
+        return prepared, None
 
     def _prepare_rag_with_jev(
         self, question, session_id, doc_name, top_k, tags, user, kb_id,
-        enterprise_request, effective_kb_id, route_decision,
+        enterprise_request, effective_kb_id, route_decision, stage,
     ):
         """RAG 主链路：原问题检索（除非策略请求改写），Jev 候选判断，最多一次改写重试。"""
         retrieve_top_k = top_k * _RETRIEVAL_OVERSAMPLE
@@ -323,8 +388,11 @@ class RAGPipeline:
         attempts = [
             (rewrite_query(question) if route_decision.should_rewrite else question, route_decision.should_rewrite)
         ]
+        stage["attempts"] = len(attempts)
+        stage["rewrites"] = 1 if route_decision.should_rewrite else 0
         context: list[Chunk] = []
         conflicts: list[dict] = []
+        passages_started = time.perf_counter()
         index = 0
         while index < len(attempts):
             query, rewrite_used = attempts[index]
@@ -354,12 +422,37 @@ class RAGPipeline:
             if not rewrite_used:
                 # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
                 attempts.append((rewrite_query(question), True))
+                stage["attempts"] = len(attempts)
+                stage["rewrites"] = 1
             index += 1
-        return self._finalize_rag_context(
+        stage["passages_ms"] = (time.perf_counter() - passages_started) * 1000
+        prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request or not context,
             conflicts=tuple(conflicts),
-        ), None
+        )
+        return self._attach_jev_stage(prepared, stage), stage
+
+    @staticmethod
+    def _attach_jev_stage(prepared: dict, stage: dict) -> dict:
+        """Attach sanitized stage timings and decision metadata for the execution trace."""
+        prepared["stage_timings"] = {
+            "jev_preflight_ms": stage["preflight_ms"],
+            "jev_passages_ms": stage["passages_ms"],
+            "preparation_ms": (time.perf_counter() - stage["_started"]) * 1000,
+        }
+        prepared["decision_metadata"] = {
+            "jev_mode": settings.jev_mode,
+            "question_set_version": stage["question_set_version"],
+            "jev_route": stage["route"],
+            "route_reason": stage["reason"],
+            "intent_confidence": stage["intent_confidence"],
+            "rewrite_probability": stage["rewrite_probability"],
+            "failure_kind": stage["failure_kind"],
+            "attempt_count": stage["attempts"],
+            "rewrite_count": stage["rewrites"],
+        }
+        return prepared
 
     def _retrieve_visible_candidates(
         self,
@@ -601,6 +694,8 @@ class RAGPipeline:
         self.tracker.save(ExecutionTrace(
             question=question, route=prepared["route"], answer=answer,
             total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
+            stage_timings=prepared.get("stage_timings") or {},
+            decision_metadata=prepared.get("decision_metadata") or {},
         ))
 
         # Gap analysis: check if this is a retrieval gap
@@ -697,6 +792,8 @@ class RAGPipeline:
             ExecutionTrace(
                 question=question, route=prepared["route"], answer=answer,
                 total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
+                stage_timings=prepared.get("stage_timings") or {},
+                decision_metadata=prepared.get("decision_metadata") or {},
             ),
         )
 
