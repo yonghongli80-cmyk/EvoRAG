@@ -1,12 +1,33 @@
 """TDD tests for rag.data_sources – abstract base, RSS, DB, and API sources."""
 
 import asyncio
+import socket
 import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_dns():
+    """Keep SSRF URL validation independent of the machine's real resolver.
+
+    ``rag.data_sources.base.validate_external_host`` resolves every hostname
+    through ``socket.getaddrinfo`` to reject hosts that map to private or
+    reserved addresses.  Sandbox/CI networks frequently intercept DNS and
+    answer ``example.com`` with a non-public address (this machine:
+    198.18.0.59), which the validator correctly rejects — breaking source
+    construction even though these tests only exercise feed/JSON parsing.
+    Pin every hostname to the IANA-reserved public A record of example.com
+    so validation passes deterministically offline.  Literal-IP URLs never
+    reach the resolver, and the SSRF rejection tests keep their own patching
+    in tests/test_data_source_ssrf_sql.py.
+    """
+    fake = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+    with patch("rag.data_sources.base.socket.getaddrinfo", return_value=fake):
+        yield
 
 
 def _run(coro):
@@ -218,10 +239,21 @@ class TestDBSource:
             os.unlink(tmp_name)
 
     def test_sqlite_connection_failure(self):
+        """A failing connect must make test_connection() return False.
+
+        ``sqlite3.connect()`` happily *creates* an empty database for a
+        nonexistent path, so "file missing" is not a connection failure.
+        Exercise the failure branch hermetically by mocking connect to
+        raise (mirrors a locked, corrupt, or unwritable database file).
+        """
         from rag.data_sources.db_source import DBSource
 
         src = DBSource(connection_string="sqlite:///nonexistent_xyz.db", query="SELECT 1")
-        assert src.test_connection() is False
+        with patch(
+            "sqlite3.connect",
+            side_effect=sqlite3.OperationalError("unable to open database file"),
+        ):
+            assert src.test_connection() is False
 
     def test_fetch_sqlite(self):
         import os
