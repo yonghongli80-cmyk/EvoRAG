@@ -57,8 +57,9 @@ class JevDecisionService:
     def select(
         self,
         question: str,
-        query: str,
         candidates: Sequence[Chunk],
+        *,
+        query: str | None = None,
         top_k: int | None = None,
     ) -> PassageSelection | None:
         """Judge ACL-visible candidates and apply passage policy.
@@ -70,7 +71,7 @@ class JevDecisionService:
         chunk_ids = [f"c{index}" for index in range(len(candidates))]
         state = {
             "question": question,
-            "query": query,
+            "query": query if query is not None else question,
             "passages": {
                 chunk_id: {"text": candidate.text}
                 for chunk_id, candidate in zip(chunk_ids, candidates, strict=True)

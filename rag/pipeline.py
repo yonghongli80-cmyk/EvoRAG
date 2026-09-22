@@ -11,6 +11,8 @@ from rag.cleaner import clean_document, deduplicate_chunks
 from rag.embedder import embed
 from rag.generator import generate, generate_stream
 from rag.guard import check_injection, check_output, sanitize_input
+from rag.jev.policy import KbCapabilities
+from rag.jev.service import JevDecisionService
 from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
@@ -30,6 +32,7 @@ from rag.vector_store import add, clear
 logger = logging.getLogger(__name__)
 
 _HISTORICAL_EVIDENCE_WARNING = "注意：以下回答仅依据历史版本资料，内容可能已过期。\n\n"
+_RETRIEVAL_OVERSAMPLE = 3
 
 
 class QueryResult(NamedTuple):
@@ -76,6 +79,7 @@ class RAGPipeline:
         user_db=None,
         feedback_processor=None,
         gap_analyzer=None,
+        jev_service: JevDecisionService | None = None,
     ):
         if kb_id:
             # 查询已有知识库，不重新索引
@@ -102,6 +106,15 @@ class RAGPipeline:
 
         self.memory = DialogueMemory(db_path=memory_db_path, generate_fn=generate)
         self.reranker = Reranker()
+        # Jev 决策服务：仅当模式非 off 时创建默认实例；注入的服务由调用方负责生命周期。
+        self._owns_jev_service = False
+        if jev_service is not None:
+            self.jev = jev_service
+        elif settings.jev_mode != "off":
+            self.jev = JevDecisionService()
+            self._owns_jev_service = True
+        else:
+            self.jev = None
         from rag.agent import RAGAgent
 
         self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
@@ -129,6 +142,7 @@ class RAGPipeline:
         self._spreadsheet_coordinator = None
         if user_db is not None and kb_id is not None:
             from pathlib import Path
+
             from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
             self._spreadsheet_coordinator = SpreadsheetQueryCoordinator(
                 user_db, Path(settings.structured_datasets_root)
@@ -145,9 +159,18 @@ class RAGPipeline:
             self._feedback_processor.close()
         if self._owns_gap_analyzer:
             self._gap_analyzer.close()
+        if self._owns_jev_service and self.jev is not None:
+            self.jev.close()
+
+    def _jev_active(self, effective_kb_id: str) -> bool:
+        """Active Jev routing requires mode=active and an allowlisted knowledge base."""
+        if self.jev is None or settings.jev_mode != "active":
+            return False
+        allowlist = {item.strip() for item in settings.jev_kb_allowlist.split(",") if item.strip()}
+        return effective_kb_id in allowlist
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
-        """公共逻辑：guard -> route -> retrieve -> rerank -> build_messages。"""
+        """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
         question = sanitize_input(question)
         guard = check_injection(question)
         if guard.blocked:
@@ -176,23 +199,6 @@ class RAGPipeline:
             }, None
 
         coordinator = getattr(self, "_spreadsheet_coordinator", None)
-        if coordinator is not None and user is not None and effective_kb_id != "rag_docs":
-            outcome = coordinator.query(question, kb_id=effective_kb_id, user=user)
-            if outcome.kind in {"structured_result", "hybrid_result"}:
-                answer = "\n".join(f"{fact.label}：{fact.value}" for fact in outcome.computed_facts)
-                payload = {
-                    "kind": outcome.kind,
-                    "facts": [{"label": fact.label, "value": fact.value} for fact in outcome.computed_facts],
-                    "sources": [
-                        {"dataset_id": source.dataset_id, "sheet_key": source.sheet_key, "cell_range": source.cell_range}
-                        for source in outcome.citations
-                    ],
-                    "rows_scanned": outcome.rows_scanned,
-                }
-                return {"route": "structured", "answer": answer, "context": [], "sources": [], "structured_result": payload}, None
-            if outcome.kind == "clarification_required":
-                question_text = outcome.clarification.question if outcome.clarification else "请补充表格查询条件"
-                return {"route": "structured", "answer": question_text, "context": [], "sources": [], "structured_result": {"kind": "clarification_required", "facts": [], "sources": [], "rows_scanned": 0, "clarification": outcome.clarification.model_dump() if outcome.clarification else None}}, None
 
         cache_key_kb = effective_kb_id
         cached = None  # Final-answer caching is disabled until ACL versioning is end-to-end.
@@ -202,31 +208,37 @@ class RAGPipeline:
             if user is not None and self._user_db is not None:
                 sources = self._filter_sources_by_permission(sources, cache_key_kb, user)
             return {"route": "cached", "answer": cached.get("answer", ""), "context": [], "sources": sources}, None
+
+        if self._jev_active(effective_kb_id):
+            return self._prepare_context_with_jev(
+                question, session_id, doc_name, top_k, tags, user, kb_id,
+                enterprise_request, effective_kb_id, coordinator,
+            )
+        return self._prepare_context_legacy(
+            question, session_id, doc_name, top_k, tags, user, kb_id,
+            enterprise_request, effective_kb_id, coordinator,
+        )
+
+    def _prepare_context_legacy(
+        self, question, session_id, doc_name, top_k, tags, user, kb_id,
+        enterprise_request, effective_kb_id, coordinator,
+    ):
+        """旧链路：确定性结构化尝试 -> DeepSeek 路由 -> 无条件改写 -> 检索 -> 旧 reranker。"""
+        structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
+        if structured is not None:
+            return structured, None
+
         from rag.agent import route_question
         route = route_question(question)
 
         if route == "agent":
             if enterprise_request:
-                bundle = build_evidence_bundle(
+                return self._fixed_decision(
                     question,
-                    [],
-                    kb_id=effective_kb_id,
-                    acl_checked=True,
-                )
-                decision = AnswerabilityDecision(
-                    kind="clarification_required",
-                    reasons=("legacy agent route has no typed evidence",),
-                )
-                confidence = assess_confidence(bundle, decision)
-                return {
-                    "route": "fixed",
-                    "answer": fixed_decision_copy(decision.kind),
-                    "context": [],
-                    "sources": [],
-                    "decision": decision,
-                    "confidence": confidence,
-                    "evidence_bundle": bundle,
-                }, None
+                    effective_kb_id,
+                    "clarification_required",
+                    ("legacy agent route has no typed evidence",),
+                ), None
             prepared = {"route": "agent", "question": question}
             # 透传当前用户/知识库，供 agent 的 retrieve 工具做权限过滤
             if user is not None:
@@ -236,8 +248,131 @@ class RAGPipeline:
             return prepared, None
 
         rewritten = rewrite_query(question)
-        # Oversampling: 检索更多结果，过滤后再截取 top_k
-        oversample_factor = 3
+        candidates = self._retrieve_visible_candidates(
+            rewritten,
+            top_k=top_k * _RETRIEVAL_OVERSAMPLE,
+            doc_name=doc_name,
+            tags=tags,
+            user=user,
+            kb_id=kb_id,
+        )
+        context = self._post_rank_acl(self.reranker.rerank(rewritten, candidates), user, effective_kb_id)
+        context = self._drop_injected_chunks(context)[:top_k]
+        return self._finalize_rag_context(
+            question, session_id, context, top_k, effective_kb_id,
+            build_bundle=enterprise_request,
+        ), None
+
+    def _prepare_context_with_jev(
+        self, question, session_id, doc_name, top_k, tags, user, kb_id,
+        enterprise_request, effective_kb_id, coordinator,
+    ):
+        """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
+        capabilities = KbCapabilities(has_structured_data=coordinator is not None)
+        route_decision = self.jev.route(question, capabilities)
+
+        if route_decision.route == "clarification":
+            return self._fixed_decision(
+                question,
+                effective_kb_id,
+                "clarification_required",
+                (route_decision.reason,),
+            ), None
+
+        if route_decision.route == "structured":
+            structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
+            if structured is not None:
+                return structured, None
+            # 结构化协调器无法处理时退回文档检索
+
+        elif route_decision.route == "tool":
+            if enterprise_request:
+                # 企业模式继续遵守既有 typed-evidence 限制
+                return self._fixed_decision(
+                    question,
+                    effective_kb_id,
+                    "clarification_required",
+                    ("jev tool route has no typed evidence",),
+                ), None
+            prepared = {"route": "agent", "question": question}
+            if user is not None:
+                prepared["user"] = user
+            if kb_id is not None:
+                prepared["kb_id"] = kb_id
+            return prepared, None
+
+        elif route_decision.route == "legacy":
+            # 预判低置信度或 Jev 不可用：完整降级到旧路由与旧 reranker
+            return self._prepare_context_legacy(
+                question, session_id, doc_name, top_k, tags, user, kb_id,
+                enterprise_request, effective_kb_id, coordinator,
+            )
+
+        return self._prepare_rag_with_jev(
+            question, session_id, doc_name, top_k, tags, user, kb_id,
+            enterprise_request, effective_kb_id, route_decision,
+        )
+
+    def _prepare_rag_with_jev(
+        self, question, session_id, doc_name, top_k, tags, user, kb_id,
+        enterprise_request, effective_kb_id, route_decision,
+    ):
+        """RAG 主链路：原问题检索（除非策略请求改写），Jev 候选判断，最多一次改写重试。"""
+        retrieve_top_k = top_k * _RETRIEVAL_OVERSAMPLE
+        # 状态机：attempts=[(检索查询, 是否已改写)]；最多追加一次改写重试，之后必须停止。
+        attempts = [
+            (rewrite_query(question) if route_decision.should_rewrite else question, route_decision.should_rewrite)
+        ]
+        context: list[Chunk] = []
+        conflicts: list[dict] = []
+        index = 0
+        while index < len(attempts):
+            query, rewrite_used = attempts[index]
+            candidates = self._retrieve_visible_candidates(
+                query,
+                top_k=retrieve_top_k,
+                doc_name=doc_name,
+                tags=tags,
+                user=user,
+                kb_id=kb_id,
+            )
+            # ACL 过滤后的候选才允许发送给 Jev；不可见文本不得越过边界。
+            selection = self.jev.select(question, candidates, query=query, top_k=top_k)
+            if selection is None:
+                # Jev 候选判断不可用：旧 reranker 兜底，来源仍标注为 reranker
+                context = self._post_rank_acl(
+                    self.reranker.rerank(query, candidates), user, effective_kb_id
+                )
+                context = self._drop_injected_chunks(context)[:top_k]
+                conflicts = []
+                break
+            conflicts = [self._conflict_payload(item) for item in selection.conflicts]
+            if selection.has_answer_evidence:
+                context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
+                context = self._drop_injected_chunks(context)[:top_k]
+                break
+            if not rewrite_used:
+                # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
+                attempts.append((rewrite_query(question), True))
+            index += 1
+        return self._finalize_rag_context(
+            question, session_id, context, top_k, effective_kb_id,
+            build_bundle=enterprise_request or not context,
+            conflicts=tuple(conflicts),
+        ), None
+
+    def _retrieve_visible_candidates(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        doc_name: str | None,
+        tags: list[str] | None,
+        user: dict | None,
+        kb_id: str,
+    ) -> list[Chunk]:
+        """Retrieve, version-scope, and ACL-filter candidates before any external judge."""
+        effective_kb_id = kb_id or self._kb_id
         feedback_weight_cache: dict[str, float] = {}
 
         def feedback_weight(chunk_hash: str) -> float:
@@ -251,39 +386,42 @@ class RAGPipeline:
 
             raw_context = retrieve_current_then_history(
                 self.retriever,
-                rewritten,
-                top_k=top_k * oversample_factor,
+                query,
+                top_k=top_k,
                 user=user,
                 user_db=self._user_db,
-                kb_id=kb_id or self._kb_id,
+                kb_id=effective_kb_id,
                 doc_name=doc_name,
                 tags=tags,
                 weights=feedback_weight,
             )
         else:
             raw_context = self.retriever.retrieve(
-                rewritten,
-                top_k=top_k * oversample_factor,
+                query,
+                top_k=top_k,
                 doc_name=doc_name,
                 tags=tags,
                 weights=feedback_weight,
             )
-        # ACL must run before reranking so unauthorized text never crosses that boundary.
+        # ACL must run before any external judge so unauthorized text never crosses that boundary.
         if user is not None and self._user_db is not None:
             from rag.permissions import filter_chunks_by_permission
             raw_context = filter_chunks_by_permission(
                 self._user_db, effective_kb_id, raw_context, user
             )
+        return raw_context
 
-        context = self.reranker.rerank(rewritten, raw_context)
-
-        # Preserve the post-rerank ACL filter as defense in depth.
+    def _post_rank_acl(self, context: list[Chunk], user: dict | None, effective_kb_id: str) -> list[Chunk]:
+        """Preserve the post-rank ACL filter as defense in depth."""
         if user is not None and self._user_db is not None:
             from rag.permissions import filter_chunks_by_permission
-            context = filter_chunks_by_permission(
+            return filter_chunks_by_permission(
                 self._user_db, effective_kb_id, context, user
             )
+        return context
 
+    def _drop_injected_chunks(self, context: list[Chunk]) -> list[Chunk]:
+        """Remove chunks blocked by the deterministic document injection guard."""
         safe_context = []
         for candidate in context:
             document_guard = check_injection(candidate.text)
@@ -296,10 +434,12 @@ class RAGPipeline:
                 )
                 continue
             safe_context.append(candidate)
-        context = safe_context
-        context = context[:top_k]
+        return safe_context
 
-        # Compute feedback weights for reranked chunks
+    def _finalize_rag_context(
+        self, question, session_id, context, top_k, effective_kb_id, *, build_bundle, conflicts=(),
+    ):
+        """Build messages, sources, feedback weights, and the optional reliability gate."""
         import hashlib
         chunk_hashes = [hashlib.md5(c.text.encode()).hexdigest() for c in context]
         weights = self._feedback_processor.get_weights(chunk_hashes)
@@ -324,12 +464,13 @@ class RAGPipeline:
             "messages": messages, "sources": sources, "sid": sid,
             "chunk_hashes": chunk_hashes, "weights": weights,
         }
-        if enterprise_request:
+        if build_bundle:
             bundle = build_evidence_bundle(
                 question,
                 context,
                 kb_id=effective_kb_id,
                 acl_checked=True,
+                conflicts=[dict(item) for item in conflicts],
             )
             decision = decide_answerability(bundle)
             confidence = assess_confidence(bundle, decision)
@@ -343,7 +484,59 @@ class RAGPipeline:
             }:
                 prepared["route"] = "fixed"
                 prepared["answer"] = fixed_decision_copy(decision.kind)
-        return prepared, None
+        return prepared
+
+    def _fixed_decision(self, question, effective_kb_id, kind, reasons, *, permission_limited=False):
+        """Build a fixed refusal without any external call."""
+        bundle = build_evidence_bundle(
+            question,
+            [],
+            kb_id=effective_kb_id,
+            acl_checked=True,
+            permission_limited=permission_limited,
+        )
+        decision = AnswerabilityDecision(kind=kind, reasons=tuple(reasons))
+        confidence = assess_confidence(bundle, decision)
+        return {
+            "route": "fixed",
+            "answer": fixed_decision_copy(decision.kind),
+            "context": [],
+            "sources": [],
+            "decision": decision,
+            "confidence": confidence,
+            "evidence_bundle": bundle,
+        }
+
+    def _attempt_structured_query(self, question, coordinator, user, effective_kb_id):
+        """Run the deterministic spreadsheet coordinator; return prepared route or None."""
+        if coordinator is None or user is None or effective_kb_id == "rag_docs":
+            return None
+        outcome = coordinator.query(question, kb_id=effective_kb_id, user=user)
+        if outcome.kind in {"structured_result", "hybrid_result"}:
+            answer = "\n".join(f"{fact.label}：{fact.value}" for fact in outcome.computed_facts)
+            payload = {
+                "kind": outcome.kind,
+                "facts": [{"label": fact.label, "value": fact.value} for fact in outcome.computed_facts],
+                "sources": [
+                    {"dataset_id": source.dataset_id, "sheet_key": source.sheet_key, "cell_range": source.cell_range}
+                    for source in outcome.citations
+                ],
+                "rows_scanned": outcome.rows_scanned,
+            }
+            return {"route": "structured", "answer": answer, "context": [], "sources": [], "structured_result": payload}
+        if outcome.kind == "clarification_required":
+            question_text = outcome.clarification.question if outcome.clarification else "请补充表格查询条件"
+            return {"route": "structured", "answer": question_text, "context": [], "sources": [], "structured_result": {"kind": "clarification_required", "facts": [], "sources": [], "rows_scanned": 0, "clarification": outcome.clarification.model_dump() if outcome.clarification else None}}
+        return None
+
+    @staticmethod
+    def _conflict_payload(chunk: Chunk) -> dict:
+        return {
+            "doc_name": chunk.doc_name,
+            "chunk_index": chunk.chunk_index,
+            "text_preview": chunk.text[:100],
+            "score_source": chunk.score_source,
+        }
 
     def _filter_sources_by_permission(self, sources: list, kb_id: str, user: dict) -> list:
         """过滤缓存命中的 sources（dict 而非 Chunk 对象）中用户无权查看的文档来源。

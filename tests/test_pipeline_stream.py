@@ -6,6 +6,50 @@ from unittest.mock import MagicMock, patch
 from rag.reliability import fixed_decision_copy
 
 
+def test_jev_clarification_route_streams_fixed_copy_without_generator(monkeypatch):
+    """Jev 澄清路由在流式路径下同样返回固定副本，不调用生成器。"""
+    from config import settings
+    from rag.jev.policy import RouteDecision
+    from rag.pipeline import RAGPipeline
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "rag_docs")
+    jev = MagicMock()
+    jev.route.return_value = RouteDecision(
+        route="clarification", should_rewrite=False, reason="clarification_confident", preflight=None,
+    )
+
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.deduplicate_chunks", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"), \
+         patch("rag.pipeline.generate_stream") as generate_stream:
+        pipeline = RAGPipeline(
+            "test.txt", session_id="s1", memory_db_path=":memory:",
+            feedback_processor=MagicMock(), gap_analyzer=MagicMock(), jev_service=jev,
+        )
+        events = []
+
+        async def collect():
+            async for event in pipeline.query_stream("那个事儿怎么办", session_id="s1"):
+                events.append(json.loads(event.removeprefix("data: ")))
+
+        asyncio.run(collect())
+
+    assert events[0] == {"type": "token", "content": fixed_decision_copy("clarification_required")}
+    assert events[1] == {"type": "sources", "sources": []}
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["reliability"]["answerability_kind"] == "clarification_required"
+    generate_stream.assert_not_called()
+    pipeline.close()
+
+
 def test_query_stream_yields_sse_events():
     """query_stream 应该 yield SSE 格式的事件。"""
     from rag.pipeline import RAGPipeline
