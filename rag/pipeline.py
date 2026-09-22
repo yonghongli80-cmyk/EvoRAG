@@ -272,7 +272,6 @@ class RAGPipeline:
                 prepared["user"] = user
             if kb_id is not None:
                 prepared["kb_id"] = kb_id
-            prepared["decision_metadata"] = {"legacy_route": "agent"}
             return prepared, None
 
         rewritten = rewrite_query(question)
