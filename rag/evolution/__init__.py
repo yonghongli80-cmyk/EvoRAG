@@ -16,11 +16,15 @@ from rag.evolution.models import (
 )
 from rag.evolution.recorder import FailureRecorder
 from rag.evolution.store import FailureTraceStore
+from rag.evolution.worker import BudgetExhausted, EvolutionBudget, EvolutionWorker
 
 __all__ = [
     "EVOLUTION_TRANSITIONS",
+    "BudgetExhausted",
     "DiagnosticDetail",
+    "EvolutionBudget",
     "EvolutionStatus",
+    "EvolutionWorker",
     "FailureObservation",
     "FailureRecorder",
     "FailureStage",

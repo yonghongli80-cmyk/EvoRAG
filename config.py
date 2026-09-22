@@ -121,6 +121,13 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 50 * 1024 * 1024
     max_chunk_chars: int = 8000
 
+    # 辅助自进化后台 worker：预算（并发/批大小/运行时长/模型调用）与繁忙暂停。
+    evolution_worker_enabled: bool = True
+    evolution_worker_interval_seconds: int = Field(default=900, ge=1)
+    evolution_worker_run_seconds: float = Field(default=120.0, gt=0.0)
+    evolution_worker_max_batch: int = Field(default=200, ge=1)
+    evolution_worker_busy_load_factor: float = Field(default=2.0, gt=0.0)
+
     model_config = {
         "env_prefix": "RAG_",
         "env_file": str(Path(__file__).resolve().parent / ".env"),
