@@ -30,7 +30,6 @@ from rag.materials.jobs import claim_material_jobs
 from rag.materials.models import ExtractedMaterial, FormatResolution
 from rag.models import Chunk
 from rag.spreadsheets.chunker import DatasetMetadata
-from rag.spreadsheets.extractor import workbook_index_material
 from rag.spreadsheets.parser import parse_spreadsheet
 from rag.spreadsheets.store import resolve_dataset_path, write_dataset
 from rag.user_db import UserDB
@@ -356,6 +355,9 @@ def process_index_job(job: dict, services: WorkerServices) -> JobResult:
             services.structured_datasets_root, document_id, version_id
         )
         manifest = write_dataset(spreadsheet_dataset_path, workbook)
+        # Deferred import breaks the worker -> extractor -> materials-init -> worker cycle.
+        from rag.spreadsheets.extractor import workbook_index_material
+
         material, chunk_templates = workbook_index_material(
             workbook,
             DatasetMetadata(
