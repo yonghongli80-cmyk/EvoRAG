@@ -51,8 +51,15 @@ def test_low_confidence_clarification_defaults_to_rag():
     assert choose_route(decision, threshold=0.75).route == "rag"
 
 
-def test_low_confidence_retrieval_falls_back_to_legacy():
+def test_low_confidence_retrieval_defaults_to_rag():
     decision = preflight("retrieval_qa", 0.40)
+    result = choose_route(decision, threshold=0.75)
+    assert result.route == "rag"
+    assert "defaults_rag" in result.reason
+
+
+def test_low_confidence_structured_falls_back_to_legacy():
+    decision = preflight("structured_query", 0.40)
     assert choose_route(decision, threshold=0.75).route == "legacy"
 
 

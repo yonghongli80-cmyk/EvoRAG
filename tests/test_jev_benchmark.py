@@ -17,13 +17,19 @@ from scripts.benchmark_jev_retrieval import (
 )
 
 
-def case(case_id: str = "rag-001", expected_sources=("doc.md",), expected_route: str = "rag") -> BenchmarkCase:
+def case(
+    case_id: str = "rag-001",
+    expected_sources=("doc.md",),
+    expected_route: str = "rag",
+    category: str = "ordinary",
+) -> BenchmarkCase:
     return BenchmarkCase(
         id=case_id,
         question=f"问题 {case_id}",
         expected_route=expected_route,
         kb_id="rag_docs",
         expected_source_names=tuple(expected_sources),
+        category=category,
     )
 
 
@@ -225,6 +231,70 @@ def test_load_cases_rejects_unknown_route(tmp_path):
     )
     with pytest.raises(ValueError, match="unknown expected_route"):
         load_cases(path)
+
+
+def test_load_cases_rejects_unknown_category(tmp_path):
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "id": "a",
+                        "question": "q",
+                        "expected_route": "rag",
+                        "kb_id": "kb",
+                        "category": "weird",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown category"):
+        load_cases(path)
+
+
+def test_rewrite_acceptance_uses_ordinary_population_only():
+    """The rewrite criterion targets ordinary questions; special cases stay reported."""
+
+    def old_prepare(_case):
+        return outcome(rewrite_called=True, preparation_ms=1000.0)
+
+    def new_prepare(case):
+        return outcome(rewrite_called=case.category != "ordinary", preparation_ms=500.0)
+
+    report = run_benchmark(
+        [case("rag-001"), case("tool-001", category="special")],
+        old_prepare,
+        new_prepare,
+        runs=1,
+        warmups=0,
+    )
+    assert report.old.rewrite_rate == 1.0
+    assert report.old.ordinary_rewrite_rate == 1.0
+    assert report.new.rewrite_rate == 0.5
+    assert report.new.ordinary_rewrite_rate == 0.0  # the only ordinary case never rewrote
+    assert report.new.ordinary_sample_count == 1
+    rewrite_check = next(check for check in report.verdict.checks if check.name == "rewrite")
+    assert rewrite_check.passed is True
+
+
+def test_case_breakdown_reports_each_path():
+    report = run_benchmark(
+        [case("rag-001", category="ordinary")],
+        lambda _case: outcome(preparation_ms=100.0, external_calls=3),
+        lambda _case: outcome(preparation_ms=50.0, external_calls=2),
+        runs=2,
+        warmups=0,
+    )
+    assert len(report.case_breakdowns) == 1
+    item = report.case_breakdowns[0]
+    assert item.case_id == "rag-001"
+    assert item.old.run_count == 2
+    assert item.old.route_correct_count == 2
+    assert item.old.external_calls_total == 6
+    assert item.new.prep_p50_ms == 50.0
 
 
 def test_committed_case_set_is_deterministic_and_labeled():

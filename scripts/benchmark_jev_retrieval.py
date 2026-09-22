@@ -44,6 +44,10 @@ class BenchmarkCase:
     kb_id: str
     expected_source_names: tuple[str, ...] = ()
     notes: str = ""
+    category: str = "ordinary"
+
+
+CASE_CATEGORIES = ("ordinary", "special")
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class PreparationOutcome:
 class Sample:
     case_id: str
     path: str
+    category: str
     preparation_ms: float
     end_to_end_ms: float | None
     route: str
@@ -96,8 +101,34 @@ class PathMetrics:
     external_calls_per_query: float
     failed_calls: int
     route_accuracy_by_category: dict[str, float] = field(default_factory=dict)
+    ordinary_rewrite_rate: float = 0.0
+    ordinary_sample_count: int = 0
     end_to_end_p50_ms: float | None = None
     end_to_end_p95_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class CasePathBreakdown:
+    """Per-case, per-path aggregates used to inspect failures case by case."""
+
+    case_id: str
+    category: str
+    expected_route: str
+    run_count: int
+    route_correct_count: int
+    rewrite_count: int
+    external_calls_total: int
+    prep_p50_ms: float
+    failures: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CaseBreakdown:
+    case_id: str
+    category: str
+    expected_route: str
+    old: CasePathBreakdown
+    new: CasePathBreakdown
 
 
 @dataclass(frozen=True)
@@ -124,6 +155,7 @@ class BenchmarkReport:
     new: PathMetrics
     verdict: AcceptanceVerdict
     failures: tuple[str, ...] = ()
+    case_breakdowns: tuple[CaseBreakdown, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -142,7 +174,28 @@ class BenchmarkReport:
                 ],
             },
             "failures": list(self.failures),
+            "case_breakdowns": [
+                {
+                    "case_id": item.case_id,
+                    "category": item.category,
+                    "expected_route": item.expected_route,
+                    "old": _case_path_to_dict(item.old),
+                    "new": _case_path_to_dict(item.new),
+                }
+                for item in self.case_breakdowns
+            ],
         }
+
+
+def _case_path_to_dict(item: CasePathBreakdown) -> dict[str, Any]:
+    return {
+        "run_count": item.run_count,
+        "route_correct_count": item.route_correct_count,
+        "rewrite_count": item.rewrite_count,
+        "external_calls_total": item.external_calls_total,
+        "prep_p50_ms": item.prep_p50_ms,
+        "failures": list(item.failures),
+    }
 
 
 def _metrics_to_dict(metrics: PathMetrics) -> dict[str, Any]:
@@ -151,6 +204,8 @@ def _metrics_to_dict(metrics: PathMetrics) -> dict[str, Any]:
         "prep_p50_ms": metrics.prep_p50_ms,
         "prep_p95_ms": metrics.prep_p95_ms,
         "rewrite_rate": metrics.rewrite_rate,
+        "ordinary_rewrite_rate": metrics.ordinary_rewrite_rate,
+        "ordinary_sample_count": metrics.ordinary_sample_count,
         "route_accuracy": metrics.route_accuracy,
         "route_accuracy_by_category": dict(metrics.route_accuracy_by_category),
         "top1_hit_rate": metrics.top1_hit_rate,
@@ -178,6 +233,9 @@ def load_cases(path: str | Path) -> tuple[BenchmarkCase, ...]:
         seen.add(case_id)
         if entry["expected_route"] not in ROUTE_EXPECTATIONS:
             raise ValueError(f"unknown expected_route for {case_id}: {entry['expected_route']}")
+        category = entry.get("category", "ordinary")
+        if category not in CASE_CATEGORIES:
+            raise ValueError(f"unknown category for {case_id}: {category}")
         cases.append(
             BenchmarkCase(
                 id=case_id,
@@ -186,6 +244,7 @@ def load_cases(path: str | Path) -> tuple[BenchmarkCase, ...]:
                 kb_id=entry["kb_id"],
                 expected_source_names=tuple(entry.get("expected_source_names") or ()),
                 notes=entry.get("notes", ""),
+                category=category,
             )
         )
     if not cases:
@@ -235,8 +294,9 @@ def compute_metrics(samples: Sequence[Sample]) -> PathMetrics:
 
     by_category: dict[str, list[Sample]] = {}
     for sample in successful:
-        by_category.setdefault(sample.case_id.split("-")[0], []).append(sample)
+        by_category.setdefault(sample.category, []).append(sample)
 
+    ordinary = [sample for sample in successful if sample.category == "ordinary"]
     if preparation:
         latency = summarize(preparation)
         p50_ms, p95_ms = latency.p50_ms, latency.p95_ms
@@ -248,6 +308,8 @@ def compute_metrics(samples: Sequence[Sample]) -> PathMetrics:
         prep_p50_ms=p50_ms,
         prep_p95_ms=p95_ms,
         rewrite_rate=_rate(sum(1 for s in successful if s.rewrite_called), len(successful)),
+        ordinary_rewrite_rate=_rate(sum(1 for s in ordinary if s.rewrite_called), len(ordinary)),
+        ordinary_sample_count=len(ordinary),
         route_accuracy=_rate(sum(1 for s in successful if s.route_correct), len(successful)),
         top1_hit_rate=_rate(sum(1 for s in top1_values if s.top1_hit), len(top1_values)),
         top5_hit_rate=_rate(sum(1 for s in with_sources if s.top5_hit), len(with_sources)),
@@ -265,15 +327,21 @@ def compute_metrics(samples: Sequence[Sample]) -> PathMetrics:
 
 
 def evaluate_acceptance(old: PathMetrics, new: PathMetrics) -> AcceptanceVerdict:
-    """Apply the fixed acceptance thresholds; thresholds are never weakened to pass."""
+    """Apply the fixed acceptance thresholds; thresholds are never weakened to pass.
+
+    The rewrite-reduction criterion targets ordinary questions, so it is evaluated on the
+    ordinary-category samples while overall rewrite rates stay in the detail line.
+    """
     p50_target = old.prep_p50_ms * 0.70
     p95_target = old.prep_p95_ms * 0.80
-    if old.rewrite_rate > 0:
-        rewrite_target = old.rewrite_rate * 0.30
-        rewrite_ok = new.rewrite_rate <= rewrite_target
+    old_ordinary = old.ordinary_rewrite_rate if old.ordinary_sample_count else old.rewrite_rate
+    new_ordinary = new.ordinary_rewrite_rate if new.ordinary_sample_count else new.rewrite_rate
+    if old_ordinary > 0:
+        rewrite_target = old_ordinary * 0.30
+        rewrite_ok = new_ordinary <= rewrite_target
     else:
         rewrite_target = 0.0
-        rewrite_ok = new.rewrite_rate == 0.0
+        rewrite_ok = new_ordinary == 0.0
     top5_floor = old.top5_hit_rate - 0.02
 
     checks = (
@@ -290,7 +358,7 @@ def evaluate_acceptance(old: PathMetrics, new: PathMetrics) -> AcceptanceVerdict
         AcceptanceCheck(
             "rewrite",
             rewrite_ok,
-            f"rewrite rate {new.rewrite_rate:.3f} <= {rewrite_target:.3f} (old {old.rewrite_rate:.3f}, need -70%)",
+            f"ordinary rewrite rate {new_ordinary:.3f} <= {rewrite_target:.3f} (old {old_ordinary:.3f}, need -70%; overall {new.rewrite_rate:.3f} vs {old.rewrite_rate:.3f})",
         ),
         AcceptanceCheck(
             "route",
@@ -313,6 +381,7 @@ def _sample_from(case: BenchmarkCase, path: str, outcome: PreparationOutcome) ->
         return Sample(
             case_id=case.id,
             path=path,
+            category=case.category,
             preparation_ms=0.0,
             end_to_end_ms=None,
             route="error",
@@ -333,6 +402,7 @@ def _sample_from(case: BenchmarkCase, path: str, outcome: PreparationOutcome) ->
     return Sample(
         case_id=case.id,
         path=path,
+        category=case.category,
         preparation_ms=outcome.preparation_ms,
         end_to_end_ms=outcome.end_to_end_ms,
         route=outcome.route,
@@ -393,6 +463,43 @@ def run_benchmark(
         new=new_metrics,
         verdict=verdict,
         failures=tuple(failures),
+        case_breakdowns=tuple(_case_breakdowns(cases, samples)),
+    )
+
+
+def _case_breakdowns(
+    cases: Sequence[BenchmarkCase], samples: Sequence[Sample]
+) -> list[CaseBreakdown]:
+    breakdowns = []
+    for case in cases:
+        by_path = {
+            path: [sample for sample in samples if sample.case_id == case.id and sample.path == path]
+            for path in ("old", "new")
+        }
+        breakdowns.append(
+            CaseBreakdown(
+                case_id=case.id,
+                category=case.category,
+                expected_route=case.expected_route,
+                old=_case_path_breakdown(case, by_path["old"]),
+                new=_case_path_breakdown(case, by_path["new"]),
+            )
+        )
+    return breakdowns
+
+
+def _case_path_breakdown(case: BenchmarkCase, samples: Sequence[Sample]) -> CasePathBreakdown:
+    preparation = [sample.preparation_ms for sample in samples if sample.failure is None]
+    return CasePathBreakdown(
+        case_id=case.id,
+        category=case.category,
+        expected_route=case.expected_route,
+        run_count=len(samples),
+        route_correct_count=sum(1 for sample in samples if sample.route_correct),
+        rewrite_count=sum(1 for sample in samples if sample.rewrite_called),
+        external_calls_total=sum(sample.external_calls for sample in samples),
+        prep_p50_ms=percentile(preparation, 0.50) if preparation else 0.0,
+        failures=tuple(sample.failure for sample in samples if sample.failure is not None),
     )
 
 
@@ -425,10 +532,10 @@ def render_markdown(
         "",
         "## Quality and cost",
         "",
-        "| path | route accuracy | Top-1 hit | Top-5 hit | rewrite rate | external calls/query | failed |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
-        f"| old | {report.old.route_accuracy:.3f} | {report.old.top1_hit_rate:.3f} | {report.old.top5_hit_rate:.3f} | {report.old.rewrite_rate:.3f} | {report.old.external_calls_per_query:.2f} | {report.old.failed_calls} |",
-        f"| new | {report.new.route_accuracy:.3f} | {report.new.top1_hit_rate:.3f} | {report.new.top5_hit_rate:.3f} | {report.new.rewrite_rate:.3f} | {report.new.external_calls_per_query:.2f} | {report.new.failed_calls} |",
+        "| path | route accuracy | Top-1 hit | Top-5 hit | rewrite rate | ordinary rewrite rate | external calls/query | failed |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"| old | {report.old.route_accuracy:.3f} | {report.old.top1_hit_rate:.3f} | {report.old.top5_hit_rate:.3f} | {report.old.rewrite_rate:.3f} | {report.old.ordinary_rewrite_rate:.3f} ({report.old.ordinary_sample_count}) | {report.old.external_calls_per_query:.2f} | {report.old.failed_calls} |",
+        f"| new | {report.new.route_accuracy:.3f} | {report.new.top1_hit_rate:.3f} | {report.new.top5_hit_rate:.3f} | {report.new.rewrite_rate:.3f} | {report.new.ordinary_rewrite_rate:.3f} ({report.new.ordinary_sample_count}) | {report.new.external_calls_per_query:.2f} | {report.new.failed_calls} |",
         "",
         "## Route accuracy by category (new path)",
         "",
@@ -438,6 +545,22 @@ def render_markdown(
             lines.append(f"- {category}: {accuracy:.3f}")
     else:
         lines.append("- (no successful samples)")
+    if report.case_breakdowns:
+        lines.extend(
+            [
+                "",
+                "## Per-case breakdown",
+                "",
+                "| case | category | expected | old route ok | old rewrites | old P50 (ms) | new route ok | new rewrites | new P50 (ms) |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for item in report.case_breakdowns:
+            lines.append(
+                f"| {_escape_markdown(item.case_id)} | {item.category} | {item.expected_route} "
+                f"| {item.old.route_correct_count}/{item.old.run_count} | {item.old.rewrite_count} | {item.old.prep_p50_ms:.0f} "
+                f"| {item.new.route_correct_count}/{item.new.run_count} | {item.new.rewrite_count} | {item.new.prep_p50_ms:.0f} |"
+            )
     lines.extend(["", "## Acceptance", "", f"verdict: {'PASS' if report.verdict.passed else 'FAIL'}", ""])
     for check in report.verdict.checks:
         marker = "PASS" if check.passed else "FAIL"
@@ -590,11 +713,18 @@ def build_live_preparations(
 
 
 def _routing_domain(prepared: dict) -> str:
-    """Return the routing domain, preferring the recorded Jev route over the final kind."""
+    """Return the effective routing decision.
+
+    A recorded Jev route wins when it is a real domain; otherwise the recorded legacy routing
+    decision is used, falling back to the prepared route kind.
+    """
     metadata = prepared.get("decision_metadata") or {}
     jev_route = metadata.get("jev_route")
-    if jev_route in ROUTE_EXPECTATIONS.values():
+    if jev_route in ("rag", "structured", "tool", "clarification"):
         return jev_route
+    legacy_route = metadata.get("legacy_route")
+    if legacy_route in ("rag", "structured", "agent"):
+        return {"rag": "rag", "structured": "structured", "agent": "tool"}[legacy_route]
     route = prepared.get("route", "")
     return {"rag": "rag", "structured": "structured", "agent": "tool", "fixed": "clarification"}.get(
         route, route

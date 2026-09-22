@@ -13,10 +13,10 @@ PREFLIGHT_QUESTION_SET_VERSION = "preflight-v1"
 PASSAGE_QUESTION_SET_VERSION = "passages-v1"
 
 _INTENT_CRITERIA = {
-    "structured_query": "需要在已授权的表格或结构化数据集中精确查询或计算。",
-    "retrieval_qa": "可以在授权知识库文档中检索并回答。",
-    "tool_task": "需要调用受控工具或执行多步任务。",
-    "clarification": "问题含糊、缺少关键信息或无法理解，必须先向用户澄清。",
+    "structured_query": "需要按维度汇总、筛选、排序或精确计算表格/结构化数据集中的数据；问题指向记录、字段或统计口径。",
+    "retrieval_qa": "可以在授权知识库文档中检索并回答，包括表述清晰但知识库中没有答案的问题。",
+    "tool_task": "需要调用受控工具、执行精确计算或无法从知识库直接得出的多步推理；仅询问知识库中已有结论的问题不算工具任务。",
+    "clarification": "问题含糊、缺少关键信息或无法理解，必须先向用户澄清；表述清晰但没有答案的问题不属于澄清。",
 }
 
 _COMPLEXITY_CRITERIA = {

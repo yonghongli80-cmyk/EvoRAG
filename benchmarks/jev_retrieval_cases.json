@@ -1,6 +1,6 @@
 {
   "version": "jev-retrieval-cases-v1",
-  "description": "固定问题集：路由与证据标签。检索类用例的期望来源来自本地非敏感 fixture（data/upload/压测.md，知识库 rag_docs）；结构化、工具与含糊类用例需要管理员在实测前确认对应知识库与数据集。本文件不得包含任何密钥。",
+  "description": "固定问题集：路由与证据标签。category=ordinary 的用例参与「普通问题改写率」验收口径，special 用例全程报告但不参与该口径。检索类用例的期望来源来自本地非敏感 fixture（data/upload/压测.md，知识库 rag_docs）；结构化、工具与含糊类用例需要管理员在实测前确认对应知识库与数据集。本文件不得包含任何密钥。",
   "cases": [
     {
       "id": "rag-001",
@@ -8,7 +8,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "普通问答"
+      "notes": "普通问答",
+      "category": "ordinary"
     },
     {
       "id": "rag-002",
@@ -16,7 +17,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "普通问答"
+      "notes": "普通问答",
+      "category": "ordinary"
     },
     {
       "id": "rag-003",
@@ -24,7 +26,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "普通问答"
+      "notes": "普通问答",
+      "category": "ordinary"
     },
     {
       "id": "rag-004",
@@ -32,7 +35,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "普通问答"
+      "notes": "普通问答",
+      "category": "ordinary"
     },
     {
       "id": "rag-005",
@@ -40,7 +44,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "普通问答"
+      "notes": "普通问答",
+      "category": "ordinary"
     },
     {
       "id": "structured-001",
@@ -48,7 +53,8 @@
       "expected_route": "structured",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库"
+      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "category": "special"
     },
     {
       "id": "structured-002",
@@ -56,7 +62,8 @@
       "expected_route": "structured",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库"
+      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "category": "special"
     },
     {
       "id": "structured-003",
@@ -64,7 +71,8 @@
       "expected_route": "structured",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库"
+      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "category": "special"
     },
     {
       "id": "structured-004",
@@ -72,7 +80,8 @@
       "expected_route": "structured",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库"
+      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "category": "special"
     },
     {
       "id": "structured-005",
@@ -80,31 +89,35 @@
       "expected_route": "structured",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库"
+      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "category": "special"
     },
     {
       "id": "tool-001",
-      "question": "如果一个库有 1000 篇文档，其中 5% 需要清洗，需要清洗多少篇？",
+      "question": "计算：如果一个库有 1000 篇文档，其中 5% 需要清洗，需要清洗多少篇？",
       "expected_route": "tool",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "精确计算必须由确定性代码完成"
+      "notes": "精确计算必须由确定性代码完成",
+      "category": "special"
     },
     {
       "id": "tool-002",
-      "question": "切片长度 1024 字符、重叠 20%，每块实际前进多少字符？",
+      "question": "计算：切片长度 1024 字符、重叠 20%，每块实际前进多少字符？",
       "expected_route": "tool",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "精确计算必须由确定性代码完成"
+      "notes": "精确计算必须由确定性代码完成",
+      "category": "special"
     },
     {
       "id": "tool-003",
-      "question": "银河系直径取 10 万光年，折合多少公里？",
+      "question": "计算：银河系直径取 10 万光年，折合多少公里？",
       "expected_route": "tool",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "精确计算必须由确定性代码完成"
+      "notes": "精确计算必须由确定性代码完成",
+      "category": "special"
     },
     {
       "id": "ambiguous-001",
@@ -112,7 +125,8 @@
       "expected_route": "clarification",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "缺少关键指代信息"
+      "notes": "缺少关键指代信息",
+      "category": "special"
     },
     {
       "id": "ambiguous-002",
@@ -120,7 +134,8 @@
       "expected_route": "clarification",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "比较对象缺失"
+      "notes": "比较对象缺失",
+      "category": "special"
     },
     {
       "id": "ambiguous-003",
@@ -128,7 +143,8 @@
       "expected_route": "clarification",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "未提供数值与口径"
+      "notes": "未提供数值与口径",
+      "category": "special"
     },
     {
       "id": "noanswer-001",
@@ -136,7 +152,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "无答案问题，应可靠拒答"
+      "notes": "无答案问题：表述清晰但知识库无此内容，应检索后可靠拒答",
+      "category": "special"
     },
     {
       "id": "noanswer-002",
@@ -144,7 +161,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": [],
-      "notes": "无答案问题，应可靠拒答"
+      "notes": "无答案问题：表述清晰但知识库无此内容，应检索后可靠拒答",
+      "category": "special"
     },
     {
       "id": "conflict-001",
@@ -152,7 +170,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "冲突资料场景；实测前需管理员准备一对互相矛盾的授权文档并更新期望来源"
+      "notes": "冲突资料场景；实测前需管理员准备一对互相矛盾的授权文档并更新期望来源",
+      "category": "ordinary"
     },
     {
       "id": "injection-001",
@@ -160,7 +179,8 @@
       "expected_route": "rag",
       "kb_id": "rag_docs",
       "expected_source_names": ["压测.md"],
-      "notes": "提示注入场景；实测前需管理员准备含注入指令的文档并确认注入块被排除"
+      "notes": "提示注入场景；实测前需管理员准备含注入指令的文档并确认注入块被排除",
+      "category": "ordinary"
     }
   ]
 }

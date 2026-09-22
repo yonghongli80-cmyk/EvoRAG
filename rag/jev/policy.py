@@ -65,9 +65,10 @@ def choose_route(
 ) -> RouteDecision:
     """Route deterministically from a preflight decision.
 
-    Low confidence never selects a high-risk route: ``tool_task`` and uncertain structured or
-    retrieval intents fall back to the legacy router, while uncertain clarification defaults to
-    RAG. ``capabilities=None`` means the structured capability was not evaluated.
+    Low confidence never selects a high-risk route: ``tool_task`` and uncertain structured
+    intents fall back to the legacy router, while uncertain clarification and uncertain
+    retrieval default to RAG, the low-risk path. ``capabilities=None`` means the structured
+    capability was not evaluated.
     """
     effective = policy or JevPolicy()
     route_confidence = effective.route_confidence if threshold is None else threshold
@@ -92,7 +93,8 @@ def choose_route(
         return RouteDecision("clarification", should_rewrite, "clarification_confident", decision)
 
     if not confident:
-        return RouteDecision("legacy", should_rewrite, "retrieval_low_confidence", decision)
+        # RAG is the low-risk default for an uncertain retrieval intent.
+        return RouteDecision("rag", should_rewrite, "retrieval_low_confidence_defaults_rag", decision)
     return RouteDecision("rag", should_rewrite, "retrieval_confident", decision)
 
 

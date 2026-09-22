@@ -272,6 +272,7 @@ class RAGPipeline:
                 prepared["user"] = user
             if kb_id is not None:
                 prepared["kb_id"] = kb_id
+            prepared["decision_metadata"] = {"legacy_route": "agent"}
             return prepared, None
 
         rewritten = rewrite_query(question)
@@ -286,10 +287,12 @@ class RAGPipeline:
         context = self._post_rank_acl(self.reranker.rerank(rewritten, candidates), user, effective_kb_id)
         context = self._drop_injected_chunks(context)[:top_k]
         self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator)
-        return self._finalize_rag_context(
+        prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request,
-        ), None
+        )
+        prepared.setdefault("decision_metadata", {})["legacy_route"] = route
+        return prepared, None
 
     def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator):
         """Queue a non-blocking shadow comparison; never alters the current response."""
@@ -385,12 +388,15 @@ class RAGPipeline:
     ):
         """RAG 主链路：原问题检索（除非策略请求改写），Jev 候选判断，最多一次改写重试。"""
         retrieve_top_k = top_k * _RETRIEVAL_OVERSAMPLE
+        # should_rewrite 与改写重试都是检索路径建议；结构化路由回退到文档检索时两者都不适用。
+        retrieval_route = route_decision.route == "rag"
+        initial_rewrite = retrieval_route and route_decision.should_rewrite
         # 状态机：attempts=[(检索查询, 是否已改写)]；最多追加一次改写重试，之后必须停止。
         attempts = [
-            (rewrite_query(question) if route_decision.should_rewrite else question, route_decision.should_rewrite)
+            (rewrite_query(question) if initial_rewrite else question, initial_rewrite)
         ]
         stage["attempts"] = len(attempts)
-        stage["rewrites"] = 1 if route_decision.should_rewrite else 0
+        stage["rewrites"] = 1 if initial_rewrite else 0
         context: list[Chunk] = []
         conflicts: list[dict] = []
         passages_started = time.perf_counter()
@@ -420,7 +426,7 @@ class RAGPipeline:
                 context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
                 context = self._drop_injected_chunks(context)[:top_k]
                 break
-            if not rewrite_used:
+            if not rewrite_used and retrieval_route:
                 # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
                 attempts.append((rewrite_query(question), True))
                 stage["attempts"] = len(attempts)

@@ -16,6 +16,7 @@ _DECISION_METADATA_KEYS = frozenset(
         "jev_model",
         "question_set_version",
         "jev_route",
+        "legacy_route",
         "route_reason",
         "intent_confidence",
         "rewrite_probability",
