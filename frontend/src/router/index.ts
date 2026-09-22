@@ -50,6 +50,11 @@ const router = createRouter({
           component: () => import('../views/SpreadsheetChangesView.vue')
         },
         {
+          path: 'operations/evolution',
+          name: 'evolution-center',
+          component: () => import('../views/EvolutionCenterView.vue')
+        },
+        {
           path: 'analysis',
           name: 'analysis',
           component: () => import('../views/AnalysisModeView.vue')
