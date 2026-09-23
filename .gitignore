@@ -17,6 +17,9 @@
 # Benchmark and live-run artifacts
 /artifacts/
 
+# Local-only real-case handoff material (company data, never committed)
+/real-case-handoff/
+
 # Eval history (generated)
 /data/eval/eval_history.jsonl
 
