@@ -11,6 +11,8 @@
 # Benchmark results
 /benchmarks/*
 !/benchmarks/jev_retrieval_cases.json
+!/benchmarks/real-cases-v1-draft.json
+!/benchmarks/real-cases-v1.json
 
 # Benchmark and live-run artifacts
 /artifacts/

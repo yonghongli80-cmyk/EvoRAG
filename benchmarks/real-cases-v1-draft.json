@@ -1,0 +1,210 @@
+[
+  {
+    "case_id": "real-001",
+    "question": "有保修服务吗，保修范围是什么?怎么申请保修",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；目标知识库来源和正确答案待管理员确认。"
+  },
+  {
+    "case_id": "real-002",
+    "question": "机器什么时候的",
+    "expected_route": "clarification",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "原话未指明机器或时间含义；目标项目需确认是否追问。"
+  },
+  {
+    "case_id": "real-003",
+    "question": "机器哪里发货呢",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；发货政策与适用范围待管理员确认。"
+  },
+  {
+    "case_id": "real-004",
+    "question": "怎么申请退换货",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；目标知识库来源和正确答案待管理员确认。"
+  },
+  {
+    "case_id": "real-005",
+    "question": "发什么快递",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；物流规则和适用范围待管理员确认。"
+  },
+  {
+    "case_id": "real-006",
+    "question": "人员盘点的范围包括哪些人员？",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；应引用的制度与正确答案待管理员确认。"
+  },
+  {
+    "case_id": "real-007",
+    "question": "帮我查一下招聘经理的sop",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "保留口语化原话；目标项目中的文件名与正确答案待确认。"
+  },
+  {
+    "case_id": "real-008",
+    "question": "帮我调一下7月份的招聘数量及入职人数",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "问题缺少年份和统计范围；聚合口径及目标路由待管理员确认。"
+  },
+  {
+    "case_id": "real-009",
+    "question": "人事主管的岗位说明书帮我调一下",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "“调一下”可能指查询内容或索取原文件；需管理员确认目标行为。"
+  },
+  {
+    "case_id": "real-010",
+    "question": "人事主管的岗位说明书",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "原话是文件名式查询；目标文件与预期回答待确认。"
+  },
+  {
+    "case_id": "real-011",
+    "question": "人事专员岗位说明书",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "原话是文件名式查询；目标文件与预期回答待确认。"
+  },
+  {
+    "case_id": "real-012",
+    "question": "帮我看一下2025年招聘数据",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "未指定统计指标和部门；是否先追问及正确统计口径待确认。"
+  },
+  {
+    "case_id": "real-013",
+    "question": "试用期面谈表",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "仅有文件关键词；需确认是查找、摘要还是获取文件。"
+  },
+  {
+    "case_id": "real-014",
+    "question": "回收岗位做什么",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；岗位说明来源和正确答案待确认。"
+  },
+  {
+    "case_id": "real-015",
+    "question": "怎么看镜头发霉",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "保留口语化原话；应引用的质检资料与正确答案待确认。"
+  },
+  {
+    "case_id": "real-016",
+    "question": "镜头质检流程",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；流程版本与正确答案待确认。"
+  },
+  {
+    "case_id": "real-017",
+    "question": "r50电池价格",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "价格可能随时间变化；目标价格表、日期和答案待确认。"
+  },
+  {
+    "case_id": "real-018",
+    "question": "r50原厂电池价格",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "保留“原厂”限定词；目标价格表、日期和答案待确认。"
+  },
+  {
+    "case_id": "real-019",
+    "question": "r50原厂电池型号是多少",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；型号答案与目标知识库来源待确认。"
+  },
+  {
+    "case_id": "real-020",
+    "question": "找一下副厂配件明细",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "可能指查询明细内容或索取文件；目标行为待确认。"
+  },
+  {
+    "case_id": "real-021",
+    "question": "腾龙17-70E口的遮光罩是什么型号",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；配件对应表与正确型号待确认。"
+  },
+  {
+    "case_id": "real-022",
+    "question": "r50",
+    "expected_route": "clarification",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "只有产品型号，缺少查询属性；预期为请用户补充问题。"
+  },
+  {
+    "case_id": "real-023",
+    "question": "尼康z9电池型号是什么",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；配件对应表与正确型号待确认。"
+  },
+  {
+    "case_id": "real-024",
+    "question": "佳能r8用什么电池",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "真实钉钉提问；配件对应表与正确型号待确认。"
+  },
+  {
+    "case_id": "real-025",
+    "question": "富士 X-S20   电池和充电器是什么型号",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "ordinary",
+    "notes": "保留原问题中的空格和两个配件对象；型号答案待确认。"
+  },
+  {
+    "case_id": "real-026",
+    "question": "帮我找一下质检培训课件",
+    "expected_route": "unknown",
+    "kb_id": "unknown",
+    "category": "special",
+    "notes": "资料定位问题；目标项目应返回内容摘要、来源还是文件入口，待管理员确认。"
+  }
+]
