@@ -3,6 +3,11 @@
 SQLite ``document_permissions.current_version_id`` is the authoritative
 current-version source. ``is_current`` in Qdrant is only repairable metadata
 and is never the sole visibility condition.
+
+Administrators bypass visibility filters here exactly as they do at the chunk
+level (``filter_chunks_by_permission``) and in the tags endpoint: the helpers
+below return ``None`` for an admin, which the caller translates into "no
+version filter" instead of an empty candidate set.
 """
 
 from __future__ import annotations
@@ -12,9 +17,11 @@ from dataclasses import replace
 from config import settings
 
 
-def _visible_document_ids(user_db, user, kb_id) -> set[int]:
+def _visible_document_ids(user_db, user, kb_id) -> set[int] | None:
     if user is None or user_db is None:
         return set()
+    if user.get("is_admin"):
+        return None
     from rag.org_auth.repository import OrgRepository, is_org_policy
     policy = OrgRepository(user_db).get_kb_policy(kb_id) if hasattr(user_db, "locked_read") else None
     if is_org_policy(policy):
@@ -27,9 +34,11 @@ def _visible_document_ids(user_db, user, kb_id) -> set[int]:
     }
 
 
-def _visible_current_version_ids(user_db, user, kb_id) -> set[int]:
+def _visible_current_version_ids(user_db, user, kb_id) -> set[int] | None:
     if user is None or user_db is None:
         return set()
+    if user.get("is_admin"):
+        return None
     ids: set[int] = set()
     if not hasattr(user_db, "get_document_permission_by_id"):
         for name in user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1)):
@@ -37,22 +46,30 @@ def _visible_current_version_ids(user_db, user, kb_id) -> set[int]:
             if perm and perm.get("current_version_id"):
                 ids.add(perm["current_version_id"])
         return ids
-    for document_id in _visible_document_ids(user_db, user, kb_id):
+    document_ids = _visible_document_ids(user_db, user, kb_id)
+    if document_ids is None:
+        return None
+    for document_id in document_ids:
         perm = user_db.get_document_permission_by_id(document_id)
         if perm and perm.get("current_version_id"):
             ids.add(perm["current_version_id"])
     return ids
 
 
-def _visible_historical_version_ids(user_db, user, kb_id) -> set[int]:
+def _visible_historical_version_ids(user_db, user, kb_id) -> set[int] | None:
     """Visible historical version IDs plus confirmed-outdated current versions."""
     if user is None or user_db is None:
         return set()
+    if user.get("is_admin"):
+        return None
     ids: set[int] = set()
     if not hasattr(user_db, "get_document_permission_by_id"):
         permissions = [user_db.get_document_permission(name, kb_id) for name in user_db.get_accessible_doc_names(kb_id, user["id"], user.get("permission_level", 1))]
     else:
-        permissions = [user_db.get_document_permission_by_id(document_id) for document_id in _visible_document_ids(user_db, user, kb_id)]
+        document_ids = _visible_document_ids(user_db, user, kb_id)
+        if document_ids is None:
+            return None
+        permissions = [user_db.get_document_permission_by_id(document_id) for document_id in document_ids]
     for perm in permissions:
         if not perm:
             continue
@@ -80,6 +97,8 @@ def retrieve_current_then_history(
 
     Historical fallback is used only when ACL-filtered current results are
     fewer than ``min(top_k, 3)`` and receives ``historical_result_weight``.
+    An administrator passes ``None`` version filters, mirroring the chunk-level
+    permission bypass.
     """
     def retrieve(**kwargs):
         if weights is not None:
@@ -88,11 +107,11 @@ def retrieve_current_then_history(
 
     current_ids = _visible_current_version_ids(user_db, user, kb_id)
     historical_ids = _visible_historical_version_ids(user_db, user, kb_id)
-    if not current_ids and not historical_ids:
+    if current_ids is not None and historical_ids is not None and not current_ids and not historical_ids:
         return []
 
     current = []
-    if current_ids:
+    if current_ids is None or current_ids:
         current = retrieve(
             top_k=top_k,
             doc_name=doc_name,
@@ -103,21 +122,21 @@ def retrieve_current_then_history(
     if len(current) >= min(top_k, 3):
         return current
 
-    if not historical_ids:
-        return current
-    fallback = retrieve(
-        top_k=top_k,
-        doc_name=doc_name,
-        tags=tags,
-        allowed_version_ids=historical_ids,
-        validity_statuses=set(),
-    )
-    rebuilt = [
-        replace(c, historical_weight=settings.historical_result_weight) for c in fallback
-    ]
-    merged = list(current)
-    for chunk in rebuilt:
-        if len(merged) >= top_k:
-            break
-        merged.append(chunk)
-    return merged
+    if historical_ids is None or historical_ids:
+        fallback = retrieve(
+            top_k=top_k,
+            doc_name=doc_name,
+            tags=tags,
+            allowed_version_ids=historical_ids,
+            validity_statuses=set(),
+        )
+        rebuilt = [
+            replace(c, historical_weight=settings.historical_result_weight) for c in fallback
+        ]
+        merged = list(current)
+        for chunk in rebuilt:
+            if len(merged) >= top_k:
+                break
+            merged.append(chunk)
+        return merged
+    return current

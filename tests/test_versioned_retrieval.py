@@ -34,6 +34,7 @@ class FakeVersionRetriever:
 
 
 USER = {"id": 1, "username": "alice", "permission_level": 1}
+ADMIN = {"id": 99, "username": "root", "permission_level": 0, "is_admin": True}
 
 
 class _FakeDB:
@@ -80,6 +81,45 @@ def test_no_visible_versions_returns_empty_without_unrestricted_retrieval():
     )
 
     assert result == []
+
+
+class _RecordingRetriever:
+    def __init__(self):
+        self.allowed_version_ids = []
+
+    def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None):
+        self.allowed_version_ids.append(allowed_version_ids)
+        if validity_statuses is not None and "valid" in validity_statuses:
+            return [chunk("current", version_id=2, is_current=True)]
+        return [chunk("history", version_id=1, is_current=False)]
+
+
+def test_admin_bypasses_version_visibility_filters():
+    """Administrators see every document; the chunk-level filter already bypasses for them.
+
+    ``filter_chunks_by_permission`` returns chunks unfiltered for admins and the tags
+    endpoint lists every permission, so version visibility must not silently empty the
+    candidate set for an admin whose account owns nothing.
+    """
+    retriever = _RecordingRetriever()
+
+    result = retrieve_current_then_history(
+        retriever, "policy", top_k=3, user=ADMIN, user_db=_NoVisibleVersionsDB(), kb_id="rag_docs"
+    )
+
+    assert [item.text for item in result] == ["current", "history"]
+    assert retriever.allowed_version_ids == [None, None]
+
+
+def test_non_admin_without_visible_versions_still_returns_empty():
+    retriever = _RecordingRetriever()
+
+    result = retrieve_current_then_history(
+        retriever, "policy", top_k=3, user=USER, user_db=_NoVisibleVersionsDB(), kb_id="rag_docs"
+    )
+
+    assert result == []
+    assert retriever.allowed_version_ids == []
 
 
 def test_history_only_fills_missing_current_results():

@@ -19,17 +19,19 @@ from rag.user_db import UserDB
 
 @pytest.fixture(autouse=True)
 def deterministic_jev_mode(monkeypatch):
-    """Isolate the suite from a developer .env that enables the Jev path.
+    """Isolate the suite from a developer .env that enables optional subsystems.
 
-    A live service may run with ``RAG_JEV_MODE=active`` (this machine does); without
-    this fixture the suite would inherit that configuration and take the Jev path in
-    tests written for the legacy chain. Tests that exercise Jev set the mode and
-    allowlist themselves, so their explicit values win.
+    A live service may run with ``RAG_JEV_MODE=active`` and
+    ``RAG_EVOLUTION_ENABLED=true`` (this machine does); without this fixture the suite
+    would inherit that configuration and take the Jev/evolution paths in tests written
+    for the defaults. Tests that exercise those subsystems set the values themselves,
+    so their explicit values win.
     """
     from config import settings
 
     monkeypatch.setattr(settings, "jev_mode", "off")
     monkeypatch.setattr(settings, "jev_kb_allowlist", "")
+    monkeypatch.setattr(settings, "evolution_enabled", False)
 
 
 @pytest.fixture(autouse=True)
