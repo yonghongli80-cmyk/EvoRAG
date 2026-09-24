@@ -217,18 +217,23 @@ class CandidateStore:
         if row is None:
             raise KeyError("observation not found")
 
-    def _insert_audit(self, actor_id: str, action: str, candidate_id: int, note: str) -> int:
+    def _insert_audit(
+        self, actor_id: str, action: str, candidate_id: int, note: str, now: float | None = None
+    ) -> int:
         """Append one audit row without committing; the caller owns the transaction.
 
         The whitelist check runs before the INSERT, so an unknown action raises
         ``ValueError`` and writes nothing even inside a larger transaction.
+        ``now`` is passed by callers that already sampled one clock so the audit
+        timestamp can never drift past the transaction it belongs to (the Windows
+        timer granularity makes two ``time.time()`` calls observable).
         """
         if action not in _AUDIT_ACTIONS:
             raise ValueError(f"invalid audit action: {action}")
         cursor = self._conn.execute(
             "INSERT INTO evolution_candidate_audit (actor_id, action, candidate_id, note, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (str(actor_id), str(action), int(candidate_id), str(note), time.time()),
+            (str(actor_id), str(action), int(candidate_id), str(note), time.time() if now is None else now),
         )
         return int(cursor.lastrowid)
 
@@ -299,7 +304,7 @@ class CandidateStore:
             candidate_id = int(cursor.lastrowid)
             # The audit row needs the new candidate id, so it follows the
             # INSERT inside the same transaction and precedes any advance.
-            self._insert_audit(str(model) or "generator", "generate", candidate_id, note)
+            self._insert_audit(str(model) or "generator", "generate", candidate_id, note, now)
             self._conn.commit()
         return candidate_id
 
@@ -343,6 +348,7 @@ class CandidateStore:
                 _AUDIT_ACTION_BY_STATUS.get(new_status, _DEFAULT_AUDIT_ACTION),
                 candidate_id,
                 str(note),
+                now,
             )
             gate_log = _decode_json(row["gate_log"])
             if not isinstance(gate_log, list):
