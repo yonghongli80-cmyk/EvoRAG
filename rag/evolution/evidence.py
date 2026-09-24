@@ -38,8 +38,11 @@ _ANSWER_PREVIEW_CHARS = 200
 _HASH_PROMPT_LIMIT = 12
 # Chunk previews let the model judge "the answer is not in the retrieved text"
 # versus "the needed chunk was never retrieved" — hash-only evidence cannot.
+# The cap must cover enough of the re-retrieval for a low-ranked but relevant
+# chunk to stay visible; eight previews hid the third-party accessory table and
+# produced a wrong content-gap verdict in the dev set.
 _PREVIEW_CHARS = 160
-_PREVIEW_LIMIT = 8
+_PREVIEW_LIMIT = 24
 
 # Evidence-priority annotations (design section 6) carried inside the pack so
 # the diagnoser ranks evidence without re-deriving the priority.
