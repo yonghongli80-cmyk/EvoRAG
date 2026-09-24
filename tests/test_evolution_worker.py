@@ -1,20 +1,28 @@
 """Task 3: budgets, busy pause and exception isolation for the evolution worker."""
 
+import json
 import os
 import threading
 import time
 import types
+from dataclasses import dataclass
 
 import pytest
 
 import rag.evolution.worker as worker_module
+from config import settings
+from rag.evolution.diagnoser import DIAGNOSIS_PROMPT_VERSION, Diagnoser
+from rag.evolution.models import DiagnosisDraft, FailureObservation
+from rag.evolution.store import FailureTraceStore
 from rag.evolution.worker import (
+    AdminReadOnlyRetrievalReader,
     BudgetExhausted,
     EvolutionBudget,
     EvolutionWorker,
     build_evolution_worker,
     default_busy_provider,
     main,
+    make_evolution_diagnosis_step,
     make_evolution_run_once,
     purge_evolution_observations,
 )
@@ -194,10 +202,19 @@ def test_default_busy_provider_is_false_without_loadavg(monkeypatch):
 class FakeStore:
     def __init__(self):
         self.purges = []
+        self.awaiting: list[dict] = []
+        self.drafts: list[tuple] = []
 
     def purge_observations_before(self, timestamp):
         self.purges.append(timestamp)
         return 0
+
+    def clusters_awaiting_diagnosis_without_draft(self, limit):
+        return list(self.awaiting[:limit])
+
+    def add_draft(self, cluster_id, draft, *, prompt_version="", model=""):
+        self.drafts.append((cluster_id, draft, prompt_version, model))
+        return len(self.drafts)
 
 
 class FakeClusterer:
@@ -260,6 +277,12 @@ def _fake_settings(**overrides):
         evolution_worker_interval_seconds=900,
         evolution_worker_run_seconds=120.0,
         evolution_worker_max_batch=200,
+        evolution_diagnosis_model_calls=5,
+        evolution_diagnosis_timeout_seconds=30.0,
+        evolution_diagnosis_max_tokens=2000,
+        evolution_diagnosis_labels_path="",
+        memory_db_path="unused-memory.db",
+        users_db_path="unused-users.db",
     )
     base.update(overrides)
     return types.SimpleNamespace(**base)
@@ -344,3 +367,444 @@ def test_module_entry_runs_when_enabled(tmp_path, monkeypatch):
     worker.stop()
     assert db.exists()
     worker.store.close()
+
+
+# ── Task 4: diagnosis inside the per-round model-call budget ───────────────────
+
+
+class FakeModel:
+    """Scripted model boundary: one reply (or exception) per call, no network."""
+
+    def __init__(self, *replies: object) -> None:
+        self.replies = list(replies)
+        self.requests: list[list[dict]] = []
+
+    def __call__(self, messages: list[dict]) -> str:
+        self.requests.append([dict(message) for message in messages])
+        reply = self.replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return str(reply)
+
+
+@dataclass
+class Chunk:
+    """Chunk stub for the injected read-only retrieval (``.text`` like ``rag.models.Chunk``)."""
+
+    text: str
+
+
+class FakeReader:
+    """Read-only ACL retrieval stub: one fixed chunk list, every call recorded."""
+
+    def __init__(self, chunks: tuple[Chunk, ...] = ()) -> None:
+        self.chunks = list(chunks)
+        self.calls: list[tuple[str, str]] = []
+        self.closed = False
+
+    def retrieve(self, question: str, *, kb_id: str) -> list:
+        self.calls.append((question, kb_id))
+        return list(self.chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeTracker:
+    """Tracker stub mirroring ExecutionTracker.get_recent (newest-first row dicts)."""
+
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self.rows = list(rows or [])
+        self.closed = False
+
+    def get_recent(self, limit: int = 20) -> list[dict]:
+        return [dict(row) for row in self.rows[:limit]]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeDiagnoserFactory:
+    """Diagnoser factory stub: fails the test if the budget never allowed a call."""
+
+    def __init__(self, diagnoser: Diagnoser | None = None) -> None:
+        self.diagnoser = diagnoser
+        self.calls = 0
+
+    def __call__(self) -> Diagnoser:
+        self.calls += 1
+        if self.diagnoser is None:
+            raise AssertionError("no diagnosis work may happen under a zero model-call budget")
+        return self.diagnoser
+
+
+def sample_draft(**kw) -> DiagnosisDraft:
+    """A contract-complete draft: no admin labels + unreproducible check."""
+    base = dict(
+        failure_category="recall_miss",
+        stage="retrieval",
+        first_divergence="重检索仍未召回目标块。",
+        direct_evidence="失败与重检索的块哈希集合均缺少同一批哈希。",
+        root_cause="假设（待复核）：召回索引未覆盖该条款。",
+        impact_scope="kb1 内金额类问题。",
+        suggested_layer="retrieval_config",
+        reproduction_steps="以原问题重检索并核对块哈希集合。",
+        acceptance_criteria="重检索命中目标块且答案引用证据。",
+        confidence="low",
+        reproducible=False,
+        evidence_refs=(),
+    )
+    base.update(kw)
+    return DiagnosisDraft(**base)
+
+
+def awaiting_cluster(
+    store: FailureTraceStore,
+    key: str,
+    *,
+    kb_id: str = "kb1",
+    questions: tuple[str, ...] = ("年假额度剩几天",),
+    chunk_hashes: tuple[str, ...] = (),
+) -> dict:
+    """One cluster in ``awaiting_diagnosis_review`` with members, via store methods only."""
+    now = time.time()
+    cluster = store.upsert_cluster(
+        cluster_key=key,
+        kb_id=kb_id,
+        failure_stage="retrieval",
+        root_cause_feature="recall_miss",
+        seen_at=now,
+    )
+    for question in questions:
+        row = store.add_observation(
+            FailureObservation(
+                kb_id=kb_id,
+                failure_stage="retrieval",
+                question=question,
+                route="rag",
+                chunk_hashes=chunk_hashes,
+                best_score=0.05,
+                answerability_kind="insufficient_evidence",
+            )
+        )
+        store.attach_cluster_member(
+            row["id"],
+            cluster["id"],
+            failure_stage="retrieval",
+            root_cause_feature="recall_miss",
+            now=now,
+        )
+    return store.promote_cluster(
+        cluster["id"],
+        new_status="awaiting_diagnosis_review",
+        pool="candidate_pool",
+        member_status="clustered",
+        now=now,
+    )
+
+
+def build_step(store, model, *, reader=None, tracker=None, budget=5, **overrides):
+    """Wire one diagnosis step over the real store with scripted model replies."""
+    cfg = _fake_settings(**overrides)
+    reader = reader if reader is not None else FakeReader()
+    tracker = tracker if tracker is not None else FakeTracker()
+    return make_evolution_diagnosis_step(
+        store,
+        settings_obj=cfg,
+        model_call_budget=budget,
+        diagnoser_factory=FakeDiagnoserFactory(Diagnoser(model_call=model)),
+        tracker_factory=lambda: tracker,
+        retrieval_factory=lambda: reader,
+    )
+
+
+def test_diagnosis_step_drafts_every_awaiting_cluster_within_budget(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    first = awaiting_cluster(store, "kb1|retrieval|recall_miss")
+    second = awaiting_cluster(store, "kb1|retrieval|other")
+    reader = FakeReader((Chunk(text="年假额度为每年 10 天"),))
+    model = FakeModel(
+        json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False),
+        json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False),
+    )
+    step = build_step(store, model, reader=reader)
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 2
+    assert outcome["model_calls"] == 2  # one call per cluster, successes counted
+    assert outcome["diagnosis_failed"] == 0
+    drafts = store.list_drafts()
+    assert {draft["cluster_id"] for draft in drafts} == {first["id"], second["id"]}
+    assert {draft["prompt_version"] for draft in drafts} == {DIAGNOSIS_PROMPT_VERSION}
+    assert {draft["model"] for draft in drafts} == {settings.deepseek_model}
+    assert [kb_id for _, kb_id in reader.calls] == ["kb1", "kb1"]
+    assert reader.closed is True  # the reader is released when the round ends
+
+
+def test_model_call_budget_zero_diagnoses_nothing(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|recall_miss")
+    factory = FakeDiagnoserFactory()  # raises when a diagnosis is attempted
+    step = make_evolution_diagnosis_step(
+        store,
+        settings_obj=_fake_settings(),
+        model_call_budget=0,
+        diagnoser_factory=factory,
+        tracker_factory=lambda: (_ for _ in ()).throw(AssertionError("no tracker under budget 0")),
+        retrieval_factory=lambda: (_ for _ in ()).throw(AssertionError("no reader under budget 0")),
+    )
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 0
+    assert outcome["model_calls"] == 0
+    assert outcome["diagnosis_failed"] == 0
+    assert factory.calls == 0
+    assert store.list_drafts() == []
+    assert outcome["diagnosis_config"]["model_call_budget"] == 0
+
+
+def test_one_failing_cluster_never_stops_the_round_and_is_retried_next_round(tmp_path):
+    from openai import APITimeoutError
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    oldest = awaiting_cluster(store, "kb1|retrieval|first")
+    middle = awaiting_cluster(store, "kb1|retrieval|second")
+    newest = awaiting_cluster(store, "kb1|retrieval|third")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    model = FakeModel("not json at all", valid, APITimeoutError(request=None))
+    step = build_step(store, model)
+
+    outcome = step()
+
+    # invalid -> no draft, round continues; timeout -> counted as failed, round continues.
+    assert outcome["diagnosed"] == 1
+    assert outcome["diagnosis_failed"] == 2
+    assert outcome["model_calls"] == 3
+    assert [draft["cluster_id"] for draft in store.list_drafts()] == [middle["id"]]
+    # Failed clusters stay in the queue: no draft means the next round retries them.
+    still_queued = {row["id"] for row in store.clusters_awaiting_diagnosis_without_draft(limit=10)}
+    assert still_queued == {oldest["id"], newest["id"]}
+
+    retried = build_step(store, FakeModel(valid, valid), reader=FakeReader())
+    assert retried()["diagnosed"] == 2
+    assert {draft["cluster_id"] for draft in store.list_drafts()} == {oldest["id"], middle["id"], newest["id"]}
+
+
+def test_diagnosis_failure_never_kills_the_worker_thread(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|only")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    model = FakeModel("garbage", valid)
+    step = build_step(store, model)
+    worker = EvolutionWorker(
+        make_evolution_run_once(FakeClusterer(), store, retention_days=90, diagnosis_step=step),
+        interval_seconds=0.01,
+        budget=EvolutionBudget(max_model_calls=5),  # the round stays inside its budget
+        busy_provider=lambda: False,
+    )
+
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not store.list_drafts() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    worker.stop()
+
+    assert len(store.list_drafts()) == 1  # the retry round succeeded
+    assert worker.is_alive is False  # the thread lives on until it is stopped
+
+
+def test_clusters_that_already_have_a_draft_are_not_diagnosed_again(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = awaiting_cluster(store, "kb1|retrieval|recall_miss")
+    store.add_draft(cluster["id"], sample_draft(), prompt_version="diagnosis-v1", model="m")
+    reader = FakeReader((Chunk(text="年假额度为每年 10 天"),))
+    factory = FakeDiagnoserFactory()
+    step = make_evolution_diagnosis_step(
+        store,
+        settings_obj=_fake_settings(),
+        model_call_budget=5,
+        diagnoser_factory=factory,
+        tracker_factory=lambda: FakeTracker(),
+        retrieval_factory=lambda: reader,
+    )
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 0
+    assert outcome["model_calls"] == 0
+    assert factory.calls == 0
+    assert reader.calls == []
+    assert len(store.list_drafts()) == 1  # the existing draft is left untouched
+
+
+def test_diagnosis_config_records_the_timeout_and_token_settings(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|recall_miss")
+    model = FakeModel(json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False))
+    step = build_step(
+        store, model, budget=3, evolution_diagnosis_timeout_seconds=12.5,
+        evolution_diagnosis_max_tokens=777, evolution_diagnosis_labels_path="",
+    )
+
+    config = step()["diagnosis_config"]
+
+    assert config["model_call_budget"] == 3
+    assert config["timeout_seconds"] == 12.5
+    assert config["max_tokens"] == 777
+    assert config["labels_path"] == ""
+    assert config["prompt_version"] == DIAGNOSIS_PROMPT_VERSION
+    assert config["model"] == settings.deepseek_model
+    # timeout/max_tokens are a worker-side snapshot only: passing them to the
+    # diagnoser would mean editing Task 3's rag/evolution/diagnoser.py, so they
+    # stay enforced by the generation client and the model side until that lane
+    # exposes them.
+
+
+# ── Task 4: the admin-only read-only ACL retrieval path ────────────────────────
+
+
+class FakePipeline:
+    """Pipeline stub recording the read-only ACL call diagnosis is allowed to make."""
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.calls: list[dict] = []
+        self.chunks: list = []
+        self.closed = False
+
+    def _retrieve_visible_candidates(self, query, *, top_k, doc_name, tags, user, kb_id):
+        self.calls.append({
+            "query": query, "top_k": top_k, "doc_name": doc_name, "tags": tags,
+            "user": user, "kb_id": kb_id,
+        })
+        return list(self.chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakePipelineFactory:
+    """Pipeline factory stub: one recording pipeline per construction."""
+
+    def __init__(self, chunks: tuple[Chunk, ...] = ()) -> None:
+        self.chunks = list(chunks)
+        self.pipelines: list[FakePipeline] = []
+
+    def __call__(self, **kwargs) -> FakePipeline:
+        pipeline = FakePipeline(**kwargs)
+        pipeline.chunks = list(self.chunks)
+        self.pipelines.append(pipeline)
+        return pipeline
+
+
+class FakeUserDB:
+    """UserDB stub whose admin principal is the development principal (id 0)."""
+
+    instances: list["FakeUserDB"] = []
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self.closed = False
+        type(self).instances.append(self)
+
+    def ensure_development_user(self) -> dict:
+        return {"id": 0, "username": "anonymous-development", "is_admin": 1}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_admin_read_only_reader_reretrieves_as_the_admin_principal():
+    FakeUserDB.instances.clear()
+    chunks = [Chunk(text="年假额度为每年 10 天")]
+    factory = FakePipelineFactory(chunks)
+    reader = AdminReadOnlyRetrievalReader(
+        "users.db",
+        pipeline_factory=factory,
+        user_db_factory=FakeUserDB,
+    )
+
+    assert reader.retrieve("年假额度剩几天", kb_id="kb1") == chunks
+    reader.close()
+
+    user_db = FakeUserDB.instances[0]
+    pipeline = factory.pipelines[0]
+    assert len(pipeline.calls) == 1
+    call = pipeline.calls[0]
+    assert call["user"] == {"id": 0, "username": "anonymous-development", "is_admin": 1}
+    assert call["kb_id"] == "kb1"
+    assert call["top_k"] == 24  # matches the evidence pack's recall cap
+    assert call["doc_name"] is None and call["tags"] is None
+    assert pipeline.kwargs == {"kb_id": "kb1", "memory_db_path": ":memory:", "user_db": user_db}
+    assert pipeline.closed is True and user_db.closed is True  # round-owned resources released
+
+
+def test_admin_read_only_reader_reuses_one_pipeline_per_knowledge_base():
+    FakeUserDB.instances.clear()
+    factory = FakePipelineFactory()
+    reader = AdminReadOnlyRetrievalReader(
+        "users.db",
+        pipeline_factory=factory,
+        user_db_factory=FakeUserDB,
+    )
+
+    reader.retrieve("q1", kb_id="kb1")
+    reader.retrieve("q2", kb_id="kb1")
+    reader.retrieve("q3", kb_id="kb2")
+    reader.close()
+
+    assert len(factory.pipelines) == 2  # one pipeline per knowledge base
+    assert {pipeline.kwargs["kb_id"] for pipeline in factory.pipelines} == {"kb1", "kb2"}
+    assert all(pipeline.closed for pipeline in factory.pipelines)
+
+
+# ── Task 4: settings wiring ────────────────────────────────────────────────────
+
+
+def test_build_evolution_worker_diagnoses_within_the_settings_budget(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    for index in range(3):
+        awaiting_cluster(store, f"kb1|retrieval|cluster-{index}")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    model = FakeModel(valid, valid, valid)
+
+    worker = build_evolution_worker(
+        settings_obj=_fake_settings(evolution_diagnosis_model_calls=2),
+        store=store,
+        clusterer=FakeClusterer(),
+        diagnoser_factory=FakeDiagnoserFactory(Diagnoser(model_call=model)),
+        tracker_factory=lambda: FakeTracker(),
+        retrieval_factory=lambda: FakeReader(),
+    )
+
+    assert worker is not None
+    assert worker.budget.max_model_calls == 2  # the phase-3 setting replaces the hardcoded 0
+    assert worker.run_once_when_idle() == "ok"
+    assert len(store.list_drafts()) == 2  # the third cluster waits for the next round
+    assert len(model.requests) == 2
+
+
+def test_build_evolution_worker_with_a_zero_budget_never_calls_the_model(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    for index in range(3):
+        awaiting_cluster(store, f"kb1|retrieval|cluster-{index}")
+    factory = FakeDiagnoserFactory()  # raises when a diagnosis is attempted
+
+    worker = build_evolution_worker(
+        settings_obj=_fake_settings(evolution_diagnosis_model_calls=0),
+        store=store,
+        clusterer=FakeClusterer(),
+        diagnoser_factory=factory,
+        tracker_factory=lambda: FakeTracker(),
+        retrieval_factory=lambda: FakeReader(),
+    )
+
+    assert worker is not None
+    assert worker.budget.max_model_calls == 0
+    assert worker.run_once_when_idle() == "ok"
+    assert factory.calls == 0
+    assert store.list_drafts() == []
+    assert worker.stats()["last_diagnosis_config"]["timeout_seconds"] == 30.0
+    assert worker.stats()["last_diagnosis_config"]["max_tokens"] == 2000

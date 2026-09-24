@@ -2,11 +2,13 @@
 
 The worker runs one clustering round at a time on a daemon thread, reusing the
 ``rag/backups/scheduler.py`` stop/pause pattern. Three budget dimensions bound
-every round: wall-clock run seconds, batch size and model calls (phase 2 makes
-zero model calls, so any reported call ends the round as budget-exhausted). A
-busy system pauses rounds without ever dropping queued observations, and one
-failing batch can never kill the thread: the round is logged and the loop keeps
-running. Nothing here can change an online response, a candidate or a gate.
+every round: wall-clock run seconds, batch size and model calls (phase 3 drafts
+diagnoses within ``evolution_diagnosis_model_calls`` per round, so a round that
+reports more calls than its budget ends as budget-exhausted). A busy system
+pauses rounds without ever dropping queued observations, and one failing batch —
+or one failing diagnosis — can never kill the thread: the round is logged and
+the loop keeps running. Nothing here can change an online response, a candidate
+or a gate.
 """
 
 from __future__ import annotations
@@ -24,6 +26,19 @@ logger = logging.getLogger(__name__)
 
 _PAUSE_POLL_SECONDS = 0.1
 
+#: Re-retrieval width for one diagnosis reproduction check. The evidence module
+#: caps its own recall the same way; the worker only owns the request.
+_DIAGNOSIS_RECALL_TOP_K = 24
+
+#: A round without a diagnosis step (phase 2 builds, or a caller that wires only
+#: clustering) reports no diagnosis work at all.
+_NO_DIAGNOSIS: dict = {
+    "diagnosed": 0,
+    "diagnosis_failed": 0,
+    "model_calls": 0,
+    "diagnosis_config": None,
+}
+
 
 class BudgetExhausted(Exception):
     """Raised (or reported) when a round exceeds one of the worker budgets."""
@@ -35,7 +50,15 @@ class BudgetExhausted(Exception):
 
 @dataclass(frozen=True)
 class EvolutionBudget:
-    """Per-round budgets; ``max_concurrency`` is structurally 1 in phase 2."""
+    """Per-round budgets; ``max_concurrency`` is structurally 1 (one round at a time).
+
+    Phase 3 added the fourth live dimension: ``max_model_calls`` bounds the
+    diagnosis calls of one round and comes from
+    ``settings.evolution_diagnosis_model_calls``. A round that reports more calls
+    than this ceiling ends as budget-exhausted; a round that stops *at* the
+    ceiling still reports ``ok`` and leaves the remaining clusters to the next
+    round.
+    """
 
     max_concurrency: int = 1
     max_batch: int = 200
@@ -105,6 +128,7 @@ class EvolutionWorker:
         self._budget_exhausted = 0
         self._last_budget_reason: str | None = None
         self._last_status = "idle"
+        self._last_diagnosis_config: dict | None = None
 
     @property
     def is_alive(self) -> bool:
@@ -159,6 +183,7 @@ class EvolutionWorker:
                 "failed": self._failed_rounds,
                 "busy_rounds": self._busy_rounds,
                 "last_budget_reason": self._last_budget_reason,
+                "last_diagnosis_config": self._last_diagnosis_config,
                 "alive": self.is_alive,
             }
 
@@ -197,6 +222,7 @@ class EvolutionWorker:
         finally:
             with self._state_lock:
                 self._runs += 1
+        self._record_diagnosis_config(result)
         if deadline is not None and self._clock() >= deadline:
             return self._exhaust("max_run_seconds")
         if self._over_model_budget(result):
@@ -230,6 +256,13 @@ class EvolutionWorker:
             if status == "busy":
                 self._busy_rounds += 1
 
+    def _record_diagnosis_config(self, result: object) -> None:
+        """Keep the last diagnosis configuration snapshot observable in ``stats()``."""
+        if not isinstance(result, Mapping) or "diagnosis_config" not in result:
+            return
+        with self._state_lock:
+            self._last_diagnosis_config = dict(result["diagnosis_config"] or {}) or None
+
     def _is_busy(self) -> bool:
         try:
             return bool(self._busy_provider())
@@ -250,8 +283,10 @@ class EvolutionWorker:
 def _reported_model_calls(result: object) -> int | None:
     """Model-call accounting seam: a run may report calls in its result mapping.
 
-    Phase 2's clusterer is deterministic and always reports ``0`` above the
-    zero ceiling, so any real model call ends the round as budget-exhausted.
+    Phase 3's diagnosis step reports the calls it actually spent (successful and
+    failed ones alike), so a round that overspends its configured
+    ``max_model_calls`` ends as budget-exhausted while a round that stops exactly
+    at the ceiling still reports ``ok`` and defers the rest to the next round.
     """
     if isinstance(result, Mapping) and "model_calls" in result:
         try:
@@ -275,23 +310,261 @@ def make_evolution_run_once(
     retention_days: float,
     batch_limit: int = 200,
     purge_every_rounds: int = 1,
+    diagnosis_step: Callable[[], dict] | None = None,
 ) -> Callable[[], dict]:
-    """Build the round function: one bounded clustering batch, then retention.
+    """Build the round function: one bounded clustering batch, then diagnosis, then retention.
 
     Clustering runs first so the purge can never shrink a cluster mid-round;
     the next round recomputes member counts from the surviving rows anyway.
+    Diagnosis (phase 3) runs second — while every member observation is still
+    present — and is bounded by its own per-round model-call budget. Without a
+    ``diagnosis_step`` the round reports zero diagnosis work, exactly like the
+    phase-2 rounds did.
     """
     rounds = {"n": 0}
 
     def run_once() -> dict:
         rounds["n"] += 1
         outcome = clusterer.cluster_once(limit=batch_limit)
+        diagnosis = diagnosis_step() if diagnosis_step is not None else dict(_NO_DIAGNOSIS)
         purged = 0
         if purge_every_rounds > 0 and rounds["n"] % purge_every_rounds == 0:
             purged = purge_evolution_observations(store, retention_days=retention_days)
-        return {"cluster_once": outcome, "purged": purged, "model_calls": 0}
+        return {
+            "cluster_once": outcome,
+            "diagnosed": diagnosis["diagnosed"],
+            "diagnosis_failed": diagnosis["diagnosis_failed"],
+            "model_calls": diagnosis["model_calls"],
+            "purged": purged,
+            "diagnosis_config": diagnosis["diagnosis_config"],
+        }
 
     return run_once
+
+
+def _close_quietly(resource) -> None:
+    """Close one diagnosis resource; cleanup must never fail a round."""
+    close = getattr(resource, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        logger.exception("evolution_diagnosis_close_failed")
+
+
+class AdminReadOnlyRetrievalReader:
+    """Read-only, ACL-filtered retrieval as the system admin principal.
+
+    Diagnosis is an admin-only tool, so the re-retrieval behind the reproduction
+    check runs as that same principal: ``UserDB.ensure_development_user()`` (id
+    0, the development admin). The admin already has full knowledge-base
+    visibility, so this path can never widen visibility beyond the pipeline's own
+    ACL filter — it reuses ``RAGPipeline._retrieve_visible_candidates`` exactly
+    like the online path does. The candidates only feed the evidence pack (chunk
+    hashes and the deterministic reproduction check); only the pack and the draft
+    reach ``evolution.db``, which is admin-visible. Nothing lands in the online
+    trajectory or in a log line.
+
+    One reader (and at most one pipeline per knowledge base) is created per
+    diagnosis round and closed by :meth:`close`.
+    """
+
+    def __init__(
+        self,
+        users_db_path: str,
+        *,
+        top_k: int = _DIAGNOSIS_RECALL_TOP_K,
+        pipeline_factory=None,
+        user_db_factory=None,
+    ) -> None:
+        from rag.pipeline import RAGPipeline
+        from rag.user_db import UserDB
+
+        self._pipeline_factory = pipeline_factory or RAGPipeline
+        self._user_db_factory = user_db_factory or UserDB
+        self._users_db_path = users_db_path
+        self._top_k = top_k
+        self._pipelines: dict[str, object] = {}
+        self._user_db = None
+        self._admin: dict | None = None
+
+    def _principal(self) -> tuple[object, dict]:
+        """The admin principal, opening the round-owned user database on first use."""
+        if self._user_db is None:
+            self._user_db = self._user_db_factory(self._users_db_path)
+            self._admin = self._user_db.ensure_development_user()
+        return self._user_db, self._admin
+
+    def _pipeline(self, kb_id: str):
+        user_db, _ = self._principal()
+        pipeline = self._pipelines.get(kb_id)
+        if pipeline is None:
+            pipeline = self._pipeline_factory(kb_id=kb_id, memory_db_path=":memory:", user_db=user_db)
+            self._pipelines[kb_id] = pipeline
+        return pipeline
+
+    def retrieve(self, question: str, *, kb_id: str) -> list:
+        """One read-only ACL retrieval for the evidence pack's reproduction check."""
+        pipeline = self._pipeline(kb_id)
+        return pipeline._retrieve_visible_candidates(
+            question,
+            top_k=self._top_k,
+            doc_name=None,
+            tags=None,
+            user=self._admin,
+            kb_id=kb_id,
+        )
+
+    def close(self) -> None:
+        """Release the pipelines and the user database created for one round."""
+        pipelines, self._pipelines = self._pipelines, {}
+        user_db, self._user_db, self._admin = self._user_db, None, None
+        for pipeline in pipelines.values():
+            _close_quietly(pipeline)
+        _close_quietly(user_db)
+
+
+def make_evolution_diagnosis_step(
+    store,
+    *,
+    settings_obj=None,
+    model_call_budget: int = 0,
+    diagnoser_factory=None,
+    tracker_factory=None,
+    retrieval_factory=None,
+) -> Callable[[], dict]:
+    """Build the per-round diagnosis step for clusters that have no draft yet.
+
+    One round drafts at most ``model_call_budget`` clusters, oldest first. Every
+    attempted cluster costs one unit of that budget — a successful and a failed
+    diagnosis alike — so a round always stays bounded even when the model is
+    slow, rate-limited or answers off-contract. A cluster that fails keeps
+    waiting in ``awaiting_diagnosis_review`` (no draft means the next round
+    retries it), and no single-cluster failure can end the round early: the
+    remaining clusters of the round are still diagnosed.
+
+    The step returns ``{"diagnosed", "diagnosis_failed", "model_calls",
+    "diagnosis_config"}``; the round function folds those into its result
+    mapping so ``model_calls`` feeds the worker's budget check.
+
+    ``evolution_diagnosis_timeout_seconds`` and ``evolution_diagnosis_max_tokens``
+    are recorded in the configuration snapshot but are *not* passed to the
+    diagnoser: the call contract lives in Task 3's ``rag/evolution/diagnoser.py``
+    (its default ``rag.generator.generate`` client carries the 30s timeout, and
+    the model side owns the token cap). Wiring them through means editing that
+    lane's file, so the settings stay in place here as the documented seam.
+
+    ``diagnoser_factory`` / ``tracker_factory`` / ``retrieval_factory`` are the
+    injection seams; the defaults build the real ``Diagnoser``, an
+    ``ExecutionTracker`` over ``memory_db_path`` and the admin-only read-only
+    retrieval reader.
+    """
+    from rag.evolution.diagnoser import DiagnosisUnavailable
+    from rag.evolution.evidence import assemble_evidence
+
+    cfg = settings_obj or settings
+    budget = int(model_call_budget)
+    timeout_seconds = float(cfg.evolution_diagnosis_timeout_seconds)
+    max_tokens = int(cfg.evolution_diagnosis_max_tokens)
+    labels_path = cfg.evolution_diagnosis_labels_path or None
+
+    def resolve_diagnoser_factory():
+        if diagnoser_factory is not None:
+            return diagnoser_factory
+        from rag.evolution.diagnoser import Diagnoser
+
+        return lambda: Diagnoser()
+
+    def resolve_tracker_factory():
+        if tracker_factory is not None:
+            return tracker_factory
+        from rag.tracker import ExecutionTracker
+
+        return lambda: ExecutionTracker(cfg.memory_db_path)
+
+    def resolve_retrieval_factory():
+        if retrieval_factory is not None:
+            return retrieval_factory
+        return lambda: AdminReadOnlyRetrievalReader(cfg.users_db_path)
+
+    def step() -> dict:
+        diagnose = resolve_diagnoser_factory()
+        track = resolve_tracker_factory()
+        retrieve_reader = resolve_retrieval_factory()
+        config = {
+            "model_call_budget": budget,
+            "timeout_seconds": timeout_seconds,
+            "max_tokens": max_tokens,
+            "labels_path": labels_path or "",
+            "prompt_version": "",
+            "model": "",
+        }
+        outcome = {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_config": config}
+        if budget <= 0:
+            return outcome  # zero budget: no diagnosis work, not even a store scan
+        clusters = store.clusters_awaiting_diagnosis_without_draft(limit=budget)
+        if not clusters:
+            return outcome
+        try:
+            tracker = track()
+            reader = retrieve_reader()
+            diagnoser = diagnose()
+        except Exception:
+            # A broken environment (unusable users.db, unavailable retriever) must
+            # not fail the round: clustering and retention already succeeded, and
+            # the exception is logged for the administrator to act on.
+            logger.exception("evolution_diagnosis_resources_unavailable")
+            return outcome
+        try:
+            config["prompt_version"] = str(diagnoser.prompt_version)
+            config["model"] = str(diagnoser.model_name)
+            for cluster in clusters:
+                if outcome["model_calls"] >= budget:
+                    break  # budget reached: the remaining clusters wait for the next round
+                outcome["model_calls"] += 1
+                try:
+                    pack = assemble_evidence(
+                        cluster,
+                        store=store,
+                        tracker=tracker,
+                        labels_path=labels_path,
+                        retrieve=reader.retrieve,
+                    )
+                    draft = diagnoser.draft(cluster, pack)
+                    store.add_draft(
+                        cluster["id"],
+                        draft,
+                        prompt_version=diagnoser.prompt_version,
+                        model=diagnoser.model_name,
+                    )
+                except DiagnosisUnavailable as error:
+                    # No draft for this cluster: it stays queued and the next round
+                    # may retry it. ``invalid`` means the answer broke the prompt
+                    # contract, ``timeout``/``rate_limited`` are capacity signals.
+                    outcome["diagnosis_failed"] += 1
+                    logger.warning(
+                        "evolution_diagnosis_unavailable cluster=%s reason=%s detail=%s",
+                        cluster.get("id"),
+                        error.reason,
+                        error.detail,
+                    )
+                    continue
+                except Exception:
+                    # One broken cluster (evidence, store, reader) never ends the
+                    # round or kills the thread; the loop moves to the next one.
+                    outcome["diagnosis_failed"] += 1
+                    logger.exception(
+                        "evolution_diagnosis_cluster_failed cluster=%s", cluster.get("id")
+                    )
+                    continue
+                outcome["diagnosed"] += 1
+        finally:
+            _close_quietly(reader)
+            _close_quietly(tracker)
+        return outcome
+
+    return step
 
 
 def build_evolution_worker(
@@ -302,21 +575,29 @@ def build_evolution_worker(
     busy_provider: Callable[[], bool] | None = None,
     clock: Callable[[], float] | None = None,
     rss_provider: Callable[[], float | None] | None = None,
+    diagnoser_factory=None,
+    tracker_factory=None,
+    retrieval_factory=None,
 ) -> EvolutionWorker | None:
     """Assemble the worker from settings; returns None (no store) when disabled.
 
     The failed-trace store and the clusterer are attached to the returned worker
     as ``worker.store`` / ``worker.clusterer`` so the lifecycle owner can close
-    the store on shutdown.
+    the store on shutdown. ``diagnoser_factory`` / ``tracker_factory`` /
+    ``retrieval_factory`` are the diagnosis step's injection seams (the defaults
+    build the real diagnoser, tracker and admin-only read-only retrieval).
     """
     cfg = settings_obj or settings
     if not cfg.evolution_enabled:
         return None
+    # Phase 3: the round's model calls are the diagnosis calls, bounded by the
+    # diagnosis setting (the phase-2 hardcoded zero is gone).
+    max_model_calls = cfg.evolution_diagnosis_model_calls
     budget = EvolutionBudget(
         max_concurrency=1,
         max_batch=cfg.evolution_worker_max_batch,
         max_run_seconds=cfg.evolution_worker_run_seconds,
-        max_model_calls=0,  # phase 2 makes no model calls
+        max_model_calls=max_model_calls,
     )
     if store is None:
         from rag.evolution.store import FailureTraceStore
@@ -335,6 +616,14 @@ def build_evolution_worker(
         store,
         retention_days=cfg.evolution_observation_retention_days,
         batch_limit=budget.max_batch,
+        diagnosis_step=make_evolution_diagnosis_step(
+            store,
+            settings_obj=cfg,
+            model_call_budget=max_model_calls,
+            diagnoser_factory=diagnoser_factory,
+            tracker_factory=tracker_factory,
+            retrieval_factory=retrieval_factory,
+        ),
     )
     worker = EvolutionWorker(
         run_once,
@@ -408,10 +697,11 @@ def main() -> int:
         return 0
     worker.start()
     logger.info(
-        "evolution worker started interval=%ss run_seconds=%s batch=%s",
+        "evolution worker started interval=%ss run_seconds=%s batch=%s model_calls_per_round=%s",
         settings.evolution_worker_interval_seconds,
         settings.evolution_worker_run_seconds,
         settings.evolution_worker_max_batch,
+        settings.evolution_diagnosis_model_calls,
     )
     try:
         while True:

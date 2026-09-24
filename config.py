@@ -131,6 +131,17 @@ class Settings(BaseSettings):
     evolution_worker_max_batch: int = Field(default=200, ge=1)
     evolution_worker_busy_load_factor: float = Field(default=2.0, gt=0.0)
 
+    # 诊断阶段（第 3 阶段）：每轮对“无草稿的 awaiting_diagnosis_review 聚类”的模型调用
+    # 预算。成功与失败的调用都计入预算，达到上限即停止本轮诊断，剩余聚类留待下轮。
+    evolution_diagnosis_model_calls: int = Field(default=5, ge=0)
+    # 单次诊断调用的超时与输出上限：诊断请求目前由生成客户端（其内置 30s 超时）与模型侧
+    # 承担，因此这里先就位并作为诊断配置快照记录，待 diagnoser 透传时接入（Task 4 接缝）。
+    evolution_diagnosis_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    evolution_diagnosis_max_tokens: int = Field(default=2000, ge=1)
+    # 管理员确认标签 JSON 路径（诊断证据的最高优先级）；为空=无标签，此时草案根因只能是
+    # 假设级（diagnoser 后校验强制）。
+    evolution_diagnosis_labels_path: str = ""
+
     model_config = {
         "env_prefix": "RAG_",
         "env_file": str(Path(__file__).resolve().parent / ".env"),
