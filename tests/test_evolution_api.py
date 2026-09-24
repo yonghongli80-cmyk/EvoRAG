@@ -648,9 +648,13 @@ def test_decision_targets_map_every_action_onto_legal_transitions():
         assert target["new_status"] in EVOLUTION_TRANSITIONS[
             EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value
         ], action
-        assert target["member_status"] in EVOLUTION_TRANSITIONS[
-            EvolutionStatus.CLUSTERED.value
-        ], action
+        # A member can be ``clustered`` (admitted with the cluster) or still
+        # ``observed`` (attached after admission), so both must reach the target.
+        for source in (EvolutionStatus.OBSERVED.value, EvolutionStatus.CLUSTERED.value):
+            assert (
+                target["member_status"] == source
+                or target["member_status"] in EVOLUTION_TRANSITIONS[source]
+            ), (action, source)
         assert target["pool"] in tuple(pool.value for pool in ObservationPool), action
 
 
@@ -675,10 +679,43 @@ def test_an_accepted_decision_writes_an_audit_row_and_advances_the_cluster(
     ]
 
 
+def test_approval_survives_a_member_attached_after_admission(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """A late member stays ``observed``; the decision must still be legal for it."""
+    from rag.evolution.models import FailureObservation
+
+    store = _store()
+    cluster_id = store_with_cluster["cluster_id"]
+    late = store.add_observation(
+        FailureObservation(
+            kb_id="kb1", failure_stage="retrieval", question="late-member",
+            route="rag", chunk_hashes=(), best_score=0.4,
+            answerability_kind="insufficient_evidence",
+        )
+    )
+    store.attach_cluster_member(
+        late["id"], cluster_id,
+        failure_stage="retrieval", root_cause_feature="recall_miss", now=time.time(),
+    )
+    store.close()
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "approve_for_candidate", "note": "迟加入成员不影响批准"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved_for_candidate"
+    statuses = {member["id"]: member["status"] for member in response.json()["members"]}
+    assert statuses[late["id"]] == "clustered"
+
+
 @pytest.mark.parametrize(
     "action,expected_status,expected_member_status",
     [
-        ("approve_for_candidate", "approved_for_candidate", "awaiting_diagnosis_review"),
+        ("approve_for_candidate", "approved_for_candidate", "clustered"),
         ("reject", "rejected", "rejected"),
         ("needs_more_evidence", "needs_more_evidence", "needs_more_evidence"),
     ],

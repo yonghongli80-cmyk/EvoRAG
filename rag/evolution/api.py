@@ -149,13 +149,17 @@ def _admin_user(user: dict = Depends(require_user)) -> dict:
 # ``candidate_pool`` on purpose — a rejected or evidence-short cluster is never
 # returned to the observation queue, because both of those statuses have no
 # outgoing transition and the next clustering round would try to re-admit one.
-# ``member_status`` must be a legal successor of the status admission wrote
-# (``clustered``), otherwise ``promote_cluster`` rejects the whole move.
+# ``member_status`` must be a legal successor of every status a member can hold
+# when the decision lands. Admission writes ``clustered``, but a member attached
+# after admission stays ``observed`` (``attach_cluster_member`` keeps it queued),
+# so approve targets ``clustered`` — reachable from both and a no-op for already
+# clustered members — instead of the unreachable ``awaiting_diagnosis_review``.
+# reject and needs_more_evidence are reachable from both statuses directly.
 DECISION_TARGETS: dict[str, dict[str, str]] = {
     "approve_for_candidate": {
         "new_status": EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
         "pool": ObservationPool.CANDIDATE_POOL.value,
-        "member_status": EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+        "member_status": EvolutionStatus.CLUSTERED.value,
     },
     "reject": {
         "new_status": EvolutionStatus.REJECTED.value,
