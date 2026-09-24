@@ -84,13 +84,14 @@ def restore_question_set_rollout():
     from rag.evolution.rollout import rollout as controller
 
     if settings.evolution_db_path and Path(settings.evolution_db_path).exists():
+        from rag.evolution.candidate_store import CandidateStore
         from rag.evolution.store import FailureTraceStore
 
-        store = FailureTraceStore(settings.evolution_db_path)
+        trace_store = FailureTraceStore(settings.evolution_db_path)
         try:
-            controller.restore(store)
+            controller.restore(CandidateStore(trace_store))
         finally:
-            store.close()
+            trace_store.close()
 
 
 app = FastAPI(

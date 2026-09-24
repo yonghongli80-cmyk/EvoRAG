@@ -642,6 +642,45 @@ def test_restore_drops_a_rolled_back_candidate(evolution_client, admin_headers, 
 
 
 # ------------------------------------------------------------------
+# The startup hook: the API must restore through a CandidateStore.
+# ------------------------------------------------------------------
+
+
+def test_startup_restore_rebuilds_a_live_canary(monkeypatch, evolution_client, admin_headers, candidate_ready):
+    """The lifespan hook restores through a ``CandidateStore`` over the trace store."""
+    from rag.api import restore_question_set_rollout
+
+    assert _canary(evolution_client, candidate_ready, 30, admin_headers).status_code == 200
+    rollout.deactivate(candidate_ready)  # a fresh process holds no live state
+
+    monkeypatch.setattr(settings, "evolution_candidate_enabled", True)
+    try:
+        restore_question_set_rollout()
+        assert rollout.percent_for(candidate_ready) == 30
+        version = candidate_question_set_version(PREFLIGHT_QUESTION_SET_VERSION, candidate_ready)
+        assert version in question_set_registry()["preflight"]
+    finally:
+        rollout.deactivate(candidate_ready)
+
+
+def test_startup_restore_is_a_noop_without_the_candidate_switch(
+    monkeypatch, evolution_client, admin_headers, candidate_ready
+):
+    from rag.api import restore_question_set_rollout
+
+    assert _canary(evolution_client, candidate_ready, 30, admin_headers).status_code == 200
+    rollout.deactivate(candidate_ready)
+
+    monkeypatch.setattr(settings, "evolution_candidate_enabled", False)
+    try:
+        restore_question_set_rollout()
+        assert rollout.percent_for(candidate_ready) == 0
+        assert set(question_set_registry()["preflight"]) == {PREFLIGHT_QUESTION_SET_VERSION}
+    finally:
+        rollout.deactivate(candidate_ready)
+
+
+# ------------------------------------------------------------------
 # The pipeline seam: an injected rollout serves the candidate set.
 # ------------------------------------------------------------------
 
