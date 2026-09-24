@@ -68,12 +68,29 @@ async def lifespan(_app: FastAPI):
     auto_index_on_startup()
     start_backup_scheduler()
     start_evolution_worker()
+    restore_question_set_rollout()
     try:
         yield
     finally:
         stop_backup_scheduler()
         stop_evolution_worker()
         close_pipeline_processors()
+
+
+def restore_question_set_rollout():
+    """Rebuild灰度控制器状态：重启时仍在灰度的候选按审计轨迹恢复百分比。"""
+    if not settings.evolution_candidate_enabled:
+        return
+    from rag.evolution.rollout import rollout as controller
+
+    if settings.evolution_db_path and Path(settings.evolution_db_path).exists():
+        from rag.evolution.store import FailureTraceStore
+
+        store = FailureTraceStore(settings.evolution_db_path)
+        try:
+            controller.restore(store)
+        finally:
+            store.close()
 
 
 app = FastAPI(
@@ -628,6 +645,17 @@ def get_failure_recorder():
     return _failure_recorder
 
 
+def get_question_set_rollout():
+    """返回灰度控制器单例；候选功能关闭或未配置放量上限时不启用在线分流。"""
+    if not settings.evolution_candidate_enabled:
+        return None
+    if settings.evolution_candidate_canary_percent <= 0:
+        return None
+    from rag.evolution.rollout import rollout as controller
+
+    return controller
+
+
 def _make_pipeline(**kwargs):
     """构造使用 API 共享数据库连接的 pipeline。"""
     from rag.pipeline import RAGPipeline
@@ -641,6 +669,10 @@ def _make_pipeline(**kwargs):
         recorder = get_failure_recorder()
         if recorder is not None:
             kwargs["failure_recorder"] = recorder
+    if "question_set_rollout" not in kwargs and settings.evolution_candidate_enabled:
+        # 灰度控制器：未启用候选开关时不注入（在线路径零变化）；启用后由控制器
+        # 决定每个请求走当前问题集还是已灰度的问题集（0% 时等价当前集）。
+        kwargs["question_set_rollout"] = get_question_set_rollout()
     return RAGPipeline(**kwargs)
 
 
