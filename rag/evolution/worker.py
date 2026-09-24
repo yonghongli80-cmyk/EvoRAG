@@ -434,15 +434,19 @@ def make_evolution_diagnosis_step(
     tracker_factory=None,
     retrieval_factory=None,
 ) -> Callable[[], dict]:
-    """Build the per-round diagnosis step for clusters that have no draft yet.
+    """Build the per-round diagnosis step for member observations without a draft.
 
-    One round drafts at most ``model_call_budget`` clusters, oldest first. Every
-    attempted cluster costs one unit of that budget — a successful and a failed
+    Phase 4 drafts one diagnosis per member **observation** instead of per
+    cluster (``docs/evolution-diagnosis.md`` §5): a cluster key mixes distinct
+    root causes, so a cluster-level draft can never match a mixed label set. The
+    step reads ``observations_awaiting_diagnosis_without_draft`` and drafts at
+    most ``model_call_budget`` observations, oldest first. Every attempted
+    observation costs one unit of that budget — a successful and a failed
     diagnosis alike — so a round always stays bounded even when the model is
-    slow, rate-limited or answers off-contract. A cluster that fails keeps
-    waiting in ``awaiting_diagnosis_review`` (no draft means the next round
-    retries it), and no single-cluster failure can end the round early: the
-    remaining clusters of the round are still diagnosed.
+    slow, rate-limited or answers off-contract. An observation that fails keeps
+    waiting for its own draft (no draft means the next round retries it), and no
+    single-observation failure can end the round early: the remaining
+    observations of the round are still diagnosed.
 
     The step returns ``{"diagnosed", "diagnosis_failed", "model_calls",
     "diagnosis_config"}``; the round function folds those into its result
@@ -505,8 +509,8 @@ def make_evolution_diagnosis_step(
         outcome = {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_config": config}
         if budget <= 0:
             return outcome  # zero budget: no diagnosis work, not even a store scan
-        clusters = store.clusters_awaiting_diagnosis_without_draft(limit=budget)
-        if not clusters:
+        pending = store.observations_awaiting_diagnosis_without_draft(limit=budget)
+        if not pending:
             return outcome
         try:
             tracker = track()
@@ -521,43 +525,54 @@ def make_evolution_diagnosis_step(
         try:
             config["prompt_version"] = str(diagnoser.prompt_version)
             config["model"] = str(diagnoser.model_name)
-            for cluster in clusters:
+            for item in pending:
                 if outcome["model_calls"] >= budget:
-                    break  # budget reached: the remaining clusters wait for the next round
+                    break  # budget reached: the remaining observations wait for the next round
                 outcome["model_calls"] += 1
+                observation = item["observation"]
+                cluster = item["cluster"]
                 try:
                     pack = assemble_evidence(
+                        observation,
                         cluster,
                         store=store,
                         tracker=tracker,
                         labels_path=labels_path,
                         retrieve=reader.retrieve,
                     )
+                    # The diagnoser keeps receiving the cluster row for its identity
+                    # signals (design section 6); the evidence pack is the single
+                    # observation's. A draft is cluster-scoped for the admin decision
+                    # but observation-scoped through observation_id.
                     draft = diagnoser.draft(cluster, pack)
                     store.add_draft(
                         cluster["id"],
                         draft,
+                        observation_id=observation["id"],
                         prompt_version=diagnoser.prompt_version,
                         model=diagnoser.model_name,
                     )
                 except DiagnosisUnavailable as error:
-                    # No draft for this cluster: it stays queued and the next round
-                    # may retry it. ``invalid`` means the answer broke the prompt
-                    # contract, ``timeout``/``rate_limited`` are capacity signals.
+                    # No draft for this observation: it stays queued and the next
+                    # round may retry it. ``invalid`` means the answer broke the
+                    # prompt contract, ``timeout``/``rate_limited`` are capacity signals.
                     outcome["diagnosis_failed"] += 1
                     logger.warning(
-                        "evolution_diagnosis_unavailable cluster=%s reason=%s detail=%s",
+                        "evolution_diagnosis_unavailable cluster=%s observation=%s reason=%s detail=%s",
                         cluster.get("id"),
+                        observation.get("id"),
                         error.reason,
                         error.detail,
                     )
                     continue
                 except Exception:
-                    # One broken cluster (evidence, store, reader) never ends the
+                    # One broken observation (evidence, store, reader) never ends the
                     # round or kills the thread; the loop moves to the next one.
                     outcome["diagnosis_failed"] += 1
                     logger.exception(
-                        "evolution_diagnosis_cluster_failed cluster=%s", cluster.get("id")
+                        "evolution_diagnosis_cluster_failed cluster=%s observation=%s",
+                        cluster.get("id"),
+                        observation.get("id"),
                     )
                     continue
                 outcome["diagnosed"] += 1

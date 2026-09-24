@@ -103,10 +103,28 @@ export interface EvolutionAuditEntry {
   created_at: number
 }
 
-/** The diagnosis read-out for one cluster: newest draft plus its audit trail. */
+/**
+ * One member observation's draft slot in the cluster diagnosis read-out.
+ *
+ * Phase 4 drafts one diagnosis per member observation (a cluster key mixes
+ * distinct root causes), so the diagnosis endpoint lists every member with its
+ * question, stage, and root-cause feature alongside its own draft (or ``null``
+ * when the worker has not drafted it yet). The question text here is
+ * administrator-only and is the point of diagnosing the member.
+ */
+export interface EvolutionMemberDraft {
+  observation_id: number
+  question: string
+  stage: string
+  root_cause_feature: string | null
+  draft: EvolutionDraft | null
+}
+
+/** The diagnosis read-out for one cluster: legacy cluster draft, member drafts, audit trail. */
 export interface EvolutionDiagnosis {
   cluster_id: number
-  draft: EvolutionDraft | null
+  cluster_draft: EvolutionDraft | null
+  member_drafts: EvolutionMemberDraft[]
   audit: EvolutionAuditEntry[]
 }
 
@@ -210,7 +228,7 @@ export async function fetchEvolutionMetrics(): Promise<EvolutionMetrics> {
   return res.data
 }
 
-/** Return the newest diagnosis draft and the audit trail of one cluster. */
+/** Return the cluster-level legacy draft, each member draft, and the audit trail. */
 export async function fetchDiagnosis(clusterId: number): Promise<EvolutionDiagnosis> {
   const res = await api.get(`/knowledge-operations/evolution/clusters/${clusterId}/diagnosis`)
   return res.data

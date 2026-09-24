@@ -3,8 +3,18 @@
 A draft is persisted verbatim (JSON payload + prompt version + model) and is
 never a confirmed conclusion; the audit trail records every admin decision with
 actor, action, cluster, and note.
+
+Phase 4 granularity revision: the clustering key (kb × stage × root-cause
+feature) mixes distinct root causes into one cluster, so a cluster-level single
+draft can never match a mixed label set (``docs/evolution-diagnosis.md`` §5).
+Drafts therefore move to the member-observation level: ``diagnosis_drafts``
+gains a nullable ``observation_id`` (NULL = the legacy cluster-level shape),
+and the worker drafts one diagnosis per member observation. These tests pin the
+migration, the backward-compatible ``add_draft`` signature, and the
+member-level "awaiting diagnosis without a draft" scan.
 """
 
+import sqlite3
 import time
 
 import pytest
@@ -12,6 +22,7 @@ import pytest
 from rag.evolution.models import (
     DiagnosisDraft,
     EvolutionStatus,
+    FailureObservation,
     ObservationPool,
 )
 from rag.evolution.store import FailureTraceStore
@@ -56,6 +67,52 @@ def make_cluster(store, *, key, status=EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW
         member_status=EvolutionStatus.CLUSTERED.value,
         now=now,
     )
+
+
+def make_awaiting_cluster_with_members(store, *, key, questions):
+    """A cluster promoted into ``awaiting_diagnosis_review`` with member observations.
+
+    Returns ``(cluster, members)`` where ``members`` is the stored observation
+    rows (``id`` included), oldest first. Only existing store methods are used,
+    so this mirrors what the recorder + clusterer produce in production.
+    """
+    now = time.time()
+    cluster = store.upsert_cluster(
+        cluster_key=key,
+        kb_id="kb1",
+        failure_stage="retrieval",
+        root_cause_feature="recall_miss",
+        seen_at=now,
+    )
+    members = []
+    for question in questions:
+        member = store.add_observation(
+            FailureObservation(
+                kb_id="kb1",
+                failure_stage="retrieval",
+                question=question,
+                route="rag",
+                chunk_hashes=(),
+                best_score=0.05,
+                answerability_kind="insufficient_evidence",
+            )
+        )
+        store.attach_cluster_member(
+            member["id"],
+            cluster["id"],
+            failure_stage="retrieval",
+            root_cause_feature="recall_miss",
+            now=now,
+        )
+        members.append(member)
+    promoted = store.promote_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.CLUSTERED.value,
+        now=now,
+    )
+    return promoted, members
 
 
 def test_add_draft_round_trips_payload_and_metadata(tmp_path):
@@ -219,3 +276,173 @@ def test_decide_cluster_rejects_illegal_transitions(tmp_path):
         )
 
     assert store.list_clusters()[0]["status"] == EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value
+
+
+# ------------------------------------------------------------------
+# Phase 4: member-observation-level drafts (docs/evolution-diagnosis.md §5).
+#
+# The clustering key mixes distinct root causes into one cluster, so a draft
+# now belongs to a single member observation. ``diagnosis_drafts.observation_id``
+# is nullable: NULL = the legacy cluster-level draft, an integer = a member draft.
+# ------------------------------------------------------------------
+
+
+def test_fresh_database_creates_the_observation_id_column(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(diagnosis_drafts)")}
+    assert "observation_id" in columns
+    store.close()
+
+
+def test_add_draft_accepts_and_round_trips_an_observation_id(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, members = make_awaiting_cluster_with_members(store, key="member-1", questions=["q1"])
+
+    draft_id = store.add_draft(
+        cluster["id"], sample_draft(), observation_id=members[0]["id"],
+        prompt_version="diagnosis-v1", model="m",
+    )
+
+    stored = store.get_draft(draft_id)
+    assert stored["cluster_id"] == cluster["id"]
+    assert stored["observation_id"] == members[0]["id"]
+    assert stored["payload"] == sample_draft().model_dump(mode="json")
+
+
+def test_add_draft_without_observation_id_stays_a_legacy_cluster_draft(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1")
+
+    draft_id = store.add_draft(cluster["id"], sample_draft(), prompt_version="v1", model="m")
+
+    assert store.get_draft(draft_id)["observation_id"] is None
+
+
+def test_add_draft_rejects_an_unknown_observation(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1")
+    with pytest.raises(KeyError):
+        store.add_draft(cluster["id"], sample_draft(), observation_id=4242, prompt_version="v1", model="m")
+
+
+def test_existing_old_shape_database_gains_the_column_with_null_legacy_drafts(tmp_path):
+    """Migration: an old-shape ``diagnosis_drafts`` opens and is altered in place.
+
+    A database written before phase 4 has no ``observation_id`` column; opening
+    it must add the nullable column without dropping the stored cluster-level
+    draft, whose ``observation_id`` then reads back as NULL.
+    """
+    db_path = tmp_path / "evolution.db"
+    now = time.time()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "CREATE TABLE failure_clusters ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "cluster_key TEXT NOT NULL UNIQUE, kb_id TEXT NOT NULL,"
+            "failure_stage TEXT NOT NULL, root_cause_feature TEXT, pool TEXT NOT NULL,"
+            "status TEXT NOT NULL, priority TEXT NOT NULL, member_count INTEGER NOT NULL DEFAULT 0,"
+            "first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL,"
+            "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE diagnosis_drafts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, cluster_id INTEGER NOT NULL,"
+            "payload JSON NOT NULL, prompt_version TEXT NOT NULL, model TEXT,"
+            "reproducible INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO failure_clusters "
+            "(cluster_key, kb_id, failure_stage, root_cause_feature, pool, status, priority, "
+            "member_count, first_seen_at, last_seen_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("kb1|retrieval|recall_miss", "kb1", "retrieval", "recall_miss",
+             ObservationPool.CANDIDATE_POOL.value, EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+             "normal", 0, now, now, now, now),
+        )
+        conn.execute(
+            "INSERT INTO diagnosis_drafts (cluster_id, payload, prompt_version, model, reproducible, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (1, '{"root_cause":"legacy"}', "diagnosis-v1", "legacy-model", 1, now),
+        )
+
+    store = FailureTraceStore(db_path)
+
+    columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(diagnosis_drafts)")}
+    assert "observation_id" in columns
+    drafts = store.list_drafts()
+    assert len(drafts) == 1
+    assert drafts[0]["observation_id"] is None  # the legacy row is not a member draft
+    assert drafts[0]["payload"]["root_cause"] == "legacy"
+    assert drafts[0]["cluster_id"] == 1
+    store.close()
+
+
+def test_observations_awaiting_diagnosis_returns_undrafted_members_of_awaiting_clusters(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, members = make_awaiting_cluster_with_members(
+        store, key="awaiting-1", questions=["q-a1", "q-a2"]
+    )
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=10)
+
+    assert [item["observation"]["id"] for item in result] == [members[0]["id"], members[1]["id"]]
+    for item in result:
+        assert item["cluster"]["id"] == cluster["id"]
+        assert item["cluster"]["status"] == EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value
+        assert item["observation"]["question"].startswith("q-a")
+
+
+def test_observations_awaiting_diagnosis_excludes_drafted_members_only(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, members = make_awaiting_cluster_with_members(
+        store, key="awaiting-1", questions=["q-a1", "q-a2"]
+    )
+    store.add_draft(
+        cluster["id"], sample_draft(), observation_id=members[0]["id"],
+        prompt_version="v1", model="m",
+    )
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=10)
+
+    # The drafted sibling is skipped; its cluster-mate still awaits a member draft.
+    assert [item["observation"]["id"] for item in result] == [members[1]["id"]]
+
+
+def test_observations_awaiting_diagnosis_ignores_non_awaiting_clusters(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    still_clustered = make_cluster(store, key="clustered-1", status=EvolutionStatus.CLUSTERED.value)
+    store.add_observation(
+        FailureObservation(kb_id="kb1", failure_stage="retrieval", question="q", route="rag")
+    )
+    store.attach_cluster_member(
+        store.list_observations()[-1]["id"], still_clustered["id"],
+        failure_stage="retrieval", root_cause_feature="recall_miss", now=time.time(),
+    )
+    _, members = make_awaiting_cluster_with_members(store, key="awaiting-1", questions=["q-a1"])
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=10)
+
+    assert [item["observation"]["id"] for item in result] == [members[0]["id"]]
+
+
+def test_legacy_cluster_draft_does_not_block_member_drafts(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, members = make_awaiting_cluster_with_members(store, key="awaiting-1", questions=["q-a1"])
+    # A legacy cluster-level draft (observation_id NULL) must not suppress
+    # the per-member draft the worker now owes this observation.
+    store.add_draft(cluster["id"], sample_draft(), prompt_version="v1", model="m")
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=10)
+
+    assert [item["observation"]["id"] for item in result] == [members[0]["id"]]
+
+
+def test_observations_awaiting_diagnosis_respects_the_limit(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _, members = make_awaiting_cluster_with_members(
+        store, key="awaiting-1", questions=["q-a1", "q-a2", "q-a3"]
+    )
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=2)
+
+    assert [item["observation"]["id"] for item in result] == [members[0]["id"], members[1]["id"]]

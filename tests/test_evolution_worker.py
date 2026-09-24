@@ -212,7 +212,10 @@ class FakeStore:
     def clusters_awaiting_diagnosis_without_draft(self, limit):
         return list(self.awaiting[:limit])
 
-    def add_draft(self, cluster_id, draft, *, prompt_version="", model=""):
+    def observations_awaiting_diagnosis_without_draft(self, limit):
+        return []
+
+    def add_draft(self, cluster_id, draft, *, observation_id=None, prompt_version="", model=""):
         self.drafts.append((cluster_id, draft, prompt_version, model))
         return len(self.drafts)
 
@@ -615,28 +618,78 @@ def test_diagnosis_failure_never_kills_the_worker_thread(tmp_path):
     assert worker.is_alive is False  # the thread lives on until it is stopped
 
 
-def test_clusters_that_already_have_a_draft_are_not_diagnosed_again(tmp_path):
+def test_diagnosis_step_drafts_every_member_observation_within_budget(tmp_path):
+    """Phase-4 granularity: the step drafts each member observation (not per cluster).
+
+    A cluster may gather distinct root causes under one key
+    (``docs/evolution-diagnosis.md`` §5), so the worker drafts one diagnosis per
+    member observation, each carrying its ``observation_id`` and re-retrieving
+    only that member's own question once.
+    """
     store = FailureTraceStore(tmp_path / "evolution.db")
-    cluster = awaiting_cluster(store, "kb1|retrieval|recall_miss")
-    store.add_draft(cluster["id"], sample_draft(), prompt_version="diagnosis-v1", model="m")
+    cluster = awaiting_cluster(store, "kb1|retrieval|recall_miss", questions=("q-a", "q-b"))
+    members = store.list_observations(cluster["id"])
     reader = FakeReader((Chunk(text="年假额度为每年 10 天"),))
-    factory = FakeDiagnoserFactory()
-    step = make_evolution_diagnosis_step(
-        store,
-        settings_obj=_fake_settings(),
-        model_call_budget=5,
-        diagnoser_factory=factory,
-        tracker_factory=lambda: FakeTracker(),
-        retrieval_factory=lambda: reader,
+    model = FakeModel(
+        json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False),
+        json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False),
     )
+    step = build_step(store, model, reader=reader)
 
     outcome = step()
 
-    assert outcome["diagnosed"] == 0
-    assert outcome["model_calls"] == 0
-    assert factory.calls == 0
-    assert reader.calls == []
-    assert len(store.list_drafts()) == 1  # the existing draft is left untouched
+    assert outcome["diagnosed"] == 2  # one draft per member observation
+    assert outcome["model_calls"] == 2
+    assert outcome["diagnosis_failed"] == 0
+    drafts = store.list_drafts()
+    assert {draft["observation_id"] for draft in drafts} == {members[0]["id"], members[1]["id"]}
+    assert all(draft["cluster_id"] == cluster["id"] for draft in drafts)  # decision stays cluster-level
+    assert all(draft["prompt_version"] == DIAGNOSIS_PROMPT_VERSION for draft in drafts)
+    # Each member is re-retrieved once, with its own question — no cluster-wide scan.
+    assert [question for question, _ in reader.calls] == ["q-a", "q-b"]
+
+
+def test_a_member_that_already_has_a_draft_is_not_diagnosed_again(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = awaiting_cluster(store, "kb1|retrieval|recall_miss", questions=("q-a", "q-b"))
+    members = store.list_observations(cluster["id"])
+    store.add_draft(
+        cluster["id"], sample_draft(), observation_id=members[0]["id"],
+        prompt_version="diagnosis-v1", model="m",
+    )
+    reader = FakeReader((Chunk(text="年假额度为每年 10 天"),))
+    model = FakeModel(json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False))
+    step = build_step(store, model, reader=reader)
+
+    outcome = step()
+
+    # Only the undrafted sibling is diagnosed; the drafted member is skipped.
+    assert outcome["diagnosed"] == 1
+    assert outcome["model_calls"] == 1
+    assert [question for question, _ in reader.calls] == ["q-b"]
+    drafted = [d for d in store.list_drafts() if d["observation_id"] == members[0]["id"]]
+    assert len(drafted) == 1  # the pre-existing member draft is untouched
+    assert len(store.list_drafts()) == 2
+
+
+def test_a_legacy_cluster_draft_does_not_suppress_the_member_draft(tmp_path):
+    """A phase-3 cluster-level draft never blocks the per-observation draft."""
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = awaiting_cluster(store, "kb1|retrieval|recall_miss", questions=("q-a",))
+    # Legacy cluster-level draft: observation_id NULL (pre-phase-4 shape).
+    store.add_draft(cluster["id"], sample_draft(), prompt_version="diagnosis-v1", model="m")
+    reader = FakeReader((Chunk(text="年假额度为每年 10 天"),))
+    model = FakeModel(json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False))
+    step = build_step(store, model, reader=reader)
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 1
+    assert outcome["model_calls"] == 1
+    member_drafts = [d for d in store.list_drafts() if d["observation_id"] is not None]
+    assert len(member_drafts) == 1  # the member still owes (and now has) its draft
+    assert len(store.list_drafts()) == 2
 
 
 def test_diagnosis_config_records_the_timeout_and_token_settings(tmp_path):

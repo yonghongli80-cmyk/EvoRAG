@@ -390,12 +390,20 @@ def test_diagnosis_endpoints_require_authentication(evolution_client):
     ).status_code == 401
 
 
-def test_diagnosis_returns_the_newest_draft_and_the_cluster_audit(
+def test_diagnosis_returns_the_newest_cluster_draft_and_the_cluster_audit(
     evolution_client, admin_headers, store_with_drafts
 ):
+    """Legacy cluster-level drafts surface as ``cluster_draft``; member_drafts still list members.
+
+    The two drafts in this fixture are cluster-level (``observation_id`` NULL,
+    the pre-phase-4 shape), so the newest is reported under ``cluster_draft`` and
+    the cluster's single member appears under ``member_drafts`` with ``draft`` null
+    until a member-level draft exists.
+    """
     cluster_id = store_with_drafts["cluster_id"]
     store = _store()
     store.add_audit("admin-7", "needs_more_evidence", cluster_id, "缺少管理员确认标签")
+    member_id = store.list_observations(cluster_id)[0]["id"]
     store.close()
 
     body = evolution_client.get(
@@ -403,22 +411,81 @@ def test_diagnosis_returns_the_newest_draft_and_the_cluster_audit(
     ).json()
 
     assert body["cluster_id"] == cluster_id
-    assert body["draft"]["id"] == store_with_drafts["draft_ids"][1]
-    assert body["draft"]["prompt_version"] == "diagnosis-v2"
-    assert body["draft"]["model"] == "deepseek/deepseek-v4.1-flash"
-    assert body["draft"]["reproducible"] is True
-    assert set(body["draft"]) == {
+    assert body["cluster_draft"]["id"] == store_with_drafts["draft_ids"][1]
+    assert body["cluster_draft"]["prompt_version"] == "diagnosis-v2"
+    assert body["cluster_draft"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert body["cluster_draft"]["reproducible"] is True
+    assert set(body["cluster_draft"]) == {
         "id", "cluster_id", "payload", "prompt_version", "model", "reproducible", "created_at",
     }
-    assert body["draft"]["payload"]["root_cause"] == "第二轮：假设切分截断"
-    assert set(body["draft"]["payload"]) == DIAGNOSIS_PAYLOAD_FIELDS
-    assert body["draft"]["payload"]["evidence_refs"] == ["a" * 64]
+    assert body["cluster_draft"]["payload"]["root_cause"] == "第二轮：假设切分截断"
+    assert set(body["cluster_draft"]["payload"]) == DIAGNOSIS_PAYLOAD_FIELDS
+    assert body["cluster_draft"]["payload"]["evidence_refs"] == ["a" * 64]
+    # The undrafted member is listed, with its admin-visible question text.
+    assert body["member_drafts"] == [
+        {
+            "observation_id": member_id,
+            "question": "chunk-secret-text",
+            "stage": "retrieval",
+            "root_cause_feature": "recall_miss",
+            "draft": None,
+        }
+    ]
     assert [(row["actor_id"], row["action"], row["note"]) for row in body["audit"]] == [
         ("admin-7", "needs_more_evidence", "缺少管理员确认标签"),
     ]
     assert "admin-9" not in evolution_client.get(
         f"{PREFIX}/clusters/{cluster_id}/diagnosis", headers=admin_headers
     ).text
+
+
+def test_diagnosis_lists_member_drafts_with_the_question_and_each_draft(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """Phase-4 shape: member_drafts carry the question text an admin diagnoses from.
+
+    The endpoint is administrator-only, so exposing the observation's question
+    here is an intentional boundary (a diagnosis is meaningless without it); no
+    other endpoint leaks question text. Each member reports its own draft or null.
+    """
+    cluster_id = store_with_cluster["cluster_id"]
+    store = _store()
+    drafted = store.list_observations(cluster_id)[0]
+    store.add_observation(FailureObservation(
+        kb_id="kb1", failure_stage="retrieval", question="second-member-question",
+        route="rag", best_score=0.2, answerability_kind="insufficient_evidence",
+    ))
+    second = store.list_observations()[-1]
+    store.attach_cluster_member(
+        second["id"], cluster_id, failure_stage="retrieval",
+        root_cause_feature="recall_miss", now=time.time(),
+    )
+    store.add_draft(
+        cluster_id, sample_draft(root_cause="成员级：候选在池中被挤压"),
+        observation_id=drafted["id"], prompt_version="diagnosis-v2", model="member-model",
+    )
+    store.close()
+
+    body = evolution_client.get(
+        f"{PREFIX}/clusters/{cluster_id}/diagnosis", headers=admin_headers
+    ).json()
+
+    entries = {entry["observation_id"]: entry for entry in body["member_drafts"]}
+    assert set(entries) == {drafted["id"], second["id"]}
+    with_draft = entries[drafted["id"]]
+    assert with_draft["question"] == "chunk-secret-text"
+    assert with_draft["stage"] == "retrieval"
+    assert with_draft["root_cause_feature"] == "recall_miss"
+    assert with_draft["draft"]["payload"]["root_cause"] == "成员级：候选在池中被挤压"
+    assert set(with_draft["draft"]) == {
+        "id", "cluster_id", "payload", "prompt_version", "model", "reproducible", "created_at",
+    }
+    # The sibling member has no draft yet and reports null, still with its question.
+    without_draft = entries[second["id"]]
+    assert without_draft["draft"] is None
+    assert without_draft["question"] == "second-member-question"
+    # A member-level draft is not the legacy cluster draft.
+    assert body["cluster_draft"] is None
 
 
 def test_diagnosis_audit_is_chronological_and_cluster_scoped(
@@ -447,7 +514,18 @@ def test_diagnosis_without_a_draft_reads_empty(
     ).json()
 
     assert body == {
-        "cluster_id": store_with_cluster["cluster_id"], "draft": None, "audit": [],
+        "cluster_id": store_with_cluster["cluster_id"],
+        "cluster_draft": None,
+        "member_drafts": [
+            {
+                "observation_id": store_with_cluster["member_id"],
+                "question": "chunk-secret-text",
+                "stage": "retrieval",
+                "root_cause_feature": "recall_miss",
+                "draft": None,
+            }
+        ],
+        "audit": [],
     }
 
 
@@ -459,7 +537,7 @@ def test_diagnosis_on_a_missing_database_reads_empty_without_creating_it(
 
     body = evolution_client.get(f"{PREFIX}/clusters/3/diagnosis", headers=admin_headers).json()
 
-    assert body == {"cluster_id": 3, "draft": None, "audit": []}
+    assert body == {"cluster_id": 3, "cluster_draft": None, "member_drafts": [], "audit": []}
     assert not db_file.exists()
 
 

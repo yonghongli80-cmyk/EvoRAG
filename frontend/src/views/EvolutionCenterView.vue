@@ -405,36 +405,89 @@ onMounted(async () => {
       <div v-if="selectedCluster" class="cluster-detail" data-test="diagnosis-panel">
         <h3 class="panel-title">诊断草案 #{{ selectedCluster.id }}</h3>
         <p v-if="diagnosisLoading" class="muted">加载诊断草案…</p>
-        <template v-else-if="diagnosis?.draft">
-          <div class="draft-head">
-            <span
-              class="badge"
-              :class="{ 'badge-warn': !diagnosis.draft.reproducible }"
-              data-test="draft-reproducible"
-            >
-              {{ diagnosis.draft.reproducible ? '可复现' : '不可复现' }}
-            </span>
-            <span class="cluster-meta">
-              置信度 {{ diagnosis.draft.payload.confidence }} · 提示词版本
-              {{ diagnosis.draft.prompt_version || '—' }} · 模型 {{ diagnosis.draft.model || '—' }}
-            </span>
+        <template v-else-if="diagnosis">
+          <div v-if="diagnosis.cluster_draft" class="draft-block" data-test="cluster-draft">
+            <p class="block-caption">聚类级遗留草案（第 3 阶段按聚类生成，仅供对照）</p>
+            <div class="draft-head">
+              <span
+                class="badge"
+                :class="{ 'badge-warn': !diagnosis.cluster_draft.reproducible }"
+                data-test="cluster-draft-reproducible"
+              >
+                {{ diagnosis.cluster_draft.reproducible ? '可复现' : '不可复现' }}
+              </span>
+              <span class="cluster-meta">
+                置信度 {{ diagnosis.cluster_draft.payload.confidence }} · 提示词版本
+                {{ diagnosis.cluster_draft.prompt_version || '—' }} · 模型 {{ diagnosis.cluster_draft.model || '—' }}
+              </span>
+            </div>
+            <dl class="draft-grid">
+              <template v-for="field in DRAFT_FIELDS" :key="field">
+                <dt>{{ DRAFT_FIELD_LABELS[field] }}</dt>
+                <dd :data-test="`cluster-draft-field-${field}`">{{ diagnosis.cluster_draft.payload[field] }}</dd>
+              </template>
+            </dl>
+            <p class="draft-refs">
+              <span>证据引用（块哈希）：</span>
+              <span
+                v-for="hash in diagnosis.cluster_draft.payload.evidence_refs"
+                :key="hash"
+                class="hash"
+                data-test="cluster-draft-evidence-ref"
+              >{{ shortHash(hash) }}</span>
+              <span v-if="diagnosis.cluster_draft.payload.evidence_refs.length === 0">无</span>
+            </p>
           </div>
-          <dl class="draft-grid">
-            <template v-for="field in DRAFT_FIELDS" :key="field">
-              <dt>{{ DRAFT_FIELD_LABELS[field] }}</dt>
-              <dd :data-test="`draft-${field}`">{{ diagnosis.draft.payload[field] }}</dd>
+
+          <div
+            v-for="member in diagnosis.member_drafts"
+            :key="member.observation_id"
+            class="draft-block"
+            data-test="member-draft"
+          >
+            <p class="member-question" data-test="member-draft-question">
+              #{{ member.observation_id }} · {{ member.question }}
+              <span class="cluster-meta"> · {{ stageLabel(member.stage) }} · {{ member.root_cause_feature || '未判定' }}</span>
+            </p>
+            <template v-if="member.draft">
+              <div class="draft-head">
+                <span
+                  class="badge"
+                  :class="{ 'badge-warn': !member.draft.reproducible }"
+                  data-test="member-draft-reproducible"
+                >
+                  {{ member.draft.reproducible ? '可复现' : '不可复现' }}
+                </span>
+                <span class="cluster-meta">
+                  置信度 {{ member.draft.payload.confidence }} · 提示词版本
+                  {{ member.draft.prompt_version || '—' }} · 模型 {{ member.draft.model || '—' }}
+                </span>
+              </div>
+              <dl class="draft-grid">
+                <template v-for="field in DRAFT_FIELDS" :key="field">
+                  <dt>{{ DRAFT_FIELD_LABELS[field] }}</dt>
+                  <dd :data-test="`member-draft-field-${field}`">{{ member.draft.payload[field] }}</dd>
+                </template>
+              </dl>
+              <p class="draft-refs">
+                <span>证据引用（块哈希）：</span>
+                <span
+                  v-for="hash in member.draft.payload.evidence_refs"
+                  :key="hash"
+                  class="hash"
+                  data-test="member-draft-evidence-ref"
+                >{{ shortHash(hash) }}</span>
+                <span v-if="member.draft.payload.evidence_refs.length === 0">无</span>
+              </p>
             </template>
-          </dl>
-          <p class="draft-refs">
-            <span>证据引用（块哈希）：</span>
-            <span
-              v-for="hash in diagnosis.draft.payload.evidence_refs"
-              :key="hash"
-              class="hash"
-              data-test="evidence-ref"
-            >{{ shortHash(hash) }}</span>
-            <span v-if="diagnosis.draft.payload.evidence_refs.length === 0">无</span>
-          </p>
+            <p v-else class="muted member-draft-empty" data-test="member-draft-empty">暂无草案</p>
+          </div>
+
+          <p
+            v-if="!diagnosis.cluster_draft && diagnosis.member_drafts.length === 0"
+            class="muted"
+            data-test="diagnosis-empty"
+          >暂无草案</p>
         </template>
         <p v-else class="muted" data-test="diagnosis-empty">暂无草案</p>
 
@@ -709,6 +762,12 @@ tbody tr:hover { background: #f8fbff; }
 .draft-grid dd { margin: 0; color: var(--color-foreground); font-size: var(--text-sm); white-space: pre-wrap; word-break: break-word; }
 
 .draft-refs { margin: var(--space-3) 0 0; color: var(--color-secondary); font-size: var(--text-xs); }
+
+.draft-block { padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border); }
+.draft-block:last-of-type { border-bottom: none; }
+.member-question { margin: 0 0 var(--space-2); color: var(--color-foreground); font-size: var(--text-sm); font-weight: var(--font-medium); }
+.block-caption { margin: 0 0 var(--space-2); color: var(--color-secondary); font-size: var(--text-xs); }
+.member-draft-empty { margin: 0; }
 
 .audit-list { list-style: none; margin: 0; padding-left: 0; }
 .audit-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); }

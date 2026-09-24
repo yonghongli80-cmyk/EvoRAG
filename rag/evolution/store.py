@@ -119,11 +119,16 @@ CREATE TABLE IF NOT EXISTS evolution_skip_log (
 # The draft payload is the frozen Pydantic draft serialized as JSON: the admin
 # reads the model output verbatim, and a prompt-version bump keeps old drafts
 # queryable. ``reproducible`` is duplicated out of the payload so the worker can
-# filter on it without parsing JSON.
+# filter on it without parsing JSON. ``observation_id`` scopes a draft to one
+# member observation; NULL is the legacy cluster-level draft the mixed-key
+# clustering produced before phase 4 (``docs/evolution-diagnosis.md`` §5). The
+# cluster_id stays NOT NULL on member drafts because a decision still covers the
+# whole cluster, so both draft levels remain joinable to their cluster.
 _DIAGNOSIS_DRAFTS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS diagnosis_drafts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cluster_id INTEGER NOT NULL,
+    observation_id INTEGER,
     payload JSON NOT NULL,
     prompt_version TEXT NOT NULL,
     model TEXT,
@@ -182,6 +187,18 @@ class FailureTraceStore:
             self._conn.execute(_SKIP_LOG_TABLE_SQL)
             self._conn.execute(_DIAGNOSIS_DRAFTS_TABLE_SQL)
             self._conn.execute(_EVOLUTION_AUDIT_TABLE_SQL)
+            # Phase-4 migration: a database written before drafts became
+            # member-level has a ``diagnosis_drafts`` table without the nullable
+            # ``observation_id`` column. Add it in place so the stored cluster-level
+            # drafts survive untouched (their observation_id reads back as NULL);
+            # dropping and recreating would delete admin-reviewed history.
+            draft_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(diagnosis_drafts)")
+            }
+            if "observation_id" not in draft_columns:
+                self._conn.execute(
+                    "ALTER TABLE diagnosis_drafts ADD COLUMN observation_id INTEGER"
+                )
             # Membership lookups and the in-window member count both filter on cluster_id.
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_failure_observations_cluster "
@@ -192,6 +209,12 @@ class FailureTraceStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_diagnosis_drafts_cluster "
                 "ON diagnosis_drafts(cluster_id)"
+            )
+            # The member-level "awaiting diagnosis without a draft" scan tests each
+            # observation against the member drafts that point at it.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_diagnosis_drafts_observation "
+                "ON diagnosis_drafts(observation_id)"
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_evolution_audit_cluster "
@@ -534,15 +557,18 @@ class FailureTraceStore:
         cluster_id: int,
         draft: DiagnosisDraft,
         *,
+        observation_id: int | None = None,
         prompt_version: str = "",
         model: str = "",
     ) -> int:
         """Persist one diagnosis draft; returns the draft id.
 
         The payload is the frozen draft serialized verbatim, so the admin sees
-        exactly what the diagnoser produced. A draft never moves the state
-        machine on its own: it is evidence for a human decision, audited by
-        ``add_audit``.
+        exactly what the diagnoser produced. ``observation_id`` scopes the draft
+        to one member observation (phase 4); ``None`` writes the legacy
+        cluster-level shape and stays backward compatible with the phase-3
+        callers. A draft never moves the state machine on its own: it is evidence
+        for a human decision, audited by ``add_audit``.
         """
         with self._lock:
             cluster = self._conn.execute(
@@ -550,12 +576,19 @@ class FailureTraceStore:
             ).fetchone()
             if cluster is None:
                 raise KeyError("cluster not found")
+            if observation_id is not None:
+                observation = self._conn.execute(
+                    "SELECT id FROM failure_observations WHERE id = ?", (int(observation_id),)
+                ).fetchone()
+                if observation is None:
+                    raise KeyError("observation not found")
             cursor = self._conn.execute(
                 "INSERT INTO diagnosis_drafts "
-                "(cluster_id, payload, prompt_version, model, reproducible, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(cluster_id, observation_id, payload, prompt_version, model, reproducible, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(cluster_id),
+                    None if observation_id is None else int(observation_id),
                     json.dumps(draft.model_dump(mode="json"), ensure_ascii=False),
                     str(prompt_version),
                     str(model),
@@ -596,6 +629,12 @@ class FailureTraceStore:
         Feeds the worker's diagnosis round: a cluster that already has a draft
         is never re-drafted here, so repeated rounds stay inside the model-call
         budget.
+
+        Phase 4 keeps this cluster-level view for backward compatibility, but the
+        worker now drafts per member observation through
+        :meth:`observations_awaiting_diagnosis_without_draft`, because a
+        cluster-level draft cannot match the mixed root causes a cluster key
+        gathers (``docs/evolution-diagnosis.md`` §5).
         """
         with self._lock:
             rows = self._conn.execute(
@@ -606,6 +645,44 @@ class FailureTraceStore:
                 (EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value, int(limit)),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def observations_awaiting_diagnosis_without_draft(self, limit: int) -> list[dict]:
+        """Member observations that still owe a diagnosis, oldest first.
+
+        Returns one ``{"observation": row, "cluster": row}`` pairing per member
+        observation whose cluster is ``awaiting_diagnosis_review`` and which has
+        no member-level draft (``diagnosis_drafts.observation_id`` pointing at
+        it). A legacy cluster-level draft (``observation_id`` NULL) never blocks
+        a member draft, so databases migrated from phase 3 still get their
+        per-observation drafts. This drives the worker's phase-4 diagnosis step,
+        replacing the cluster-level scan (design sections 5/6: a failure
+        trajectory is the observation-level entity; the cluster is only the
+        admission grouping).
+        """
+        with self._lock:
+            observation_rows = self._conn.execute(
+                "SELECT o.* FROM failure_observations o "
+                "JOIN failure_clusters c ON c.id = o.cluster_id "
+                "WHERE c.status = ? "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM diagnosis_drafts d WHERE d.observation_id = o.id"
+                ") "
+                "ORDER BY o.id ASC LIMIT ?",
+                (EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value, int(limit)),
+            ).fetchall()
+            if not observation_rows:
+                return []
+            cluster_ids = sorted({row["cluster_id"] for row in observation_rows})
+            placeholders = ", ".join("?" for _ in cluster_ids)
+            cluster_rows = self._conn.execute(
+                f"SELECT * FROM failure_clusters WHERE id IN ({placeholders})",
+                tuple(cluster_ids),
+            ).fetchall()
+        clusters_by_id = {row["id"]: dict(row) for row in cluster_rows}
+        return [
+            {"observation": _decode_row(row), "cluster": clusters_by_id[row["cluster_id"]]}
+            for row in observation_rows
+        ]
 
     def add_audit(self, actor_id: str, action: str, cluster_id: int, note: str) -> int:
         """Append one admin decision to the audit trail; returns the row id.

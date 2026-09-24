@@ -1,12 +1,21 @@
-"""Deterministic-first evidence assembly for one candidate cluster.
+"""Deterministic-first evidence assembly for one member observation.
+
+Phase 4 revises the granularity (``docs/evolution-diagnosis.md`` §5): the
+clustering key (kb × stage × root-cause feature) gathers distinct root causes
+into one cluster, so a cluster-level single draft can never match a mixed label
+set — for example a ``kb_hr`` cluster that holds both "candidate squeezed out of
+the pool" and "no such document in the library". The pack therefore covers a
+single failure trajectory (design sections 5/6/9: a failure trajectory is the
+observation-level entity; the cluster is only the admission grouping), and the
+caller passes ``(observation, cluster)`` instead of a cluster row alone.
 
 The pack follows design section 6's evidence priority: admin-confirmed labels
 and other deterministic evidence first, same-KB success traces second,
 re-retrieved permission-filtered candidates third. Nothing here calls a model,
 opens a network connection, or reads credentials; the reproduction check is a
-pure comparison of chunk hashes between the failure time record and one
-re-retrieval per question sample. The injected ``retrieve`` callable is the
-caller's read-only ACL path (``RAGPipeline._retrieve_visible_candidates`` or an
+pure comparison of chunk hashes between the failure-time record and one
+re-retrieval per question. The injected ``retrieve`` callable is the caller's
+read-only ACL path (``RAGPipeline._retrieve_visible_candidates`` or an
 equivalent), so this module never widens visibility by itself.
 """
 
@@ -20,7 +29,6 @@ from rag.evolution.models import EvidencePack, ReproductionResult
 
 # Bounded, deterministic caps: the worker round stays predictable and the pack
 # stays small enough for one LLM prompt.
-_QUESTION_SAMPLES = 3
 _RECALL_CHUNKS = 24
 _SUCCESS_TRACES = 3
 _TRACE_SCAN_LIMIT = 50
@@ -71,54 +79,6 @@ def _hash_tuple(value) -> tuple[str, ...]:
         except ValueError:
             return ()
     return tuple(str(item) for item in value)
-
-
-def _question_samples(members: list[dict]) -> tuple[str, ...]:
-    """At most ``_QUESTION_SAMPLES`` distinct member questions, first-seen order.
-
-    Distinctness is computed on the normalized question so punctuation-only
-    variants of the same question never crowd out other samples.
-    """
-
-    samples: list[str] = []
-    seen: set[str] = set()
-    for member in members:
-        question = str(member.get("question") or "")
-        key = normalize_question(question)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        samples.append(question)
-        if len(samples) >= _QUESTION_SAMPLES:
-            break
-    return tuple(samples)
-
-
-def _member_questions(members: list[dict]) -> tuple[str, ...]:
-    """Every member question (not only the capped samples), first-seen order."""
-
-    questions: list[str] = []
-    seen: set[str] = set()
-    for member in members:
-        question = str(member.get("question") or "")
-        key = normalize_question(question)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        questions.append(question)
-    return tuple(questions)
-
-
-def _offered_hashes_by_question(members: list[dict]) -> dict[str, tuple[str, ...]]:
-    """Failed-time offered chunk hashes per normalized member question."""
-
-    offered: dict[str, tuple[str, ...]] = {}
-    for member in members:
-        key = normalize_question(str(member.get("question") or ""))
-        if not key:
-            continue
-        offered[key] = offered.get(key, ()) + _hash_tuple(member.get("details_chunk_hashes"))
-    return offered
 
 
 def _load_admin_labels(labels_path) -> tuple[dict, ...]:
@@ -267,6 +227,7 @@ def _reproduction(
 
 
 def assemble_evidence(
+    observation: dict,
     cluster: dict,
     *,
     store,
@@ -274,31 +235,41 @@ def assemble_evidence(
     labels_path=None,
     retrieve=None,
 ) -> EvidencePack:
-    """Assemble the deterministic-first evidence pack for one candidate cluster.
+    """Assemble the deterministic-first evidence pack for one member observation.
 
-    Members come from ``store.list_observations(cluster["id"])``; admin labels
-    are matched by normalized question from ``labels_path``; success traces are
-    read from the tracker (newest first, capped); ``retrieve`` is the injected
-    read-only ACL retrieval used once per question sample for the recall hashes
-    and the deterministic reproduction check. The pack never carries
-    credentials or unauthorized text.
+    ``observation`` is the stored failure-observation row; ``cluster`` is the
+    admitting cluster row, consulted only for the signals the observation does
+    not overwrite (its kb_id, and the failure stage / root-cause feature the
+    observation left empty). ``question_samples`` is exactly this observation's
+    question; ``failed_hashes`` are exactly its own offered chunk hashes (a
+    sibling member's root cause never leaks in); the admin labels matched by
+    normalized question, the same-KB success traces and the one re-retrieval
+    behind the deterministic reproduction check are all scoped to it. ``retrieve``
+    is the injected read-only ACL retrieval, used once for the recall hashes and
+    the reproduction verdict. ``store`` is kept for the documented caller wiring;
+    the observation and cluster rows are read directly, so no member lookup is
+    needed here. The pack never carries credentials or unauthorized text.
     """
 
-    members = store.list_observations(cluster["id"])
-    kb_id = str(cluster["kb_id"])
-    questions = _question_samples(members)
+    question = str(observation.get("question") or "")
+    questions = (question,) if question else ()
+    kb_id = str(observation.get("kb_id") or cluster.get("kb_id") or "")
     labels = _load_admin_labels(labels_path)
+
+    offered_key = normalize_question(question)
+    offered_by_question = (
+        {offered_key: _hash_tuple(observation.get("details_chunk_hashes"))} if offered_key else {}
+    )
+
     recall: set[str] = set()
     reproduction = _reproduction(
         questions=questions,
-        offered_by_question=_offered_hashes_by_question(members),
+        offered_by_question=offered_by_question,
         retrieve=retrieve,
         kb_id=kb_id,
         recall=recall,
     )
-    failed_hashes = {
-        chunk_hash for member in members for chunk_hash in _hash_tuple(member.get("details_chunk_hashes"))
-    }
+    failed_hashes = _hash_tuple(observation.get("details_chunk_hashes"))
     # The pack is prompt input for a reasoning model: every 64-character hash is a
     # token cost, so both lists are capped (sorted, so the cap is deterministic and
     # the reproduction check — which runs on the full sets — is unaffected).
@@ -306,10 +277,12 @@ def assemble_evidence(
         cluster_id=int(cluster["id"]),
         kb_id=kb_id,
         question_samples=questions,
-        failure_stage=str(cluster.get("failure_stage") or ""),
-        root_cause_feature=str(cluster.get("root_cause_feature") or ""),
+        failure_stage=str(observation.get("stage") or cluster.get("failure_stage") or ""),
+        root_cause_feature=str(
+            observation.get("root_cause_feature") or cluster.get("root_cause_feature") or ""
+        ),
         admin_labels=_matched_admin_labels(questions, labels),
-        success_traces=_success_traces(kb_id, _member_questions(members), tracker),
+        success_traces=_success_traces(kb_id, questions, tracker),
         recall_hashes=tuple(sorted(recall)[:_HASH_PROMPT_LIMIT]),
         failed_hashes=tuple(sorted(failed_hashes)[:_HASH_PROMPT_LIMIT]),
         reproduction=reproduction,

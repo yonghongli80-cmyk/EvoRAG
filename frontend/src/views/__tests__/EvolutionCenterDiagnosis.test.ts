@@ -53,7 +53,9 @@ const candidateCluster = {
   updated_at: 1_700_000_100
 }
 
-const draft = {
+// Phase-4 shape: a draft now belongs to one member observation, so the read-out
+// carries a legacy cluster-level draft (or null) plus one slot per member.
+const memberDraft = {
   id: 21,
   cluster_id: 7,
   prompt_version: 'diagnosis-v1',
@@ -76,9 +78,26 @@ const draft = {
   }
 }
 
+const memberWithDraft = {
+  observation_id: 1,
+  question: '年假额度剩几天',
+  stage: 'retrieval',
+  root_cause_feature: 'recall_miss',
+  draft: memberDraft
+}
+
+const memberWithoutDraft = {
+  observation_id: 2,
+  question: '报销流程是什么',
+  stage: 'retrieval',
+  root_cause_feature: 'recall_miss',
+  draft: null
+}
+
 const diagnosis = {
   cluster_id: 7,
-  draft,
+  cluster_draft: null,
+  member_drafts: [memberWithDraft, memberWithoutDraft],
   audit: [
     {
       id: 5,
@@ -104,7 +123,7 @@ const stateMachine = {
     { path: '/knowledge-operations/evolution/metrics', methods: ['GET'] },
     { path: '/knowledge-operations/evolution/clusters/{cluster_id}/decision', methods: ['POST'] }
   ],
-  note: '第 3 阶段诊断审核'
+  note: '第 4 阶段成员级诊断审核'
 }
 
 /** Route every GET the view issues on mount to a canned response. */
@@ -182,7 +201,7 @@ beforeEach(() => {
   mockRoutes()
 })
 
-describe('EvolutionCenterView diagnosis review', () => {
+describe('EvolutionCenterView member-draft review', () => {
   it('requests the diagnosis of the selected cluster', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -192,12 +211,17 @@ describe('EvolutionCenterView diagnosis review', () => {
     expect(wrapper.get('[data-test="cluster-detail"]').text()).toContain('awaiting_diagnosis_review')
   })
 
-  it('renders the nine draft fields, the reproduction flag and the audit list', async () => {
+  it('renders each member with its own draft (fields, flag) and the audit list', async () => {
     const wrapper = mountView()
     await flushPromises()
     await openClusterDetail(wrapper)
 
-    const panel = wrapper.get('[data-test="diagnosis-panel"]')
+    const members = wrapper.findAll('[data-test="member-draft"]')
+    expect(members).toHaveLength(2)
+
+    // The drafted member carries the admin-visible question and all nine fields.
+    const drafted = members[0]
+    expect(drafted.get('[data-test="member-draft-question"]').text()).toContain('年假额度剩几天')
     for (const field of [
       'recall_miss',
       '重检索未命中目标块',
@@ -208,26 +232,59 @@ describe('EvolutionCenterView diagnosis review', () => {
       '以原问题重检索并核对块哈希',
       '重检索命中 h1 且答案引用证据'
     ]) {
-      expect(panel.text()).toContain(field)
+      expect(drafted.text()).toContain(field)
     }
-    expect(panel.text()).toContain('可复现')
-    expect(panel.text()).toContain('low')
-    expect(panel.text()).toContain('diagnosis-v1')
-    expect(panel.text()).toContain('deepseek/deepseek-v4.1-flash')
+    expect(drafted.get('[data-test="member-draft-reproducible"]').text()).toContain('可复现')
+    expect(drafted.text()).toContain('low')
+    expect(drafted.text()).toContain('diagnosis-v1')
+    expect(drafted.text()).toContain('deepseek/deepseek-v4.1-flash')
+    expect(drafted.get('[data-test="member-draft-evidence-ref"]').text()).toContain('aaaa')
+
+    // The undrafted member keeps its question and shows the explicit empty state.
+    const undrafted = members[1]
+    expect(undrafted.get('[data-test="member-draft-question"]').text()).toContain('报销流程是什么')
+    expect(undrafted.get('[data-test="member-draft-empty"]').text()).toContain('暂无草案')
 
     const audit = wrapper.get('[data-test="diagnosis-audit"]')
     expect(audit.text()).toContain('needs_more_evidence')
     expect(audit.text()).toContain('缺少管理员确认标签')
-    expect(wrapper.get('[data-test="evidence-ref"]').text()).toContain('aaaa')
   })
 
-  it('shows an explicit empty state when the cluster has no draft', async () => {
-    mockRoutes({ diagnosis: { cluster_id: 7, draft: null, audit: [] } })
+  it('renders a legacy cluster-level draft alongside the member drafts', async () => {
+    mockRoutes({
+      diagnosis: {
+        cluster_id: 7,
+        cluster_draft: memberDraft,
+        member_drafts: [memberWithoutDraft],
+        audit: []
+      }
+    })
     const wrapper = mountView()
     await flushPromises()
     await openClusterDetail(wrapper)
 
-    expect(wrapper.get('[data-test="diagnosis-empty"]').text()).toContain('暂无草案')
+    const legacy = wrapper.get('[data-test="cluster-draft"]')
+    expect(legacy.text()).toContain('遗留草案')
+    expect(legacy.get('[data-test="cluster-draft-field-root_cause"]').text()).toContain(
+      '假设：切分把目标段落截断'
+    )
+    expect(wrapper.get('[data-test="member-draft-empty"]').text()).toContain('暂无草案')
+  })
+
+  it('shows an explicit empty state when no member has a draft', async () => {
+    mockRoutes({
+      diagnosis: {
+        cluster_id: 7,
+        cluster_draft: null,
+        member_drafts: [memberWithoutDraft],
+        audit: []
+      }
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    await openClusterDetail(wrapper)
+
+    expect(wrapper.get('[data-test="member-draft-empty"]').text()).toContain('暂无草案')
     expect(wrapper.findAll('[data-test="decision-approve"]')).toHaveLength(1)
   })
 

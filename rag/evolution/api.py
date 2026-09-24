@@ -309,18 +309,54 @@ def get_cluster(cluster_id: int, user: dict = Depends(_admin_user)) -> dict:
 
 @router.get("/clusters/{cluster_id}/diagnosis", summary="诊断草案与决策记录")
 def get_diagnosis(cluster_id: int, user: dict = Depends(_admin_user)) -> dict:
-    """The newest diagnosis draft of one cluster plus its audit trail.
+    """The cluster-level legacy draft, every member draft, and the audit trail.
 
-    A missing database or an unknown cluster reads as an empty diagnosis instead
-    of an error: a cluster with no draft yet is a normal state (the worker drafts
-    it on a later round), so the page renders "no draft" rather than a failure.
+    Phase 4 drafts one diagnosis per member observation, because a cluster key
+    mixes distinct root causes (``docs/evolution-diagnosis.md`` §5). The response
+    therefore reports ``cluster_draft`` (the newest legacy cluster-level draft,
+    or ``null``) plus ``member_drafts`` — one entry per member observation with
+    its question, stage, and root-cause feature, and its own draft or ``null``.
+
+    ``member_drafts`` carries each observation's question text. This is an
+    intentional boundary change: a diagnosis is meaningless without the question
+    an admin is judging a root cause for, and this endpoint is already
+    administrator-only (``require_admin``), so the question text is visible to
+    administrators and to no one else. A missing database or an unknown cluster
+    reads as an empty diagnosis instead of an error: a cluster whose members are
+    not yet drafted is a normal state (the worker drafts on a later round), so
+    the page renders "no draft" rather than a failure.
     """
     store = _open_store()
-    drafts = [] if store is None else store.list_drafts(cluster_id)
-    audit = [] if store is None else store.list_audit(cluster_id)
+    if store is None:
+        return {"cluster_id": cluster_id, "cluster_draft": None, "member_drafts": [], "audit": []}
+    drafts = store.list_drafts(cluster_id)  # newest first; carries observation_id
+    members = store.list_observations(cluster_id)  # oldest first
+    audit = store.list_audit(cluster_id)
+    # The legacy cluster-level draft (observation_id NULL) that predates phase 4;
+    # the newest such row is the one under review.
+    cluster_draft = next((row for row in drafts if row["observation_id"] is None), None)
+    # Newest member draft per observation (drafts are newest first, so the first
+    # occurrence wins).
+    member_draft_by_observation: dict[int, dict] = {}
+    for row in drafts:
+        observation_id = row["observation_id"]
+        if observation_id is not None and observation_id not in member_draft_by_observation:
+            member_draft_by_observation[observation_id] = row
     return {
         "cluster_id": cluster_id,
-        "draft": None if not drafts else _serialize_draft(drafts[0]),
+        "cluster_draft": None if cluster_draft is None else _serialize_draft(cluster_draft),
+        "member_drafts": [
+            {
+                "observation_id": member["id"],
+                "question": member["question"],
+                "stage": member["stage"],
+                "root_cause_feature": member["root_cause_feature"],
+                "draft": _serialize_draft(member_draft_by_observation[member["id"]])
+                if member["id"] in member_draft_by_observation
+                else None,
+            }
+            for member in members
+        ],
         "audit": [_serialize_audit(row) for row in audit],
     }
 
@@ -331,12 +367,15 @@ def submit_decision(
 ) -> dict:
     """Record one administrator decision and move the cluster through the machine.
 
-    The audit row is written before the transition runs, so no state change can
-    exist without a trace: an audit row without a state change is a visible
-    no-op, while the reverse would be an unaudited transition. Admission writes
-    go through ``store.promote_cluster``; this decision writes through
-    ``store.decide_cluster``, which applies the same transition table to a
-    cluster that already lives in the candidate pool.
+    The decision is still **cluster-level** (unchanged): a single
+    ``approve_for_candidate`` / ``reject`` / ``needs_more_evidence`` covers the
+    whole cluster and every member observation, even though phase 4 drafts a
+    diagnosis per member. The audit row is written before the transition runs,
+    so no state change can exist without a trace: an audit row without a state
+    change is a visible no-op, while the reverse would be an unaudited
+    transition. Admission writes go through ``store.promote_cluster``; this
+    decision writes through ``store.decide_cluster``, which applies the same
+    transition table to a cluster that already lives in the candidate pool.
     """
     target = DECISION_TARGETS.get(payload.action)
     if target is None:

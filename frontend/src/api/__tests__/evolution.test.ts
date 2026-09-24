@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  fetchDiagnosis,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
   fetchEvolutionObservations,
@@ -75,5 +76,18 @@ describe('fetchEvolutionStateMachine', () => {
     await fetchEvolutionStateMachine()
 
     expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/state-machine')
+  })
+})
+
+describe('fetchDiagnosis', () => {
+  it('requests the cluster diagnosis read-out', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: { cluster_id: 7, cluster_draft: null, member_drafts: [], audit: [] }
+    } as any)
+
+    const diagnosis = await fetchDiagnosis(7)
+
+    expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/clusters/7/diagnosis')
+    expect(diagnosis.member_drafts).toEqual([])
   })
 })
