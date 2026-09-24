@@ -1,5 +1,5 @@
-from rag.user_db import UserDB
 from rag.spreadsheets.catalog import build_authorized_catalog
+from rag.user_db import UserDB
 
 
 def test_lists_only_current_ready_spreadsheet_datasets(tmp_path):

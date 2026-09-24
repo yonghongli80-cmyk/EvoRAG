@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from rag.spreadsheets.catalog import CatalogColumn, CatalogDataset, CatalogSheet, SpreadsheetCatalog
+from rag.spreadsheets.catalog import SpreadsheetCatalog
 from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
 from rag.spreadsheets.planner import Clarification, PlanningResult, QueryIntent
 

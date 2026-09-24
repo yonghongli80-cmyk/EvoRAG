@@ -2,8 +2,12 @@ import pytest
 from pydantic import ValidationError
 
 from rag.spreadsheets.query import (
-    Metric, QueryScope, SortClause, StructuredQueryPlan,
-    execute_multi_dataset_query, execute_structured_query,
+    Metric,
+    QueryScope,
+    SortClause,
+    StructuredQueryPlan,
+    execute_multi_dataset_query,
+    execute_structured_query,
 )
 
 
