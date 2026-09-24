@@ -144,9 +144,88 @@ class DiagnosticDetail(BaseModel):
     non_evolvable_reason: NonEvolvableReason | None = None
 
 
+@dataclass(frozen=True)
+class ReproductionResult:
+    """Deterministic reproduction check: does the failure still happen the same way?"""
+
+    reproducible: bool
+    missing_hashes: tuple[str, ...] = ()
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class EvidencePack:
+    """Deterministic-first evidence for one candidate cluster.
+
+    Priority order follows design section 6: admin-confirmed labels and deterministic
+    evidence first, same-KB success traces second, re-retrieved permission-filtered
+    candidates third. The pack never carries credentials or unauthorized text.
+    """
+
+    cluster_id: int
+    kb_id: str
+    question_samples: tuple[str, ...]
+    failure_stage: str
+    root_cause_feature: str
+    admin_labels: tuple[dict, ...] = ()
+    success_traces: tuple[dict, ...] = ()
+    recall_hashes: tuple[str, ...] = ()
+    failed_hashes: tuple[str, ...] = ()
+    reproduction: ReproductionResult = ReproductionResult(reproducible=False)
+
+
+class DiagnosisDraft(BaseModel):
+    """One structured diagnosis draft; a draft is never a confirmed conclusion.
+
+    The nine fields mirror design section 6; ``confidence`` is ``low`` unless admin
+    labels or deterministic evidence back the root cause.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    failure_category: Literal[
+        "intent_route_error",
+        "rewrite_information_loss",
+        "recall_miss",
+        "ranking_error",
+        "chunking_structure_damage",
+        "tool_selection_error",
+        "structured_plan_error",
+        "generator_ignored_evidence",
+        "evidence_conflict_unrecognized",
+        "prompt_or_workflow_defect",
+        "code_defect",
+        "undetermined",
+    ]
+    stage: str
+    first_divergence: str
+    direct_evidence: str
+    root_cause: str
+    impact_scope: str
+    suggested_layer: Literal[
+        "prompt",
+        "retrieval_config",
+        "query_rewrite",
+        "field_mapping",
+        "chunking",
+        "reranking",
+        "parser",
+        "tool_workflow",
+        "code",
+        "none",
+    ]
+    reproduction_steps: str
+    acceptance_criteria: str
+    confidence: Literal["low", "medium", "high"]
+    reproducible: bool
+    evidence_refs: tuple[str, ...] = ()
+
+
 __all__ = [
     "EVOLUTION_TRANSITIONS",
+    "DiagnosisDraft",
     "DiagnosticDetail",
+    "EvidencePack",
     "EvolutionStatus",
     "FailureObservation",
     "FailureStage",
