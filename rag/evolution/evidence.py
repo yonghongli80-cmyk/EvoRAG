@@ -36,6 +36,10 @@ _ANSWER_PREVIEW_CHARS = 200
 # Hash lists are prompt input for a reasoning model: each 64-char hash costs
 # tokens, so the pack carries a deterministic prefix of each list.
 _HASH_PROMPT_LIMIT = 12
+# Chunk previews let the model judge "the answer is not in the retrieved text"
+# versus "the needed chunk was never retrieved" — hash-only evidence cannot.
+_PREVIEW_CHARS = 160
+_PREVIEW_LIMIT = 8
 
 # Evidence-priority annotations (design section 6) carried inside the pack so
 # the diagnoser ranks evidence without re-deriving the priority.
@@ -166,6 +170,7 @@ def _reproduction(
     retrieve,
     kb_id: str,
     recall: set[str],
+    previews: list[dict] | None = None,
 ) -> ReproductionResult:
     """Deterministic retrieval-level reproduction: no model, one re-retrieval per sample.
 
@@ -174,6 +179,11 @@ def _reproduction(
     ``missing_hashes``. A sample without failed hashes, or whose re-retrieval
     fails, cannot confirm reproduction and is treated as inconclusive, so only
     an all-clear verdict is ``reproducible=True``.
+
+    When ``previews`` is a list, each re-retrieved chunk contributes one bounded
+    preview (document, hash, leading text). The previews describe the *current*
+    retrieval result — for versioned corpora they are not the failure-time text,
+    and the diagnoser renders them under that label.
     """
 
     if retrieve is None:
@@ -192,8 +202,16 @@ def _reproduction(
             # simply cannot confirm reproduction (design section 9).
             failures += 1
             continue
+        for chunk in chunks[:_RECALL_CHUNKS]:
+            chunk_hash = _text_md5(_chunk_text(chunk))
+            recall.add(chunk_hash)
+            if previews is not None and len(previews) < _PREVIEW_LIMIT:
+                previews.append({
+                    "doc": getattr(chunk, "doc_name", ""),
+                    "hash": chunk_hash,
+                    "text": _chunk_text(chunk)[:_PREVIEW_CHARS],
+                })
         hashes = tuple(_text_md5(_chunk_text(chunk)) for chunk in chunks)
-        recall.update(hashes[:_RECALL_CHUNKS])
         offered = offered_by_question.get(normalize_question(question), ())
         if not offered:
             continue
@@ -262,12 +280,14 @@ def assemble_evidence(
     )
 
     recall: set[str] = set()
+    previews: list[dict] = []
     reproduction = _reproduction(
         questions=questions,
         offered_by_question=offered_by_question,
         retrieve=retrieve,
         kb_id=kb_id,
         recall=recall,
+        previews=previews,
     )
     failed_hashes = _hash_tuple(observation.get("details_chunk_hashes"))
     # The pack is prompt input for a reasoning model: every 64-character hash is a
@@ -285,6 +305,7 @@ def assemble_evidence(
         success_traces=_success_traces(kb_id, questions, tracker),
         recall_hashes=tuple(sorted(recall)[:_HASH_PROMPT_LIMIT]),
         failed_hashes=tuple(sorted(failed_hashes)[:_HASH_PROMPT_LIMIT]),
+        recall_previews=tuple(previews),
         reproduction=reproduction,
     )
 

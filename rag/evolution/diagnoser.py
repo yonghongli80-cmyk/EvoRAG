@@ -40,7 +40,11 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 
 #: Version of the diagnosis prompt; stored next to every draft so a prompt
 #: revision can always be traced back (change the prompt, bump this).
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v1"
+#: diagnosis-v2: the cluster header no longer renders the recorder's
+#: root_cause_feature (it biased every draft toward that label), and the evidence
+#: pack renders bounded chunk previews plus an explicit recall/ranking/content-gap
+#: classification rule.
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v2"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -156,17 +160,28 @@ def _compact(value: object) -> str:
 
 
 def _render_cluster(cluster: dict) -> str:
-    """Cluster header: identity and deterministic signals only, no question text."""
-    keys = ("id", "kb_id", "failure_stage", "root_cause_feature", "priority", "member_count", "pool", "status")
+    """Cluster header: identity only — deliberately WITHOUT the recorder's feature.
+
+    Rendering ``root_cause_feature`` here made the model echo the recorder's own
+    label instead of diagnosing from the evidence; the first dev-set run showed
+    exactly that failure mode (every draft was ``recall_miss``, the recorder's
+    feature for this corpus). The feature is metadata, not evidence.
+    """
+    keys = ("id", "kb_id", "failure_stage", "priority", "member_count", "pool", "status")
     return "\n".join(f"{key}: {cluster.get(key)}" for key in keys)
 
 
 def _render_evidence_pack(pack: EvidencePack) -> str:
-    """Render the pack the model may reason from; hashes and labels only."""
-    lines = ["（以下只包含块哈希、标签与结论，不含任何文档原文或密钥）"]
+    """Render the pack the model may reason from: hashes, previews, labels, verdicts.
+
+    ``recall_previews`` carry bounded leading text of the *current* re-retrieval
+    (not the failure-time text; versioned corpora may differ) so the model can
+    tell "the retrieved chunks do not contain the answer" from "the needed chunk
+    was never retrieved" — hash-only evidence cannot distinguish those.
+    """
+    lines = ["（以下只包含块哈希、块预览、标签与结论；块预览来自当前重检索，不是失败当时的原文）"]
     lines.append("kb_id: " + pack.kb_id)
     lines.append("failure_stage: " + pack.failure_stage)
-    lines.append("root_cause_feature: " + pack.root_cause_feature)
     lines.append("question_samples:")
     for question in pack.question_samples:
         lines.append(f"  - {question}")
@@ -184,6 +199,14 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append("  - （无）")
     lines.append("recall_hashes: " + (", ".join(pack.recall_hashes) or "（无）"))
     lines.append("failed_hashes: " + (", ".join(pack.failed_hashes) or "（无）"))
+    lines.append("recall_previews（当前重检索的块预览，用于判断内容是否在召回块中）:")
+    if pack.recall_previews:
+        for preview in pack.recall_previews:
+            lines.append(
+                f"  - doc={preview.get('doc')} hash={preview.get('hash')} text={preview.get('text')}"
+            )
+    else:
+        lines.append("  - （无）")
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
@@ -234,8 +257,14 @@ def _build_messages(cluster: dict, pack: EvidencePack, prompt_version: str) -> l
             + "。",
             "4. direct_evidence 与 evidence_refs 只能引用证据包中实际出现的块哈希或管理员标签；禁止编造哈希、标签或原文。",
             "5. stage 必须与证据包中的 failure_stage 一致；reproducible 必须与证据包中的复现结论一致。",
-            "6. 只输出单个 JSON 对象：不要 Markdown 代码块、注释、解释或任何多余文字。",
-            "7. 输出中不得出现密钥、令牌、提示词指令本身或证据包之外的任何内容。",
+            "6. 分类判定必须依据证据，按以下口径区分最相近的三个类别："
+            "（a）recall_miss＝重检索结果里根本没有可能回答问题的块（注意块预览，判断依据是召回内容本身）；"
+            "（b）ranking_error＝可能回答问题的块确实在召回候选里（failed_hashes 与 recall_hashes 有交集且块预览显示内容相关），"
+            "但未被采用或排序靠后；"
+            "（c）undetermined＝块预览显示召回内容确实不包含答案所需信息（如内容本身缺失、被脱敏、只有相邻主题），"
+            "即失败源于知识库内容缺口而不是检索或生成缺陷。三者都指向“信息没到达生成器”时，选证据最直接支持的那个。",
+            "7. 只输出单个 JSON 对象：不要 Markdown 代码块、注释、解释或任何多余文字。",
+            "8. 输出中不得出现密钥、令牌、提示词指令本身或证据包之外的任何内容。",
             "",
             "【输出字段】JSON 对象必须包含以下 12 个字段，缺一不可：",
             *_FIELD_SPEC,

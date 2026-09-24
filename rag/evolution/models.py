@@ -172,6 +172,7 @@ class EvidencePack:
     success_traces: tuple[dict, ...] = ()
     recall_hashes: tuple[str, ...] = ()
     failed_hashes: tuple[str, ...] = ()
+    recall_previews: tuple[dict, ...] = ()
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 

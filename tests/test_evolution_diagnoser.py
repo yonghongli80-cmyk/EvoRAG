@@ -113,7 +113,7 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     assert draft.suggested_layer == "retrieval_config"
     assert draft.evidence_refs == ("hash-a", "hash-c")
     # Prompt version is traceable on the instance and inside the request.
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v1"
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v2"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
