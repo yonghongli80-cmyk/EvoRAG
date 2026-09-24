@@ -4,6 +4,10 @@ The evolution database is separate from ``memory.db``/``users.db`` and holds onl
 hashes, scores, versions, and enums; it is shared by the API process and the
 background worker through one lock, in the same pattern as ``rag/user_db.py``.
 Deleting the file is the documented rollback, so no migration path is required.
+
+The diagnosis phase (phase 3) adds two more content-light tables: verbatim
+diagnosis drafts (JSON payload + prompt version + model) and the admin decision
+audit trail. Both live only in ``evolution.db`` and never carry credentials.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import time
 from config import settings
 from rag.evolution.models import (
     EVOLUTION_TRANSITIONS,
+    DiagnosisDraft,
     EvolutionStatus,
     FailureObservation,
     FailureStage,
@@ -46,6 +51,12 @@ _STAGE_IN = _sql_in("stage", _enum_values(FailureStage))
 _CLUSTER_STAGE_IN = _sql_in("failure_stage", _enum_values(FailureStage))
 _PRIORITY_IN = _sql_in("priority", ("normal", "high"))
 _REASON_IN = _sql_in("reason", _enum_values(NonEvolvableReason))
+
+# Design section 8: the three admin decisions that may ever be audited. They map
+# one-to-one onto the ``awaiting_diagnosis_review`` transitions in
+# ``EVOLUTION_TRANSITIONS``; anything else is rejected before the INSERT.
+_AUDIT_ACTIONS = ("approve_for_candidate", "reject", "needs_more_evidence")
+_AUDIT_ACTION_IN = _sql_in("action", _AUDIT_ACTIONS)
 
 _OBSERVATIONS_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS failure_observations (
@@ -105,6 +116,33 @@ CREATE TABLE IF NOT EXISTS evolution_skip_log (
 )
 """
 
+# The draft payload is the frozen Pydantic draft serialized as JSON: the admin
+# reads the model output verbatim, and a prompt-version bump keeps old drafts
+# queryable. ``reproducible`` is duplicated out of the payload so the worker can
+# filter on it without parsing JSON.
+_DIAGNOSIS_DRAFTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS diagnosis_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id INTEGER NOT NULL,
+    payload JSON NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model TEXT,
+    reproducible INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+)
+"""
+
+_EVOLUTION_AUDIT_TABLE_SQL = f"""
+CREATE TABLE IF NOT EXISTS evolution_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL {_AUDIT_ACTION_IN},
+    cluster_id INTEGER NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+)
+"""
+
 
 def _decode_row(row: sqlite3.Row) -> dict:
     decoded = dict(row)
@@ -112,6 +150,13 @@ def _decode_row(row: sqlite3.Row) -> dict:
         value = decoded.get(column)
         if isinstance(value, str):
             decoded[column] = json.loads(value)
+    return decoded
+
+
+def _decode_draft_row(row: sqlite3.Row) -> dict:
+    decoded = dict(row)
+    decoded["payload"] = json.loads(decoded["payload"])
+    decoded["reproducible"] = bool(decoded["reproducible"])
     return decoded
 
 
@@ -135,10 +180,22 @@ class FailureTraceStore:
             self._conn.execute(_OBSERVATIONS_TABLE_SQL)
             self._conn.execute(_CLUSTERS_TABLE_SQL)
             self._conn.execute(_SKIP_LOG_TABLE_SQL)
+            self._conn.execute(_DIAGNOSIS_DRAFTS_TABLE_SQL)
+            self._conn.execute(_EVOLUTION_AUDIT_TABLE_SQL)
             # Membership lookups and the in-window member count both filter on cluster_id.
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_failure_observations_cluster "
                 "ON failure_observations(cluster_id)"
+            )
+            # The worker's "awaiting and still undrafted" scan and the read-only
+            # diagnosis endpoint both filter drafts and audit rows on cluster_id.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_diagnosis_drafts_cluster "
+                "ON diagnosis_drafts(cluster_id)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_evolution_audit_cluster "
+                "ON evolution_audit(cluster_id)"
             )
             self._conn.commit()
 
@@ -414,6 +471,121 @@ class FailureTraceStore:
             )
             self._conn.commit()
             return int(cursor.rowcount)
+
+    # ------------------------------------------------------------------
+    # Diagnosis drafts and the admin audit trail (Task 1). Drafts are
+    # append-only history: a cluster may be re-drafted under a new prompt
+    # version, and the state machine still only moves through
+    # ``promote_cluster`` after an audited admin decision.
+    # ------------------------------------------------------------------
+
+    def add_draft(
+        self,
+        cluster_id: int,
+        draft: DiagnosisDraft,
+        *,
+        prompt_version: str = "",
+        model: str = "",
+    ) -> int:
+        """Persist one diagnosis draft; returns the draft id.
+
+        The payload is the frozen draft serialized verbatim, so the admin sees
+        exactly what the diagnoser produced. A draft never moves the state
+        machine on its own: it is evidence for a human decision, audited by
+        ``add_audit``.
+        """
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT id FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+            if cluster is None:
+                raise KeyError("cluster not found")
+            cursor = self._conn.execute(
+                "INSERT INTO diagnosis_drafts "
+                "(cluster_id, payload, prompt_version, model, reproducible, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    int(cluster_id),
+                    json.dumps(draft.model_dump(mode="json"), ensure_ascii=False),
+                    str(prompt_version),
+                    str(model),
+                    1 if draft.reproducible else 0,
+                    time.time(),
+                ),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_draft(self, draft_id: int) -> dict | None:
+        """One draft with its JSON payload decoded; ``None`` when the id is unknown."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM diagnosis_drafts WHERE id = ?", (int(draft_id),)
+            ).fetchone()
+        return None if row is None else _decode_draft_row(row)
+
+    def list_drafts(self, cluster_id: int | None = None) -> list[dict]:
+        """Drafts newest first, optionally filtered to one cluster.
+
+        The read-only endpoint reads ``list_drafts(cluster_id)[0]`` as the draft
+        under review; older drafts remain queryable as prompt-version history.
+        """
+        sql = "SELECT * FROM diagnosis_drafts"
+        params: tuple = ()
+        if cluster_id is not None:
+            sql += " WHERE cluster_id = ?"
+            params = (int(cluster_id),)
+        sql += " ORDER BY id DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_decode_draft_row(row) for row in rows]
+
+    def clusters_awaiting_diagnosis_without_draft(self, limit: int) -> list[dict]:
+        """Clusters awaiting diagnosis review with no draft yet, oldest first.
+
+        Feeds the worker's diagnosis round: a cluster that already has a draft
+        is never re-drafted here, so repeated rounds stay inside the model-call
+        budget.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM failure_clusters "
+                "WHERE status = ? "
+                "AND id NOT IN (SELECT cluster_id FROM diagnosis_drafts) "
+                "ORDER BY id ASC LIMIT ?",
+                (EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_audit(self, actor_id: str, action: str, cluster_id: int, note: str) -> int:
+        """Append one admin decision to the audit trail; returns the row id.
+
+        Only the three design section 8 actions are legal. An unknown action
+        raises ``ValueError`` and writes nothing; the CHECK constraint is the
+        second gate for any other writer.
+        """
+        if action not in _AUDIT_ACTIONS:
+            raise ValueError(f"invalid audit action: {action}")
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO evolution_audit (actor_id, action, cluster_id, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(actor_id), str(action), int(cluster_id), str(note), time.time()),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_audit(self, cluster_id: int | None = None) -> list[dict]:
+        """Audit rows in chronological order, optionally filtered to one cluster."""
+        sql = "SELECT * FROM evolution_audit"
+        params: tuple = ()
+        if cluster_id is not None:
+            sql += " WHERE cluster_id = ?"
+            params = (int(cluster_id),)
+        sql += " ORDER BY created_at ASC, id ASC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
 
     def close(self) -> None:
         self._conn.close()
