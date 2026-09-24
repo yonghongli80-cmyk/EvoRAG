@@ -66,6 +66,92 @@ export interface EvolutionStateMachine {
   note: string
 }
 
+/** The nine design-section-6 fields plus the confidence and reproduction signals. */
+export interface EvolutionDraftPayload {
+  failure_category: string
+  stage: string
+  first_divergence: string
+  direct_evidence: string
+  root_cause: string
+  impact_scope: string
+  suggested_layer: string
+  reproduction_steps: string
+  acceptance_criteria: string
+  confidence: string
+  reproducible: boolean
+  evidence_refs: string[]
+}
+
+/** One stored diagnosis draft as the API serializes it (administrator only). */
+export interface EvolutionDraft {
+  id: number
+  cluster_id: number
+  payload: EvolutionDraftPayload
+  prompt_version: string
+  model: string | null
+  reproducible: boolean
+  created_at: number
+}
+
+/** One row of the administrator decision trail. */
+export interface EvolutionAuditEntry {
+  id: number
+  actor_id: string
+  action: string
+  cluster_id: number
+  note: string
+  created_at: number
+}
+
+/** The diagnosis read-out for one cluster: newest draft plus its audit trail. */
+export interface EvolutionDiagnosis {
+  cluster_id: number
+  draft: EvolutionDraft | null
+  audit: EvolutionAuditEntry[]
+}
+
+/** The three administrator decisions of design section 8. */
+export type EvolutionDecisionAction =
+  | 'approve_for_candidate'
+  | 'reject'
+  | 'needs_more_evidence'
+
+/** One metric definition with the phase it becomes available in. */
+export interface EvolutionMetricDefinition {
+  definition: string
+  available_from_phase: number
+}
+
+/** The phase-2 observation metrics as ``GET /metrics`` serializes them. */
+export interface EvolutionMetrics {
+  window_days: number
+  counts: {
+    observations: number
+    observed: number
+    clustered: number
+    by_status: Record<string, number>
+    clusters: number
+    observation_queue: number
+    candidate_pool: number
+    skipped: number
+    skips_by_reason: Record<string, number>
+    funnel: {
+      observed: number
+      clustered: number
+      awaiting_diagnosis_review: number
+      skips: Record<string, number>
+    }
+  }
+  rates: {
+    problem_solve_rate: number | null
+    generalization_rate: number | null
+    wrong_answer_rate: number | null
+    refusal_accuracy_rate: number | null
+    avg_latency_ms: number | null
+  }
+  definitions: Record<string, EvolutionMetricDefinition>
+}
+
 export interface EvolutionQuery {
   status?: string
   pool?: string
@@ -115,5 +201,30 @@ export async function fetchEvolutionCluster(clusterId: number): Promise<Evolutio
 /** Return the read-only state-machine reference (administrator only). */
 export async function fetchEvolutionStateMachine(): Promise<EvolutionStateMachine> {
   const res = await api.get('/knowledge-operations/evolution/state-machine')
+  return res.data
+}
+
+/** Return the phase-2 observation metrics (administrator only). */
+export async function fetchEvolutionMetrics(): Promise<EvolutionMetrics> {
+  const res = await api.get('/knowledge-operations/evolution/metrics')
+  return res.data
+}
+
+/** Return the newest diagnosis draft and the audit trail of one cluster. */
+export async function fetchDiagnosis(clusterId: number): Promise<EvolutionDiagnosis> {
+  const res = await api.get(`/knowledge-operations/evolution/clusters/${clusterId}/diagnosis`)
+  return res.data
+}
+
+/** Submit one administrator decision and return the updated cluster. */
+export async function submitDecision(
+  clusterId: number,
+  action: EvolutionDecisionAction,
+  note: string
+): Promise<EvolutionCluster> {
+  const res = await api.post(`/knowledge-operations/evolution/clusters/${clusterId}/decision`, {
+    action,
+    note
+  })
   return res.data
 }

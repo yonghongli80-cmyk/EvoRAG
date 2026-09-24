@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
+  fetchDiagnosis,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
+  fetchEvolutionMetrics,
   fetchEvolutionObservations,
-  fetchEvolutionStateMachine
+  fetchEvolutionStateMachine,
+  submitDecision
 } from '../api/evolution'
 import type {
   EvolutionCluster,
+  EvolutionDecisionAction,
+  EvolutionDiagnosis,
   EvolutionEndpoint,
+  EvolutionMetrics,
   EvolutionObservation,
   EvolutionStateMachine
 } from '../api/evolution'
@@ -16,6 +22,31 @@ import type {
 type Tab = 'observations' | 'clusters' | 'metrics'
 
 const PAGE_SIZE = 20
+
+/** The nine design-section-6 text fields, in the order an administrator reads them. */
+const DRAFT_FIELDS = [
+  'failure_category',
+  'stage',
+  'first_divergence',
+  'direct_evidence',
+  'root_cause',
+  'impact_scope',
+  'suggested_layer',
+  'reproduction_steps',
+  'acceptance_criteria'
+] as const
+
+const DRAFT_FIELD_LABELS: Record<(typeof DRAFT_FIELDS)[number], string> = {
+  failure_category: '失败类别',
+  stage: '发生阶段',
+  first_divergence: '第一处实质偏离',
+  direct_evidence: '直接证据',
+  root_cause: '根因（假设级）',
+  impact_scope: '影响范围',
+  suggested_layer: '建议修改层级',
+  reproduction_steps: '复现方法',
+  acceptance_criteria: '验收标准'
+}
 
 const activeTab = ref<Tab>('observations')
 const observations = ref<EvolutionObservation[]>([])
@@ -30,6 +61,11 @@ const stateMachine = ref<EvolutionStateMachine | null>(null)
 const loading = ref(false)
 const error = ref('')
 const forbidden = ref(false)
+const diagnosis = ref<EvolutionDiagnosis | null>(null)
+const diagnosisLoading = ref(false)
+const decisionNote = ref('')
+const deciding = ref(false)
+const metrics = ref<EvolutionMetrics | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(observationsTotal.value / PAGE_SIZE)))
 const statusOptions = computed(() => stateMachine.value?.statuses ?? [])
@@ -113,11 +149,71 @@ async function loadStateMachine() {
   }
 }
 
+async function loadMetrics() {
+  try {
+    metrics.value = await fetchEvolutionMetrics()
+    error.value = ''
+  } catch (err) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = '无法加载观测指标'
+  }
+}
+
+function formatRate(rate: number | null): string {
+  return rate === null ? '样本不足' : `${(rate * 100).toFixed(1)}%`
+}
+
+function formatLatency(ms: number | null): string {
+  return ms === null ? '样本不足' : `${ms.toFixed(0)} ms`
+}
+
 async function openCluster(cluster: EvolutionCluster) {
   try {
     selectedCluster.value = await fetchEvolutionCluster(cluster.id)
   } catch {
     error.value = '无法加载聚类详情'
+    return
+  }
+  decisionNote.value = ''
+  await loadDiagnosis(cluster.id)
+}
+
+async function loadDiagnosis(clusterId: number) {
+  diagnosisLoading.value = true
+  try {
+    diagnosis.value = await fetchDiagnosis(clusterId)
+  } catch (err) {
+    diagnosis.value = null
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = '无法加载诊断草案'
+  } finally {
+    diagnosisLoading.value = false
+  }
+}
+
+async function decide(action: EvolutionDecisionAction) {
+  if (!selectedCluster.value || deciding.value) return
+  deciding.value = true
+  try {
+    const updated = await submitDecision(selectedCluster.value.id, action, decisionNote.value)
+    selectedCluster.value = updated
+    decisionNote.value = ''
+    error.value = ''
+    await loadDiagnosis(updated.id)
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '决策提交失败'
+  } finally {
+    deciding.value = false
   }
 }
 
@@ -136,6 +232,11 @@ function showClusters() {
   if (!clustersLoaded.value) void loadClusters()
 }
 
+function showMetrics() {
+  activeTab.value = 'metrics'
+  if (metrics.value === null) void loadMetrics()
+}
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -152,7 +253,7 @@ onMounted(async () => {
       <div>
         <span class="eyebrow">EVOLUTION CENTER</span>
         <h2>进化中心</h2>
-        <p>只读观测失败轨迹、聚类准入与状态机；第 2 阶段不生成候选、不改动在线链路。</p>
+        <p>只读观测失败轨迹、聚类准入与状态机；诊断草案仅供管理员确认根因，未确认前不生成候选、不改动在线链路。</p>
       </div>
       <div class="filters">
         <select v-model="statusFilter" aria-label="状态筛选" @change="applyFilters">
@@ -193,7 +294,7 @@ onMounted(async () => {
         class="tab"
         :class="{ active: activeTab === 'metrics' }"
         data-test="tab-metrics"
-        @click="activeTab = 'metrics'"
+        @click="showMetrics()"
       >
         指标看板
       </button>
@@ -301,6 +402,98 @@ onMounted(async () => {
         </table>
       </div>
 
+      <div v-if="selectedCluster" class="cluster-detail" data-test="diagnosis-panel">
+        <h3 class="panel-title">诊断草案 #{{ selectedCluster.id }}</h3>
+        <p v-if="diagnosisLoading" class="muted">加载诊断草案…</p>
+        <template v-else-if="diagnosis?.draft">
+          <div class="draft-head">
+            <span
+              class="badge"
+              :class="{ 'badge-warn': !diagnosis.draft.reproducible }"
+              data-test="draft-reproducible"
+            >
+              {{ diagnosis.draft.reproducible ? '可复现' : '不可复现' }}
+            </span>
+            <span class="cluster-meta">
+              置信度 {{ diagnosis.draft.payload.confidence }} · 提示词版本
+              {{ diagnosis.draft.prompt_version || '—' }} · 模型 {{ diagnosis.draft.model || '—' }}
+            </span>
+          </div>
+          <dl class="draft-grid">
+            <template v-for="field in DRAFT_FIELDS" :key="field">
+              <dt>{{ DRAFT_FIELD_LABELS[field] }}</dt>
+              <dd :data-test="`draft-${field}`">{{ diagnosis.draft.payload[field] }}</dd>
+            </template>
+          </dl>
+          <p class="draft-refs">
+            <span>证据引用（块哈希）：</span>
+            <span
+              v-for="hash in diagnosis.draft.payload.evidence_refs"
+              :key="hash"
+              class="hash"
+              data-test="evidence-ref"
+            >{{ shortHash(hash) }}</span>
+            <span v-if="diagnosis.draft.payload.evidence_refs.length === 0">无</span>
+          </p>
+        </template>
+        <p v-else class="muted" data-test="diagnosis-empty">暂无草案</p>
+
+        <h4 class="panel-subtitle">决策记录（管理员三动作全部留痕）</h4>
+        <ul
+          v-if="diagnosis && diagnosis.audit.length > 0"
+          class="audit-list"
+          data-test="diagnosis-audit"
+        >
+          <li v-for="row in diagnosis.audit" :key="row.id">
+            <span class="audit-action">{{ row.action }}</span>
+            <span class="cluster-meta">
+              {{ row.actor_id }} · {{ formatTime(row.created_at) }} · {{ row.note || '无备注' }}
+            </span>
+          </li>
+        </ul>
+        <p v-else class="muted">暂无决策记录</p>
+
+        <div class="decision-bar">
+          <textarea
+            v-model="decisionNote"
+            class="decision-note"
+            data-test="decision-note"
+            rows="2"
+            placeholder="备注：确认根因的依据、驳回理由或还缺的证据"
+            :disabled="deciding"
+          ></textarea>
+          <div class="decision-buttons">
+            <button
+              type="button"
+              class="query-button"
+              data-test="decision-approve"
+              :disabled="deciding"
+              @click="decide('approve_for_candidate')"
+            >
+              确认进入候选
+            </button>
+            <button
+              type="button"
+              class="decision-button"
+              data-test="decision-reject"
+              :disabled="deciding"
+              @click="decide('reject')"
+            >
+              拒绝
+            </button>
+            <button
+              type="button"
+              class="decision-button"
+              data-test="decision-needs-more-evidence"
+              :disabled="deciding"
+              @click="decide('needs_more_evidence')"
+            >
+              证据不足
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="state-machine" data-test="state-machine-legend">
         <h3 class="panel-title">状态机（设计第 7 节，只读）</h3>
         <p v-if="stateMachine?.note" class="note">{{ stateMachine.note }}</p>
@@ -309,7 +502,7 @@ onMounted(async () => {
             <code>{{ status }}</code> → <span>{{ targets.join('、') || '终态' }}</span>
           </li>
         </ul>
-        <h4 class="panel-subtitle">第 2 阶段只读端点</h4>
+        <h4 class="panel-subtitle">端点清单</h4>
         <ul class="endpoints" data-test="endpoint-inventory">
           <li v-for="endpoint in endpoints" :key="endpoint.path">
             <span class="method">{{ endpoint.methods.join('/') }}</span>
@@ -319,10 +512,58 @@ onMounted(async () => {
       </div>
     </div>
 
-    <div v-else class="tab-panel">
-      <div class="empty-state" data-test="metrics-placeholder">
-        <strong>指标看板待接入</strong>
-        <span>第 2 阶段只累积观测数据，最小指标集（问题解决率、错误答案率、拒答准确率等）将在下一任务随 /metrics 端点一起提供。</span>
+    <div v-else-if="activeTab === 'metrics'" class="tab-panel">
+      <div v-if="metrics" class="metrics" data-test="metrics-panel">
+        <div class="metrics-cards">
+          <div class="metric-card">
+            <span class="metric-label">观测窗口</span>
+            <strong data-test="metrics-window">{{ metrics.window_days }} 天</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">失败观测</span>
+            <strong data-test="metrics-observations">{{ metrics.counts.observations }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">聚类（候选池）</span>
+            <strong data-test="metrics-clusters">{{ metrics.counts.clusters }}（{{ metrics.counts.candidate_pool }}）</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">问题解决率</span>
+            <strong data-test="metrics-solve-rate">{{ formatRate(metrics.rates.problem_solve_rate) }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">同类问题泛化率</span>
+            <strong data-test="metrics-generalization-rate">{{ formatRate(metrics.rates.generalization_rate) }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">错误答案率</span>
+            <strong data-test="metrics-wrong-answer-rate">{{ formatRate(metrics.rates.wrong_answer_rate) }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">拒答准确率</span>
+            <strong data-test="metrics-refusal-rate">{{ formatRate(metrics.rates.refusal_accuracy_rate) }}</strong>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">平均耗时</span>
+            <strong data-test="metrics-latency">{{ formatLatency(metrics.rates.avg_latency_ms) }}</strong>
+          </div>
+        </div>
+        <table class="metrics-table" data-test="metrics-definitions">
+          <thead>
+            <tr><th>指标</th><th>口径</th><th>可用阶段</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(definition, name) in metrics.definitions" :key="name">
+              <td><code>{{ name }}</code></td>
+              <td>{{ definition.definition }}</td>
+              <td>第 {{ definition.available_from_phase }} 阶段</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else-if="!forbidden" class="empty-state" data-test="metrics-placeholder">
+        <strong>指标加载中或无观测数据</strong>
+        <span>第 2 阶段起持续累积观测；指标由存储信号确定性计算，样本不足时显示“样本不足”。</span>
       </div>
     </div>
   </section>
@@ -450,6 +691,53 @@ tbody tr:hover { background: #f8fbff; }
 .cluster-meta { font-size: var(--text-xs); color: var(--color-secondary); }
 
 .hash { display: inline-block; padding: 2px 6px; margin-right: var(--space-1); border-radius: var(--radius); background: var(--color-surface-2); font-family: ui-monospace, monospace; font-size: var(--text-xs); }
+
+.draft-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-bottom: var(--space-3); }
+.badge {
+  padding: 2px var(--space-3);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius);
+  color: var(--color-primary);
+  background: var(--color-surface-2);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+}
+.badge-warn { color: var(--color-destructive); border-color: #fecaca; background: var(--color-destructive-light); }
+
+.draft-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0; }
+.draft-grid dt { color: var(--color-secondary); font-size: var(--text-xs); }
+.draft-grid dd { margin: 0; color: var(--color-foreground); font-size: var(--text-sm); white-space: pre-wrap; word-break: break-word; }
+
+.draft-refs { margin: var(--space-3) 0 0; color: var(--color-secondary); font-size: var(--text-xs); }
+
+.audit-list { list-style: none; margin: 0; padding-left: 0; }
+.audit-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); }
+.audit-action { color: var(--color-primary); font-family: ui-monospace, monospace; font-size: var(--text-xs); font-weight: var(--font-semibold); }
+
+.decision-bar { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--color-border); }
+.decision-note {
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-foreground);
+  background: var(--color-surface);
+  font: inherit;
+  font-size: var(--text-sm);
+  box-sizing: border-box;
+  resize: vertical;
+}
+.decision-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.decision-buttons button { min-height: 34px; padding: 0 var(--space-4); font-size: var(--text-xs); }
+.decision-buttons button:disabled { cursor: not-allowed; opacity: .5; }
+.decision-button {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-foreground);
+  background: var(--color-surface-2);
+  font: inherit;
+  cursor: pointer;
+}
 
 .state-machine ul { margin: 0; padding-left: var(--space-5); color: var(--color-foreground); font-size: var(--text-sm); }
 .state-machine li { margin-bottom: var(--space-1); }

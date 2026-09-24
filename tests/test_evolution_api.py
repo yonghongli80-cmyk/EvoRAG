@@ -1,11 +1,13 @@
-"""Task 4: read-only evolution observation API.
+"""Evolution observation API: phase-2 reads plus phase-3 admin decisions.
 
-The phase-2 API surface is administrator-only and read-only: four GET endpoints
+The phase-2 surface is administrator-only and read-only: four GET endpoints
 under ``/knowledge-operations/evolution`` and nothing that can move an
-observation or a cluster through the state machine. The tests mount the router
-on a private app (``rag.api`` mounts it once in production) and assert the
+observation or a cluster through the state machine. Phase 3 (Task 5) adds the
+first writes — the diagnosis draft read-out and the three audited admin
+decisions — both still administrator-only. The tests mount the router on a
+private app (``rag.api`` mounts it once in production) and assert the
 authorization boundary, the pagination shape, and that serialization carries
-stored signals only — never question text or chunk text.
+stored signals only, never question text, chunk text, or credentials.
 """
 
 from __future__ import annotations
@@ -18,7 +20,13 @@ from fastapi.testclient import TestClient
 
 from rag.auth import create_token
 from rag.evolution import api as evolution_api
-from rag.evolution.models import FailureObservation
+from rag.evolution.models import (
+    EVOLUTION_TRANSITIONS,
+    DiagnosisDraft,
+    EvolutionStatus,
+    FailureObservation,
+    ObservationPool,
+)
 from rag.evolution.store import FailureTraceStore
 from rag.user_db import UserDB
 
@@ -156,7 +164,11 @@ def test_state_machine_matches_design_section_seven(evolution_client, admin_head
     assert body["transitions"]["canary"] == [
         "stable", "rolled_back", "rejected", "blocked", "needs_more_evidence",
     ]
-    assert "POST" not in {m for path in body["endpoints"] for m in path["methods"]}
+    # Phase 3 adds exactly one state-changing method: the audited decision endpoint.
+    write_paths = {
+        path["path"] for path in body["endpoints"] if "POST" in path["methods"]
+    }
+    assert write_paths == {f"{PREFIX}/clusters/{{cluster_id}}/decision"}
     assert body["transitions"] == {
         status: list(targets) for status, targets in evolution_api.EVOLUTION_TRANSITIONS.items()
     }
@@ -287,3 +299,351 @@ def test_metrics_reports_phase_two_payload_without_text(
     assert "chunk-secret-text" not in evolution_client.get(
         f"{PREFIX}/metrics", headers=admin_headers
     ).text
+
+
+# ------------------------------------------------------------------
+# Task 5: the diagnosis read-out and the three audited admin decisions.
+#
+# A draft is the verbatim diagnoser output — permission-filtered evidence text
+# an administrator reviews before confirming a root cause. It is stored JSON,
+# so the assertions check both its field set and that no credential-shaped
+# value survives serialization.
+# ------------------------------------------------------------------
+
+DIAGNOSIS_SECRET = "sk-evolution-diagnosis-sentinel"
+
+# The frozen draft contract: nine design-section-6 fields plus the confidence
+# and reproduction metadata the worker filters on.
+DIAGNOSIS_PAYLOAD_FIELDS = {
+    "failure_category", "stage", "first_divergence", "direct_evidence", "root_cause",
+    "impact_scope", "suggested_layer", "reproduction_steps", "acceptance_criteria",
+    "confidence", "reproducible", "evidence_refs",
+}
+
+
+def sample_draft(**kw) -> DiagnosisDraft:
+    """A minimal valid draft; every design-section-6 field is required."""
+    base = dict(
+        failure_category="recall_miss",
+        stage="retrieval",
+        first_divergence="重检索未命中目标块",
+        direct_evidence="失败与重检索的块哈希集合均缺少 h1",
+        root_cause="假设：切分把目标段落截断",
+        impact_scope="kb1 内年假类问题",
+        suggested_layer="chunking",
+        reproduction_steps="以原问题重检索并核对块哈希",
+        acceptance_criteria="重检索命中 h1 且答案引用证据",
+        confidence="low",
+        reproducible=True,
+        evidence_refs=("a" * 64,),
+    )
+    base.update(kw)
+    return DiagnosisDraft(**base)
+
+
+def _store() -> FailureTraceStore:
+    """A separate writer handle on the test database (the API keeps its own)."""
+    from config import settings
+
+    return FailureTraceStore(settings.evolution_db_path)
+
+
+def _user_id(db: UserDB, username: str) -> int:
+    row = db.get_user_by_username(username)
+    assert row is not None
+    return int(row["id"])
+
+
+@pytest.fixture
+def store_with_drafts(store_with_cluster) -> dict:
+    """Two drafts for the reviewed cluster plus an audit row of another cluster."""
+    cluster_id = store_with_cluster["cluster_id"]
+    store = _store()
+    first = store.add_draft(
+        cluster_id, sample_draft(root_cause="第一轮：假设切分截断"),
+        prompt_version="diagnosis-v1", model="deepseek/deepseek-v4.1-flash",
+    )
+    second = store.add_draft(
+        cluster_id,
+        sample_draft(root_cause="第二轮：假设切分截断", confidence="medium"),
+        prompt_version="diagnosis-v2", model="deepseek/deepseek-v4.1-flash",
+    )
+    store.add_audit("admin-9", "reject", 999, "不属于这条聚类的备注")
+    store.close()
+    return {"cluster_id": cluster_id, "draft_ids": (first, second)}
+
+
+def test_diagnosis_endpoints_are_admin_only(evolution_client, user_headers, admin_headers):
+    diagnosis = f"{PREFIX}/clusters/1/diagnosis"
+    decision = f"{PREFIX}/clusters/1/decision"
+    assert evolution_client.get(diagnosis, headers=user_headers).status_code == 403
+    assert evolution_client.post(
+        decision, json={"action": "reject", "note": ""}, headers=user_headers
+    ).status_code == 403
+    assert evolution_client.get(diagnosis, headers=admin_headers).status_code == 200
+
+
+def test_diagnosis_endpoints_require_authentication(evolution_client):
+    assert evolution_client.get(f"{PREFIX}/clusters/1/diagnosis").status_code == 401
+    assert evolution_client.post(
+        f"{PREFIX}/clusters/1/decision", json={"action": "reject", "note": ""}
+    ).status_code == 401
+
+
+def test_diagnosis_returns_the_newest_draft_and_the_cluster_audit(
+    evolution_client, admin_headers, store_with_drafts
+):
+    cluster_id = store_with_drafts["cluster_id"]
+    store = _store()
+    store.add_audit("admin-7", "needs_more_evidence", cluster_id, "缺少管理员确认标签")
+    store.close()
+
+    body = evolution_client.get(
+        f"{PREFIX}/clusters/{cluster_id}/diagnosis", headers=admin_headers
+    ).json()
+
+    assert body["cluster_id"] == cluster_id
+    assert body["draft"]["id"] == store_with_drafts["draft_ids"][1]
+    assert body["draft"]["prompt_version"] == "diagnosis-v2"
+    assert body["draft"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert body["draft"]["reproducible"] is True
+    assert set(body["draft"]) == {
+        "id", "cluster_id", "payload", "prompt_version", "model", "reproducible", "created_at",
+    }
+    assert body["draft"]["payload"]["root_cause"] == "第二轮：假设切分截断"
+    assert set(body["draft"]["payload"]) == DIAGNOSIS_PAYLOAD_FIELDS
+    assert body["draft"]["payload"]["evidence_refs"] == ["a" * 64]
+    assert [(row["actor_id"], row["action"], row["note"]) for row in body["audit"]] == [
+        ("admin-7", "needs_more_evidence", "缺少管理员确认标签"),
+    ]
+    assert "admin-9" not in evolution_client.get(
+        f"{PREFIX}/clusters/{cluster_id}/diagnosis", headers=admin_headers
+    ).text
+
+
+def test_diagnosis_audit_is_chronological_and_cluster_scoped(
+    evolution_client, admin_headers, store_with_drafts
+):
+    cluster_id = store_with_drafts["cluster_id"]
+    store = _store()
+    first = store.add_audit("admin-7", "needs_more_evidence", cluster_id, "第一轮证据不足")
+    second = store.add_audit("admin-7", "approve_for_candidate", cluster_id, "根因已确认")
+    store.close()
+
+    rows = evolution_client.get(
+        f"{PREFIX}/clusters/{cluster_id}/diagnosis", headers=admin_headers
+    ).json()["audit"]
+
+    assert [row["id"] for row in rows] == [first, second]
+    assert [row["action"] for row in rows] == ["needs_more_evidence", "approve_for_candidate"]
+    assert set(rows[0]) == {"id", "actor_id", "action", "cluster_id", "note", "created_at"}
+
+
+def test_diagnosis_without_a_draft_reads_empty(
+    evolution_client, admin_headers, store_with_cluster
+):
+    body = evolution_client.get(
+        f"{PREFIX}/clusters/{store_with_cluster['cluster_id']}/diagnosis", headers=admin_headers
+    ).json()
+
+    assert body == {
+        "cluster_id": store_with_cluster["cluster_id"], "draft": None, "audit": [],
+    }
+
+
+def test_diagnosis_on_a_missing_database_reads_empty_without_creating_it(
+    evolution_client, admin_headers, tmp_path
+):
+    db_file = tmp_path / "evolution.db"
+    assert not db_file.exists()
+
+    body = evolution_client.get(f"{PREFIX}/clusters/3/diagnosis", headers=admin_headers).json()
+
+    assert body == {"cluster_id": 3, "draft": None, "audit": []}
+    assert not db_file.exists()
+
+
+def test_diagnosis_payload_never_carries_credentials(
+    evolution_client, admin_headers, store_with_drafts, monkeypatch
+):
+    from config import settings
+
+    monkeypatch.setattr(settings, "deepseek_api_key", DIAGNOSIS_SECRET)
+    body = evolution_client.get(
+        f"{PREFIX}/clusters/{store_with_drafts['cluster_id']}/diagnosis", headers=admin_headers
+    ).text
+
+    assert DIAGNOSIS_SECRET not in body
+    assert "RAG_" not in body
+
+
+def test_serialize_draft_redacts_secret_shaped_payload_keys():
+    payload = sample_draft().model_dump(mode="json")
+    payload["connection_string"] = "Server=db;Password=hunter2"
+    payload["nested"] = [{"api_key": "sk-should-never-leave"}]
+
+    serialized = evolution_api._serialize_draft({
+        "id": 1,
+        "cluster_id": 2,
+        "prompt_version": "diagnosis-v1",
+        "model": "deepseek/deepseek-v4.1-flash",
+        "reproducible": True,
+        "created_at": 1.0,
+        "payload": payload,
+    })
+
+    assert serialized["payload"]["connection_string"] == "[REDACTED]"
+    assert serialized["payload"]["nested"][0]["api_key"] == "[REDACTED]"
+    assert serialized["payload"]["root_cause"] == payload["root_cause"]
+    assert set(serialized["payload"]) == DIAGNOSIS_PAYLOAD_FIELDS | {"connection_string", "nested"}
+
+
+def test_decision_rejects_an_unknown_action(evolution_client, admin_headers, store_with_cluster):
+    cluster_id = store_with_cluster["cluster_id"]
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "approve", "note": "拼写错误"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 400
+    assert _store().list_audit(cluster_id) == []
+
+
+def test_decision_on_an_unknown_cluster_is_not_found(
+    evolution_client, admin_headers, store_with_observation
+):
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/999/decision",
+        json={"action": "reject", "note": "聚类不存在"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 404
+    assert _store().list_audit(999) == []
+
+
+def test_decision_on_a_missing_database_is_not_found_without_creating_it(
+    evolution_client, admin_headers, tmp_path
+):
+    db_file = tmp_path / "evolution.db"
+    assert not db_file.exists()
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/1/decision",
+        json={"action": "reject", "note": ""},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 404
+    assert not db_file.exists()
+
+
+def test_decision_outside_diagnosis_review_is_a_conflict_without_audit(
+    evolution_client, admin_headers, store_with_observation
+):
+    store = _store()
+    cluster = store.upsert_cluster(
+        cluster_key="kb1|retrieval|recall_miss",
+        kb_id="kb1",
+        failure_stage="retrieval",
+        root_cause_feature="recall_miss",
+        seen_at=time.time(),
+    )
+    store.close()
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster['id']}/decision",
+        json={"action": "reject", "note": "尚未进入诊断审核"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 409
+    assert _store().list_audit(cluster["id"]) == []
+
+
+def test_decision_targets_map_every_action_onto_legal_transitions():
+    targets = evolution_api.DECISION_TARGETS
+
+    assert set(targets) == {"approve_for_candidate", "reject", "needs_more_evidence"}
+    for action, target in targets.items():
+        assert target["new_status"] in EVOLUTION_TRANSITIONS[
+            EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value
+        ], action
+        assert target["member_status"] in EVOLUTION_TRANSITIONS[
+            EvolutionStatus.CLUSTERED.value
+        ], action
+        assert target["pool"] in tuple(pool.value for pool in ObservationPool), action
+
+
+def test_an_accepted_decision_writes_an_audit_row_and_advances_the_cluster(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """The audit row precedes the transition, so the decision stays traceable."""
+    cluster_id = store_with_cluster["cluster_id"]
+    admin_id = _user_id(evolution_client.app.state.user_db, "admin")
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "approve_for_candidate", "note": "根因已确认"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved_for_candidate"
+    rows = _store().list_audit(cluster_id)
+    assert [(row["actor_id"], row["action"], row["note"]) for row in rows] == [
+        (str(admin_id), "approve_for_candidate", "根因已确认"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "action,expected_status,expected_member_status",
+    [
+        ("approve_for_candidate", "approved_for_candidate", "awaiting_diagnosis_review"),
+        ("reject", "rejected", "rejected"),
+        ("needs_more_evidence", "needs_more_evidence", "needs_more_evidence"),
+    ],
+)
+def test_admin_decision_advances_the_cluster_and_is_audited(
+    evolution_client,
+    admin_headers,
+    store_with_cluster,
+    action,
+    expected_status,
+    expected_member_status,
+):
+    cluster_id = store_with_cluster["cluster_id"]
+    admin_id = _user_id(evolution_client.app.state.user_db, "admin")
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": action, "note": f"{action} 备注"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == cluster_id
+    assert body["status"] == expected_status
+    assert body["pool"] == "candidate_pool"
+    assert [member["status"] for member in body["members"]] == [expected_member_status]
+    rows = _store().list_audit(cluster_id)
+    assert [(row["actor_id"], row["action"], row["note"]) for row in rows] == [
+        (str(admin_id), action, f"{action} 备注"),
+    ]
+
+
+def test_a_second_decision_is_a_conflict_and_writes_no_second_audit_row(
+    evolution_client, admin_headers, store_with_cluster
+):
+    cluster_id = store_with_cluster["cluster_id"]
+    decision = f"{PREFIX}/clusters/{cluster_id}/decision"
+    payload = {"action": "approve_for_candidate", "note": "根因已确认"}
+
+    first = evolution_client.post(decision, json=payload, headers=admin_headers)
+    second = evolution_client.post(decision, json=payload, headers=admin_headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert len(_store().list_audit(cluster_id)) == 1

@@ -1,22 +1,30 @@
-"""Read-only observation API for the assisted self-evolution phase 2.
+"""Evolution observation API: phase-2 reads plus phase-3 admin decisions.
 
 Mounted once by ``rag.api`` inside the knowledge-operations area. Every endpoint
-is administrator-only and GET-only: phase 2 observes failures, and no endpoint
-can move an observation or a cluster through the state machine — administrators
-mark states explicitly in phase 3 (design open question 3). Serialization
-carries stored signals only (hashes, scores, versions, enums, counts, and
-timestamps); question text and chunk text never leave the store.
+is administrator-only. Phase 2 observes failures and stays read-only; phase 3
+(Task 5) opens the first writes, so an administrator can read a diagnosis draft
+and confirm a root cause before a cluster may reach the candidate pool.
+
+Serialization carries stored signals only (hashes, scores, versions, enums,
+counts, and timestamps); question text and chunk text never leave the store. The
+one exception is the draft payload: the permission-filtered diagnoser output an
+administrator must read to judge a root cause, redacted for credential-shaped
+keys before it leaves ``evolution.db``. Every state change runs through the store
+(``promote_cluster`` for admission, ``decide_cluster`` for an admin decision) and
+is preceded by an audit row.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
 
 from config import settings
-from rag.api_security import require_admin, require_user
+from rag.api_security import redact_source_config, require_admin, require_user
 from rag.evolution.metrics import compute_metrics
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
 from rag.evolution.store import FailureTraceStore
@@ -29,19 +37,23 @@ MAX_PAGE_SIZE = 100
 _STATUSES = tuple(status.value for status in EvolutionStatus)
 _POOLS = tuple(pool.value for pool in ObservationPool)
 
-# Phase-2 endpoint inventory returned by GET /state-machine, so the page renders
-# the read-only boundary from the same source the router registers.
+# Endpoint inventory returned by GET /state-machine so the page renders the real
+# surface from the same source the router registers. Phase 3 adds the diagnosis
+# read endpoint and the single audited decision endpoint; the invariant that no
+# other state-changing method exists is pinned by the API tests.
 _ENDPOINTS = (
     {"path": "/knowledge-operations/evolution/observations", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/clusters", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/clusters/{cluster_id}", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/clusters/{cluster_id}/diagnosis", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/state-machine", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/metrics", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/clusters/{cluster_id}/decision", "methods": ("POST",)},
 )
 
 _STATE_MACHINE_NOTE = (
-    "第 2 阶段只读观测：进入候选池由聚类准入规则自动完成，"
-    "管理员显式标记（rejected / needs_more_evidence）留待第 3 阶段开放。"
+    "进入候选池由聚类准入规则自动完成；管理员审核诊断草案后显式决策"
+    "（approve_for_candidate / reject / needs_more_evidence），每次决策都写审计行。"
 )
 
 _store_lock = threading.Lock()
@@ -81,8 +93,45 @@ def close_store() -> None:
 
 
 def _admin_user(user: dict = Depends(require_user)) -> dict:
-    """Every evolution endpoint is administrator-only; phase 2 has no writes."""
+    """Every evolution endpoint is administrator-only, reads and decisions alike."""
     return require_admin(user)
+
+
+# Design section 8: the three administrator decisions, each mapped onto one of
+# the ``awaiting_diagnosis_review`` transitions. ``pool`` stays
+# ``candidate_pool`` on purpose — a rejected or evidence-short cluster is never
+# returned to the observation queue, because both of those statuses have no
+# outgoing transition and the next clustering round would try to re-admit one.
+# ``member_status`` must be a legal successor of the status admission wrote
+# (``clustered``), otherwise ``promote_cluster`` rejects the whole move.
+DECISION_TARGETS: dict[str, dict[str, str]] = {
+    "approve_for_candidate": {
+        "new_status": EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+        "pool": ObservationPool.CANDIDATE_POOL.value,
+        "member_status": EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+    },
+    "reject": {
+        "new_status": EvolutionStatus.REJECTED.value,
+        "pool": ObservationPool.CANDIDATE_POOL.value,
+        "member_status": EvolutionStatus.REJECTED.value,
+    },
+    "needs_more_evidence": {
+        "new_status": EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+        "pool": ObservationPool.CANDIDATE_POOL.value,
+        "member_status": EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+    },
+}
+
+
+class DiagnosisDecision(BaseModel):
+    """One administrator decision; the note is audit evidence for the transition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ``str`` plus an explicit check instead of ``Literal``: an unknown action is
+    # a 400 naming the supported set, not FastAPI's generic 422.
+    action: str
+    note: str = ""
 
 
 def _filter_value(value: str | None, allowed: tuple[str, ...], label: str) -> str | None:
@@ -158,6 +207,46 @@ def _serialize_cluster(row: dict, members: list[dict] | None = None) -> dict:
     return payload
 
 
+def _serialize_draft(row: dict) -> dict:
+    """One stored draft: metadata plus the redacted, verbatim payload.
+
+    The payload is the diagnoser's frozen output — the evidence an administrator
+    reviews before confirming a root cause, and the only place where text beyond
+    hashes and enums reaches the API. It is redacted for credential-shaped keys
+    (``redact_source_config``), so a model that echoed a connection string or an
+    API key cannot leak it through this endpoint.
+    """
+    return {
+        "id": row["id"],
+        "cluster_id": row["cluster_id"],
+        "prompt_version": row["prompt_version"],
+        "model": row["model"],
+        "reproducible": bool(row["reproducible"]),
+        "created_at": row["created_at"],
+        "payload": redact_source_config(dict(row["payload"])),
+    }
+
+
+def _serialize_audit(row: dict) -> dict:
+    """One audit row: who decided what, on which cluster, and why."""
+    return {
+        "id": row["id"],
+        "actor_id": row["actor_id"],
+        "action": row["action"],
+        "cluster_id": row["cluster_id"],
+        "note": row["note"],
+        "created_at": row["created_at"],
+    }
+
+
+def _find_cluster(store: FailureTraceStore, cluster_id: int) -> dict | None:
+    """One cluster row, or ``None`` when the id is unknown."""
+    for row in store.list_clusters():
+        if row["id"] == cluster_id:
+            return row
+    return None
+
+
 @router.get("/observations", summary="失败观察列表")
 def list_observations(
     status: str | None = Query(None),
@@ -211,11 +300,71 @@ def get_cluster(cluster_id: int, user: dict = Depends(_admin_user)) -> dict:
     """One cluster with its member observations (stored signals only)."""
     store = _open_store()
     if store is not None:
-        for row in store.list_clusters():
-            if row["id"] == cluster_id:
-                members = store.list_observations(cluster_id=cluster_id)
-                return _serialize_cluster(row, members)
+        row = _find_cluster(store, cluster_id)
+        if row is not None:
+            members = store.list_observations(cluster_id=cluster_id)
+            return _serialize_cluster(row, members)
     raise HTTPException(status_code=404, detail="聚类不存在")
+
+
+@router.get("/clusters/{cluster_id}/diagnosis", summary="诊断草案与决策记录")
+def get_diagnosis(cluster_id: int, user: dict = Depends(_admin_user)) -> dict:
+    """The newest diagnosis draft of one cluster plus its audit trail.
+
+    A missing database or an unknown cluster reads as an empty diagnosis instead
+    of an error: a cluster with no draft yet is a normal state (the worker drafts
+    it on a later round), so the page renders "no draft" rather than a failure.
+    """
+    store = _open_store()
+    drafts = [] if store is None else store.list_drafts(cluster_id)
+    audit = [] if store is None else store.list_audit(cluster_id)
+    return {
+        "cluster_id": cluster_id,
+        "draft": None if not drafts else _serialize_draft(drafts[0]),
+        "audit": [_serialize_audit(row) for row in audit],
+    }
+
+
+@router.post("/clusters/{cluster_id}/decision", summary="提交诊断决策")
+def submit_decision(
+    cluster_id: int, payload: DiagnosisDecision, user: dict = Depends(_admin_user)
+) -> dict:
+    """Record one administrator decision and move the cluster through the machine.
+
+    The audit row is written before the transition runs, so no state change can
+    exist without a trace: an audit row without a state change is a visible
+    no-op, while the reverse would be an unaudited transition. Admission writes
+    go through ``store.promote_cluster``; this decision writes through
+    ``store.decide_cluster``, which applies the same transition table to a
+    cluster that already lives in the candidate pool.
+    """
+    target = DECISION_TARGETS.get(payload.action)
+    if target is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的决策动作：{payload.action}（支持 {' / '.join(sorted(DECISION_TARGETS))}）",
+        )
+    store = _open_store()
+    cluster = None if store is None else _find_cluster(store, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="聚类不存在")
+    if cluster["status"] != EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value:
+        raise HTTPException(status_code=409, detail="该聚类已不在诊断审核状态")
+    store.add_audit(str(user["id"]), payload.action, cluster_id, payload.note)
+    try:
+        updated = store.decide_cluster(
+            cluster_id,
+            new_status=target["new_status"],
+            pool=target["pool"],
+            member_status=target["member_status"],
+            now=time.time(),
+        )
+    except KeyError as exc:
+        # The cluster disappeared between the read above and this write.
+        raise HTTPException(status_code=404, detail="聚类不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"非法状态转移：{exc}") from exc
+    return _serialize_cluster(updated, store.list_observations(cluster_id=cluster_id))
 
 
 @router.get("/state-machine", summary="状态机参考")
