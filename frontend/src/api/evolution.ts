@@ -246,3 +246,109 @@ export async function submitDecision(
   })
   return res.data
 }
+
+/** One entry of the five-layer gate trail (scope → layers 2/3 → canary). */
+export interface EvolutionGateEntry {
+  gate: string
+  result: string
+  detail: string
+  created_at: number
+}
+
+/** One row of the candidate lifecycle audit trail. */
+export interface EvolutionCandidateAudit {
+  id: number
+  actor_id: string
+  action: string
+  candidate_id: number
+  note: string
+  created_at: number
+}
+
+/**
+ * A text-free summary of one payload override.
+ *
+ * The candidate payload itself stays in ``evolution.db``; the UI shows which
+ * questions the candidate touches and how much text it moves, because the
+ * rollout decision is taken on the gate trail, the rationale and the expected
+ * effect — never on a payload the observer cannot verify.
+ */
+export interface CandidatePayloadQuestion {
+  question_id: string
+  fields: string[]
+  instructions_chars: number
+  criteria_entries: number
+}
+
+/** Which questions a candidate overrides, and how many of them it touches. */
+export interface CandidatePayloadSummary {
+  question_count: number
+  overridden: number
+  questions: CandidatePayloadQuestion[]
+}
+
+/** One question-set candidate as the list endpoint serializes it. */
+export interface EvolutionCandidate {
+  id: number
+  observation_id: number | null
+  cluster_id: number
+  artifact_type: string
+  target: string
+  status: string
+  pool: string
+  confidence: string
+  prompt_version: string
+  model: string | null
+  rationale: string
+  expected_effect: string
+  rollback_ref: Record<string, string>
+  payload_summary: CandidatePayloadSummary
+  canary_percent: number
+  created_at: number
+  updated_at: number
+}
+
+/** One candidate with its five-layer gate trail and lifecycle audit rows. */
+export interface EvolutionCandidateDetail extends EvolutionCandidate {
+  gate_log: EvolutionGateEntry[]
+  audit: EvolutionCandidateAudit[]
+}
+
+export interface CandidateQuery {
+  status?: string
+  page?: number
+  pageSize?: number
+}
+
+/** Return one page of question-set candidates (administrator only). */
+export async function fetchCandidates(
+  query: CandidateQuery = {}
+): Promise<Paged<EvolutionCandidate>> {
+  const res = await api.get('/knowledge-operations/evolution/candidates', {
+    params: pageParams(query)
+  })
+  return res.data
+}
+
+/** Return one candidate with its gate trail and audit history (administrator only). */
+export async function fetchCandidate(candidateId: number): Promise<EvolutionCandidateDetail> {
+  const res = await api.get(`/knowledge-operations/evolution/candidates/${candidateId}`)
+  return res.data
+}
+
+/** Roll one candidate out by percentage and return the updated candidate. */
+export async function submitCanary(
+  candidateId: number,
+  percent: number
+): Promise<EvolutionCandidate> {
+  const res = await api.post(`/knowledge-operations/evolution/candidates/${candidateId}/canary`, {
+    percent
+  })
+  return res.data
+}
+
+/** Roll one candidate back to the current question set and return it. */
+export async function rollbackCandidate(candidateId: number): Promise<EvolutionCandidate> {
+  const res = await api.post(`/knowledge-operations/evolution/candidates/${candidateId}/rollback`)
+  return res.data
+}

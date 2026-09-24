@@ -376,3 +376,252 @@ describe('EvolutionCenterView member-draft review', () => {
     expect(wrapper.get('[data-test="endpoint-inventory"]').text()).toContain('POST')
   })
 })
+
+// ------------------------------------------------------------------
+// Task 5: the candidate rollout panel (layers 4-5).
+//
+// The page lists question-set candidates, shows the five-layer gate trail and
+// the payload summary, and offers the two audited layer-4/5 actions: a
+// percentage canary and an instant rollback. The payload text stays in
+// evolution.db, so the assertions pin the summary shape, never the text.
+// ------------------------------------------------------------------
+
+const CANDIDATES_URL = '/knowledge-operations/evolution/candidates'
+const CANARY_URL = `${CANDIDATES_URL}/5/canary`
+const ROLLBACK_URL = `${CANDIDATES_URL}/5/rollback`
+
+const candidate = {
+  id: 5,
+  observation_id: 12,
+  cluster_id: 7,
+  artifact_type: 'jev_question_set',
+  target: 'preflight',
+  status: 'canary',
+  pool: 'candidate_pool',
+  confidence: 'medium',
+  prompt_version: 'candidate-v1',
+  model: 'deepseek/deepseek-v4.1-flash',
+  rationale: 'intent 判据在结构化查询边界与线上分歧集中',
+  expected_effect: '结构化查询意图判定更稳定',
+  rollback_ref: {
+    question_set_version: 'preflight-v1',
+    payload_sha256: 'b'.repeat(64)
+  },
+  payload_summary: {
+    question_count: 3,
+    overridden: 2,
+    questions: [
+      { question_id: 'intent', fields: ['instructions'], instructions_chars: 44, criteria_entries: 0 },
+      { question_id: 'complexity', fields: ['criteria'], instructions_chars: 0, criteria_entries: 3 },
+      { question_id: 'needs_query_rewrite', fields: [], instructions_chars: 0, criteria_entries: 0 }
+    ]
+  },
+  canary_percent: 30,
+  created_at: 1_700_000_300,
+  updated_at: 1_700_000_400
+}
+
+const candidateDetail = {
+  ...candidate,
+  gate_log: [
+    {
+      gate: 'scope',
+      result: 'accepted',
+      detail: 'jev_question_set/preflight questions=3',
+      created_at: 1_700_000_300
+    },
+    { gate: 'benchmark', result: 'passed', detail: '路线准确率不降', created_at: 1_700_000_310 },
+    { gate: 'shadow', result: 'passed', detail: '一致率 0.98', created_at: 1_700_000_350 },
+    { gate: 'canary', result: 'passed', detail: 'percent=30', created_at: 1_700_000_400 }
+  ],
+  audit: [
+    {
+      id: 1,
+      actor_id: '3',
+      action: 'generate',
+      candidate_id: 5,
+      note: 'generated preflight candidate from question_set_version=preflight-v1',
+      created_at: 1_700_000_300
+    },
+    {
+      id: 2,
+      actor_id: '3',
+      action: 'canary',
+      candidate_id: 5,
+      note: '灰度 30%｜canary_percent=30',
+      created_at: 1_700_000_400
+    }
+  ]
+}
+
+/** Route the reads the candidates tab issues; other paths keep the canned routes. */
+function mockCandidateRoutes(options: { candidates?: any; candidate?: any; candidateError?: any } = {}) {
+  vi.mocked(api.get).mockImplementation(async (url: string) => {
+    const path = String(url)
+    if (path === CANDIDATES_URL) {
+      return {
+        data:
+          options.candidates ?? { items: [candidate], total: 1, page: 1, page_size: 100 }
+      }
+    }
+    if (path.startsWith(`${CANDIDATES_URL}/`)) {
+      if (options.candidateError) return Promise.reject(options.candidateError)
+      return { data: options.candidate ?? candidateDetail }
+    }
+    if (path.endsWith('/state-machine')) return { data: stateMachine }
+    if (path.endsWith('/metrics')) return { data: metrics }
+    if (path.endsWith('/knowledge-operations/evolution/clusters')) {
+      return { data: { items: [candidateCluster], total: 1, page: 1, page_size: 100 } }
+    }
+    if (path.startsWith('/knowledge-operations/evolution/clusters/')) {
+      return { data: { ...candidateCluster, members: [observation] } }
+    }
+    return { data: { items: [], total: 0, page: 1, page_size: 20 } }
+  })
+}
+
+describe('EvolutionCenterView candidate rollout', () => {
+  it('lists candidates with target, status, confidence and canary percentage', async () => {
+    mockCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+
+    expect(api.get).toHaveBeenCalledWith(CANDIDATES_URL, {
+      params: { page: 1, page_size: 100 }
+    })
+    const row = wrapper.get('[data-test="candidate-row"]')
+    expect(row.text()).toContain('预判')
+    expect(row.text()).toContain('canary')
+    expect(row.text()).toContain('medium')
+    expect(row.get('[data-test="candidate-row-percent"]').text()).toBe('30%')
+  })
+
+  it('shows an explicit empty state when no candidate was generated', async () => {
+    mockCandidateRoutes({ candidates: { items: [], total: 0, page: 1, page_size: 100 } })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="candidates-empty"]').text()).toContain('暂无候选')
+  })
+
+  it('renders the five-layer gate trail, the payload summary and the rollback reference', async () => {
+    mockCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="candidate-row"]').trigger('click')
+    await flushPromises()
+
+    const detail = wrapper.get('[data-test="candidate-detail"]')
+    const trail = detail.get('[data-test="candidate-gate-log"]')
+    const entries = trail.findAll('[data-test="candidate-gate-entry"]')
+    expect(entries).toHaveLength(4)
+    expect(trail.text()).toContain('层 1 产物边界')
+    expect(trail.text()).toContain('层 2 基准门禁')
+    expect(trail.text()).toContain('层 3 影子对比')
+    expect(trail.text()).toContain('层 4 灰度')
+    expect(trail.text()).toContain('percent=30')
+
+    expect(detail.get('[data-test="candidate-rationale"]').text()).toContain(
+      'intent 判据在结构化查询边界与线上分歧集中'
+    )
+    expect(detail.get('[data-test="candidate-expected-effect"]').text()).toContain(
+      '结构化查询意图判定更稳定'
+    )
+    const rollbackRef = detail.get('[data-test="candidate-rollback-ref"]')
+    expect(rollbackRef.text()).toContain('preflight-v1')
+    expect(rollbackRef.text()).toContain('b'.repeat(64))
+
+    const summary = detail.get('[data-test="candidate-payload-summary"]')
+    expect(summary.text()).toContain('共 3 个问题，改动 2 个')
+    const questions = summary.findAll('[data-test="candidate-payload-question"]')
+    expect(questions).toHaveLength(3)
+    expect(questions[0].text()).toContain('intent(instructions)')
+    expect(questions[1].text()).toContain('complexity(criteria)')
+    expect(questions[2].text()).toContain('未改动')
+
+    // The candidate lifecycle audit is rendered next to the trail.
+    const audit = detail.get('[data-test="candidate-audit"]')
+    expect(audit.text()).toContain('canary')
+    expect(audit.text()).toContain('灰度 30%')
+  })
+
+  it('submits the canary percentage and the rollback with the candidate id', async () => {
+    mockCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="candidate-row"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="candidate-percent-input"]').setValue('60')
+    await wrapper.get('[data-test="candidate-canary"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(CANARY_URL, { percent: 60 })
+
+    await wrapper.get('[data-test="candidate-rollback"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(ROLLBACK_URL)
+  })
+
+  it('refuses a percentage outside 0..100 without calling the API', async () => {
+    mockCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="candidate-row"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="candidate-percent-input"]').setValue('140')
+    await wrapper.get('[data-test="candidate-canary"]').trigger('click')
+    await flushPromises()
+
+    expect(api.post).not.toHaveBeenCalledWith(CANARY_URL, { percent: 140 })
+    expect(wrapper.get('[data-test="evolution-error"]').text()).toContain('0..100')
+  })
+
+  it('reports a rejected canary (percent above the configured ceiling) on the banner', async () => {
+    mockCandidateRoutes()
+    vi.mocked(api.post).mockRejectedValue({
+      response: { status: 400, data: { detail: '请求的灰度百分比 30 超过配置上限 10' } }
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="candidate-row"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="candidate-canary"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="evolution-error"]').text()).toContain('超过配置上限')
+    expect(wrapper.get('[data-test="candidate-detail"]').text()).toContain('结构化查询意图判定更稳定')
+  })
+
+  it('explains the administrator boundary when the candidate reads are rejected', async () => {
+    mockCandidateRoutes({ candidateError: { response: { status: 403 } } })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-candidates"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="candidate-row"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="evolution-forbidden"]').text()).toContain('管理员')
+  })
+})

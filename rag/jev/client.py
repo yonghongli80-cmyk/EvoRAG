@@ -7,7 +7,7 @@ to the legacy router/reranker. Logs never include response bodies or credentials
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from pydantic import ValidationError
 from typesafe_sdk import (
@@ -25,6 +25,7 @@ from typesafe_sdk import (
 from config import settings
 from rag.jev.models import JevBatchResult, PassageJudgment, PreflightDecision
 from rag.jev.questions import (
+    PASSAGE_QUESTION_SET_VERSION,
     PREFLIGHT_QUESTION_SET_VERSION,
     build_passage_questions,
     build_preflight_questions,
@@ -32,6 +33,14 @@ from rag.jev.questions import (
 from rag.resilience import CircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+#: A question-set provider returns the questions of one stage plus the version
+#: that built them; ``chunk_ids`` is ``None`` for the preflight stage and the
+#: ACL-visible chunk ids for the passages stage. The version is what
+#: :class:`~rag.jev.models.PreflightDecision` carries back to the pipeline, so
+#: a request judged with a candidate set stays attributable in
+#: ``decision_metadata.jev_question_set_version``.
+QuestionSetProvider = Callable[[str, list[str] | None], tuple[dict, str]]
 
 _PASSAGE_SUFFIXES = (
     "is_relevant",
@@ -65,18 +74,31 @@ def _classify(error: BaseException) -> str:
 class JevClient:
     """Lazily constructs the SDK client and maps answers to internal contracts."""
 
-    def __init__(self, client: TypeSafeClient | None = None):
+    def __init__(
+        self,
+        client: TypeSafeClient | None = None,
+        *,
+        question_set_provider: QuestionSetProvider | None = None,
+    ):
         self._client = client
         self._owns_client = client is None
         self._breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
+        # Layer 4 seam: ``None`` keeps the static ``rag.jev.questions`` path
+        # byte-for-byte; a provider (the rollout controller in production)
+        # supplies the questions of both stages and the version to write back.
+        self._question_set_provider = question_set_provider
 
     def preflight(self, state: dict) -> JevBatchResult[PreflightDecision]:
         """Judge intent, complexity, and rewrite need in one batched request."""
+        resolved = self._resolve_question_set("preflight", None)
+        if isinstance(resolved, JevBatchResult):
+            return resolved
+        questions, version = resolved
         return self._run(
             "preflight",
             state,
-            build_preflight_questions(),
-            lambda response, duration_ms: self._map_preflight(response, duration_ms),
+            questions,
+            lambda response, duration_ms: self._map_preflight(response, duration_ms, version),
         )
 
     def judge_passages(
@@ -85,12 +107,41 @@ class JevClient:
         """Judge ACL-visible candidate passages in one batched request."""
         if not chunk_ids:
             return JevBatchResult(available=False, failure_kind="invalid_response", duration_ms=0.0)
+        resolved = self._resolve_question_set("passages", chunk_ids)
+        if isinstance(resolved, JevBatchResult):
+            return resolved
+        questions, _ = resolved
         return self._run(
             "passages",
             state,
-            build_passage_questions(chunk_ids),
+            questions,
             lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms),
         )
+
+    def _resolve_question_set(
+        self, stage: str, chunk_ids: Sequence[str] | None
+    ) -> tuple[Mapping[str, Question], str] | JevBatchResult:
+        """Return ``(questions, version)`` for one stage; a provider failure is normalized.
+
+        Without a provider the static builders run, so the questions and the
+        version are exactly what the module defines. A provider failure is a
+        normalized failure instead of an exception: the service itself is
+        healthy, so the breaker is not touched and the caller falls back to the
+        legacy router/reranker. The error type is logged, never the payload.
+        """
+        provider = self._question_set_provider
+        if provider is None:
+            if stage == "preflight":
+                return build_preflight_questions(), PREFLIGHT_QUESTION_SET_VERSION
+            return build_passage_questions(chunk_ids or ()), PASSAGE_QUESTION_SET_VERSION
+        try:
+            questions, version = provider(stage, None if chunk_ids is None else list(chunk_ids))
+        except Exception as error:  # noqa: BLE001 - the online path must not see it
+            logger.warning("Jev %s question-set provider failed: %s", stage, type(error).__name__)
+            return JevBatchResult(
+                available=False, failure_kind="invalid_response", duration_ms=0.0
+            )
+        return questions, str(version)
 
     def close(self) -> None:
         """Release the SDK client when this adapter owns it."""
@@ -135,7 +186,9 @@ class JevClient:
         self._breaker.record_success()
         return JevBatchResult(value=value, available=True, duration_ms=_elapsed_ms(started))
 
-    def _map_preflight(self, response, duration_ms: float) -> PreflightDecision:
+    def _map_preflight(
+        self, response, duration_ms: float, version: str = PREFLIGHT_QUESTION_SET_VERSION
+    ) -> PreflightDecision:
         answers = _answers_of(response)
         intent = _answer(answers, "intent")
         complexity = _answer(answers, "complexity")
@@ -147,7 +200,7 @@ class JevClient:
             complexity_confidence=complexity.confidence,
             rewrite_probability=rewrite.noul,
             model=response.model,
-            question_set_version=PREFLIGHT_QUESTION_SET_VERSION,
+            question_set_version=version,
             duration_ms=duration_ms,
         )
 
@@ -186,4 +239,4 @@ def _answer(answers: Mapping, question_id: str):
     return answers[question_id]
 
 
-__all__ = ["JevClient"]
+__all__ = ["JevClient", "QuestionSetProvider"]

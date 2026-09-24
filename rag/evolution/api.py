@@ -3,21 +3,29 @@
 Mounted once by ``rag.api`` inside the knowledge-operations area. Every endpoint
 is administrator-only. Phase 2 observes failures and stays read-only; phase 3
 (Task 5) opens the first writes, so an administrator can read a diagnosis draft
-and confirm a root cause before a cluster may reach the candidate pool.
+and confirm a root cause before a cluster may reach the candidate pool. Phase 4
+appends the candidate lifecycle (Task 5 of the candidate plan): two reads over
+the candidates and the five-layer trail, and two audited actions — a percentage
+canary (layer 4) and an instant rollback (layer 5).
 
 Serialization carries stored signals only (hashes, scores, versions, enums,
 counts, and timestamps); question text and chunk text never leave the store. The
 one exception is the draft payload: the permission-filtered diagnoser output an
 administrator must read to judge a root cause, redacted for credential-shaped
-keys before it leaves ``evolution.db``. Every state change runs through the store
-(``promote_cluster`` for admission, ``decide_cluster`` for an admin decision) and
-is preceded by an audit row.
+keys before it leaves ``evolution.db``. A candidate payload is summarized
+instead (which questions it overrides and how much text it moves) — the
+generation evidence an administrator needs for the rollout decision is the gate
+trail, the rationale and the expected effect. Every state change runs through
+the store (``promote_cluster`` for admission, ``decide_cluster`` for an admin
+decision, ``advance_candidate`` for the candidate lifecycle) and is preceded by
+an audit row.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -25,9 +33,13 @@ from pydantic import BaseModel, ConfigDict
 
 from config import settings
 from rag.api_security import redact_source_config, require_admin, require_user
+from rag.evolution.candidate_store import CandidateStore
+from rag.evolution.candidates import PayloadBoundaryError, validate_payload
 from rag.evolution.metrics import compute_metrics
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
+from rag.evolution.rollout import PERCENT_NOTE_KEY, percent_note, rollout
 from rag.evolution.store import FailureTraceStore
+from rag.jev.questions import build_preflight_questions
 
 router = APIRouter(prefix="/knowledge-operations/evolution", tags=["evolution"])
 
@@ -40,7 +52,10 @@ _POOLS = tuple(pool.value for pool in ObservationPool)
 # Endpoint inventory returned by GET /state-machine so the page renders the real
 # surface from the same source the router registers. Phase 3 adds the diagnosis
 # read endpoint and the single audited decision endpoint; the invariant that no
-# other state-changing method exists is pinned by the API tests.
+# other state-changing method exists is pinned by the API tests. Phase 4 appends
+# the four candidate endpoints below — they are deliberately *not* in this
+# inventory, because ``test_evolution_api.py`` pins the phase-3 surface and the
+# candidate lifecycle is documented (and exercised) through its own tests.
 _ENDPOINTS = (
     {"path": "/knowledge-operations/evolution/observations", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/clusters", "methods": ("GET",)},
@@ -59,6 +74,14 @@ _STATE_MACHINE_NOTE = (
 _store_lock = threading.Lock()
 _store: FailureTraceStore | None = None
 _store_path: str | None = None
+# Phase 4: the candidate store shares the trace store's connection and lock, so
+# it is cached per path the same way and dropped by ``close_store``.
+_candidate_store: CandidateStore | None = None
+_candidate_store_path: str | None = None
+
+# Candidate rows are paged in Python like every other list endpoint, so the
+# query asks for a bounded scan instead of the whole table.
+MAX_CANDIDATE_ROWS = 1000
 
 
 def _open_store() -> FailureTraceStore | None:
@@ -84,12 +107,36 @@ def _open_store() -> FailureTraceStore | None:
 
 def close_store() -> None:
     """Release the read-only connection (shutdown and test isolation)."""
-    global _store, _store_path
+    global _store, _store_path, _candidate_store, _candidate_store_path
     with _store_lock:
         if _store is not None:
             _store.close()
         _store = None
         _store_path = None
+        # The candidate store shares the trace connection and never closes it,
+        # so dropping the reference is all the cleanup it needs.
+        _candidate_store = None
+        _candidate_store_path = None
+
+
+def _open_candidate_store() -> CandidateStore | None:
+    """The candidate store on the shared connection, or ``None`` when nothing was recorded.
+
+    ``CandidateStore`` reuses the trace store's connection, row factory and lock
+    (a candidate always lives next to the observations it came from) and closes
+    nothing it does not own, so the shutdown path stays the single
+    ``close_store()``.
+    """
+    global _candidate_store, _candidate_store_path
+    store = _open_store()
+    if store is None:
+        return None
+    path = str(settings.evolution_db_path)
+    with _store_lock:
+        if _candidate_store is None or _candidate_store_path != path:
+            _candidate_store = CandidateStore(store)
+            _candidate_store_path = path
+        return _candidate_store
 
 
 def _admin_user(user: dict = Depends(require_user)) -> dict:
@@ -437,3 +484,311 @@ def metrics(user: dict = Depends(_admin_user)) -> dict:
     finally:
         if temporary:
             store.close()
+
+
+# ----------------------------------------------------------------------
+# Phase 4 (Task 5): the candidate lifecycle.
+#
+# A candidate question set goes live only through an audited canary action and
+# comes back off in one audited rollback. Both writes reconcile the in-memory
+# rollout controller with the persisted trail first, so a restarted API process
+# resumes (or drops) exactly what the administrator left behind, and the
+# transition legality is checked before a single row is written.
+# ----------------------------------------------------------------------
+
+
+def _summarize_payload(payload: Mapping) -> dict:
+    """Which questions a candidate overrides, and how much text it moves.
+
+    The payload text itself stays in ``evolution.db``: the API carries stored
+    signals only, and the gate trail plus the rationale and expected effect are
+    what a rollout decision is taken on. Overridden keys are reported per
+    question so the summary still shows a surgical edit versus a rewrite.
+    """
+    questions = []
+    overridden = 0
+    if not isinstance(payload, Mapping):
+        return {"question_count": 0, "overridden": 0, "questions": []}
+    for question_id in sorted(payload):
+        entry = payload[question_id] if isinstance(payload[question_id], Mapping) else {}
+        fields = sorted(key for key in ("instructions", "criteria") if key in entry)
+        if fields:
+            overridden += 1
+        questions.append(
+            {
+                "question_id": str(question_id),
+                "fields": fields,
+                "instructions_chars": len(entry["instructions"]) if "instructions" in entry else 0,
+                "criteria_entries": len(entry.get("criteria") or {}),
+            }
+        )
+    return {"question_count": len(questions), "overridden": overridden, "questions": questions}
+
+
+def _serialize_candidate(row: dict, *, canary_percent: int = 0) -> dict:
+    """One candidate: stored signals, a payload summary and the live percentage."""
+    return {
+        "id": row["id"],
+        "observation_id": row["observation_id"],
+        "cluster_id": row["cluster_id"],
+        "artifact_type": row["artifact_type"],
+        "target": row["target"],
+        "status": row["status"],
+        "pool": row["pool"],
+        "confidence": row["confidence"],
+        "prompt_version": row["prompt_version"],
+        "model": row["model"],
+        "rationale": row["rationale"],
+        "expected_effect": row["expected_effect"],
+        "rollback_ref": dict(row["rollback_ref"])
+        if isinstance(row["rollback_ref"], Mapping)
+        else {},
+        "payload_summary": _summarize_payload(row["payload"]),
+        "canary_percent": int(canary_percent),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_gate_entry(entry: dict) -> dict:
+    """One entry of the five-layer trail: which layer, what it concluded, when."""
+    return {
+        "gate": str(entry.get("gate", "")),
+        "result": str(entry.get("result", "")),
+        "detail": str(entry.get("detail", "")),
+        "created_at": float(entry.get("created_at") or 0.0),
+    }
+
+
+def _serialize_candidate_audit(row: dict) -> dict:
+    """One candidate lifecycle audit row: who acted, what, on which candidate."""
+    return {
+        "id": row["id"],
+        "actor_id": row["actor_id"],
+        "action": row["action"],
+        "candidate_id": row["candidate_id"],
+        "note": row["note"],
+        "created_at": row["created_at"],
+    }
+
+
+class CanaryRequest(BaseModel):
+    """One canary action: the share of requests that may use the candidate set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ``int`` plus an explicit range check instead of ``Field(le=100)``: an
+    # out-of-range share is a 400 naming the boundary, not FastAPI's generic
+    # 422 — the same shape the phase-3 decision endpoint uses for its action.
+    percent: int
+
+
+def _reconcile_rollout(store: CandidateStore) -> None:
+    """Rebuild live rollout state from the persisted trail before acting on it."""
+    rollout.restore(store)
+
+
+def _require_candidate(store: CandidateStore, candidate_id: int) -> dict:
+    row = store.get_candidate(candidate_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="候选不存在")
+    return row
+
+
+def _require_canaryable_payload(row: dict) -> None:
+    """Refuse to serve a stored payload that no longer fits its base set.
+
+    The generator validated the payload against the set it was generated from;
+    a rollback reference points at that same version, so re-validating here is
+    the last check before the candidate set reaches live traffic. Only the
+    chunk-independent preflight target can be re-validated without a request.
+    """
+    if row["target"] != "preflight":
+        return
+    try:
+        validate_payload("preflight", row["payload"], build_preflight_questions())
+    except PayloadBoundaryError as error:
+        raise HTTPException(
+            status_code=409, detail=f"候选载荷越界，拒绝灰度：{error.reason}"
+        ) from error
+
+
+@router.get("/candidates", summary="候选问题集列表")
+def list_candidates(
+    status: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    user: dict = Depends(_admin_user),
+) -> dict:
+    """Question-set candidates newest first, with the live canary percentage.
+
+    A missing database means nothing was recorded yet, so the page reads empty
+    without creating the file (the generation switch is off by default).
+    """
+    status = _filter_value(status, _STATUSES, "状态")
+    store = _open_candidate_store()
+    rows = [] if store is None else store.list_candidates(status=status, limit=MAX_CANDIDATE_ROWS)
+    if store is not None:
+        _reconcile_rollout(store)
+    items = [
+        _serialize_candidate(row, canary_percent=rollout.percent_for(row["id"])) for row in rows
+    ]
+    return _page(items, page, page_size)
+
+
+@router.get("/candidates/{candidate_id}", summary="候选详情与五层门禁轨迹")
+def get_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> dict:
+    """One candidate with its gate trail and its lifecycle audit rows.
+
+    The trail is the five layers in order (scope, layer 2, layer 3, canary), so
+    an administrator sees what the candidate passed before approving layer 4 and
+    what the percentage was when it went live.
+    """
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    _reconcile_rollout(store)
+    row = _require_candidate(store, candidate_id)
+    payload = _serialize_candidate(row, canary_percent=rollout.percent_for(candidate_id))
+    payload["gate_log"] = [_serialize_gate_entry(entry) for entry in row["gate_log"]]
+    payload["audit"] = [
+        _serialize_candidate_audit(entry) for entry in store.list_audit(candidate_id)
+    ]
+    return payload
+
+
+@router.post("/candidates/{candidate_id}/canary", summary="按百分比灰度候选问题集")
+def canary_candidate(
+    candidate_id: int, payload: CanaryRequest, user: dict = Depends(_admin_user)
+) -> dict:
+    """Layer 4: register the candidate question set and roll it out by percentage.
+
+    The action registers the candidate version in
+    :mod:`rag.jev.questions` (a data registration next to the default set),
+    advances ``awaiting_verification → approved_for_canary → canary`` and writes
+    the percentage into the rollout controller; a candidate already in canary
+    only changes its percentage. Requests inside the stable bucket
+    ``hash(key) % 100 < percent`` are judged with the candidate set and carry
+    its version in ``decision_metadata``; the rest keep the current set. A
+    percentage of zero registers nothing, which is the default online
+    behaviour. Only one candidate may be live at a time.
+    """
+    if not 0 <= payload.percent <= 100:
+        raise HTTPException(status_code=400, detail="灰度百分比必须是 0..100 的整数")
+    ceiling = settings.evolution_candidate_canary_percent
+    if payload.percent > ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"请求的灰度百分比 {payload.percent} 超过配置上限 {ceiling}"
+                "（evolution_candidate_canary_percent）"
+            ),
+        )
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    _reconcile_rollout(store)
+    row = _require_candidate(store, candidate_id)
+    actor_id = str(user["id"])
+    percent = payload.percent
+    current = row["status"]
+
+    if current == EvolutionStatus.CANARY.value:
+        # Already live: a percentage change is its own audited action.
+        store.add_audit(actor_id, "canary", candidate_id, percent_note(percent))
+    elif current in (
+        EvolutionStatus.AWAITING_VERIFICATION.value,
+        EvolutionStatus.APPROVED_FOR_CANARY.value,
+    ):
+        live = [
+            candidate
+            for candidate in store.list_candidates(
+                status=EvolutionStatus.CANARY.value, limit=MAX_CANDIDATE_ROWS
+            )
+            if candidate["id"] != candidate_id
+        ]
+        if live:
+            raise HTTPException(
+                status_code=409,
+                detail=f"候选 #{live[0]['id']} 正在灰度中：同一时间只允许一个候选问题集在线",
+            )
+        _require_canaryable_payload(row)
+        try:
+            if current == EvolutionStatus.AWAITING_VERIFICATION.value:
+                store.advance_candidate(
+                    candidate_id,
+                    EvolutionStatus.APPROVED_FOR_CANARY.value,
+                    actor_id=actor_id,
+                    note=f"管理员批准灰度 {percent}%",
+                )
+            store.advance_candidate(
+                candidate_id,
+                EvolutionStatus.CANARY.value,
+                actor_id=actor_id,
+                note=percent_note(percent),
+                gate="canary",
+                gate_detail=f"percent={percent}",
+            )
+        except KeyError as error:
+            # The candidate disappeared between the read above and this write.
+            raise HTTPException(status_code=404, detail="候选不存在") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=f"非法状态转移：{error}") from error
+    else:
+        raise HTTPException(
+            status_code=409, detail=f"候选状态 {current} 不允许灰度（需 awaiting_verification 或 canary）"
+        )
+
+    # The live effect goes last: every audited write above it already
+    # succeeded, so a failure here leaves the trail truthful and no traffic.
+    rollback_ref = row["rollback_ref"] if isinstance(row["rollback_ref"], Mapping) else {}
+    rollout.activate(
+        candidate_id,
+        row["target"],
+        row["payload"],
+        str(rollback_ref.get("question_set_version", "")),
+        percent,
+    )
+    updated = store.get_candidate(candidate_id)
+    return _serialize_candidate(updated, canary_percent=rollout.percent_for(candidate_id))
+
+
+@router.post("/candidates/{candidate_id}/rollback", summary="一键回滚候选灰度")
+def rollback_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> dict:
+    """Layer 5: unregister the candidate question set and zero its percentage.
+
+    Rollback takes effect before the audited transition runs, so traffic is back
+    on the current question set even if the move itself is refused; a candidate
+    outside canary/stable is refused with a 409 and nothing is written. A
+    second rollback of an already rolled-back candidate is an idempotent no-op.
+    """
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    _reconcile_rollout(store)
+    row = _require_candidate(store, candidate_id)
+    if row["status"] == EvolutionStatus.ROLLED_BACK.value:
+        # Idempotent: the registration is already gone and the percentage is 0.
+        rollout.deactivate(candidate_id)
+        return _serialize_candidate(row, canary_percent=0)
+    if EvolutionStatus.ROLLED_BACK.value not in EVOLUTION_TRANSITIONS.get(row["status"], ()):
+        raise HTTPException(
+            status_code=409, detail=f"候选状态 {row['status']} 不可回滚（仅 canary / stable 可回滚）"
+        )
+    previous = rollout.percent_for(candidate_id)
+    rollout.deactivate(candidate_id)
+    try:
+        updated = store.advance_candidate(
+            candidate_id,
+            EvolutionStatus.ROLLED_BACK.value,
+            actor_id=str(user["id"]),
+            note=(
+                f"回滚：撤销候选问题集注册，灰度百分比置 0（原 {previous}%）"
+                f"｜{PERCENT_NOTE_KEY}=0"
+            ),
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="候选不存在") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=f"非法状态转移：{error}") from error
+    return _serialize_candidate(updated, canary_percent=rollout.percent_for(candidate_id))

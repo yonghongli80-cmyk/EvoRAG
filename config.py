@@ -144,6 +144,16 @@ class Settings(BaseSettings):
     # 假设级（diagnoser 后校验强制）。
     evolution_diagnosis_labels_path: str = ""
 
+    # 候选阶段（第 4 阶段）：候选生成默认关闭（与观测总开关独立，需显式开启）；
+    # 模型调用预算沿用第 3 阶段诊断通道（次/轮）。
+    evolution_candidate_enabled: bool = False
+    evolution_candidate_model_calls: int = Field(default=2, ge=0)
+    # 灰度百分比配置上限：请求的百分比超过它即 400（在线路径默认 0%，不配置即不允许放量）。
+    # 层 4 未批准时在线请求 100% 走当前问题集；回滚 = 秒级置 0 + 审计。
+    evolution_candidate_canary_percent: int = Field(default=0, ge=0, le=100)
+    # 第 4 阶段层 3 影子对比的默认采样率（每请求的确定性抽样比例）。
+    evolution_candidate_shadow_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+
     model_config = {
         "env_prefix": "RAG_",
         "env_file": str(Path(__file__).resolve().parent / ".env"),

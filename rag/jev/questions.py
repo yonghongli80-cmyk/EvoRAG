@@ -5,7 +5,7 @@ stable IDs, a version string, a primitive type, and full meanings kept in instru
 criteria. Deterministic code owns routing; Jev only answers these fixed questions.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from typesafe_sdk import Choice, Noul, Question
 
@@ -89,6 +89,130 @@ def build_passage_questions(chunk_ids: Sequence[str]) -> dict[str, Question]:
 __all__ = [
     "PASSAGE_QUESTION_SET_VERSION",
     "PREFLIGHT_QUESTION_SET_VERSION",
+    "QuestionSetBuilder",
     "build_passage_questions",
     "build_preflight_questions",
+    "build_with_overlay",
+    "question_set_registry",
+    "register_candidate_question_set",
+    "unregister_candidate_question_set",
 ]
+
+
+# ----------------------------------------------------------------------
+# Phase 4 (layer 4): the question-set registry.
+#
+# A candidate question set is **data**, not a new code path: it registers a
+# builder for one target under a distinct version next to the default one, so
+# the deterministic mappers (``_map_preflight``/``_map_passages``), the stored
+# schema and the default online behaviour stay exactly as they are. The
+# rollout controller registers and unregisters candidates; nothing else in the
+# online path reads this map, so an unregistered version simply never serves.
+# ----------------------------------------------------------------------
+
+QuestionSetBuilder = Callable[..., dict]
+"""One question-set builder.
+
+A preflight builder takes no arguments (that set never depends on a request);
+a passages builder takes the ACL-visible chunk-id list of the request it
+serves, because the passage set is built per request.
+"""
+
+
+def _passage_builder(chunk_ids: Sequence[str] | None = None) -> dict[str, Question]:
+    """The default passages set; the chunk ids come from the request being served."""
+    return build_passage_questions(chunk_ids or ())
+
+
+def _base_questions(target: str, chunk_ids: Sequence[str] | None) -> dict[str, Question]:
+    """A freshly built default question set, so an overlay never mutates it."""
+    if target == "passages":
+        return build_passage_questions(chunk_ids or ())
+    return build_preflight_questions()
+
+
+# Candidate registrations only: target -> {version -> builder}. The defaults
+# live outside this map so they can never be replaced or dropped through it.
+_CANDIDATE_BUILDERS: dict[str, dict[str, QuestionSetBuilder]] = {
+    "preflight": {},
+    "passages": {},
+}
+
+_DEFAULT_VERSION: dict[str, str] = {
+    "preflight": PREFLIGHT_QUESTION_SET_VERSION,
+    "passages": PASSAGE_QUESTION_SET_VERSION,
+}
+
+
+def question_set_registry() -> dict[str, dict[str, QuestionSetBuilder]]:
+    """Return ``target -> {version: builder}`` with the default versions present.
+
+    The view is a fresh copy, so a caller cannot add or drop a builder through
+    it; candidate versions appear next to the default one of the same target.
+    """
+    registry: dict[str, dict[str, QuestionSetBuilder]] = {
+        "preflight": {PREFLIGHT_QUESTION_SET_VERSION: build_preflight_questions},
+        "passages": {PASSAGE_QUESTION_SET_VERSION: _passage_builder},
+    }
+    for target, builders in _CANDIDATE_BUILDERS.items():
+        if builders:
+            registry.setdefault(target, {}).update(builders)
+    return registry
+
+
+def register_candidate_question_set(target: str, version: str, builder: QuestionSetBuilder) -> None:
+    """Register one candidate question-set builder under a distinct version.
+
+    Re-registering the same version replaces it (a canary re-issue refreshes
+    the payload), but the default version of a target is refused: the default
+    set is the stable protocol the pipeline depends on and stays untouched.
+    """
+    if target not in _CANDIDATE_BUILDERS:
+        raise ValueError(f"unknown candidate target: {target!r}")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("candidate question-set version must be a non-empty string")
+    if version == _DEFAULT_VERSION[target]:
+        raise ValueError(f"the default {target} version {version!r} may not be replaced")
+    if not callable(builder):
+        raise TypeError("candidate question-set builder must be callable")
+    _CANDIDATE_BUILDERS[target][version] = builder
+
+
+def unregister_candidate_question_set(target: str, version: str) -> None:
+    """Drop one candidate registration; an unknown version is a no-op.
+
+    Rollback calls this more than once by design (an admin may press the
+    button again), so a missing candidate version is not an error. The default
+    version is refused, exactly like in registration.
+    """
+    if target not in _CANDIDATE_BUILDERS:
+        raise ValueError(f"unknown candidate target: {target!r}")
+    if version == _DEFAULT_VERSION[target]:
+        raise ValueError(f"the default {target} version {version!r} cannot be unregistered")
+    _CANDIDATE_BUILDERS[target].pop(version, None)
+
+
+def build_with_overlay(
+    target: str, payload: dict, chunk_ids: Sequence[str] | None = None
+) -> dict[str, Question]:
+    """Overlay validated candidate text onto the default question set of a request.
+
+    ``payload`` maps question ids to the ``instructions``/``criteria`` text a
+    candidate wants (see :mod:`rag.evolution.candidates`). The base set is
+    built fresh, then only the text attributes of its questions are rewritten —
+    never the question objects themselves — so the question id, the primitive
+    type (``Choice``/``Noul``) and the question count are unchanged by
+    construction and the default set stays pristine for the next request. A
+    payload id the base does not have raises ``KeyError`` naming that id, which
+    the rollout treats as a normalized failure rather than a changed set.
+    """
+    if target not in _CANDIDATE_BUILDERS:
+        raise ValueError(f"unknown candidate target: {target!r}")
+    questions = _base_questions(target, chunk_ids)
+    for question_id, entry in payload.items():
+        question = questions[question_id]
+        if "instructions" in entry:
+            question.instructions = entry["instructions"]
+        if "criteria" in entry:
+            question.criteria = dict(entry["criteria"])
+    return questions

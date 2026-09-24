@@ -103,6 +103,7 @@ class RAGPipeline:
         gap_analyzer=None,
         jev_service: JevDecisionService | None = None,
         failure_recorder: FailureRecorder | None = None,
+        question_set_rollout=None,
     ):
         if kb_id:
             # 查询已有知识库，不重新索引
@@ -173,6 +174,10 @@ class RAGPipeline:
                 max_queue=settings.evolution_queue_limit,
             )
             self._owns_failure_recorder = True
+        # 层 4 灰度：问题集提供者由 rollout 控制器持有，这里只发布每请求的灰度键
+        # （kb + 会话 + 问题），让同一请求的 preflight 与 passages 落入同一个桶。
+        # 默认 None：不注入时在线行为零变化，Jev 客户端走静态问题集。
+        self._question_set_rollout = question_set_rollout
         self._closed = False
         self._agent_lock = threading.Lock()
         self._async_agent_lock = asyncio.Lock()
@@ -298,6 +303,15 @@ class RAGPipeline:
             return {"route": "cached", "answer": cached.get("answer", ""), "context": [], "sources": sources}, None
 
         if self._jev_active(effective_kb_id):
+            rollout = getattr(self, "_question_set_rollout", None)
+            if rollout is not None:
+                # 层 4 灰度键：同一请求内所有 Jev 判定共用，保证 preflight 与 passages
+                # 的候选/当前问题集选择一致；键只存在于进程内，不落库、不记日志。
+                with rollout.request_key(f"{effective_kb_id}|{session_id}|{question}"):
+                    return self._prepare_context_with_jev(
+                        question, session_id, doc_name, top_k, tags, user, kb_id,
+                        enterprise_request, effective_kb_id, coordinator,
+                    )
             return self._prepare_context_with_jev(
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
