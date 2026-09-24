@@ -157,8 +157,65 @@ def test_add_audit_appends_rows_and_rejects_unknown_actions(tmp_path):
     assert rows[0]["created_at"] <= rows[1]["created_at"]
     assert [row["id"] for row in store.list_audit(other["id"])] == [third]
     assert len(store.list_audit()) == 3
-
     for illegal in ("approve", "APPROVE_FOR_CANDIDATE", "", "needs_more_evidence ", "delete"):
         with pytest.raises(ValueError):
             store.add_audit("admin-1", illegal, cluster["id"], "typo")
     assert len(store.list_audit()) == 3
+
+
+def test_decide_cluster_advances_a_candidate_pool_cluster(tmp_path):
+    """Admin decisions act on clusters already in the candidate pool.
+
+    ``promote_cluster`` is a no-op outside the observation queue, but every
+    ``awaiting_diagnosis_review`` cluster lives in the candidate pool, so the
+    explicit decision path needs its own transition entry point.
+    """
+    from rag.evolution.models import FailureObservation
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1", status=EvolutionStatus.CLUSTERED.value)
+    member = store.add_observation(
+        FailureObservation(kb_id="kb1", question="q", route="rag")
+    )
+    store.attach_cluster_member(
+        member["id"],
+        cluster["id"],
+        failure_stage="retrieval",
+        root_cause_feature="recall_miss",
+        now=time.time(),
+    )
+    admitted = store.promote_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.CLUSTERED.value,
+        now=time.time(),
+    )
+    assert admitted["pool"] == ObservationPool.CANDIDATE_POOL.value
+
+    decided = store.decide_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+        now=time.time(),
+    )
+
+    assert decided["status"] == EvolutionStatus.APPROVED_FOR_CANDIDATE.value
+    assert store.get_observation(member["id"])["status"] == EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value
+
+
+def test_decide_cluster_rejects_illegal_transitions(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1")
+
+    with pytest.raises(ValueError, match="invalid transition"):
+        store.decide_cluster(
+            cluster["id"],
+            new_status=EvolutionStatus.STABLE.value,
+            pool=ObservationPool.CANDIDATE_POOL.value,
+            member_status=EvolutionStatus.CLUSTERED.value,
+            now=time.time(),
+        )
+
+    assert store.list_clusters()[0]["status"] == EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value

@@ -441,6 +441,56 @@ class FailureTraceStore:
             rows = self._conn.execute("SELECT * FROM failure_clusters ORDER BY id ASC").fetchall()
         return [dict(row) for row in rows]
 
+    def decide_cluster(
+        self,
+        cluster_id: int,
+        *,
+        new_status: str,
+        pool: str,
+        member_status: str,
+        now: float,
+    ) -> dict:
+        """Apply an administrator decision to one cluster and its members atomically.
+
+        ``promote_cluster`` admits clusters from the observation queue only, but every
+        ``awaiting_diagnosis_review`` cluster already lives in the candidate pool, so an
+        explicit decision needs this separate entry point. Both the cluster and its
+        members still move through ``EVOLUTION_TRANSITIONS``; an illegal transition
+        raises ``ValueError`` and nothing is written.
+        """
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+            if cluster is None:
+                raise KeyError("cluster not found")
+            current = cluster["status"]
+            if new_status not in EVOLUTION_TRANSITIONS.get(current, ()):
+                raise ValueError(f"invalid transition: {current} -> {new_status}")
+            members = self._conn.execute(
+                "SELECT id, status FROM failure_observations WHERE cluster_id = ?", (int(cluster_id),)
+            ).fetchall()
+            for member in members:
+                status = member["status"]
+                if status == member_status:
+                    continue
+                if member_status not in EVOLUTION_TRANSITIONS.get(status, ()):
+                    raise ValueError(f"invalid transition: {status} -> {member_status}")
+            self._conn.execute(
+                "UPDATE failure_clusters SET status = ?, pool = ?, updated_at = ? WHERE id = ?",
+                (new_status, pool, float(now), int(cluster_id)),
+            )
+            self._conn.execute(
+                "UPDATE failure_observations SET status = ?, updated_at = ? "
+                "WHERE cluster_id = ? AND status != ?",
+                (member_status, float(now), int(cluster_id), member_status),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+        return dict(row)
+
     def list_observations(self, cluster_id: int | None = None) -> list[dict]:
         """All observations, or the members of one cluster, oldest first.
 
