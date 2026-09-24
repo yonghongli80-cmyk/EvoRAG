@@ -448,12 +448,11 @@ def make_evolution_diagnosis_step(
     "diagnosis_config"}``; the round function folds those into its result
     mapping so ``model_calls`` feeds the worker's budget check.
 
-    ``evolution_diagnosis_timeout_seconds`` and ``evolution_diagnosis_max_tokens``
-    are recorded in the configuration snapshot but are *not* passed to the
-    diagnoser: the call contract lives in Task 3's ``rag/evolution/diagnoser.py``
-    (its default ``rag.generator.generate`` client carries the 30s timeout, and
-    the model side owns the token cap). Wiring them through means editing that
-    lane's file, so the settings stay in place here as the documented seam.
+    ``evolution_diagnosis_timeout_seconds`` is wired into the diagnoser's own
+    isolated client (a background call must never trip the online generator's
+    circuit breaker); ``evolution_diagnosis_max_tokens`` stays a recorded
+    configuration value because the model side owns the cap and the call
+    contract lives in ``rag/evolution/diagnoser.py``.
 
     ``diagnoser_factory`` / ``tracker_factory`` / ``retrieval_factory`` are the
     injection seams; the defaults build the real ``Diagnoser``, an
@@ -474,7 +473,10 @@ def make_evolution_diagnosis_step(
             return diagnoser_factory
         from rag.evolution.diagnoser import Diagnoser
 
-        return lambda: Diagnoser()
+        return lambda: Diagnoser(
+            timeout_seconds=cfg.evolution_diagnosis_timeout_seconds,
+            max_tokens=cfg.evolution_diagnosis_max_tokens,
+        )
 
     def resolve_tracker_factory():
         if tracker_factory is not None:

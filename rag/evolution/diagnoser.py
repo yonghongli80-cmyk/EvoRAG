@@ -102,9 +102,37 @@ _FIELD_SPEC = (
 )
 
 
-def _default_model_call(messages: list[dict]) -> str:
-    """Reuse the online generator for diagnosis at a low temperature."""
-    return generator.generate(messages, temperature=DIAGNOSIS_TEMPERATURE)
+def _default_model_call(
+    timeout_seconds: float = 30.0, max_tokens: int = 8000
+) -> ModelCall:
+    """Build an isolated model call for diagnosis at a low temperature.
+
+    The call reuses the generator's provider settings and auth-header helper but
+    owns its client: a background diagnosis timeout must never trip the online
+    generator's circuit breaker, and the diagnosis timeout belongs to the worker
+    configuration (``evolution_diagnosis_timeout_seconds``). ``max_tokens`` bounds
+    the completion: this provider's reasoning tokens count against the budget and
+    an uncapped call can run for minutes, while a small cap starves the JSON.
+    """
+
+    def call(messages: list[dict]) -> str:
+        client = openai.OpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout=timeout_seconds,
+            default_headers=generator.deepseek_default_headers(),
+        )
+        clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
+        response = client.chat.completions.create(
+            model=settings.deepseek_model,
+            messages=clean_msgs,
+            temperature=DIAGNOSIS_TEMPERATURE,
+            max_tokens=max_tokens,
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        return response.choices[0].message.content or "（模型未返回内容）"
+
+    return call
 
 
 def _classify(exc: BaseException) -> tuple[str, str]:
@@ -279,8 +307,13 @@ class Diagnoser:
         model_call: ModelCall | None = None,
         *,
         prompt_version: str = DIAGNOSIS_PROMPT_VERSION,
+        timeout_seconds: float | None = None,
+        max_tokens: int | None = None,
     ) -> None:
-        self._model_call: ModelCall = model_call or _default_model_call
+        self._model_call: ModelCall = model_call or _default_model_call(
+            timeout_seconds if timeout_seconds is not None else 30.0,
+            max_tokens if max_tokens is not None else 8000,
+        )
         #: Prompt version of this instance; persisted next to every draft.
         self.prompt_version = prompt_version
         #: Model label for the draft row (Task 1 store ``model`` column).

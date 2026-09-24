@@ -232,7 +232,7 @@ def test_reproduction_without_retriever_says_no_retriever(tmp_path):
 
 
 def test_recall_hashes_use_the_first_24_chunks_per_question(tmp_path):
-    """每个 sample 取前 24 个块的文本 MD5，跨 sample 取并集。"""
+    """每个 sample 取前 24 个块的文本 MD5（供复现检查），跨 sample 取并集。"""
 
     store = FailureTraceStore(tmp_path / "e.db")
     cluster = build_cluster(store, questions=["q1", "q2"])
@@ -243,10 +243,30 @@ def test_recall_hashes_use_the_first_24_chunks_per_question(tmp_path):
 
     pack = assemble_evidence(cluster, store=store, retrieve=retriever)
 
-    assert len(pack.recall_hashes) == 48  # 24 + 24，两个问题的前 24 名互不重叠
-    assert md5("a-23") in pack.recall_hashes
-    assert md5("a-24") not in pack.recall_hashes  # 第 25 名起不入 pack
+    # The reproduction check sees the full union; the prompt-facing pack carries
+    # a deterministic prefix of it (hash lists are prompt tokens).
+    assert md5("a-24") not in pack.recall_hashes  # 第 25 名起不入复现并集
     assert md5("b-25") not in pack.recall_hashes
+    assert len(pack.recall_hashes) == 12
+    md5s = sorted([md5(f"a-{i}") for i in range(24)] + [md5(f"b-{i}") for i in range(24)])
+    assert list(pack.recall_hashes) == md5s[:12]
+
+
+def test_reproduction_check_uses_the_full_recall_union_even_when_the_pack_is_capped(tmp_path):
+    """A chunk beyond the prompt cap still counts towards a reproducible verdict."""
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store, questions=["q1"], hashes_by_question={"q1": (md5("h-late"),)})
+    retriever = FakeRetriever({
+        "q1": (Chunk("keep-0"), Chunk("keep-1"), Chunk("h-late")),
+    })
+
+    pack = assemble_evidence(cluster, store=store, retrieve=retriever)
+
+    assert pack.reproduction.reproducible is True
+    # Three hashes fit under the cap; the point is that the verdict used the full union.
+    assert len(pack.recall_hashes) == 3
+    assert md5("h-late") in pack.recall_hashes
 
 
 def test_success_traces_take_recent_matching_non_blocked_rows(tmp_path):

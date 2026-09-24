@@ -25,6 +25,9 @@ _RECALL_CHUNKS = 24
 _SUCCESS_TRACES = 3
 _TRACE_SCAN_LIMIT = 50
 _ANSWER_PREVIEW_CHARS = 200
+# Hash lists are prompt input for a reasoning model: each 64-char hash costs
+# tokens, so the pack carries a deterministic prefix of each list.
+_HASH_PROMPT_LIMIT = 12
 
 # Evidence-priority annotations (design section 6) carried inside the pack so
 # the diagnoser ranks evidence without re-deriving the priority.
@@ -296,6 +299,9 @@ def assemble_evidence(
     failed_hashes = {
         chunk_hash for member in members for chunk_hash in _hash_tuple(member.get("details_chunk_hashes"))
     }
+    # The pack is prompt input for a reasoning model: every 64-character hash is a
+    # token cost, so both lists are capped (sorted, so the cap is deterministic and
+    # the reproduction check — which runs on the full sets — is unaffected).
     return EvidencePack(
         cluster_id=int(cluster["id"]),
         kb_id=kb_id,
@@ -304,8 +310,8 @@ def assemble_evidence(
         root_cause_feature=str(cluster.get("root_cause_feature") or ""),
         admin_labels=_matched_admin_labels(questions, labels),
         success_traces=_success_traces(kb_id, _member_questions(members), tracker),
-        recall_hashes=tuple(sorted(recall)),
-        failed_hashes=tuple(sorted(failed_hashes)),
+        recall_hashes=tuple(sorted(recall)[:_HASH_PROMPT_LIMIT]),
+        failed_hashes=tuple(sorted(failed_hashes)[:_HASH_PROMPT_LIMIT]),
         reproduction=reproduction,
     )
 

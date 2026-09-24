@@ -13,11 +13,13 @@ call, and the prompt/request/draft text is asserted free of credentials
 """
 
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from openai import APITimeoutError, RateLimitError
 
+from config import settings
 from rag.evolution.diagnoser import (
     DIAGNOSIS_PROMPT_VERSION,
     Diagnoser,
@@ -269,21 +271,42 @@ def test_prompt_contract_declares_evidence_only_taxonomy_and_json_shape():
     assert DIAGNOSIS_PROMPT_VERSION in prompt
 
 
-def test_default_model_call_delegates_to_generator_generate_with_low_temperature(monkeypatch):
-    import rag.generator as generator
+def test_default_model_call_uses_an_isolated_client_with_the_configured_timeout(monkeypatch):
+    """Diagnosis must not share the online generator's client or circuit breaker.
+
+    A background timeout tripping the online breaker would take the live answer
+    path down with it, so the default call builds its own client with the
+    configured diagnosis timeout and the generator's provider settings.
+    """
+    import openai
 
     recorded: dict[str, object] = {}
+    real_client = openai.OpenAI
 
-    def fake_generate(messages, temperature=0.3):
-        recorded["messages"] = messages
-        recorded["temperature"] = temperature
-        return json.dumps(_payload(), ensure_ascii=False)
+    class FakeCompletions:
+        def create(self, **kwargs):
+            recorded.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(_payload(), ensure_ascii=False)))]
+            )
 
-    monkeypatch.setattr(generator, "generate", fake_generate)
+    class FakeClient:
+        def __init__(self, **kwargs):
+            recorded["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
 
-    draft = Diagnoser().draft(_cluster(), _pack())
+    monkeypatch.setattr(openai, "OpenAI", FakeClient)
+    monkeypatch.setattr(settings, "deepseek_model", "deepseek/diagnosis-probe")
+    monkeypatch.setattr(settings, "deepseek_base_url", "https://provider.example/v1")
+    monkeypatch.setattr(settings, "deepseek_api_key", "probe-key")
+    try:
+        draft = Diagnoser(timeout_seconds=90.0, max_tokens=8000).draft(_cluster(), _pack())
+    finally:
+        monkeypatch.setattr(openai, "OpenAI", real_client)
 
     assert draft.failure_category == "recall_miss"
+    assert recorded["client"]["timeout"] == 90.0
+    assert recorded["model"] == "deepseek/diagnosis-probe"
     assert recorded["temperature"] == 0.2
-    assert isinstance(recorded["messages"], list)
-    assert recorded["messages"][0]["role"] == "system"
+    assert recorded["max_tokens"] == 8000
+    assert recorded["extra_body"] == {"thinking": {"type": "disabled"}}
