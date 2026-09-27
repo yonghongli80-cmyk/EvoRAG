@@ -8,6 +8,16 @@ appends the candidate lifecycle (Task 5 of the candidate plan): two reads over
 the candidates and the five-layer trail, and two audited actions — a percentage
 canary (layer 4) and an instant rollback (layer 5).
 
+Phase 5 adds the code-patch half of the same table (Task 4 of the code-patch
+plan). A code patch has no percentage canary — there is no second instance to
+serve a share of traffic — so layer 4 degrades to an administrator review of the
+diff: ``POST /code-candidates/{id}/decision`` exports
+``artifacts/patches/candidate-<id>.patch`` (a header comment with the apply
+command and the base commit, then the diff verbatim), writes the audit row and
+advances the candidate to ``approved_for_canary``, which for a code patch means
+"awaiting a human apply". The endpoint never runs ``git apply``: the working tree
+is only read, exactly as ``validate_patch`` reads it.
+
 Serialization carries stored signals only (hashes, scores, versions, enums,
 counts, and timestamps); question text and chunk text never leave the store. The
 one exception is the draft payload: the permission-filtered diagnoser output an
@@ -15,10 +25,13 @@ administrator must read to judge a root cause, redacted for credential-shaped
 keys before it leaves ``evolution.db``. A candidate payload is summarized
 instead (which questions it overrides and how much text it moves) — the
 generation evidence an administrator needs for the rollout decision is the gate
-trail, the rationale and the expected effect. Every state change runs through
-the store (``promote_cluster`` for admission, ``decide_cluster`` for an admin
-decision, ``advance_candidate`` for the candidate lifecycle) and is preceded by
-an audit row.
+trail, the rationale and the expected effect. A code-patch candidate carries its
+diff body only on the detail response, because that body *is* the file content a
+reviewer must read to decide; the list rows report the layer, the touched paths,
+the verification targets and what the sandbox concluded instead. Every state
+change runs through the store (``promote_cluster`` for admission,
+``decide_cluster`` for an admin decision, ``advance_candidate`` for the candidate
+lifecycle) and is preceded by an audit row.
 """
 
 from __future__ import annotations
@@ -35,6 +48,12 @@ from config import settings
 from rag.api_security import redact_source_config, require_admin, require_user
 from rag.evolution.candidate_store import CandidateStore
 from rag.evolution.candidates import PayloadBoundaryError, validate_payload
+
+# ``code_patches`` owns diff parsing and is the authority layer 1 validated a
+# candidate's ``paths`` against; ``candidate_store`` already borrows private
+# helpers from ``store`` the same way, and the diff headers are the only record
+# of which files a stored patch touches (``paths`` is not a column).
+from rag.evolution.code_patches import _diff_header_paths
 from rag.evolution.metrics import compute_metrics
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
 from rag.evolution.rollout import PERCENT_NOTE_KEY, percent_note, rollout
@@ -498,6 +517,10 @@ def metrics(user: dict = Depends(_admin_user)) -> dict:
 # rollout controller with the persisted trail first, so a restarted API process
 # resumes (or drops) exactly what the administrator left behind, and the
 # transition legality is checked before a single row is written.
+#
+# Phase 5 (Task 4 of the code-patch plan) continues below it: the code-patch
+# review endpoints, which share this table, state machine and audit trail but
+# have no percentage rollout, sit between the canary and the rollback below.
 # ----------------------------------------------------------------------
 
 
@@ -628,12 +651,20 @@ def list_candidates(
 
     A missing database means nothing was recorded yet, so the page reads empty
     without creating the file (the generation switch is off by default).
+
+    Phase 5 widened one table to two artifact types, and this endpoint's
+    contract is the question-set one: ``target`` and ``payload`` are NULL for a
+    code patch, which the page (and its frontend) would read as a broken row.
+    Each candidate list endpoint therefore serves exactly one artifact type —
+    question sets here, code patches under ``/code-candidates`` — while both
+    share the table, the state machine, the gate trail and the audit trail.
     """
     status = _filter_value(status, _STATUSES, "状态")
     store = _open_candidate_store()
     rows = [] if store is None else store.list_candidates(status=status, limit=MAX_CANDIDATE_ROWS)
     if store is not None:
         _reconcile_rollout(store)
+    rows = [row for row in rows if row["artifact_type"] == QUESTION_SET_ARTIFACT_TYPE]
     items = [
         _serialize_candidate(row, canary_percent=rollout.percent_for(row["id"])) for row in rows
     ]
@@ -755,6 +786,335 @@ def canary_candidate(
     )
     updated = store.get_candidate(candidate_id)
     return _serialize_candidate(updated, canary_percent=rollout.percent_for(candidate_id))
+
+
+# ----------------------------------------------------------------------
+# Phase 5 (Task 4): the code-patch review endpoints and the export.
+#
+# A code patch has no percentage canary — there is no second instance to serve a
+# share of traffic — so layer 4 degrades to an administrator review of the diff
+# (design §2). ``approve_for_apply`` is that whole layer: it exports
+# ``artifacts/patches/candidate-<id>.patch``, writes the audit row (whose note
+# carries the export path and the apply command) and advances the candidate to
+# ``approved_for_canary``, which for a code patch means "awaiting a human apply".
+# The endpoint never runs ``git apply``: nothing here writes to the working tree,
+# reads it, or spawns git, exactly like ``validate_patch``'s check-only mode.
+# ----------------------------------------------------------------------
+
+#: The artifact types the two candidate surfaces serve. One table, two contracts:
+#: question sets read ``target``/``payload``, code patches read ``layer``/``diff``.
+QUESTION_SET_ARTIFACT_TYPE = "jev_question_set"
+CODE_PATCH_ARTIFACT_TYPE = "code_patch"
+
+#: Layers 2/3 of a code patch are the worktree sandbox (apply, target tests,
+#: benchmark replay) and record their conclusion under this gate name; layer 4's
+#: review writes under the other one. Both names are what the gate trail is read
+#: by — the store only ever copies them into ``gate_log``.
+SANDBOX_GATE = "sandbox"
+REVIEW_GATE = "review"
+
+#: Where an approved patch is exported, and the repository the exported apply
+#: command names. ``artifacts/`` is locally ignored, so an export is a working
+#: document an administrator applies by hand — never a commit, never a merge.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PATCH_EXPORT_DIR = REPO_ROOT / "artifacts" / "patches"
+_PATCH_EXPORT_SUBDIR = "artifacts/patches"
+
+#: The three administrator decisions of layer 4, each mapped onto one of the
+#: ``awaiting_verification`` transitions and onto the gate detail its review
+#: entry records. ``approved_for_canary`` is the target for an approval because
+#: the code-patch state machine reuses the question-set one (the plan Task 1
+#: interfaces pin the transition, and no new status exists).
+CODE_PATCH_DECISIONS: dict[str, dict[str, str]] = {
+    "approve_for_apply": {
+        "new_status": EvolutionStatus.APPROVED_FOR_CANARY.value,
+        "gate_detail": "approved_for_apply",
+    },
+    "reject": {"new_status": EvolutionStatus.REJECTED.value, "gate_detail": "reject"},
+    "needs_revision": {
+        "new_status": EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+        "gate_detail": "needs_revision",
+    },
+}
+
+
+class CodePatchDecision(BaseModel):
+    """One administrator review decision; the note is audit evidence for it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ``str`` plus an explicit check instead of ``Literal``: an unknown action is
+    # a 400 naming the supported set, not FastAPI's generic 422 — the same shape
+    # the phase-3 decision endpoint and the question-set canary use.
+    action: str
+    note: str = ""
+
+
+def _diff_paths(diff: str) -> list[str]:
+    """Every file a stored diff touches, once, through the boundary module's parser.
+
+    ``_diff_header_paths`` reports both sides of a modified file (``a/…`` and
+    ``b/…``), which is one file to a reviewer, so deduplicate in diff order.
+    """
+    paths: list[str] = []
+    for path in _diff_header_paths(diff):
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _sandbox_summary(gate_log: object) -> list[dict]:
+    """The sandbox conclusions of layers 2/3, lifted out of the gate trail.
+
+    A patch that never reached the sandbox summarizes to an empty list, which is
+    exactly what a reviewer needs to see before deciding about it.
+    """
+    if not isinstance(gate_log, list):
+        return []
+    return [
+        _serialize_gate_entry(entry)
+        for entry in gate_log
+        if isinstance(entry, Mapping) and entry.get("gate") == SANDBOX_GATE
+    ]
+
+
+def _serialize_code_candidate(row: dict) -> dict:
+    """One code-patch candidate: stored signals, paths and the sandbox conclusion.
+
+    The diff body is deliberately absent — it is the file content a reviewer
+    reads on the detail response, and the only place the frontend ever shows it.
+    A list row needs the layer, the touched paths, the verification targets and
+    what the sandbox concluded; ``paths`` comes from the diff headers because the
+    candidate stores the diff, not a separate path list.
+    """
+    return {
+        "id": row["id"],
+        "observation_id": row["observation_id"],
+        "cluster_id": row["cluster_id"],
+        "artifact_type": row["artifact_type"],
+        "layer": row["layer"],
+        "paths": _diff_paths(str(row.get("diff") or "")),
+        "test_paths": [str(path) for path in row.get("test_paths") or []],
+        "status": row["status"],
+        "pool": row["pool"],
+        "confidence": row["confidence"],
+        "prompt_version": row["prompt_version"],
+        "model": row["model"],
+        "rationale": row["rationale"],
+        "expected_effect": row["expected_effect"],
+        "rollback_ref": dict(row["rollback_ref"])
+        if isinstance(row["rollback_ref"], Mapping)
+        else {},
+        "sandbox_summary": _sandbox_summary(row["gate_log"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _serialize_code_candidate_detail(row: dict, store: CandidateStore) -> dict:
+    """One patch plus its diff body, its five-layer trail and its audit rows."""
+    payload = _serialize_code_candidate(row)
+    payload["diff"] = str(row.get("diff") or "")
+    payload["gate_log"] = [_serialize_gate_entry(entry) for entry in row["gate_log"]]
+    payload["audit"] = [
+        _serialize_candidate_audit(entry) for entry in store.list_audit(row["id"])
+    ]
+    return payload
+
+
+def _patch_export_path(candidate_id: int) -> Path:
+    """``artifacts/patches/candidate-<id>.patch`` under the export directory."""
+    return PATCH_EXPORT_DIR / f"candidate-{int(candidate_id)}.patch"
+
+
+def _apply_command(candidate_id: int, test_paths: list[str]) -> str:
+    """The command an administrator runs by hand — this endpoint never runs it.
+
+    ``--3way`` so a base commit that has since moved still resolves when the
+    context matches, followed by the verification targets the sandbox already
+    ran. The command is written into the exported header comment and the audit
+    note, so the trail names the exact steps a human performed afterwards.
+    """
+    verification = " ".join(path for path in test_paths if path)
+    command = (
+        f"git -C {REPO_ROOT} apply --3way {_PATCH_EXPORT_SUBDIR}/candidate-{int(candidate_id)}.patch"
+    )
+    return f"{command} && python -m pytest {verification}" if verification else command
+
+
+def _patch_file_text(candidate_id: int, candidate: dict, apply_command: str) -> str:
+    """The exported file: a header comment, then the diff body verbatim.
+
+    The comment carries what a reviewer needs at the moment they apply it — the
+    layer, the base commit the diff was generated against, the touched files, the
+    verification targets and the apply command. ``git apply`` skips leading
+    comment lines, so the file stays a valid patch.
+    """
+    rollback_ref = candidate.get("rollback_ref")
+    base_commit = (
+        str(rollback_ref.get("base_commit", ""))
+        if isinstance(rollback_ref, Mapping)
+        else ""
+    )
+    paths = _diff_paths(str(candidate.get("diff") or ""))
+    test_paths = [str(path) for path in candidate.get("test_paths") or []]
+    header = [
+        f"# candidate-{int(candidate_id)}.patch — 进化补丁审核导出（approve_for_apply）",
+        "# 系统永不自动应用本补丁；应用、跑测试与重启服务均由管理员按下面的命令手动执行。",
+        f"# layer: {candidate.get('layer') or '—'}",
+        f"# base_commit: {base_commit or '—'}",
+        f"# files: {', '.join(paths) if paths else '—'}",
+        f"# test_paths: {', '.join(test_paths) if test_paths else '—'}",
+        f"# apply: {apply_command}",
+    ]
+    diff = str(candidate.get("diff") or "")
+    if diff and not diff.endswith("\n"):
+        diff += "\n"
+    return "\n".join(header) + "\n" + diff
+
+
+def _export_patch(candidate: dict) -> tuple[Path, str]:
+    """Write the exported patch file and return its path and the apply command.
+
+    Exporting is the entire effect of an approval: the directory is created when
+    it is missing, the file is written, and nothing else in the repository moves.
+    A row without a diff body cannot be exported, so the endpoint refuses it
+    before this runs (an empty ``.patch`` would be worse than no export).
+    """
+    candidate_id = int(candidate["id"])
+    test_paths = [str(path) for path in candidate.get("test_paths") or []]
+    apply_command = _apply_command(candidate_id, test_paths)
+    export_path = _patch_export_path(candidate_id)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_text(
+        _patch_file_text(candidate_id, candidate, apply_command), encoding="utf-8"
+    )
+    return export_path, apply_command
+
+
+def _decision_note(
+    action: str, note: str, export_path: Path | None, apply_command: str
+) -> str:
+    """The audit note: the administrator's words, plus what an approval produced.
+
+    ``advance_candidate`` writes this note as the audit row of the same
+    transaction that moves the status, so the trail always names the exported
+    file and the command a human has to run afterwards — and for the two other
+    decisions it stays exactly what the administrator typed.
+    """
+    if action != "approve_for_apply" or export_path is None:
+        return note
+    detail = f"导出补丁 {export_path}；应用命令：{apply_command}"
+    return f"{detail}；备注：{note}" if note else detail
+
+
+@router.get("/code-candidates", summary="代码补丁候选列表")
+def list_code_candidates(
+    status: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    user: dict = Depends(_admin_user),
+) -> dict:
+    """Code-patch candidates newest first, with the sandbox conclusion per row.
+
+    A missing database means nothing was recorded yet, so the page reads empty
+    without creating the file. There is no percentage to report and no rollout to
+    reconcile: layer 4 for a code patch is the review endpoint below, and the
+    diff body never leaves the detail response.
+    """
+    status = _filter_value(status, _STATUSES, "状态")
+    store = _open_candidate_store()
+    rows = (
+        []
+        if store is None
+        else [
+            row
+            for row in store.list_candidates(status=status, limit=MAX_CANDIDATE_ROWS)
+            if row["artifact_type"] == CODE_PATCH_ARTIFACT_TYPE
+        ]
+    )
+    items = [_serialize_code_candidate(row) for row in rows]
+    return _page(items, page, page_size)
+
+
+@router.get("/code-candidates/{candidate_id}", summary="代码补丁详情、diff 全文与门禁轨迹")
+def get_code_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> dict:
+    """One patch with its diff, its five-layer trail and its lifecycle audit.
+
+    The trail is where the whole evidence lives: ``scope`` (layer 1, written at
+    generation), ``sandbox`` (layers 2/3 — the isolated worktree run) and, once an
+    administrator decides, ``review`` (layer 4). A missing database and an unknown
+    id both read as 404, and neither creates the file.
+    """
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    row = _require_candidate(store, candidate_id)
+    return _serialize_code_candidate_detail(row, store)
+
+
+@router.post("/code-candidates/{candidate_id}/decision", summary="提交代码补丁审核决策")
+def decide_code_candidate(
+    candidate_id: int, payload: CodePatchDecision, user: dict = Depends(_admin_user)
+) -> dict:
+    """Layer 4 for a code patch: one audited administrator decision.
+
+    The order is fixed and it is what makes the trail truthful. An unknown action
+    is a 400 before anything is read; an unknown candidate or a missing database
+    is a 404; an illegal transition (a candidate already decided, or one that
+    never passed the sandbox) is a 409 — all three write nothing, because
+    ``advance_candidate`` validates inside its transaction and the audit row
+    follows the validation, never precedes it. An approval exports the patch
+    first, so the audit note can name the exported file and the apply command in
+    the same row that records the status move.
+
+    Approving never applies: the endpoint reads the stored diff, writes it under
+    ``artifacts/patches/`` and stops. ``git apply``, the tests and the restart
+    belong to the administrator, at the command this endpoint records.
+    """
+    target = CODE_PATCH_DECISIONS.get(payload.action)
+    if target is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"不支持的审核动作：{payload.action}"
+                f"（支持 {' / '.join(sorted(CODE_PATCH_DECISIONS))}）"
+            ),
+        )
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    row = _require_candidate(store, candidate_id)
+    new_status = target["new_status"]
+    if new_status not in EVOLUTION_TRANSITIONS.get(row["status"], ()):
+        # Checked here as well as inside the store so the 409 leaves no trace:
+        # a rejected decision must not be able to write an audit row.
+        raise HTTPException(
+            status_code=409,
+            detail=f"补丁状态 {row['status']} 不允许 {payload.action}（目标 {new_status}）",
+        )
+    export_path: Path | None = None
+    apply_command = ""
+    if payload.action == "approve_for_apply":
+        if not str(row.get("diff") or "").strip():
+            raise HTTPException(status_code=409, detail="补丁缺少 diff 正文，拒绝导出")
+        export_path, apply_command = _export_patch(row)
+    note = _decision_note(payload.action, payload.note, export_path, apply_command)
+    try:
+        updated = store.advance_candidate(
+            candidate_id,
+            new_status,
+            actor_id=str(user["id"]),
+            note=note,
+            gate=REVIEW_GATE,
+            gate_detail=target["gate_detail"],
+        )
+    except KeyError as error:
+        # The candidate disappeared between the read above and this write.
+        raise HTTPException(status_code=404, detail="候选不存在") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=f"非法状态转移：{error}") from error
+    return _serialize_code_candidate_detail(updated, store)
 
 
 @router.post("/candidates/{candidate_id}/rollback", summary="一键回滚候选灰度")

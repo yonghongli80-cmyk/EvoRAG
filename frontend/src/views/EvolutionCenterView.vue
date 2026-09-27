@@ -3,6 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import {
   fetchCandidate,
   fetchCandidates,
+  fetchCodePatch,
+  fetchCodePatches,
   fetchDiagnosis,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
@@ -11,12 +13,16 @@ import {
   fetchEvolutionStateMachine,
   rollbackCandidate,
   submitCanary,
+  submitCodePatchDecision,
   submitDecision
 } from '../api/evolution'
 import type {
+  CodePatchDecisionAction,
   EvolutionCandidate,
   EvolutionCandidateDetail,
   EvolutionCluster,
+  EvolutionCodePatch,
+  EvolutionCodePatchDetail,
   EvolutionDecisionAction,
   EvolutionDiagnosis,
   EvolutionEndpoint,
@@ -25,7 +31,7 @@ import type {
   EvolutionStateMachine
 } from '../api/evolution'
 
-type Tab = 'observations' | 'clusters' | 'metrics' | 'candidates'
+type Tab = 'observations' | 'clusters' | 'metrics' | 'candidates' | 'code-patches'
 
 const PAGE_SIZE = 20
 
@@ -79,6 +85,16 @@ const selectedCandidateId = ref<number | null>(null)
 const candidateLoading = ref(false)
 const canaryPercent = ref('5')
 const candidateActing = ref(false)
+// Task 4: the code-patch review tab. There is no percentage to set — layer 4 for
+// a code patch is the administrator review, and ``approve_for_apply`` only
+// exports the patch, so the buttons say what they actually do.
+const codePatches = ref<EvolutionCodePatch[]>([])
+const codePatchesLoaded = ref(false)
+const selectedCodePatch = ref<EvolutionCodePatchDetail | null>(null)
+const selectedCodePatchId = ref<number | null>(null)
+const codePatchLoading = ref(false)
+const codePatchNote = ref('')
+const codePatchActing = ref(false)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(observationsTotal.value / PAGE_SIZE)))
 const statusOptions = computed(() => stateMachine.value?.statuses ?? [])
@@ -381,6 +397,91 @@ function showCandidates() {
   if (!candidatesLoaded.value) void loadCandidates()
 }
 
+/** The five evolution layers a code patch may address, as the boundary names them. */
+const LAYER_LABELS: Record<string, string> = {
+  chunking: '切块策略',
+  reranking: '重排流程',
+  parser: '解析器',
+  tool_workflow: '工具工作流',
+  code: '项目代码'
+}
+
+function layerLabel(layer: string): string {
+  return LAYER_LABELS[layer] || layer
+}
+
+function shortCommit(commit: string): string {
+  return commit.length > 12 ? `${commit.slice(0, 12)}…` : commit
+}
+
+async function loadCodePatches() {
+  codePatchLoading.value = true
+  try {
+    const data = await fetchCodePatches({ pageSize: 100 })
+    codePatches.value = data.items
+    codePatchesLoaded.value = true
+    error.value = ''
+  } catch (err) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = '无法加载补丁候选列表'
+  } finally {
+    codePatchLoading.value = false
+  }
+}
+
+async function openCodePatch(patch: EvolutionCodePatch) {
+  selectedCodePatchId.value = patch.id
+  codePatchLoading.value = true
+  try {
+    selectedCodePatch.value = await fetchCodePatch(patch.id)
+    codePatchNote.value = ''
+    error.value = ''
+  } catch (err) {
+    selectedCodePatch.value = null
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = '无法加载补丁详情'
+  } finally {
+    codePatchLoading.value = false
+  }
+}
+
+/** Re-read the open patch after a decision: the trail and the status moved. */
+async function reloadCodePatch() {
+  if (selectedCodePatchId.value === null) return
+  await openCodePatch({ id: selectedCodePatchId.value } as EvolutionCodePatch)
+}
+
+async function decideCodePatch(action: CodePatchDecisionAction) {
+  if (!selectedCodePatch.value || codePatchActing.value) return
+  codePatchActing.value = true
+  try {
+    await submitCodePatchDecision(selectedCodePatch.value.id, action, codePatchNote.value)
+    error.value = ''
+    codePatchNote.value = ''
+    await reloadCodePatch()
+    await loadCodePatches()
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '审核决策提交失败'
+  } finally {
+    codePatchActing.value = false
+  }
+}
+
+function showCodePatches() {
+  activeTab.value = 'code-patches'
+  if (!codePatchesLoaded.value) void loadCodePatches()
+}
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -450,6 +551,15 @@ onMounted(async () => {
         @click="showCandidates"
       >
         候选灰度
+      </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: activeTab === 'code-patches' }"
+        data-test="tab-code-patches"
+        @click="showCodePatches"
+      >
+        代码补丁
       </button>
     </nav>
 
@@ -908,6 +1018,194 @@ onMounted(async () => {
         </template>
       </div>
     </div>
+
+    <div v-else-if="activeTab === 'code-patches'" class="tab-panel">
+      <div class="table-card">
+        <h3 class="panel-title">代码补丁候选（层 4 = 管理员审核，批准只导出不应用）</h3>
+        <p v-if="codePatchLoading && codePatches.length === 0" class="muted" data-test="code-candidates-loading">
+          加载补丁候选中…
+        </p>
+        <p v-else-if="codePatches.length === 0" class="muted" data-test="code-candidates-empty">
+          暂无补丁：只有经管理员确认根因的失败聚类才会按层级生成代码补丁，越界路径与限额在层 1 即被拒绝。
+        </p>
+        <table v-else data-test="code-candidate-list">
+          <thead>
+            <tr>
+              <th>ID</th><th>层级</th><th>状态</th><th>置信度</th><th>文件数</th>
+              <th>基线提交</th><th>沙箱</th><th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="patch in codePatches"
+              :key="patch.id"
+              data-test="code-candidate-row"
+              :class="{ 'candidate-row-active': selectedCodePatchId === patch.id }"
+              @click="openCodePatch(patch)"
+            >
+              <td>{{ patch.id }}</td>
+              <td>
+                {{ layerLabel(patch.layer) }}<code>（{{ patch.layer }}）</code>
+              </td>
+              <td>
+                <span
+                  class="badge"
+                  :class="{ 'badge-warn': patch.status === 'rejected' || patch.status === 'rolled_back' }"
+                >
+                  {{ patch.status }}
+                </span>
+              </td>
+              <td>{{ patch.confidence }}</td>
+              <td data-test="code-candidate-row-files">{{ patch.paths.length }}</td>
+              <td><code>{{ shortCommit(patch.rollback_ref.base_commit || '') || '—' }}</code></td>
+              <td>
+                <span
+                  v-for="(entry, index) in patch.sandbox_summary"
+                  :key="index"
+                  class="badge"
+                  :class="{ 'badge-warn': entry.result !== 'passed' && entry.result !== 'accepted' }"
+                >
+                  {{ gateResultLabel(entry.result) }}
+                </span>
+                <span v-if="patch.sandbox_summary.length === 0" class="cluster-meta">未验证</span>
+              </td>
+              <td>{{ formatTime(patch.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-if="selectedCodePatch" class="candidate-detail" data-test="code-candidate-detail">
+        <h3 class="panel-title">
+          补丁 #{{ selectedCodePatch.id }}（{{ layerLabel(selectedCodePatch.layer) }}）
+        </h3>
+        <p v-if="codePatchLoading" class="muted">加载补丁…</p>
+        <template v-else>
+          <p class="cluster-meta">
+            {{ selectedCodePatch.status }} · 置信度 {{ selectedCodePatch.confidence }} ·
+            聚类 #{{ selectedCodePatch.cluster_id }}{{ selectedCodePatch.observation_id
+              ? ` · 观测 #${selectedCodePatch.observation_id}` : '' }} ·
+            提示词 {{ selectedCodePatch.prompt_version || '—' }} / 模型 {{ selectedCodePatch.model || '—' }}
+          </p>
+          <dl class="draft-grid">
+            <dt>生成理由</dt>
+            <dd data-test="code-candidate-rationale">{{ selectedCodePatch.rationale }}</dd>
+            <dt>预期效果</dt>
+            <dd data-test="code-candidate-expected-effect">{{ selectedCodePatch.expected_effect }}</dd>
+            <dt>回滚引用</dt>
+            <dd data-test="code-candidate-rollback-ref">
+              base_commit={{ selectedCodePatch.rollback_ref.base_commit || '—' }}
+            </dd>
+          </dl>
+
+          <h4 class="panel-subtitle">文件清单（层 1 边界内，只读）</h4>
+          <ul class="patch-files" data-test="code-candidate-files">
+            <li v-for="path in selectedCodePatch.paths" :key="path">
+              <code>{{ path }}</code>
+            </li>
+          </ul>
+          <p class="cluster-meta" data-test="code-candidate-test-paths">
+            验证目标：<code v-for="path in selectedCodePatch.test_paths" :key="path">{{ path }}</code>
+          </p>
+
+          <h4 class="panel-subtitle">diff 全文（只读；应用由管理员手动执行）</h4>
+          <pre class="patch-diff" data-test="patch-diff">{{ selectedCodePatch.diff }}</pre>
+
+          <h4 class="panel-subtitle">沙箱结论（层 2/3：隔离 worktree 内 apply + 目标测试 + 基准回放）</h4>
+          <ul
+            v-if="selectedCodePatch.sandbox_summary.length > 0"
+            class="audit-list"
+            data-test="code-candidate-sandbox"
+          >
+            <li v-for="(entry, index) in selectedCodePatch.sandbox_summary" :key="index">
+              <span class="badge" :class="{ 'badge-warn': entry.result !== 'passed' && entry.result !== 'accepted' }">
+                {{ gateResultLabel(entry.result) }}
+              </span>
+              <span class="cluster-meta">{{ entry.detail || '—' }} · {{ formatTime(entry.created_at) }}</span>
+            </li>
+          </ul>
+          <p v-else class="muted">沙箱尚未验证该补丁：未通过层 2/3 的补丁不予审核。</p>
+
+          <h4 class="panel-subtitle">五层门禁轨迹</h4>
+          <ul
+            v-if="selectedCodePatch.gate_log.length > 0"
+            class="audit-list"
+            data-test="code-candidate-gate-log"
+          >
+            <li
+              v-for="(entry, index) in selectedCodePatch.gate_log"
+              :key="index"
+              data-test="code-candidate-gate-entry"
+            >
+              <span class="audit-action">{{ gateLabel(entry.gate) }}</span>
+              <span
+                class="badge"
+                :class="{ 'badge-warn': entry.result !== 'passed' && entry.result !== 'accepted' }"
+              >
+                {{ gateResultLabel(entry.result) }}
+              </span>
+              <span class="cluster-meta">{{ entry.detail || '—' }} · {{ formatTime(entry.created_at) }}</span>
+            </li>
+          </ul>
+          <p v-else class="muted">暂无门禁记录</p>
+
+          <h4 class="panel-subtitle">生命周期审计</h4>
+          <ul
+            v-if="selectedCodePatch.audit.length > 0"
+            class="audit-list"
+            data-test="code-candidate-audit"
+          >
+            <li v-for="row in selectedCodePatch.audit" :key="row.id">
+              <span class="audit-action">{{ row.action }}</span>
+              <span class="cluster-meta">
+                {{ row.actor_id }} · {{ formatTime(row.created_at) }} · {{ row.note || '无备注' }}
+              </span>
+            </li>
+          </ul>
+          <p v-else class="muted">暂无审计记录</p>
+
+          <div class="decision-bar">
+            <textarea
+              v-model="codePatchNote"
+              class="decision-note"
+              data-test="code-candidate-note"
+              rows="2"
+              placeholder="备注：批准依据、驳回理由或还缺的证据（写入审计）"
+              :disabled="codePatchActing"
+            ></textarea>
+            <div class="decision-buttons">
+              <button
+                type="button"
+                class="query-button"
+                data-test="code-candidate-approve"
+                :disabled="codePatchActing"
+                @click="decideCodePatch('approve_for_apply')"
+              >
+                批准并导出
+              </button>
+              <button
+                type="button"
+                class="decision-button"
+                data-test="code-candidate-reject"
+                :disabled="codePatchActing"
+                @click="decideCodePatch('reject')"
+              >
+                拒绝
+              </button>
+              <button
+                type="button"
+                class="decision-button"
+                data-test="code-candidate-needs-revision"
+                :disabled="codePatchActing"
+                @click="decideCodePatch('needs_revision')"
+              >
+                需修订
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -1100,6 +1398,27 @@ tbody tr:hover { background: #f8fbff; }
 .candidate-actions { display: grid; gap: var(--space-2); }
 .candidate-actions label { color: var(--color-secondary); font-size: var(--text-xs); }
 .candidate-actions .decision-note { max-width: 160px; }
+
+/* The patch body is the file content under review: monospace, read-only, and the
+   only place on the page a diff is ever rendered. */
+.patch-files { list-style: none; margin: 0; padding-left: 0; }
+.patch-files li { padding: var(--space-1) 0; font-size: var(--text-sm); }
+.patch-files code { font-family: ui-monospace, monospace; font-size: var(--text-xs); }
+.patch-diff {
+  max-height: 420px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-foreground);
+  background: var(--color-surface-2);
+  font-family: ui-monospace, monospace;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre;
+  user-select: text;
+}
 
 .error-banner {
   margin-bottom: var(--space-4);

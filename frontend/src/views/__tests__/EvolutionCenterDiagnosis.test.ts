@@ -625,3 +625,252 @@ describe('EvolutionCenterView candidate rollout', () => {
     expect(wrapper.get('[data-test="evolution-forbidden"]').text()).toContain('管理员')
   })
 })
+
+// ------------------------------------------------------------------
+// Task 4: the code-patch review tab.
+//
+// Layer 4 has no percentage canary for a code patch (no second instance), so the
+// review is the gate: the page lists the patch rows, opens one with its file
+// list, its read-only diff, the sandbox conclusion and the five-layer trail, and
+// offers the three audited decisions. ``approve_for_apply`` only exports the
+// patch — the API never applies it — so the UI labels the button accordingly.
+// ------------------------------------------------------------------
+
+const CODE_CANDIDATES_URL = '/knowledge-operations/evolution/code-candidates'
+const PATCH_DECISION_URL = `${CODE_CANDIDATES_URL}/5/decision`
+
+const codePatch = {
+  id: 5,
+  observation_id: 12,
+  cluster_id: 7,
+  artifact_type: 'code_patch',
+  layer: 'reranking',
+  paths: ['rag/reranker.py'],
+  test_paths: ['tests/test_reranker.py'],
+  status: 'awaiting_verification',
+  pool: 'candidate_pool',
+  confidence: 'medium',
+  prompt_version: 'patch-v1',
+  model: 'deepseek/deepseek-v4.1-flash',
+  rationale: '重排序分数区分度低，词面撞名淹没真实候选',
+  expected_effect: '同义候选排在撞名候选之前',
+  rollback_ref: { base_commit: 'a'.repeat(40) },
+  sandbox_summary: [
+    {
+      gate: 'sandbox',
+      result: 'passed',
+      detail: 'applied=True tests_passed=True',
+      created_at: 1_700_000_500
+    }
+  ],
+  created_at: 1_700_000_300,
+  updated_at: 1_700_000_500
+}
+
+const codePatchDetail = {
+  ...codePatch,
+  diff:
+    '--- a/rag/reranker.py\n' +
+    '+++ b/rag/reranker.py\n' +
+    '@@ -1,3 +1,4 @@\n' +
+    ' def rerank(query, chunks):\n' +
+    '     return chunks\n' +
+    '+    # candidate tweak\n',
+  gate_log: [
+    {
+      gate: 'scope',
+      result: 'accepted',
+      detail: 'code_patch/reranking files=1',
+      created_at: 1_700_000_300
+    },
+    {
+      gate: 'sandbox',
+      result: 'passed',
+      detail: 'applied=True tests_passed=True',
+      created_at: 1_700_000_500
+    }
+  ],
+  audit: [
+    {
+      id: 1,
+      actor_id: '3',
+      action: 'generate',
+      candidate_id: 5,
+      note: 'generated reranking patch from base_commit=' + 'a'.repeat(40),
+      created_at: 1_700_000_300
+    },
+    {
+      id: 2,
+      actor_id: '3',
+      action: 'advance',
+      candidate_id: 5,
+      note: '沙箱：apply 与目标测试均通过',
+      created_at: 1_700_000_500
+    }
+  ]
+}
+
+/** Route the reads the code-patch tab issues; other paths keep the canned routes. */
+function mockCodeCandidateRoutes(
+  options: { patches?: any; patch?: any; patchError?: any } = {}
+) {
+  vi.mocked(api.get).mockImplementation(async (url: string) => {
+    const path = String(url)
+    if (path === CODE_CANDIDATES_URL) {
+      return { data: options.patches ?? { items: [codePatch], total: 1, page: 1, page_size: 100 } }
+    }
+    if (path.startsWith(`${CODE_CANDIDATES_URL}/`)) {
+      if (options.patchError) return Promise.reject(options.patchError)
+      return { data: options.patch ?? codePatchDetail }
+    }
+    if (path.endsWith('/state-machine')) return { data: stateMachine }
+    if (path.endsWith('/metrics')) return { data: metrics }
+    if (path.endsWith('/knowledge-operations/evolution/clusters')) {
+      return { data: { items: [candidateCluster], total: 1, page: 1, page_size: 100 } }
+    }
+    if (path.startsWith('/knowledge-operations/evolution/clusters/')) {
+      return { data: { ...candidateCluster, members: [observation] } }
+    }
+    return { data: { items: [], total: 0, page: 1, page_size: 20 } }
+  })
+}
+
+describe('EvolutionCenterView code-patch review', () => {
+  it('lists patches with layer, status, confidence, file count and base commit', async () => {
+    mockCodeCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+
+    expect(api.get).toHaveBeenCalledWith(CODE_CANDIDATES_URL, {
+      params: { page: 1, page_size: 100 }
+    })
+    const row = wrapper.get('[data-test="code-candidate-row"]')
+    expect(row.text()).toContain('reranking')
+    expect(row.text()).toContain('awaiting_verification')
+    expect(row.text()).toContain('medium')
+    expect(row.text()).toContain('1')
+    expect(row.text()).toContain('a'.repeat(8))
+  })
+
+  it('shows an explicit empty state when no patch was generated', async () => {
+    mockCodeCandidateRoutes({ patches: { items: [], total: 0, page: 1, page_size: 100 } })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="code-candidates-empty"]').text()).toContain('暂无补丁')
+  })
+
+  it('opens the file list, the read-only diff, the sandbox conclusion and the gate trail', async () => {
+    mockCodeCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    const detail = wrapper.get('[data-test="code-candidate-detail"]')
+
+    // The file list and the verification targets.
+    const files = detail.get('[data-test="code-candidate-files"]')
+    expect(files.text()).toContain('rag/reranker.py')
+    expect(detail.get('[data-test="code-candidate-test-paths"]').text()).toContain('tests/test_reranker.py')
+
+    // The diff is rendered read-only, verbatim and never edited by this page.
+    const diff = detail.get('[data-test="patch-diff"]')
+    expect(diff.text()).toContain('--- a/rag/reranker.py')
+    expect(diff.text()).toContain('+    # candidate tweak')
+    expect((diff.element as HTMLPreElement).tagName).toBe('PRE')
+
+    // The sandbox conclusion of layers 2/3, summarised from the gate trail.
+    const sandbox = detail.get('[data-test="code-candidate-sandbox"]')
+    expect(sandbox.text()).toContain('applied=True tests_passed=True')
+
+    const trail = detail.get('[data-test="code-candidate-gate-log"]')
+    expect(trail.text()).toContain('层 1 产物边界')
+    expect(trail.text()).toContain('code_patch/reranking files=1')
+
+    expect(detail.get('[data-test="code-candidate-rationale"]').text()).toContain(
+      '重排序分数区分度低'
+    )
+    expect(detail.get('[data-test="code-candidate-expected-effect"]').text()).toContain(
+      '同义候选排在撞名候选之前'
+    )
+    expect(detail.get('[data-test="code-candidate-rollback-ref"]').text()).toContain(
+      'a'.repeat(40)
+    )
+
+    const audit = detail.get('[data-test="code-candidate-audit"]')
+    expect(audit.text()).toContain('generate')
+    expect(audit.text()).toContain('沙箱：apply 与目标测试均通过')
+  })
+
+  it('submits the three review decisions with the note', async () => {
+    mockCodeCandidateRoutes()
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    // Approving exports the patch; the endpoint never applies it, so the label
+    // says so instead of promising a rollout.
+    expect(wrapper.get('[data-test="code-candidate-approve"]').text()).toContain('批准并导出')
+
+    await wrapper.get('[data-test="code-candidate-note"]').setValue('基准回放已复核')
+    await wrapper.get('[data-test="code-candidate-approve"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(PATCH_DECISION_URL, {
+      action: 'approve_for_apply',
+      note: '基准回放已复核'
+    })
+
+    await wrapper.get('[data-test="code-candidate-note"]').setValue('未触及分数间距')
+    await wrapper.get('[data-test="code-candidate-reject"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(PATCH_DECISION_URL, {
+      action: 'reject',
+      note: '未触及分数间距'
+    })
+
+    await wrapper.get('[data-test="code-candidate-note"]').setValue('缺基准证据')
+    await wrapper.get('[data-test="code-candidate-needs-revision"]').trigger('click')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(PATCH_DECISION_URL, {
+      action: 'needs_revision',
+      note: '缺基准证据'
+    })
+    expect(wrapper.get('[data-test="code-candidate-approve"]').text()).toContain('批准并导出')
+  })
+
+  it('reports a rejected decision (409, already decided) on the banner', async () => {
+    mockCodeCandidateRoutes()
+    vi.mocked(api.post).mockRejectedValue({
+      response: { status: 409, data: { detail: '补丁状态 approved_for_canary 不允许 approve_for_apply' } }
+    })
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-test="code-candidate-reject"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="evolution-error"]').text()).toContain('不允许')
+    expect(wrapper.get('[data-test="code-candidate-detail"]').text()).toContain(
+      'applied=True tests_passed=True'
+    )
+  })
+})

@@ -352,3 +352,94 @@ export async function rollbackCandidate(candidateId: number): Promise<EvolutionC
   const res = await api.post(`/knowledge-operations/evolution/candidates/${candidateId}/rollback`)
   return res.data
 }
+
+// ----------------------------------------------------------------------
+// Task 4: the code-patch review surface.
+//
+// Layer 4 has no percentage canary for a code patch (there is no second
+// instance to serve a share of traffic), so the review is the gate: a list of
+// patch rows without the diff body, a detail that carries the diff verbatim plus
+// the sandbox conclusion and the five-layer trail, and one audited decision
+// endpoint. ``approve_for_apply`` exports ``artifacts/patches/candidate-<id>.patch``
+// and records the apply command — the API never applies anything.
+// ----------------------------------------------------------------------
+
+/** One code-patch candidate as the list endpoint serializes it (no diff body). */
+export interface EvolutionCodePatch {
+  id: number
+  observation_id: number | null
+  cluster_id: number
+  artifact_type: string
+  layer: string
+  /** The files the diff touches, read from the diff headers by the API. */
+  paths: string[]
+  /** The verification targets the sandbox ran (and the apply command re-runs). */
+  test_paths: string[]
+  status: string
+  pool: string
+  confidence: string
+  prompt_version: string
+  model: string | null
+  rationale: string
+  expected_effect: string
+  rollback_ref: Record<string, string>
+  /** The sandbox conclusion of layers 2/3, lifted out of the gate trail. */
+  sandbox_summary: EvolutionGateEntry[]
+  created_at: number
+  updated_at: number
+}
+
+/** One code patch with its diff body, its five-layer trail and its audit rows. */
+export interface EvolutionCodePatchDetail extends EvolutionCodePatch {
+  diff: string
+  gate_log: EvolutionGateEntry[]
+  audit: EvolutionCandidateAudit[]
+}
+
+/** The three administrator decisions of the code-patch review. */
+export type CodePatchDecisionAction = 'approve_for_apply' | 'reject' | 'needs_revision'
+
+export interface CodePatchQuery {
+  status?: string
+  page?: number
+  pageSize?: number
+}
+
+/** Return one page of code-patch candidates (administrator only). */
+export async function fetchCodePatches(
+  query: CodePatchQuery = {}
+): Promise<Paged<EvolutionCodePatch>> {
+  const res = await api.get('/knowledge-operations/evolution/code-candidates', {
+    params: pageParams(query)
+  })
+  return res.data
+}
+
+/**
+ * Return one code patch with its diff, gate trail and audit history.
+ *
+ * This is the only response that carries the diff body: it is the file content a
+ * reviewer must read, and the page renders it read-only.
+ */
+export async function fetchCodePatch(patchId: number): Promise<EvolutionCodePatchDetail> {
+  const res = await api.get(`/knowledge-operations/evolution/code-candidates/${patchId}`)
+  return res.data
+}
+
+/**
+ * Submit one review decision and return the updated patch.
+ *
+ * ``approve_for_apply`` exports the patch and records the apply command; the
+ * endpoint never applies it, so the caller only refreshes the trail.
+ */
+export async function submitCodePatchDecision(
+  patchId: number,
+  action: CodePatchDecisionAction,
+  note: string
+): Promise<EvolutionCodePatchDetail> {
+  const res = await api.post(
+    `/knowledge-operations/evolution/code-candidates/${patchId}/decision`,
+    { action, note }
+  )
+  return res.data
+}
