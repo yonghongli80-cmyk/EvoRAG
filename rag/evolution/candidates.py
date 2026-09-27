@@ -1,9 +1,12 @@
 """Candidate contracts for the assisted self-evolution phase (phase 4).
 
-Only one artifact type exists in this phase: ``jev_question_set`` — a text
-variant of the Jev judgement layer's question set. It is pure data, it can be
-shadow-compared against the live set question by question, and it rolls back
-instantly through the version recorded in ``rollback_ref``.
+Only text variants of the Jev judgement layer's question set are bounded here.
+A ``jev_question_set`` candidate is pure data: it can be shadow-compared against
+the live set question by question, and it rolls back instantly through the
+version recorded in ``rollback_ref``. Its sibling artifact, ``code_patch``,
+carries a unified diff and is bounded by
+:func:`rag.evolution.code_patches.validate_patch` instead — this module refuses
+it rather than pretending a payload check applies to a diff.
 
 The payload is a **text-only override**. Question ids, question count, primitive
 type (``Choice``/``Noul``) and the criteria key set are structural: the
@@ -26,7 +29,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-#: The only artifact type this phase may produce (design §6 suggestion layers).
+#: The artifact type whose payload :func:`validate_payload` bounds (design §6
+#: suggestion layers). ``code_patch`` candidates are bounded by
+#: :func:`rag.evolution.code_patches.validate_patch` instead.
 ARTIFACT_TYPE = "jev_question_set"
 
 #: The only two question-set targets a candidate may address.
@@ -183,7 +188,13 @@ def _validate_entry(question_id: str, entry: Mapping[str, object], base_question
     _validate_change(question_id, base_instructions, base_criteria, entry)
 
 
-def validate_payload(target: str, payload: dict, base: Mapping[str, object]) -> None:
+def validate_payload(
+    target: str,
+    payload: dict,
+    base: Mapping[str, object],
+    *,
+    artifact_type: str = ARTIFACT_TYPE,
+) -> None:
     """Assert a candidate payload stays inside the question-set boundary.
 
     ``base`` is the current question set for ``target`` (question id → question
@@ -204,9 +215,20 @@ def validate_payload(target: str, payload: dict, base: Mapping[str, object]) -> 
     7. ``target`` is one of :data:`TARGETS`; anything else is a programming
        error and raises ``ValueError`` instead of a boundary error.
 
+    ``artifact_type`` scopes the validator itself: only ``jev_question_set`` is
+    served. A ``code_patch`` carries a diff, not question text, and is bounded
+    by :func:`rag.evolution.code_patches.validate_patch`, so naming one here is
+    a programming error (``ValueError``) rather than a silent pass.
+
     Raises :class:`PayloadBoundaryError` for a boundary violation and
-    ``ValueError`` for an unknown target. Returns ``None`` on success.
+    ``ValueError`` for an unknown target or artifact type. Returns ``None`` on
+    success.
     """
+    if artifact_type != ARTIFACT_TYPE:
+        raise ValueError(
+            f"validate_payload bounds {ARTIFACT_TYPE!r} payloads only; "
+            f"{artifact_type!r} candidates are bounded by validate_patch"
+        )
     if target not in TARGETS:
         raise ValueError(f"unknown candidate target: {target!r}")
     if not isinstance(payload, Mapping) or not payload:
@@ -236,7 +258,11 @@ def validate_payload(target: str, payload: dict, base: Mapping[str, object]) -> 
 class JevQuestionSetCandidate(BaseModel):
     """One question-set candidate: a bounded text variant of the live set.
 
-    ``extra="forbid"`` makes an unknown field (a chunk text, an answer, a
+    ``artifact_type`` is the phase's discriminator: ``jev_question_set`` is this
+    contract, bounded by :func:`validate_payload`; ``code_patch`` names the
+    sibling contract in :mod:`rag.evolution.code_patches`, bounded by its own
+    :func:`~rag.evolution.code_patches.validate_patch` (a diff is not question
+    text). ``extra="forbid"`` makes an unknown field (a chunk text, an answer, a
     credential) a construction error, exactly like ``DiagnosticDraft``.
     ``rollback_ref`` must name the live question-set version and hash the
     payload snapshot a rollback restores, because rollback may only depend on
@@ -245,7 +271,7 @@ class JevQuestionSetCandidate(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    artifact_type: Literal["jev_question_set"]
+    artifact_type: Literal["jev_question_set", "code_patch"]
     target: Literal["preflight", "passages"]
     payload: dict[str, dict]
     rationale: str

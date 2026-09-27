@@ -459,6 +459,9 @@ def test_candidate_table_has_the_documented_columns_and_indexes(tmp_path):
         "rationale",
         "expected_effect",
         "confidence",
+        "diff",
+        "layer",
+        "test_paths",
         "created_at",
         "updated_at",
     }
@@ -519,3 +522,108 @@ def test_old_shape_candidates_table_gains_the_missing_columns(tmp_path):
     assert stored["confidence"] == "low"
     assert stored["rationale"] == "旧格式候选"
     assert store.add_candidate(None, cluster["id"], sample_candidate()) == 2
+
+
+# ------------------------------------------------------------------
+# Phase 5: code-patch candidates share the store and the state machine.
+# ------------------------------------------------------------------
+
+
+def sample_code_patch(**kw):
+    """A minimal reranking-layer patch over the current repository state."""
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    data = dict(
+        artifact_type="code_patch",
+        layer="reranking",
+        paths=("rag/reranker.py",),
+        diff=(
+            "--- a/rag/reranker.py\n"
+            "+++ b/rag/reranker.py\n"
+            "@@ -1,1 +1,2 @@\n"
+            " # reranker\n"
+            "+# tightened filename collision penalty\n"
+        ),
+        test_paths=("tests/test_reranker.py",),
+        rationale="词面撞名淹没候选，重排缺少文件名惩罚",
+        expected_effect="无关文档不再凭借文件名相似度挤占前列",
+        rollback_ref={"base_commit": "a" * 40},
+        confidence="low",
+    )
+    data.update(kw)
+    return CodePatchCandidate(**data)
+
+
+def test_a_code_patch_candidate_round_trips_through_the_store(tmp_path):
+    trace, store, cluster, member = seeded(tmp_path)
+
+    candidate_id = store.add_candidate(
+        member["id"], cluster["id"], sample_code_patch(), prompt_version="patch-v1", model="m"
+    )
+    row = store.get_candidate(candidate_id)
+
+    assert row["artifact_type"] == "code_patch"
+    assert row["layer"] == "reranking"
+    assert row["target"] is None
+    assert row["payload"] is None
+    assert row["diff"].startswith("--- a/rag/reranker.py")
+    assert row["test_paths"] == ["tests/test_reranker.py"]
+    assert store.list_candidates()[0]["rollback_ref"]["base_commit"] == "a" * 40
+
+
+def test_a_phase4_database_upgrades_to_the_code_patch_schema(tmp_path):
+    """A pre-phase-5 table (CHECK-constrained, no patch columns) is rebuilt in place."""
+    import json
+
+    db_path = tmp_path / "evolution.db"
+    trace = FailureTraceStore(db_path)
+    cluster, member = make_approved_cluster(trace)
+    old_candidate = sample_candidate()
+    now = time.time()
+    with trace._lock:
+        trace._conn.execute(
+            "CREATE TABLE candidates ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, observation_id INTEGER, cluster_id INTEGER, "
+            "artifact_type TEXT NOT NULL CHECK(artifact_type IN ('jev_question_set')), "
+            "target TEXT NOT NULL CHECK(target IN ('preflight','passages')), "
+            "payload JSON NOT NULL, status TEXT NOT NULL, pool TEXT NOT NULL, "
+            "gate_log JSON NOT NULL DEFAULT '[]', prompt_version TEXT, model TEXT, "
+            "rollback_ref JSON NOT NULL, rationale TEXT NOT NULL, expected_effect TEXT NOT NULL, "
+            "confidence TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        trace._conn.execute(
+            "INSERT INTO candidates (observation_id, cluster_id, artifact_type, target, payload, "
+            "status, pool, gate_log, prompt_version, model, rollback_ref, rationale, "
+            "expected_effect, confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                member["id"], cluster["id"], "jev_question_set", "preflight",
+                json.dumps(old_candidate.payload, ensure_ascii=False),
+                "candidate_testing", "candidate_pool", "[]", "candidate-v1", "m",
+                json.dumps(old_candidate.rollback_ref, ensure_ascii=False),
+                old_candidate.rationale, old_candidate.expected_effect, "medium", now, now,
+            ),
+        )
+        trace._conn.commit()
+    trace.close()
+
+    reopened = FailureTraceStore(db_path)
+    store = CandidateStore(reopened)  # opening runs the migration
+    rows = store.list_candidates()
+    assert [row["artifact_type"] for row in rows] == ["jev_question_set"]
+    assert rows[0]["target"] == "preflight"
+    assert rows[0]["payload"] == old_candidate.payload
+
+    patch_id = store.add_candidate(member["id"], cluster["id"], sample_code_patch())
+    assert store.get_candidate(patch_id)["layer"] == "reranking"
+    store.close()
+
+
+def test_the_benchmark_gate_scan_skips_code_patch_candidates(tmp_path):
+    """Layer 2 belongs to question sets; the sandbox gate owns code patches."""
+    trace, store, cluster, member = seeded(tmp_path)
+    store.add_candidate(member["id"], cluster["id"], sample_candidate())
+    store.add_candidate(member["id"], cluster["id"], sample_code_patch())
+
+    rows = store.candidates_without_gate_result("benchmark", limit=10)
+
+    assert [row["artifact_type"] for row in rows] == ["jev_question_set"]

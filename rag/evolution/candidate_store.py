@@ -35,7 +35,8 @@ import threading
 import time
 
 from config import settings
-from rag.evolution.candidates import ARTIFACT_TYPE, TARGETS, JevQuestionSetCandidate
+from rag.evolution.candidates import JevQuestionSetCandidate
+from rag.evolution.code_patches import CodePatchCandidate
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
 
 # The phase-3 ``_sql_in``/``_enum_values`` helpers are the single definition of
@@ -71,18 +72,22 @@ _DEFAULT_GATE_RESULT = "passed"
 
 _STATUS_IN = _sql_in("status", _enum_values(EvolutionStatus))
 _POOL_IN = _sql_in("pool", _enum_values(ObservationPool))
-_ARTIFACT_IN = _sql_in("artifact_type", (ARTIFACT_TYPE,))
-_TARGET_IN = _sql_in("target", TARGETS)
 _CONFIDENCE_IN = _sql_in("confidence", ("low", "medium", "high"))
 
+# Phase-5 schema: ``artifact_type`` widens to ``jev_question_set | code_patch``.
+# The CHECK constraints on artifact_type/target are gone on purpose — the Pydantic
+# ``Literal`` contracts already enforce them, and a CHECK would force a table
+# rebuild for every future artifact. ``target``/``payload`` stay question-set
+# columns and are NULL for code patches, which carry ``diff``/``layer``/
+# ``test_paths`` instead. The migration below rebuilds a phase-4 table in place.
 _CANDIDATES_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS candidates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observation_id INTEGER,
     cluster_id INTEGER,
-    artifact_type TEXT NOT NULL {_ARTIFACT_IN},
-    target TEXT NOT NULL {_TARGET_IN},
-    payload JSON NOT NULL,
+    artifact_type TEXT NOT NULL,
+    target TEXT,
+    payload JSON,
     status TEXT NOT NULL {_STATUS_IN},
     pool TEXT NOT NULL {_POOL_IN},
     gate_log JSON NOT NULL DEFAULT '[]',
@@ -92,6 +97,9 @@ CREATE TABLE IF NOT EXISTS candidates (
     rationale TEXT NOT NULL,
     expected_effect TEXT NOT NULL,
     confidence TEXT NOT NULL {_CONFIDENCE_IN},
+    diff TEXT,
+    layer TEXT,
+    test_paths JSON,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 )
@@ -129,9 +137,36 @@ _CANDIDATE_COLUMN_MIGRATIONS: dict[str, str] = {
     "confidence": "TEXT NOT NULL DEFAULT 'low'",
     "created_at": "REAL NOT NULL DEFAULT 0",
     "updated_at": "REAL NOT NULL DEFAULT 0",
+    "diff": "TEXT",
+    "layer": "TEXT",
+    "test_paths": "JSON",
 }
 
-_CANDIDATE_JSON_COLUMNS = ("payload", "gate_log", "rollback_ref")
+# Phase-5 rebuild: the phase-4 table CHECK-constrained artifact_type to
+# ``jev_question_set`` and forced NOT NULL on target/payload. Neither can be
+# altered in place, so a table that still declares ``target`` NOT NULL (the
+# phase-4 shape, after the column migrations above have added every missing
+# column) is rebuilt in one transaction (SQLite DDL is transactional): create
+# the phase-5 shape, copy 1:1, drop, rename, recreate the indexes. Question-set
+# rows survive verbatim, defaults included.
+_CANDIDATES_PHASE5_DDL = (
+    "CREATE TABLE candidates_phase5 ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, observation_id INTEGER, cluster_id INTEGER, "
+    "artifact_type TEXT NOT NULL, target TEXT, payload JSON, status TEXT NOT NULL, "
+    "pool TEXT NOT NULL, gate_log JSON NOT NULL DEFAULT '[]', prompt_version TEXT, "
+    "model TEXT, rollback_ref JSON NOT NULL, rationale TEXT NOT NULL, "
+    "expected_effect TEXT NOT NULL, confidence TEXT NOT NULL, diff TEXT, layer TEXT, "
+    "test_paths JSON, created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+)
+_CANDIDATES_COPY_COLUMNS = (
+    "id", "observation_id", "cluster_id", "artifact_type", "target", "payload",
+    "status", "pool", "gate_log", "prompt_version", "model", "rollback_ref",
+    "rationale", "expected_effect", "confidence", "diff", "layer", "test_paths",
+    "created_at", "updated_at",
+)
+_PATCH_COLUMNS = ("diff", "layer", "test_paths")
+
+_CANDIDATE_JSON_COLUMNS = ("payload", "gate_log", "rollback_ref", "test_paths")
 
 
 def _decode_json(value: object) -> object:
@@ -150,7 +185,13 @@ def _decode_candidate_row(row: sqlite3.Row) -> dict:
 
 
 class CandidateStore:
-    """Persistence for question-set candidates; content-light by construction."""
+    """Persistence for evolution candidates; content-light by construction.
+
+    Phase 4 stored Jev question-set candidates; phase 5 widened the table to
+    code-patch candidates (``diff``/``layer``/``test_paths`` instead of
+    ``target``/``payload``). Both artifacts share the state machine, the gate log
+    and the audit trail.
+    """
 
     def __init__(self, store: FailureTraceStore | None = None, *, db_path=None):
         if store is not None:
@@ -181,6 +222,7 @@ class CandidateStore:
                     self._conn.execute(
                         f"ALTER TABLE candidates ADD COLUMN {column} {definition}"
                     )
+            self._rebuild_phase4_candidates_table()
             self._conn.execute(_CANDIDATE_AUDIT_TABLE_SQL)
             # The worker's "gated yet?" scan and the admin's per-cluster list
             # both filter candidates; the audit list joins on candidate_id.
@@ -241,37 +283,49 @@ class CandidateStore:
         self,
         observation_id: int | None,
         cluster_id: int,
-        candidate: JevQuestionSetCandidate,
+        candidate: JevQuestionSetCandidate | CodePatchCandidate,
         *,
         prompt_version: str = "",
         model: str = "",
     ) -> int:
-        """Persist one candidate and return its id.
+        """Persist one candidate (question set or code patch) and return its id.
 
         A candidate starts in ``candidate_testing`` inside the candidate pool and
         carries the layer-1 (scope) gate as its first ``gate_log`` entry, plus a
         ``generate`` audit row. Both writes share one transaction with the
         candidate row, so a candidate can never exist without its gate and audit
-        history. Payload validation itself lives in
-        :func:`~rag.evolution.candidates.validate_payload`: the generator runs it
-        before calling this method, and every gate re-runs it.
+        history. Question-set payloads are validated by the generator through
+        :func:`~rag.evolution.candidates.validate_payload` and every gate re-runs
+        it; code patches are bounded by
+        :func:`~rag.evolution.code_patches.validate_patch` the same way.
         """
         now = time.time()
+        is_patch = candidate.artifact_type == "code_patch"
+        if is_patch:
+            scope_detail = (
+                f"{candidate.artifact_type}/{candidate.layer} files={len(candidate.paths)}"
+            )
+            note = (
+                f"generated {candidate.layer} patch from base_commit="
+                f"{candidate.rollback_ref.get('base_commit', '')}"
+            )
+        else:
+            scope_detail = (
+                f"{candidate.artifact_type}/{candidate.target} "
+                f"questions={len(candidate.payload)}"
+            )
+            note = (
+                f"generated {candidate.target} candidate from question_set_version="
+                f"{candidate.rollback_ref.get('question_set_version', '')}"
+            )
         gate_log = [
             {
                 "gate": "scope",
                 "result": "accepted",
-                "detail": (
-                    f"{candidate.artifact_type}/{candidate.target} "
-                    f"questions={len(candidate.payload)}"
-                ),
+                "detail": scope_detail,
                 "created_at": now,
             }
         ]
-        note = (
-            f"generated {candidate.target} candidate from question_set_version="
-            f"{candidate.rollback_ref.get('question_set_version', '')}"
-        )
         with self._lock:
             self._require_cluster(int(cluster_id))
             if observation_id is not None:
@@ -280,14 +334,14 @@ class CandidateStore:
                 "INSERT INTO candidates ("
                 "observation_id, cluster_id, artifact_type, target, payload, status, pool, "
                 "gate_log, prompt_version, model, rollback_ref, rationale, expected_effect, "
-                "confidence, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "confidence, diff, layer, test_paths, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     None if observation_id is None else int(observation_id),
                     int(cluster_id),
                     candidate.artifact_type,
-                    candidate.target,
-                    json.dumps(candidate.payload, ensure_ascii=False),
+                    None if is_patch else candidate.target,
+                    None if is_patch else json.dumps(candidate.payload, ensure_ascii=False),
                     EvolutionStatus.CANDIDATE_TESTING.value,
                     ObservationPool.CANDIDATE_POOL.value,
                     json.dumps(gate_log, ensure_ascii=False),
@@ -297,6 +351,9 @@ class CandidateStore:
                     candidate.rationale,
                     candidate.expected_effect,
                     candidate.confidence,
+                    candidate.diff if is_patch else None,
+                    candidate.layer if is_patch else None,
+                    json.dumps(list(candidate.test_paths), ensure_ascii=False) if is_patch else None,
                     now,
                     now,
                 ),
@@ -421,18 +478,59 @@ class CandidateStore:
         reports the outcome back through :meth:`advance_candidate`, so a gate
         never runs twice on the same candidate. A candidate already advanced
         past testing is excluded, because its remaining layers happened later.
+
+        The benchmark gate serves question sets only — code patches are validated
+        by the sandbox gate instead — so the scan filters by artifact type.
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM candidates WHERE status = ? "
+                "SELECT * FROM candidates WHERE status = ? AND artifact_type = ? "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM json_each(candidates.gate_log) AS entry "
                 "    WHERE json_extract(entry.value, '$.gate') = ?"
                 ") "
                 "ORDER BY id ASC LIMIT ?",
-                (EvolutionStatus.CANDIDATE_TESTING.value, str(gate_name), int(limit)),
+                (
+                    EvolutionStatus.CANDIDATE_TESTING.value,
+                    "jev_question_set",
+                    str(gate_name),
+                    int(limit),
+                ),
             ).fetchall()
         return [_decode_candidate_row(row) for row in rows]
+
+    def _rebuild_phase4_candidates_table(self) -> None:
+        """Rebuild a phase-4 ``candidates`` table (CHECK + NOT NULL target) in place.
+
+        ``PRAGMA table_info`` still reports ``notnull`` for ``target`` after the
+        column migrations, which is exactly the phase-4 shape that blocks a code
+        patch (NULL target). SQLite DDL is transactional, so the rebuild either
+        completes whole or not at all; a phase-5 table (nullable target) is left
+        untouched.
+        """
+        info = {
+            row["name"]: row for row in self._conn.execute("PRAGMA table_info(candidates)")
+        }
+        if not info.get("target") or not info["target"]["notnull"]:
+            return
+        columns = ", ".join(_CANDIDATES_COPY_COLUMNS)
+        self._conn.execute("DROP TABLE IF EXISTS candidates_phase5")
+        self._conn.execute(_CANDIDATES_PHASE5_DDL)
+        self._conn.execute(
+            f"INSERT INTO candidates_phase5 ({columns}) SELECT {columns} FROM candidates"
+        )
+        self._conn.execute("DROP TABLE candidates")
+        self._conn.execute("ALTER TABLE candidates_phase5 RENAME TO candidates")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidates_cluster ON candidates(cluster_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_candidates_observation ON candidates(observation_id)"
+        )
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # Audit trail.
