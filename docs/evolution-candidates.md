@@ -29,6 +29,30 @@
 阈值常量在 `rag/evolution/candidate_gates.py`（`ROUTE_DELTA_MAX_PP = 0.0`、
 `TOP5_DELTA_MAX_PP = 2.0`），测试钉死含 -2.0pp 闭区间；**不得为让候选通过而放宽**。
 
+### 2.1 层 2 的驱动前提：必须有主体（2026-09-28 修正）
+
+**旧记录"层 2 路线 +0.0pp、Top-5 +0.0pp（20 用例零回归）"测的是空转**：门禁的基线用
+`build_live_preparations(..., user_id=None)` 构造，而带知识库的请求在没有主体时会被
+pipeline 的"企业模式但无主体"守卫在**检索之前**直接回答。实测（2026-09-28，提交语料 20 条）：
+
+| 驱动方式 | 结果 |
+| --- | --- |
+| `user_id=None` | 每条 `route=clarification`、`sources=[]`、`external_calls=0`、约 0.05ms |
+| `user_id=1`（bench-admin） | 每条真实执行：`route=rag`、有来源、`external_calls=2`、0.9–4.7s |
+
+因此两侧比较的是**同一份空跑结果**，无论候选改了什么都会报 0pp 通过。
+**修正**：`scripts/benchmark_candidate_questions.py::build_gate_callables` 在没有主体时
+直接拒绝（`MISSING_PRINCIPAL_HINT`），CLI 也给出同一行提示，并有测试钉住。
+
+**修正后门禁有牙的证据**（`real-case-handoff/e2e_gate_teeth.py`，2026-09-28，`user_id=1`）：
+
+| 覆盖层 | 结果 |
+| --- | --- |
+| 中性（问题集文本不变） | **通过**：route +0.0pp、Top-5 +0.0pp（20 用例，55s） |
+| 故意破坏 intent（一律判"需要澄清"） | **失败**：route **−85.0pp**、Top-5 **−100.0pp**，逐用例列出 17 个回归（29s） |
+
+也就是说，同样的破坏在旧驱动方式下会被报成"零回归"。
+
 ## 3. 在线分流与回滚的语义
 
 - 分流决策：`sha256(request_key) % 100 < percent`——**确定性**（重启不重排，日志可归因）；
@@ -50,7 +74,7 @@
 | 层 | 结果 | 证据 |
 | --- | --- | --- |
 | 生成 | ✅ candidate#1（passages，48 问，40.5s，confidence=low，rollback_ref=passages-v1+sha256） | e2e-candidate-part1.json |
-| 层 2 基准 | ✅ 通过：路线 delta +0.0pp、Top-5 delta +0.0pp（20 用例零回归）→ awaiting_verification | 同上 |
+| 层 2 基准 | ⚠️ 当时报“通过：路线 delta +0.0pp、Top-5 delta +0.0pp（20 用例零回归）”——**该结论无效**，见 2.1 节：无主体时两侧都是空跑 | 同上 |
 | 层 3 影子 | ✅ 10 样本：路由一致率 1.0、双侧可用 10/10、可用性差异 0（selection 未测：冒烟未传 candidates） | e2e-candidate-part2-shadow.json |
 | 层 4 灰度 | ✅ canary 5%：状态 canary、审计 canary_percent=5；在线 8/8 请求正常 | API 交互记录 |
 | 层 5 回滚 | ✅ rollback：状态 rolled_back；重启后注册表仅默认版本、snapshot 空 | API + 重启验证 |
@@ -58,6 +82,19 @@
 过程修复两处真实缺陷（均有回归测试）：管理员批准对“准入后加入的 observed 成员”
 状态不可达（409）；启动恢复把 `FailureTraceStore` 传给了需要 `CandidateStore` 的
 `restore()`（服务起不来）。
+
+**2026-09-28 复跑（`real-case-handoff/e2e_candidate_v3.py`，诊断 + 生成的真实调用）**：
+对唯一已批准聚类（cluster 3，kb_accessories，`confirmed_layer=reranking`，18 个成员观测）
+先补出 obs 7（`找一下副厂配件明细`）的诊断草案，再尝试生成——**生成被正确拒绝**：
+
+```
+CandidateUnavailable: invalid: draft[0].suggested_layer 'none' is not addressable by a jev_question_set candidate
+```
+
+该草案的类别是 `undetermined`（内容缺口）、`suggested_layer=none`（内容缺口不该由问题集候选来"修"），
+生成器因此拒绝产出候选。**这是设计意图的正确行为，不是故障**；但它同时说明：
+即使把 `RAG_EVOLUTION_CANDIDATE_ENABLED` 打开，当前也**没有可灰度的对象**——
+要产生候选，需要一个诊断结论指向可由问题集候选处理的层级的观测。
 
 ## 5. 已知限制（如实记录）
 
