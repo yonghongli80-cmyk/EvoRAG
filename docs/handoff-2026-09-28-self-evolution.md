@@ -196,3 +196,13 @@ POST /knowledge-operations/evolution/code-candidates/{id}/decision  # approve_fo
 
    该密钥已通过 Gitee 认证（`Hi 李永红(@li-yonghong111)`）。若想让 `git push` 直接可用，
    需要把 `origin` 改成 SSH URL 并在 `~/.ssh/config` 里为 `gitee.com` 指定这把密钥。
+11. **环境的陈旧副本坑**：`.venv\Lib\site-packages\config.py` 是 2026-09-22 的旧版
+   （不含 `evolution_db_path` 等第 3 阶段之后的字段）。直接 `python scripts\xxx.py` 时
+   `scripts\` 排在 `sys.path` 最前、editable 安装只把仓库根追加在 site-packages **之后**，
+   所以旧副本会赢——本会话的测量脚本第一次就是这样失败在 `AttributeError: evolution_db_path`。
+   新脚本沿用仓库既有修法（把仓库根移到 `sys.path` 最前，见
+   `scripts/benchmark_jev_retrieval.py::_ensure_project_root_on_path`）并有测试钉住；
+   要根治可清理该 venv 的陈旧副本（属环境操作，未擅自执行）。
+12. **可重复测量协议**：调优诊断器之前先跑 `scripts/run_diagnosis_devset.py`
+   （固定用例集 + `--repeats` 重复 + 逐次一致率/多数票/稳定性/契约违规率），
+   方法与坑见 `docs/evolution-diagnosis.md` 第 5.1 节。单次一致率不足以区分改动与噪声。

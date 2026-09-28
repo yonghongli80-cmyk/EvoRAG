@@ -68,6 +68,40 @@
 **结果：一致率 24/28 = 86% ≥ 80% 验收线**（提示词版本 diagnosis-v2；v3 只加确定性证据，
 参考口径仍是本条，见第 5 节 v3 复核）。
 
+### 5.1 可重复测量协议（2026-09-28 起，调优前必须先跑它）
+
+**为什么需要**：上面的 24/28 是**单次**测量，而同一问题、同一证据包，模型会在重复之间
+改变类别（本会话实测：同一问题 3 次跑出 `ranking_error` / `undetermined` / 契约违规）。
+单次一致率无法区分"改动有效"与"这次运气好"，因此任何提示词/证据改动之前，先建立可比基线。
+
+**怎么跑**：
+
+```powershell
+# 1102 在跑时不能直接用本机 qdrant 目录（本地客户端按路径独占加锁）：
+robocopy qdrant_data %TEMP%\qdrant-snapshot /E /XF .lock
+.venv\Scripts\python.exe scripts\run_diagnosis_devset.py `
+  --cases real-case-handoff\diagnosis-devset-cases.json `
+  --repeats 3 --label "<这次的名字>" --qdrant-path %TEMP%\qdrant-snapshot `
+  --json-out artifacts\diagnosis-devset-<label>.json --markdown-out artifacts\diagnosis-devset-<label>.md
+```
+
+- **用例集是显式文件**（`case_id / question / kb_id / expected_category`），不再依赖聚类状态或
+  待诊断队列——上一轮把聚类推进过状态后，队列驱动的 harness 只能回来 12/30 条，无法复现参考口径。
+  该文件含公司问题，只放本地 `real-case-handoff/`（已 ignore），不入库。
+- 每个用例**只组装一次证据包**、在同一份证据包上重复 `--repeats` 次，因此测到的是**模型方差**
+  而不是检索方差；缺失观测行的用例以 `no_observation` 如实列出，不静默缩小分母。
+- 报告字段：`agreement_by_run`（每次重复各自的一致率 = 单次部署会拿到的分数）、
+  `agreement_majority`（多数票上限）、`stable_rows`（重复间类别一致的行数）、
+  `contract_violation_rate`（契约违规率）、`latency_p50_ms`。**改动只有超出 `agreement_by_run`
+  的跨度才算有效。**
+- 运行是只读的：不写 `evolution.db`、不调灰度、不改聚类状态。
+
+**环境坑（本会话踩到）**：虚拟环境 `site-packages` 里有一份 **2026-09-22 的陈旧 `config.py`**
+（不含 `evolution_db_path` 等第 3 阶段以后的字段）。直接 `python scripts\xxx.py` 时 `scripts\`
+排在 `sys.path` 最前、而 editable 安装只把仓库根**追加在 site-packages 之后**，于是陈旧副本
+会赢。仓库既有的修法是 `scripts/benchmark_jev_retrieval.py::_ensure_project_root_on_path`，
+新协议脚本同法处理并有测试钉住。若要彻底消除，可清理该 venv 的陈旧副本（属环境操作，未擅自执行）。
+
 **三轮迭代过程（每轮都改机器不改标签，唯一一次改标签有据在案）**：
 | 轮次 | 一致率 | 发现 | 机器侧修订 |
 | --- | --- | --- | --- |
