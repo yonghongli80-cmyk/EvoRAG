@@ -39,7 +39,7 @@
      不可复现则该聚类建议 `needs_more_evidence`。
    - 哈希列表按排序取前 12 条进入提示词（控制成本），复现检查仍看全量。
 3. `Diagnoser.draft`：恰好一次模型调用，版本化提示词（`DIAGNOSIS_PROMPT_VERSION`，
-   当前 `diagnosis-v1`），输出经 Pydantic 校验 + 后校验硬规则：
+   当前 `diagnosis-v2`），输出经 Pydantic 校验 + 后校验硬规则：
    - 无管理员标签 → `confidence=low` 且根因含“假设”；
    - 不可复现 → `confidence=low`、根因含“待复核”、`reproducible=false`；
    - 违反任一即 `DiagnosisUnavailable("invalid")`，**不产半成品**。

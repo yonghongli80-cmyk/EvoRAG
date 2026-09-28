@@ -128,3 +128,39 @@ POST /knowledge-operations/evolution/code-candidates/{id}/decision  # approve_fo
   交接与报告里都保留了纠正记录——请继续这样做。
 - 提交风格：`feat:`/`fix:`/`docs:` + 正文说明**为什么**；提交前跑相关专项测试 + ruff；
   全量回归约 15 分钟，改核心路径时必跑。
+
+## 9. 新会话复核订正（追加，2026-09-28）
+
+上文原文保留不动，本节只记录新会话复核后发现的偏差与已完成的修正（含实测证据）：
+
+1. **设计正文只有 13 节，"第 15 节"不存在**（末节是"借鉴 HarnessEvolve"）。第 6.6 项引用的
+   三项实际出自 §3/§7/§9/§10/§12；`docs/evolution-code-patches.md`（"第 15 节""第 13 节（门禁）"）
+   与 `docs/evolution-candidates.md`（"第 12–15 节"）同属错引。
+2. **第 6.2 项范围被低估**（实测）：KB 库在**仓库根** `qdrant_data/`（不是 `data/qdrant_data`，该路径不存在），
+   另缺 `data/users.db` 等运行态；1102 在跑时直接拷贝会在 `.lock` 报锁，只拷 `users.db` 会丢
+   `users.db-wal`（KB 权限判定在其中）；沙箱剥离全部 `RAG_*` 后嵌入直接
+   `openai.OpenAIError: Missing credentials`；`.env` 里的 TypeSafe key 是真实联网凭证，
+   **不给它时"新"路径退化为旧路径，实测 old/new 逐条完全相同**——所以只补数据与嵌入会把层 2
+   判据变成**假绿**（两侧同样退化 ⇒ 0pp delta），gate 必须先能识别"回放没有真的跑"。
+   另有一处未解：补上 KB 快照与嵌入后，每条 preparation 仍在 0.04ms 返回、`failed_calls=0`、
+   route 0.15（根因调查进行中，见下方"进行中"）。
+3. **第 6.4 项的三个前提都不成立**：`evolution_candidate_model_calls` 是**死配置**（仅定义、
+   无任何读取点）；**没有管理员触发端点**，`PatchGenerator`/`run_patch_sandbox` 的唯一调用者是
+   git-ignored 的 `real-case-handoff/e2e_code_patch.py`；第 4 阶段的 `CandidateGenerator` 同样未接
+   worker。且沙箱超时（worktree 120s / pytest 600s / 回放 900s）放不进单轮 120s 墙钟。
+   建议改为**只读"待生成清单"端点**，把自动化范围交管理员拍板。
+4. **第 6.5 项的事实需修正**：只抬预览上限无用（召回 `top_k=24` 与 `_PREVIEW_LIMIT=24` 相等，
+   天花板是检索宽度）；real-020 **锚点**判的是 `generator_ignored_evidence`（`pack_reproducible=true`），
+   被判 `undetermined` 的是同义变体且 `pack_reproducible=false`；该行同时带"复现失败"共因，
+   而"关键词覆盖度"修法不触及它。一致率仅 2 例余量（24/28）。
+5. **数字出处与版本号订正**：阶段 2 的"9 观测→3 聚类→2 候选池"实际记录在
+   `docs/real-cases-v1-replay-report.md`（不在 `docs/evolution-observations.md`）；
+   `docs/evolution-diagnosis.md` 的"当前 `diagnosis-v1`"应为 `diagnosis-v2`（已订正）。
+6. **第 6.3 项已完成**（本会话）：`PassageJudgment.question_set_version`（必填，镜像
+   `PreflightDecision`）、`JevClient` 写回所用问题集版本、`PassageSelection.question_set_version`
+   透出、`decision_metadata.passages_question_set_version`、tracker 决策元数据白名单放行；
+   同批混版本直接拒绝。**残余**：观测表列 `details_jev_question_set_version` 与
+   `candidate_generator` 的 `rollback_ref` 校验仍只读 preflight 版本，passages 灰度期间的观测
+   在该校验里仍表现为基线版本。
+7. **进行中**：第 6.2 项的根因（上述 0.04ms 早退）调查；第 6.5 项"深层块是否被埋没"的只读检索探针。
+   两者都应有可复现证据后再动实现。
