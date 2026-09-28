@@ -185,3 +185,14 @@ POST /knowledge-operations/evolution/code-candidates/{id}/decision  # approve_fo
    未停服务、未动主库。回放/诊断脚本会清库或改状态，跑前务必备份 `data/evolution.db`
    （本轮备份在 `%TEMP%\ragv3-65-backup-*`）。v3 的一致率数字只在**12 条子集**上测得
    （多数聚类已被上一轮推进过状态），**24/28 = 86% 仍是唯一参考验收数字**。
+10. **推送方式（本机实测）**：`origin` 是 https，但本环境弹不出 Git Credential Manager 对话框，
+   且 `~/.ssh` 里只有非默认名的 `workstation_ed25519`（无 agent、无 `Host gitee.com` 条目），
+   所以 `git push` 会失败。可用的推送命令是显式指定密钥与 SSH URL：
+
+   ```powershell
+   git -C D:\Desktop\RAGv3 -c core.sshCommand="ssh -i C:/Users/Syf15/.ssh/workstation_ed25519 -o IdentitiesOnly=yes" `
+     push git@gitee.com:li-yonghong111/ragv3.git main
+   ```
+
+   该密钥已通过 Gitee 认证（`Hi 李永红(@li-yonghong111)`）。若想让 `git push` 直接可用，
+   需要把 `origin` 改成 SSH URL 并在 `~/.ssh/config` 里为 `gitee.com` 指定这把密钥。
