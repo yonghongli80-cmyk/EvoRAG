@@ -734,8 +734,24 @@ def _enforce_diagnosis_scope(
     editing this cluster's code), and the diagnosis must agree with the cluster
     and the member observation on stage and kb. ``trace_store`` is read — never
     written — like the phase-4 generator.
+
+    One override exists by design (design section 6/8): when the administrator
+    confirmed a root-cause layer on the cluster, that confirmation is the
+    authority and supersedes the diagnoser's own suggestion — the requested layer
+    must equal the confirmed one, and the drafts' suggestions are not consulted
+    for the layer decision.
     """
+    confirmed = str(cluster.get("confirmed_layer") or "").strip()
+    if confirmed and confirmed != layer:
+        raise PatchUnavailable(
+            REASON_INVALID,
+            f"the administrator confirmed the {confirmed!r} layer, so no {layer!r} patch "
+            "may be generated for this cluster",
+        )
     for index, fields in enumerate(drafts):
+        if confirmed:
+            # The human authority governs the layer; nothing else to check here.
+            continue
         suggested = str(fields.get("suggested_layer") or "").strip()
         if suggested != layer:
             raise PatchUnavailable(

@@ -199,6 +199,18 @@ class FailureTraceStore:
                 self._conn.execute(
                     "ALTER TABLE diagnosis_drafts ADD COLUMN observation_id INTEGER"
                 )
+            # Phase-5 migration: the administrator's confirmed root-cause layer
+            # (design section 6/8 — the human confirms the layer a fix belongs
+            # to, which is what lets a code-patch candidate be generated from a
+            # diagnosis whose draft suggested something else). Nullable: an
+            # unconfirmed cluster keeps reading back NULL.
+            cluster_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(failure_clusters)")
+            }
+            if "confirmed_layer" not in cluster_columns:
+                self._conn.execute(
+                    "ALTER TABLE failure_clusters ADD COLUMN confirmed_layer TEXT"
+                )
             # Membership lookups and the in-window member count both filter on cluster_id.
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_failure_observations_cluster "
@@ -472,6 +484,7 @@ class FailureTraceStore:
         pool: str,
         member_status: str,
         now: float,
+        confirmed_layer: str | None = None,
     ) -> dict:
         """Apply an administrator decision to one cluster and its members atomically.
 
@@ -479,7 +492,9 @@ class FailureTraceStore:
         ``awaiting_diagnosis_review`` cluster already lives in the candidate pool, so an
         explicit decision needs this separate entry point. Both the cluster and its
         members still move through ``EVOLUTION_TRANSITIONS``; an illegal transition
-        raises ``ValueError`` and nothing is written.
+        raises ``ValueError`` and nothing is written. ``confirmed_layer`` records the
+        administrator's confirmed root-cause layer (design section 6/8) inside the same
+        transaction, which is what allows a code-patch candidate afterwards.
         """
         with self._lock:
             cluster = self._conn.execute(
@@ -503,10 +518,41 @@ class FailureTraceStore:
                 "UPDATE failure_clusters SET status = ?, pool = ?, updated_at = ? WHERE id = ?",
                 (new_status, pool, float(now), int(cluster_id)),
             )
+            if confirmed_layer is not None:
+                self._conn.execute(
+                    "UPDATE failure_clusters SET confirmed_layer = ?, updated_at = ? WHERE id = ?",
+                    (str(confirmed_layer), float(now), int(cluster_id)),
+                )
             self._conn.execute(
                 "UPDATE failure_observations SET status = ?, updated_at = ? "
                 "WHERE cluster_id = ? AND status != ?",
                 (member_status, float(now), int(cluster_id), member_status),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+        return dict(row)
+
+    def set_confirmed_layer(
+        self, cluster_id: int, *, confirmed_layer: str, now: float
+    ) -> dict:
+        """Record the administrator's confirmed root-cause layer without moving status.
+
+        Design sections 6/8 treat the root-cause confirmation and the state
+        transition as separate judgments: an administrator may confirm the layer
+        after approving the cluster, and the candidate generator reads it. The
+        write is one UPDATE; the caller owns the audit row.
+        """
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT * FROM failure_clusters WHERE id = ?", (int(cluster_id),)
+            ).fetchone()
+            if cluster is None:
+                raise KeyError("cluster not found")
+            self._conn.execute(
+                "UPDATE failure_clusters SET confirmed_layer = ?, updated_at = ? WHERE id = ?",
+                (str(confirmed_layer), float(now), int(cluster_id)),
             )
             self._conn.commit()
             row = self._conn.execute(

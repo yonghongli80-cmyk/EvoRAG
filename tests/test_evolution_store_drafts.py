@@ -220,6 +220,43 @@ def test_add_audit_appends_rows_and_rejects_unknown_actions(tmp_path):
     assert len(store.list_audit()) == 3
 
 
+def test_decide_cluster_records_the_administrator_confirmed_layer(tmp_path):
+    """The human-confirmed root-cause layer persists on the cluster row.
+
+    Design sections 6/8: the administrator confirms the layer a fix belongs to,
+    which is the authority a code-patch candidate is generated against.
+    """
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1")
+
+    decided = store.decide_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.CLUSTERED.value,
+        now=time.time(),
+        confirmed_layer="reranking",
+    )
+
+    assert decided["confirmed_layer"] == "reranking"
+    assert store.list_clusters()[0]["confirmed_layer"] == "reranking"
+
+
+def test_a_decision_without_a_confirmed_layer_leaves_it_null(tmp_path):
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = make_cluster(store, key="awaiting-1")
+
+    decided = store.decide_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.CLUSTERED.value,
+        now=time.time(),
+    )
+
+    assert decided["confirmed_layer"] is None
+
+
 def test_decide_cluster_advances_a_candidate_pool_cluster(tmp_path):
     """Admin decisions act on clusters already in the candidate pool.
 

@@ -768,6 +768,48 @@ def test_default_model_call_uses_an_isolated_client_with_the_configured_limits(m
 
 
 # ------------------------------------------------------------------
+# The administrator's confirmed layer (design sections 6/8).
+# ------------------------------------------------------------------
+
+
+def test_an_administrator_confirmed_layer_overrides_the_draft_suggestion(tmp_path):
+    """The human confirmation governs: a prompt-layer draft still yields the
+    reranking patch the administrator confirmed."""
+    trace, cluster, member = seeded(tmp_path)
+    confirmed = {**cluster, "confirmed_layer": "reranking"}
+    fake = FakeModel(model_reply(new_file_diff("rag/fusion/weights.py")))
+
+    candidate = _generate(
+        fake, confirmed, member, trace, drafts=[_draft(suggested_layer="prompt")]
+    )
+
+    assert candidate.layer == "reranking"
+    assert candidate.paths == ("rag/fusion/weights.py",)
+
+
+def test_a_confirmed_layer_blocks_a_patch_for_another_layer(tmp_path):
+    trace, cluster, member = seeded(tmp_path)
+    confirmed = {**cluster, "confirmed_layer": "chunking"}
+    fake = FakeModel(model_reply(edit_file_diff()))
+
+    with pytest.raises(PatchUnavailable) as excinfo:
+        _generate(fake, confirmed, member, trace, layer="reranking")
+
+    assert "chunking" in str(excinfo.value)
+    assert excinfo.value.reason == "invalid"
+
+
+def test_without_a_confirmation_the_draft_layer_still_has_to_match(tmp_path):
+    trace, cluster, member = seeded(tmp_path)
+    fake = FakeModel(model_reply(edit_file_diff()))
+
+    with pytest.raises(PatchUnavailable) as excinfo:
+        _generate(fake, cluster, member, trace, layer="reranking", drafts=[_draft(suggested_layer="code")])
+
+    assert "suggested_layer" in str(excinfo.value)
+
+
+# ------------------------------------------------------------------
 # Helpers bound to the module under test.
 # ------------------------------------------------------------------
 

@@ -762,3 +762,94 @@ def test_a_second_decision_is_a_conflict_and_writes_no_second_audit_row(
     assert first.status_code == 200
     assert second.status_code == 409
     assert len(_store().list_audit(cluster_id)) == 1
+
+
+def test_a_decision_records_the_administrator_confirmed_layer(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """The confirmed layer is the human authority a code patch is generated for."""
+    cluster_id = store_with_cluster["cluster_id"]
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={
+            "action": "approve_for_candidate",
+            "note": "回放数据证实检索分数区分度低、撞名块淹没候选",
+            "confirmed_layer": "reranking",
+        },
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["confirmed_layer"] == "reranking"
+    rows = _store().list_audit(cluster_id)
+    assert "reranking" in rows[-1]["note"]
+
+
+def test_an_unknown_confirmed_layer_is_rejected_without_an_audit_row(
+    evolution_client, admin_headers, store_with_cluster
+):
+    cluster_id = store_with_cluster["cluster_id"]
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "approve_for_candidate", "note": "x", "confirmed_layer": "not-a-layer"},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 400
+    assert _store().list_audit(cluster_id) == []
+
+
+def test_the_layer_can_be_confirmed_after_the_approval(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """Confirming the root-cause layer is a separate judgment from the approval."""
+    cluster_id = store_with_cluster["cluster_id"]
+    approved = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "approve_for_candidate", "note": "根因已确认"},
+        headers=admin_headers,
+    )
+    assert approved.status_code == 200
+
+    response = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={
+            "action": "confirm_layer",
+            "note": "回放数据证实分数区分度低、撞名块淹没候选",
+            "confirmed_layer": "reranking",
+        },
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["confirmed_layer"] == "reranking"
+    notes = [row["note"] for row in _store().list_audit(cluster_id)]
+    assert any("reranking" in note for note in notes)
+
+
+def test_confirming_a_layer_needs_a_layer_and_a_reviewable_cluster(
+    evolution_client, admin_headers, store_with_cluster
+):
+    cluster_id = store_with_cluster["cluster_id"]
+
+    missing = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "confirm_layer", "note": "x"},
+        headers=admin_headers,
+    )
+    assert missing.status_code == 400
+
+    rejected = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "reject", "note": "非缺陷"},
+        headers=admin_headers,
+    )
+    assert rejected.status_code == 200
+    after_reject = evolution_client.post(
+        f"{PREFIX}/clusters/{cluster_id}/decision",
+        json={"action": "confirm_layer", "note": "x", "confirmed_layer": "reranking"},
+        headers=admin_headers,
+    )
+    assert after_reject.status_code == 409

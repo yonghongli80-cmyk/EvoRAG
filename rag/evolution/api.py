@@ -40,6 +40,7 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
@@ -55,7 +56,12 @@ from rag.evolution.candidates import PayloadBoundaryError, validate_payload
 # of which files a stored patch touches (``paths`` is not a column).
 from rag.evolution.code_patches import _diff_header_paths
 from rag.evolution.metrics import compute_metrics
-from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
+from rag.evolution.models import (
+    EVOLUTION_TRANSITIONS,
+    DiagnosisDraft,
+    EvolutionStatus,
+    ObservationPool,
+)
 from rag.evolution.rollout import PERCENT_NOTE_KEY, percent_note, rollout
 from rag.evolution.store import FailureTraceStore
 from rag.jev.questions import build_preflight_questions
@@ -193,6 +199,13 @@ DECISION_TARGETS: dict[str, dict[str, str]] = {
 }
 
 
+#: Layers an administrator may confirm; read from the diagnosis contract so the
+#: API, the diagnoser and the patch generator share one taxonomy.
+CONFIRMABLE_LAYERS: tuple[str, ...] = tuple(
+    get_args(DiagnosisDraft.model_fields["suggested_layer"].annotation)
+)
+
+
 class DiagnosisDecision(BaseModel):
     """One administrator decision; the note is audit evidence for the transition."""
 
@@ -202,6 +215,47 @@ class DiagnosisDecision(BaseModel):
     # a 400 naming the supported set, not FastAPI's generic 422.
     action: str
     note: str = ""
+    # The administrator's confirmed root-cause layer (design section 6/8). It is
+    # optional: without it the diagnoser's own suggestion stands, and the
+    # code-patch generator refuses a layer the confirmed diagnosis does not name.
+    confirmed_layer: str | None = None
+
+
+def _confirm_cluster_layer(*, cluster_id: int, payload: DiagnosisDecision, user: dict) -> dict:
+    """Record the administrator's confirmed root-cause layer without moving status.
+
+    The root-cause confirmation and the state transition are separate judgments
+    (design sections 6/8): the layer may be confirmed before or after the
+    approval, and the code-patch generator reads it as the authority. Only the
+    two review states accept a confirmation; the write is audited first.
+    """
+    layer = (payload.confirmed_layer or "").strip()
+    if layer not in CONFIRMABLE_LAYERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的确认根因层级：{payload.confirmed_layer}（支持 {' / '.join(CONFIRMABLE_LAYERS)}）",
+        )
+    store = _open_store()
+    cluster = None if store is None else _find_cluster(store, cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="聚类不存在")
+    if cluster["status"] not in (
+        EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+        EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+    ):
+        raise HTTPException(status_code=409, detail="该聚类当前不接受根因层级确认")
+    store.add_audit(
+        str(user["id"]),
+        # The phase-3 audit table whitelists three decision actions; the layer
+        # confirmation is part of the same approval judgment, and the note names
+        # exactly what happened.
+        "approve_for_candidate",
+        cluster_id,
+        f"确认根因层级：{layer}；备注：{payload.note}" if payload.note else f"确认根因层级：{layer}",
+    )
+    updated = store.set_confirmed_layer(cluster_id, confirmed_layer=layer, now=time.time())
+    members = store.list_observations(cluster_id)
+    return _serialize_cluster(updated, members)
 
 
 def _filter_value(value: str | None, allowed: tuple[str, ...], label: str) -> str | None:
@@ -267,6 +321,7 @@ def _serialize_cluster(row: dict, members: list[dict] | None = None) -> dict:
         "status": row["status"],
         "priority": row["priority"],
         "member_count": row["member_count"],
+        "confirmed_layer": row.get("confirmed_layer"),
         "first_seen_at": row["first_seen_at"],
         "last_seen_at": row["last_seen_at"],
         "created_at": row["created_at"],
@@ -448,10 +503,17 @@ def submit_decision(
     transition table to a cluster that already lives in the candidate pool.
     """
     target = DECISION_TARGETS.get(payload.action)
+    if payload.action == "confirm_layer":
+        return _confirm_cluster_layer(cluster_id=cluster_id, payload=payload, user=user)
     if target is None:
         raise HTTPException(
             status_code=400,
             detail=f"不支持的决策动作：{payload.action}（支持 {' / '.join(sorted(DECISION_TARGETS))}）",
+        )
+    if payload.confirmed_layer is not None and payload.confirmed_layer not in CONFIRMABLE_LAYERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效的确认根因层级：{payload.confirmed_layer}（支持 {' / '.join(CONFIRMABLE_LAYERS)}）",
         )
     store = _open_store()
     cluster = None if store is None else _find_cluster(store, cluster_id)
@@ -459,7 +521,10 @@ def submit_decision(
         raise HTTPException(status_code=404, detail="聚类不存在")
     if cluster["status"] != EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value:
         raise HTTPException(status_code=409, detail="该聚类已不在诊断审核状态")
-    store.add_audit(str(user["id"]), payload.action, cluster_id, payload.note)
+    audit_note = payload.note
+    if payload.confirmed_layer:
+        audit_note = f"{audit_note}；确认根因层级：{payload.confirmed_layer}".strip("；")
+    store.add_audit(str(user["id"]), payload.action, cluster_id, audit_note)
     try:
         updated = store.decide_cluster(
             cluster_id,
@@ -467,6 +532,7 @@ def submit_decision(
             pool=target["pool"],
             member_status=target["member_status"],
             now=time.time(),
+            confirmed_layer=payload.confirmed_layer,
         )
     except KeyError as exc:
         # The cluster disappeared between the read above and this write.
