@@ -112,6 +112,20 @@ ASCII 词 + CJK 二字组（最多 8 个词），在**重检索的前 24 块全�
 （带口径第 2 次）、`focused-coverage-ab.json`、`focused-coverage-repeat.json`、
 `focused-truncation-probe.json`。
 
+**"输出更紧凑"的调研（负结果，如实记录）**：同一问题、同一证据包，用真实 provider 对比三种写法：
+
+| 变体 | prompt 字符 | max_tokens | finish_reason | reasoning_tokens | 正文 | 契约 | 类别 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A 现状 | 8958 | 8000 | stop | 6714 | 1384 字符 | 通过 | generator_ignored_evidence |
+| B 加"每字段一句话、正文 ≤500 字" | 9023 | 8000 | **length** | 8000（吃满） | **0 字符** | 失败 | —— |
+| C B + 预览 24→8 | 5165 | 16000 | stop | 6853 | 622 字符 | 通过 | generator_ignored_evidence |
+
+结论：要求"更紧凑"**没有**降低推理开销（B 反而把预算全花在推理上、正文为空）；把证据包从
+8958 字符压到 5165 字符，推理仍在 6.7–6.9k。也就是说**推理开销由问题与判定难度决定，
+不由提示词长度决定**；而两次给出合法 JSON 时类别仍是 `generator_ignored_evidence`（标签为
+`ranking_error`）。**"输出更紧凑"这条路线不成立**，剩下的选择只有两个：放宽上限+超时
+（用尾延迟与成本换可用的草稿），或不动、接受这一族按契约违规/超时在下一轮重试。
+
 **仍未解决（如实记录）**：`ranking_error` ↔ `generator_ignored_evidence` ↔ `undetermined`
 三者的边界在证据层面（内容存在/被采用/被生成器忽略）本就相邻，模型输出在同一证据包上
 不稳定；要真正收敛，方向是"把被采用证据与生成器输入做确定性比对"（像复现检查那样），
