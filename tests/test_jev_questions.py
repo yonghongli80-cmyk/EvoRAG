@@ -24,7 +24,14 @@ def test_question_ids_are_stable_and_complete():
 
 def test_internal_models_reject_invalid_probabilities():
     try:
-        PassageJudgment(chunk_id="c0", relevance=1.2, answer_evidence=0.8, contradiction=0.0, prompt_injection=0.0)
+        PassageJudgment(
+            chunk_id="c0",
+            relevance=1.2,
+            answer_evidence=0.8,
+            contradiction=0.0,
+            prompt_injection=0.0,
+            question_set_version="passages-v1",
+        )
     except ValueError:
         return
     raise AssertionError("probabilities outside [0,1] must fail")

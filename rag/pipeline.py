@@ -404,6 +404,7 @@ class RAGPipeline:
             "route": route_decision.route,
             "reason": route_decision.reason,
             "question_set_version": preflight.question_set_version if preflight is not None else "",
+            "passages_question_set_version": "",
             "intent_confidence": preflight.intent_confidence if preflight is not None else None,
             "rewrite_probability": preflight.rewrite_probability if preflight is not None else None,
             "failure_kind": (
@@ -500,6 +501,7 @@ class RAGPipeline:
                 conflicts = []
                 break
             conflicts = [self._conflict_payload(item) for item in selection.conflicts]
+            stage["passages_question_set_version"] = selection.question_set_version
             if selection.has_answer_evidence:
                 context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
                 context = self._drop_injected_chunks(context)[:top_k]
@@ -529,6 +531,7 @@ class RAGPipeline:
         prepared["decision_metadata"] = {
             "jev_mode": settings.jev_mode,
             "question_set_version": stage["question_set_version"],
+            "passages_question_set_version": stage["passages_question_set_version"],
             "jev_route": stage["route"],
             "route_reason": stage["reason"],
             "intent_confidence": stage["intent_confidence"],

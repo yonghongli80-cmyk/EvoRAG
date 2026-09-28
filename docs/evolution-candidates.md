@@ -34,9 +34,11 @@
 - 分流决策：`sha256(request_key) % 100 < percent`——**确定性**（重启不重排，日志可归因）；
   request_key = `kb|session|question`（ContextVar 作用域，并发请求不互覆）。
 - 0% 时 `provide()` 直接返回当前问题集：**漏接线/零配置不可能把流量导给候选**。
-- 候选服务期间的版本归属：preflight 侧写回 `decision_metadata.jev_question_set_version`；
-  passages 侧暂无版本字段（`PassageJudgment` 无该字段），响应级归属留待补 `models.py` 字段——
-  这是已知限制，见第 5 节。
+- 候选服务期间的版本归属：preflight 侧写回 `decision_metadata.question_set_version`；
+  passages 侧由 `JevClient` 把所用问题集版本写回 `PassageJudgment.question_set_version`，
+  经 `PassageSelection.question_set_version` 透出，响应写入
+  `decision_metadata.passages_question_set_version`；同一批次出现两个版本直接拒绝，
+  避免把响应错记到其中一个版本上。
 - 回滚 = 反注册 + 百分比 0 + 审计 + 状态 `rolled_back`；重启后 `restore()` 只恢复
   `canary/stable` 状态的候选，已回滚的不会复活（单元测试 + e2e 双重钉住）。
 
@@ -59,8 +61,12 @@
 
 ## 5. 已知限制（如实记录）
 
-1. **响应级版本归属不完整**：passages 候选的灰度无法从 `decision_metadata` 直接观测
-   （无版本字段），在线验证依赖端点/审计/注册表与单测；补 `PassageJudgment` 版本字段后补齐。
+1. **响应级版本归属：passages 侧已补齐，仍有一处残余**。`PassageJudgment.question_set_version`
+   已写回并经 `PassageSelection` 透出，响应可从
+   `decision_metadata.passages_question_set_version` 归因；但观测表列
+   `details_jev_question_set_version` 仍只记 preflight 版本，而
+   `candidate_generator` 的 `rollback_ref` 校验读的正是该列——passages 灰度期间的观测
+   在这个校验里仍表现为基线版本，列级/校验级归属留作后续事项。
 2. **候选生成对提示词尺寸敏感**：passages 全量问题集（48 问）下 8000 token 曾截断 JSON，
    e2e 用 16000 通过；生产默认 8000，聚簇候选较大时可能需临时调大或改提示词要求稀疏载荷
    （只输出实际变更的 id）——后者需要载荷契约放宽，列为后续事项。

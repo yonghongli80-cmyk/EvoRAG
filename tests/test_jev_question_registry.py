@@ -286,6 +286,32 @@ def test_the_passages_provider_receives_the_chunk_ids_of_the_request():
     assert [judgment.chunk_id for judgment in result.value] == ["c0", "c1"]
 
 
+def test_the_passages_provider_version_is_written_back():
+    """A candidate passages set stays attributable in the response.
+
+    The preflight side already stamps its version onto the decision; this pins
+    that the passages side does the same, so a request judged with a candidate
+    passage set is attributable to that candidate version and not silently to
+    the default one.
+    """
+    candidate_version = f"{PASSAGE_QUESTION_SET_VERSION}+candidate-7"
+
+    def provider(stage: str, chunk_ids: list[str] | None):
+        return build_passage_questions(chunk_ids or []), candidate_version
+
+    client = RecordingClient(passage_answers(["c0", "c1"]))
+    result = JevClient(client=client, question_set_provider=provider).judge_passages(
+        {"question": "年假几天", "passages": {"c0": {"text": "t"}, "c1": {"text": "u"}}},
+        ["c0", "c1"],
+    )
+
+    assert result.available is True
+    assert [judgment.question_set_version for judgment in result.value] == [
+        candidate_version,
+        candidate_version,
+    ]
+
+
 def test_an_empty_chunk_list_never_consults_the_provider():
     seen: list[tuple[str, list[str] | None]] = []
 

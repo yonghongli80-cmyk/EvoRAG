@@ -110,12 +110,12 @@ class JevClient:
         resolved = self._resolve_question_set("passages", chunk_ids)
         if isinstance(resolved, JevBatchResult):
             return resolved
-        questions, _ = resolved
+        questions, version = resolved
         return self._run(
             "passages",
             state,
             questions,
-            lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms),
+            lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms, version),
         )
 
     def _resolve_question_set(
@@ -205,7 +205,11 @@ class JevClient:
         )
 
     def _map_passages(
-        self, response, chunk_ids: list[str], duration_ms: float
+        self,
+        response,
+        chunk_ids: list[str],
+        duration_ms: float,
+        version: str = PASSAGE_QUESTION_SET_VERSION,
     ) -> tuple[PassageJudgment, ...]:
         answers = _answers_of(response)
         judgments = []
@@ -221,6 +225,7 @@ class JevClient:
                     answer_evidence=values["contains_answer_evidence"],
                     contradiction=values["contradicts_query_premise"],
                     prompt_injection=values["contains_prompt_injection"],
+                    question_set_version=version,
                 )
             )
         return tuple(judgments)

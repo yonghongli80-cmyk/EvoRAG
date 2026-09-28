@@ -67,6 +67,7 @@ def test_persisted_row_has_no_chunk_text_or_secret(tmp_path):
     recorder = FailureRecorder(store)
     t = trace(decision_metadata={
         "question_set_version": "passages-v1",
+        "passages_question_set_version": "passages-v1+candidate-3",
         "jev_route": "rag",
         "secret_like": "secret-test-key",
     })
@@ -78,6 +79,9 @@ def test_persisted_row_has_no_chunk_text_or_secret(tmp_path):
     assert row["question"] == "q"  # question text is diagnosable, already stored by tracker
     assert row["stage"] == "retrieval" and row["kb_id"] == "kb1"
     assert row["details_decision_metadata"]["question_set_version"] == "passages-v1"
+    # A passages canary stays attributable in the stored observation, not only in
+    # the in-memory trace: the allowlist has to carry the passages version too.
+    assert row["details_decision_metadata"]["passages_question_set_version"] == "passages-v1+candidate-3"
 
 
 def test_diagnostic_detail_rejects_unknown_fields():

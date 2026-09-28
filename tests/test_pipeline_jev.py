@@ -300,6 +300,35 @@ def test_conflicting_evidence_requests_clarification(active_jev):
     mock_generate.assert_not_called()
 
 
+def test_decision_metadata_carries_both_stage_versions(active_jev):
+    """A response names the preflight version and the passages version that served it.
+
+    A candidate question set may target either stage. Preflight already wrote its
+    version into ``decision_metadata``; the passages stage has to do the same, or
+    a passages canary's traffic cannot be attributed to the candidate.
+    """
+    jev = MagicMock()
+    jev.route.return_value = rag_route()
+    visible = Chunk(text="年假为 7 天", doc_name="policy.md", chunk_index=0)
+    jev.select.return_value = PassageSelection(
+        accepted=(visible,),
+        conflicts=(),
+        excluded_ids=(),
+        has_answer_evidence=True,
+        question_set_version="passages-v1+candidate-3",
+    )
+    pipeline = build_pipeline(jev)
+    pipeline.retriever.retrieve.return_value = [visible]
+    pipeline.tracker = MagicMock()
+
+    with patch("rag.pipeline.generate", return_value="answer"):
+        pipeline.query("年假有几天")
+
+    trace = pipeline.tracker.save.call_args.args[0]
+    assert trace.decision_metadata["question_set_version"] == "preflight-v1"
+    assert trace.decision_metadata["passages_question_set_version"] == "passages-v1+candidate-3"
+
+
 def test_streaming_parity_for_jev_path(active_jev):
     import asyncio
     import json

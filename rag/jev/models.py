@@ -28,7 +28,13 @@ class PreflightDecision(BaseModel):
 
 
 class PassageJudgment(BaseModel):
-    """One candidate passage: semantic probabilities instead of a single relevance score."""
+    """One candidate passage: semantic probabilities instead of a single relevance score.
+
+    ``question_set_version`` is the versioned question set that produced this
+    judgment. It mirrors :attr:`PreflightDecision.question_set_version` so a
+    request judged with a candidate passage set stays attributable to that
+    candidate instead of being read as the default set's traffic.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -37,6 +43,7 @@ class PassageJudgment(BaseModel):
     answer_evidence: float = Field(ge=0.0, le=1.0)
     contradiction: float = Field(ge=0.0, le=1.0)
     prompt_injection: float = Field(ge=0.0, le=1.0)
+    question_set_version: str
 
 
 class JevBatchResult[T](BaseModel):

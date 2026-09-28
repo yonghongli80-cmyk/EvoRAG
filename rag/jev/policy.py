@@ -51,12 +51,19 @@ class RouteDecision:
 
 @dataclass(frozen=True)
 class PassageSelection:
-    """Deterministic passage outcome after Jev judgments are applied."""
+    """Deterministic passage outcome after Jev judgments are applied.
+
+    ``question_set_version`` names the versioned question set the applied
+    judgments came from (``""`` when the batch named none), so the pipeline can
+    stamp a response with the passages version that served it — the preflight
+    side already reports its own version through ``PreflightDecision``.
+    """
 
     accepted: tuple[Chunk, ...]
     conflicts: tuple[Chunk, ...]
     excluded_ids: tuple[str, ...]
     has_answer_evidence: bool
+    question_set_version: str = ""
 
 
 def choose_route(
@@ -117,6 +124,7 @@ def select_passages(
     """
     effective = policy or JevPolicy()
     by_chunk_id = _judgments_by_chunk_id(judgments)
+    version = _uniform_question_set_version(judgments)
 
     excluded: list[str] = []
     conflicts: list[Chunk] = []
@@ -147,7 +155,23 @@ def select_passages(
         conflicts=tuple(conflicts),
         excluded_ids=tuple(excluded),
         has_answer_evidence=any(item.metadata.get("jev_answer_evidence") == "true" for item in accepted),
+        question_set_version=version,
     )
+
+
+def _uniform_question_set_version(judgments: Sequence[PassageJudgment]) -> str:
+    """The one version that judged this batch; mixed versions are refused.
+
+    One batch is produced by one question set, so two versions in one batch mean
+    the caller merged judgments from different serving versions. Refusing is the
+    only honest answer: picking either one would misattribute the response.
+    """
+    versions = {judgment.question_set_version for judgment in judgments}
+    if len(versions) > 1:
+        raise ValueError(
+            f"mixed question set versions in one judgment batch: {sorted(versions)}"
+        )
+    return next(iter(versions), "")
 
 
 def _judgments_by_chunk_id(judgments: Sequence[PassageJudgment]) -> dict[str, PassageJudgment]:

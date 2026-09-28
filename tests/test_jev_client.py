@@ -17,6 +17,7 @@ from typesafe_sdk import (
 import rag.jev.client as client_module
 from config import settings
 from rag.jev.client import JevClient
+from rag.jev.questions import PASSAGE_QUESTION_SET_VERSION
 
 FAKE_KEY = "tsa-fake-key-do-not-log-123"
 
@@ -169,6 +170,25 @@ def test_passage_judgments_map_all_questions(fake_typesafe_client):
     assert result.value[0].answer_evidence == 0.8
     assert result.value[0].contradiction == 0.1
     assert result.value[0].prompt_injection == 0.0
+
+
+def test_passage_judgments_carry_the_question_set_version(fake_typesafe_client):
+    """Every judgment names the question set that produced it.
+
+    The preflight decision already carries its version; the passages stage has to
+    carry its own, or a request judged with a candidate passage set cannot be
+    attributed to that candidate in ``decision_metadata``.
+    """
+    fake_typesafe_client.answers = passage_answers(["c0", "c1"])
+    result = JevClient(client=fake_typesafe_client).judge_passages(
+        {"question": "年假几天", "passages": {"c0": {"text": "t"}, "c1": {"text": "u"}}},
+        ["c0", "c1"],
+    )
+    assert result.available is True
+    assert [judgment.question_set_version for judgment in result.value] == [
+        PASSAGE_QUESTION_SET_VERSION,
+        PASSAGE_QUESTION_SET_VERSION,
+    ]
 
 
 def test_passage_response_missing_one_question_is_invalid_response(fake_typesafe_client):

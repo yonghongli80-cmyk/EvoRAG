@@ -19,6 +19,7 @@ def judgment(
     evidence: float,
     contradiction: float,
     injection: float,
+    version: str = "passages-v1",
 ) -> PassageJudgment:
     return PassageJudgment(
         chunk_id=chunk_id,
@@ -26,7 +27,35 @@ def judgment(
         answer_evidence=evidence,
         contradiction=contradiction,
         prompt_injection=injection,
+        question_set_version=version,
     )
+
+
+def test_selection_carries_the_question_set_version_of_its_judgments():
+    """The selection names the version that produced the judgments it applied.
+
+    Without it the pipeline can only stamp the preflight version into
+    ``decision_metadata``, so a passages candidate's traffic is unattributable.
+    """
+    selected = select_passages(
+        [chunk("c0")],
+        [judgment("c0", relevance=.9, evidence=.8, contradiction=.0, injection=.0, version="passages-v1+candidate-3")],
+        policy=JevPolicy(),
+    )
+    assert selected.question_set_version == "passages-v1+candidate-3"
+
+
+def test_mixed_question_set_versions_are_refused():
+    """One batch is judged by one set; mixed versions are a bug, not a merge."""
+    with pytest.raises(ValueError, match="question set"):
+        select_passages(
+            [chunk("c0"), chunk("c1")],
+            [
+                judgment("c0", relevance=.9, evidence=.8, contradiction=.0, injection=.0, version="passages-v1"),
+                judgment("c1", relevance=.9, evidence=.8, contradiction=.0, injection=.0, version="passages-v1+c3"),
+            ],
+            policy=JevPolicy(),
+        )
 
 
 def test_injected_answer_bearing_passage_is_excluded():
@@ -156,6 +185,7 @@ class RecordingJevClient:
                     answer_evidence=0.9,
                     contradiction=0.0,
                     prompt_injection=0.0,
+                    question_set_version="passages-v1",
                 )
                 for chunk_id in chunk_ids
             ),

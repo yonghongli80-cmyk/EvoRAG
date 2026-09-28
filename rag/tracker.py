@@ -15,6 +15,7 @@ _DECISION_METADATA_KEYS = frozenset(
         "jev_mode",
         "jev_model",
         "question_set_version",
+        "passages_question_set_version",
         "jev_route",
         "legacy_route",
         "route_reason",

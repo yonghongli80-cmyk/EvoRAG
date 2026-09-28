@@ -61,6 +61,36 @@ def test_get_recent_empty(tmp_path):
     assert results == []
 
 
+def test_decision_metadata_allowlist_keeps_both_stage_versions(tmp_path):
+    """The sanitizer keeps the passages version next to the preflight one.
+
+    A key that is not allowlisted is dropped before persistence, so a
+    passages-stage version that only exists in the in-memory trace would still be
+    lost in the stored observation.
+    """
+    db_path = str(tmp_path / "test.db")
+    tracker = ExecutionTracker(db_path=db_path)
+    trace = ExecutionTrace(
+        question="年假几天",
+        route="rag",
+        answer="7 天",
+        total_ms=10.0,
+        decision_metadata={
+            "question_set_version": "preflight-v1",
+            "passages_question_set_version": "passages-v1+candidate-3",
+            "question": "must not be persisted",
+        },
+    )
+    tracker.save(trace)
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT details FROM execution_logs LIMIT 1").fetchone()
+    conn.close()
+    metadata = json.loads(row[0])["decision_metadata"]
+    assert metadata["question_set_version"] == "preflight-v1"
+    assert metadata["passages_question_set_version"] == "passages-v1+candidate-3"
+    assert "question" not in metadata
+
+
 def test_tool_calls_serialized_as_json(tmp_path):
     """Tool calls should be serialized as JSON in details column."""
     db_path = str(tmp_path / "test.db")
