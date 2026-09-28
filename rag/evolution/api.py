@@ -91,6 +91,16 @@ _ENDPOINTS = (
     {"path": "/knowledge-operations/evolution/state-machine", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/metrics", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/clusters/{cluster_id}/decision", "methods": ("POST",)},
+    # The later phases' read surfaces belong in the administrator's inventory too:
+    # without them the list documents the diagnosis tab while the candidates and
+    # patches tabs stay undiscoverable from it. Their write endpoints (canary,
+    # rollback, review decisions) stay out so the invariant this list pins — that
+    # the only state-changing method in the *diagnosis* surface is the audited
+    # decision — remains literally true; those are documented in
+    # docs/evolution-candidates.md and docs/evolution-code-patches.md.
+    {"path": "/knowledge-operations/evolution/candidates", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/code-candidates", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/code-generation-queue", "methods": ("GET",)},
 )
 
 _STATE_MACHINE_NOTE = (

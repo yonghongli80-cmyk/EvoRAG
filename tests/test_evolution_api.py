@@ -169,6 +169,17 @@ def test_state_machine_matches_design_section_seven(evolution_client, admin_head
         path["path"] for path in body["endpoints"] if "POST" in path["methods"]
     }
     assert write_paths == {f"{PREFIX}/clusters/{{cluster_id}}/decision"}
+    # The later phases' read surfaces are listed too, so an administrator can find
+    # them from the reference tab; their write endpoints stay documented elsewhere
+    # (that keeps the single-write-method invariant above literally true).
+    read_paths = {
+        path["path"] for path in body["endpoints"] if path["methods"] == ["GET"]
+    }
+    assert {
+        f"{PREFIX}/candidates",
+        f"{PREFIX}/code-candidates",
+        f"{PREFIX}/code-generation-queue",
+    } <= read_paths
     assert body["transitions"] == {
         status: list(targets) for status, targets in evolution_api.EVOLUTION_TRANSITIONS.items()
     }
