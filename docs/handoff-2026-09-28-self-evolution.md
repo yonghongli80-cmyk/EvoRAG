@@ -162,5 +162,26 @@ POST /knowledge-operations/evolution/code-candidates/{id}/decision  # approve_fo
    同批混版本直接拒绝。**残余**：观测表列 `details_jev_question_set_version` 与
    `candidate_generator` 的 `rollback_ref` 校验仍只读 preflight 版本，passages 灰度期间的观测
    在该校验里仍表现为基线版本。
-7. **进行中**：第 6.2 项的根因（上述 0.04ms 早退）调查；第 6.5 项"深层块是否被埋没"的只读检索探针。
-   两者都应有可复现证据后再动实现。
+7. **第 6.2 项的根因已查明（本会话）**：沙箱回放命令不带主体，而语料每条都带 `kb_id`，
+   `rag/pipeline.py` 的"企业模式但无主体"守卫在路由/检索**之前**就返回
+   `route="fixed"` + `permission_limited`，于是每条 preparation 在微秒级返回、
+   `external_calls=0`，基准把它记成"成功样本"（`failed_calls=0`），准确率恒为 0.150——
+   **回放不是"不可用"，而是必然空转**。据此本会话把沙箱门禁改成：候选自带目标测试之外，
+   固定加跑一组仓库自有的离线确定性回归网（`REGRESSION_TEST_PATHS`，24 个文件，补丁永远不能改
+   `tests/**` 与 `conftest.py`，故无法被它裁掉/跳过），并加防空转守卫
+   （`benchmark_verdict` 在"样本数为 0 / 基线有失败调用 / 基线 prep P50 < 1ms"时整份报告记为
+   "measured nothing"，绝不判 pass；验收侧另加 `executed` 检查）。**残余**：端到端回放要真正
+   作为判定输入，仍需"录制-回放"fixture（冻结 route 决策/改写文本/query 向量/重排顺序）。
+8. **第 6.5 项已完成（本会话），但结论与交接的假设不同**：证据包已加确定性"问题词覆盖度"
+   （逐词命中块数 + 最早排名，在重检索前 24 块**全文**上算，不只 160 字预览），提示词升到
+   `diagnosis-v3`，且**只渲染证据、不附加判定口径**（第一版附加了口径，实测把内容缺口行推成
+   recall_miss，已撤回并记录）。关键发现：`real-020` 家族的不稳定**不是判据偏弱**，而是
+   completion 被推理 token 吃满而截断——`max_tokens=8000` 时实测 `finish_reason=length`、
+   `reasoning_tokens=7942`、`text_tokens=0`、正文仅 137 字符；提到 16000 后同一请求返回完整
+   JSON，但换成 90s 超时且仍不稳定。默认值因此**未改**，取舍写在
+   `docs/evolution-diagnosis.md` 第 5 节"v3 复核"。
+9. **本会话的验证口径提醒**：1102 在跑时不能直接开本机 Qdrant；本轮所有回放/诊断实验都用
+   `RAG_QDRANT_PATH` 指向 `qdrant_data` 的临时快照（`robocopy /E /XF .lock`）完成，
+   未停服务、未动主库。回放/诊断脚本会清库或改状态，跑前务必备份 `data/evolution.db`
+   （本轮备份在 `%TEMP%\ragv3-65-backup-*`）。v3 的一致率数字只在**12 条子集**上测得
+   （多数聚类已被上一轮推进过状态），**24/28 = 86% 仍是唯一参考验收数字**。

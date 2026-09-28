@@ -382,3 +382,87 @@ def test_missing_tracker_yields_empty_traces_without_error(tmp_path):
     pack = assemble_evidence(member, cluster, store=store)
 
     assert pack.success_traces == ()
+
+
+# ------------------------------------------------------------------
+# Question-term coverage: where the question's own words appear in the recall.
+# ------------------------------------------------------------------
+
+
+def test_question_term_coverage_reports_where_the_terms_appear(tmp_path):
+    """关键词覆盖度：每个问题词在召回集合里命中几块、最早出现在第几名。
+
+    这是区分"内容存在却没被采用"（ranking_error）与"召回里根本没有内容"
+    （recall_miss / 内容缺口）的确定性依据，而且只依赖问题词本身：
+    命中为 0 的词以 ``chunks=0``、``best_rank=0`` 如实报出，不省略。
+    """
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="副厂配件报价")
+    retriever = FakeRetriever({
+        "副厂配件报价": (
+            Chunk("无关内容"),
+            Chunk("这是副厂配件明细表"),
+        ),
+    })
+
+    pack = assemble_evidence(member, cluster, store=store, retrieve=retriever)
+
+    coverage = {record["term"]: record for record in pack.question_term_coverage}
+    assert coverage["副厂"] == {"term": "副厂", "chunks": 1, "best_rank": 2}
+    assert coverage["配件"] == {"term": "配件", "chunks": 1, "best_rank": 2}
+    assert coverage["报价"] == {"term": "报价", "chunks": 0, "best_rank": 0}
+
+
+def test_question_term_coverage_looks_past_the_preview_window(tmp_path):
+    """信号必须在整块文本上算：词出现在第 160 字之后同样要算命中。
+
+    预览是 160 字的有界窗口，只读预览会继承同一个盲点——而"深层块被埋没"
+    正是要判断的情形。
+    """
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="质检培训")
+    retriever = FakeRetriever({
+        "质检培训": (Chunk("铺垫" * 400 + "质检培训课件清单"),),
+    })
+
+    pack = assemble_evidence(member, cluster, store=store, retrieve=retriever)
+
+    coverage = {record["term"]: record for record in pack.question_term_coverage}
+    assert coverage["质检"]["chunks"] == 1
+    assert coverage["培训"]["best_rank"] == 1
+    # The preview the prompt sees is still the bounded leading window.
+    assert "质检培训" not in pack.recall_previews[0]["text"]
+
+
+def test_question_term_coverage_is_empty_without_a_retriever(tmp_path):
+    """没有重检索就没有覆盖度证据：空元组，而不是编造 0 命中。"""
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="副厂配件明细")
+
+    pack = assemble_evidence(member, cluster, store=store)
+
+    assert pack.question_term_coverage == ()
+
+
+def test_question_term_coverage_terms_are_deterministic_and_bounded(tmp_path):
+    """词元固定有序、有上限：同一问题两次组装得到同一份信号。"""
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    question = "富士 X-S20 电池和充电器是什么型号"
+    member = add_member(store, cluster, question=question)
+    retriever = FakeRetriever({question: (Chunk("富士 X-S20 电池 充电器"),)})
+
+    first = assemble_evidence(member, cluster, store=store, retrieve=retriever)
+    second = assemble_evidence(member, cluster, store=store, retrieve=retriever)
+
+    assert first.question_term_coverage == second.question_term_coverage
+    assert 0 < len(first.question_term_coverage) <= 8
+    terms = [record["term"] for record in first.question_term_coverage]
+    assert len(set(terms)) == len(terms)

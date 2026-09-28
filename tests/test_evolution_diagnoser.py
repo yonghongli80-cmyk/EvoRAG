@@ -113,7 +113,7 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     assert draft.suggested_layer == "retrieval_config"
     assert draft.evidence_refs == ("hash-a", "hash-c")
     # Prompt version is traceable on the instance and inside the request.
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v2"
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v3"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -125,6 +125,41 @@ def test_prompt_version_is_injectable_for_future_prompt_revisions():
     assert diagnoser.prompt_version == "diagnosis-v2"
     diagnoser.draft(_cluster(), _pack())
     assert "diagnosis-v2" in _request_text(fake)
+
+
+def test_prompt_renders_question_term_coverage_as_evidence():
+    """覆盖度信号进提示词：逐词给出命中块数与最早排名。
+
+    这是"埋没型缺陷"的确定性依据——关键词在召回集合里有覆盖（哪怕排名靠后）
+    说明内容存在却没被采用。**只作为证据渲染，不附带新的判定口径**：第一版附了
+    "有覆盖⇒ranking_error / 无覆盖⇒recall_miss"的口径，成对开发集跑显示它把内容缺口
+    的行推成 recall_miss，而 ranking_error 那几行本身不稳定，故不采用口径推送。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(
+        question_term_coverage=(
+            {"term": "副厂", "chunks": 3, "best_rank": 11},
+            {"term": "报价", "chunks": 0, "best_rank": 0},
+        )
+    )
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "question_term_coverage" in prompt
+    assert "term=副厂 chunks=3 best_rank=11" in prompt
+    assert "term=报价 chunks=0 best_rank=0" in prompt
+
+
+def test_a_pack_without_coverage_renders_an_explicit_empty_section():
+    """没有覆盖度证据时显式写"无"，不编造 0 命中也不省略该段。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    prompt = _request_text(fake)
+    assert "question_term_coverage" in prompt
+    assert "question_term_coverage: （无）" in prompt
 
 
 def test_missing_admin_labels_forces_low_confidence_with_hypothesis_root_cause():

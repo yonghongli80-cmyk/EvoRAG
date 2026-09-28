@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from rag.evolution.models import EvidencePack, ReproductionResult
@@ -43,6 +45,13 @@ _HASH_PROMPT_LIMIT = 12
 # produced a wrong content-gap verdict in the dev set.
 _PREVIEW_CHARS = 160
 _PREVIEW_LIMIT = 24
+
+# Question-term coverage is the deterministic answer to "is the question's own
+# wording anywhere in the recall set, and how deep". Two characters is the
+# shortest term worth reporting (a single character matches almost anything), and
+# the term list is capped because every term is prompt input.
+_COVERAGE_TERMS = 8
+_MIN_TERM_CHARS = 2
 
 # Evidence-priority annotations (design section 6) carried inside the pack so
 # the diagnoser ranks evidence without re-deriving the priority.
@@ -65,6 +74,53 @@ def _text_md5(text: str) -> str:
     """The pipeline's chunk hash: md5 of the chunk text (``rag/pipeline.py``)."""
 
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+_CJK_RANGE = "\u4e00-\u9fff"
+_ASCII_TERM = re.compile(r"[0-9a-z_]+")
+_CJK_RUN = re.compile(f"[{_CJK_RANGE}]+")
+
+
+def _question_terms(question: str) -> tuple[str, ...]:
+    """The deterministic terms a question contributes to the coverage signal.
+
+    ASCII/digit words are taken whole; CJK text contributes character bigrams.
+    Bigrams are used instead of a word segmenter so the signal stays
+    deterministic, dependency-free and cheap, and the approximation is in the
+    safe direction: a reported term occurs in the text verbatim, so a hit is
+    always real. Terms keep their first-appearance order and are capped.
+    """
+    terms: list[str] = []
+    for word in _ASCII_TERM.findall(question.lower()):
+        if len(word) >= _MIN_TERM_CHARS:
+            terms.append(word)
+    for run in _CJK_RUN.findall(question):
+        for index in range(len(run) - 1):
+            terms.append(run[index : index + 2])
+    ordered: list[str] = []
+    for term in terms:
+        if term not in ordered:
+            ordered.append(term)
+    return tuple(ordered[:_COVERAGE_TERMS])
+
+
+def _term_coverage(terms: Sequence[str], texts: Sequence[str]) -> tuple[dict, ...]:
+    """Per term: how many recall chunks contain it, and the earliest rank that does.
+
+    ``chunks=0, best_rank=0`` is reported as-is — a term the recall set does not
+    contain is evidence about the corpus, not a gap in the pack.
+    """
+    records: list[dict] = []
+    for term in terms:
+        hits = 0
+        best_rank = 0
+        for rank, text in enumerate(texts, start=1):
+            if term in text:
+                hits += 1
+                if best_rank == 0:
+                    best_rank = rank
+        records.append({"term": term, "chunks": hits, "best_rank": best_rank})
+    return tuple(records)
 
 
 def _chunk_text(chunk) -> str:
@@ -174,6 +230,7 @@ def _reproduction(
     kb_id: str,
     recall: set[str],
     previews: list[dict] | None = None,
+    recall_texts: list[str] | None = None,
 ) -> ReproductionResult:
     """Deterministic retrieval-level reproduction: no model, one re-retrieval per sample.
 
@@ -187,6 +244,10 @@ def _reproduction(
     preview (document, hash, leading text). The previews describe the *current*
     retrieval result — for versioned corpora they are not the failure-time text,
     and the diagnoser renders them under that label.
+
+    ``recall_texts`` collects the *full* text of the same bounded recall window,
+    because the coverage signal has to look past the preview's character cap: a
+    term that only occurs deep inside a chunk still counts as covered.
     """
 
     if retrieve is None:
@@ -208,6 +269,8 @@ def _reproduction(
         for chunk in chunks[:_RECALL_CHUNKS]:
             chunk_hash = _text_md5(_chunk_text(chunk))
             recall.add(chunk_hash)
+            if recall_texts is not None:
+                recall_texts.append(_chunk_text(chunk))
             if previews is not None and len(previews) < _PREVIEW_LIMIT:
                 previews.append({
                     "doc": getattr(chunk, "doc_name", ""),
@@ -284,6 +347,7 @@ def assemble_evidence(
 
     recall: set[str] = set()
     previews: list[dict] = []
+    recall_texts: list[str] = []
     reproduction = _reproduction(
         questions=questions,
         offered_by_question=offered_by_question,
@@ -291,6 +355,7 @@ def assemble_evidence(
         kb_id=kb_id,
         recall=recall,
         previews=previews,
+        recall_texts=recall_texts,
     )
     failed_hashes = _hash_tuple(observation.get("details_chunk_hashes"))
     # The pack is prompt input for a reasoning model: every 64-character hash is a
@@ -309,6 +374,12 @@ def assemble_evidence(
         recall_hashes=tuple(sorted(recall)[:_HASH_PROMPT_LIMIT]),
         failed_hashes=tuple(sorted(failed_hashes)[:_HASH_PROMPT_LIMIT]),
         recall_previews=tuple(previews),
+        # Coverage is only evidence when there is a recall window to measure: with
+        # no re-retrieval (or an empty one) "0 hits" would claim the corpus lacks
+        # the term when nothing was measured at all.
+        question_term_coverage=(
+            _term_coverage(_question_terms(question), recall_texts) if recall_texts else ()
+        ),
         reproduction=reproduction,
     )
 

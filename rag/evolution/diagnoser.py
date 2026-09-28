@@ -44,7 +44,14 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: root_cause_feature (it biased every draft toward that label), and the evidence
 #: pack renders bounded chunk previews plus an explicit recall/ranking/content-gap
 #: classification rule.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v2"
+#: diagnosis-v3: the pack also carries the deterministic question-term coverage
+#: (per term: chunks containing it, earliest rank). It is rendered as evidence and
+#: deliberately *not* turned into a category rule: the first iteration attached a
+#: rule that pushed "covered terms ⇒ ranking_error" / "no coverage ⇒ recall_miss",
+#: and a paired dev-set run showed it moved content-gap rows into recall_miss
+#: without improving the ranking_error rows (which turn out to be unstable on
+#: their own). Evidence without a nudge is the honest version of this signal.
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v3"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -207,6 +214,18 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
             )
     else:
         lines.append("  - （无）")
+    if pack.question_term_coverage:
+        lines.append(
+            "question_term_coverage（问题关键词在召回集合中的覆盖；best_rank 为该词最早出现的块序号，"
+            "0 表示召回集合里没有这个词）:"
+        )
+        for record in pack.question_term_coverage:
+            lines.append(
+                f"  - term={record.get('term')} chunks={record.get('chunks')} "
+                f"best_rank={record.get('best_rank')}"
+            )
+    else:
+        lines.append("question_term_coverage: （无）")
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:

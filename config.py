@@ -138,7 +138,11 @@ class Settings(BaseSettings):
     # 诊断客户端；证据包含多样本时推理模型可能超过 30s，默认放宽到 90s。
     evolution_diagnosis_timeout_seconds: float = Field(default=90.0, gt=0.0)
     # 单次诊断输出的 token 上限：该提供商的 reasoning token 计入完成预算，无上限时调用
-    # 可达数分钟，过小则会挤掉 JSON 正文；默认 8000（实测留足正文空间）。
+    # 可达数分钟，过小则会挤掉 JSON 正文。**默认 8000 已知会在证据包较大时饿死正文**：
+    # 实测某条问题（提示词约 9k 字符）finish_reason=length、reasoning_tokens=7942、
+    # text_tokens=0，正文只剩 137 字符的半个 JSON；提到 16000 后同一请求返回完整 JSON，
+    # 但会撞上 90s 诊断超时（同一批 3 次里 1 次 APITimeoutError）。放宽上限与放宽超时
+    # 必须一起评估，因此默认值暂不动，取舍见 docs/evolution-diagnosis.md 第 5 节。
     evolution_diagnosis_max_tokens: int = Field(default=8000, ge=1)
     # 管理员确认标签 JSON 路径（诊断证据的最高优先级）；为空=无标签，此时草案根因只能是
     # 假设级（diagnoser 后校验强制）。

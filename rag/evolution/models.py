@@ -161,6 +161,12 @@ class EvidencePack:
     Priority order follows design section 6: admin-confirmed labels and deterministic
     evidence first, same-KB success traces second, re-retrieved permission-filtered
     candidates third. The pack never carries credentials or unauthorized text.
+
+    ``question_term_coverage`` is deterministic like ``reproduction``: per question
+    term, how many re-retrieved chunks contain it and the earliest rank one does.
+    It answers "is the question's own wording anywhere in the recall set (and how
+    deep)" without a model, which is what separates "the content exists but was not
+    adopted" from "the recall set does not contain it".
     """
 
     cluster_id: int
@@ -173,6 +179,7 @@ class EvidencePack:
     recall_hashes: tuple[str, ...] = ()
     failed_hashes: tuple[str, ...] = ()
     recall_previews: tuple[dict, ...] = ()
+    question_term_coverage: tuple[dict, ...] = ()
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 
