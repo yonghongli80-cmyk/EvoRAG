@@ -273,6 +273,18 @@ def _cases_by_question(cases: Sequence) -> dict[str, Any]:
     return index
 
 
+#: A knowledge-base gate needs a principal, and this is not a nicety: without one
+#: the pipeline answers every request in its enterprise guard *before* retrieval.
+#: Measured on the committed corpus: ``user_id=None`` gives ``route=clarification``,
+#: ``sources=[]``, ``external_calls=0`` and ~0.05ms for every case, so both sides
+#: compare identical empty runs and the gate can only ever report "no regression".
+#: (The phase-4 e2e result "route +0.0pp, Top-5 +0.0pp, 20 cases" was such a run.)
+MISSING_PRINCIPAL_HINT = (
+    "the layer-2 gate needs a principal (--user-id): without one every request is "
+    "answered before retrieval, and the two sides would compare identical empty runs"
+)
+
+
 def build_gate_callables(
     cases: Sequence,
     *,
@@ -291,6 +303,8 @@ def build_gate_callables(
     side additionally serves its builder from ``rag.jev.client`` for the
     duration of each call, which is why it is a factory over ``(target, payload)``.
     """
+    if user_id is None:
+        raise ValueError(MISSING_PRINCIPAL_HINT)
     _ensure_project_root_on_path()
     from scripts.benchmark_jev_retrieval import build_live_preparations
 
@@ -478,6 +492,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         parser.error("--payload-json requires --target")
     if args.limit < 1:
         parser.error("--limit must be at least 1")
+    if args.user_id is None:
+        # Refused here as well as in build_gate_callables, so an operator gets one
+        # clear line instead of a traceback from deep inside the gate.
+        parser.error(MISSING_PRINCIPAL_HINT)
     return args
 
 
