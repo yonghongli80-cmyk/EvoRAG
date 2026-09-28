@@ -41,10 +41,17 @@
 1. 主工作树必须干净（`git status --porcelain` 为空），否则拒绝运行；
 2. `git worktree add <tmp> --detach <base_commit>`；
 3. worktree 内 `git apply`（stdin + UTF-8）——失败即 `rejected`；
-4. 目标测试 `pytest <test_paths>`（cwd/PYTHONPATH=worktree、`PYTHONHASHSEED=0`、不继承 `.env`）；
-   失败 → `rejected`；超时 → `needs_more_evidence`（不误杀）；
-5. 基准回放（子进程 `scripts/benchmark_jev_retrieval.py`）；回归 → `rejected`；
-   **回放本身跑不起来（环境问题）不判死**，记 "replay unavailable" 仍可进入人工审核；
+4. 测试运行 `pytest <候选 test_paths> + 固定回归网`（cwd/PYTHONPATH=worktree、`PYTHONHASHSEED=0`、
+   不继承 `.env`）；失败 → `rejected`；超时或收集失败 → `needs_more_evidence`（不误杀）。
+   固定回归网见 `rag/evolution/sandbox.py` 的 `REGRESSION_TEST_PATHS`（24 个离线确定性文件，
+   覆盖 Jev 策略与注册表、管线装配、检索、重排、切块、结构化查询与工具）。补丁永远不能改
+   `tests/**` 与 `**/conftest.py`（第 2 节黑名单），所以这张网对候选恒定，无法被它裁掉、跳过或改写；
+   候选没写 `test_paths` 时仍是 `needs_more_evidence`——"我们跑了自己的基线"不等于"候选自带
+   的验证目标通过了"。
+5. 基准回放（子进程 `scripts/benchmark_jev_retrieval.py`）：回归 → `rejected`；
+   **回放跑不起来（环境问题）不判死**，记 "replay unavailable" 仍可进入人工审核；
+   回放"跑了但什么都没测到"（两侧同样空转）同样不算证据，记
+   `benchmark replay measured nothing: <原因>`，**任何情况下都不会被判成 pass**（见第 7 节第 1 条）。
 6. `finally` 强制 `git worktree remove --force` + `prune` + 删临时目录。
 结论经 `sandbox_gate_outcome(report)` 映射为 (状态, gate_detail)，以 `gate="sandbox"` 落 gate_log。
 
@@ -79,18 +86,34 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
 
 ## 7. 已知限制（如实记录）
 
-1. **沙箱基准回放不可用**：worktree 内没有知识库数据（`data/qdrant_data` 不在版本控制内），
-   基准回放在沙箱里必然 `exit_1`；当前策略是“回放不可用不判死”，因此层 2 的**基准回归判定对代码补丁实际未生效**，
-   只靠目标测试。补齐方式：把只读 KB 快照挂进沙箱，或在主树以隔离 Qdrant 实例回放——列为后续事项。
+1. **沙箱内的端到端基准回放当前必然空转，层 2 对代码补丁实际不生效**（2026-09-28 实测）。
+   回放命令不带主体，而语料每条都带 `kb_id`：`rag/pipeline.py` 的"企业模式但无主体"守卫在
+   路由与检索**之前**就返回 `route="fixed"` + `permission_limited`，于是每条 preparation 在
+   微秒级返回、`external_calls=0`，而基准把它记成"成功样本"（`failed_calls=0`），路线准确率
+   恒为 0.150。补上知识库快照与嵌入凭证也不成立：准备路径要出网四次（路由模型、改写、嵌入、
+   重排），而沙箱按红线**永不**把凭证交给子进程；且路由/改写的模型调用不确定，实测同一份
+   **未打补丁**的代码两次跑 0.579 / 0.529，会让"route 不得降 0pp"的层 2 阈值产生**假红**。
+   因此本阶段的实际回归判定 = **固定回归网 + 候选自带目标测试**（第 4 节第 4 步）。
+   防御性守卫已就位：`_execution_evidence_reason` 要求基线侧"确有工作"（样本数 > 0、
+   无失败调用、`prep P50 ≥ MIN_PREP_P50_MS`），否则整份报告记为"measured nothing"而不是通过；
+   另在验收侧加了 `executed` 检查，让不带 `--user-id` 的知识库跑法**当场报错**而不是静默产出
+   0.150 的假数字。
+   要恢复端到端回放作为判定输入，需要"录制-回放"fixture：沙箱外一次性录下 route 决策、改写文本、
+   query 向量与重排顺序并入库，沙箱内重放这四个 seam——列为后续事项（当前不阻塞门禁有效性）。
 2. **目标测试由模型提议**：`test_paths` 必须真实存在（层 1 校验），但模型可能只挑弱测试；
-   人工审核时应自行补充更严的验证命令。
-3. **一次一轮、单候选**：不做多分支探索（DGM 式）与知识库级灰度，属设计第 15 节的后续增强。
+   固定回归网已覆盖仓库共享路径（缓解此项），人工审核仍应自行补充更严的验证命令。
+3. **一次一轮、单候选**：不做多分支探索（DGM 式）与知识库级灰度；快照回退的不可变版本存储也尚不存在。
+   这三项出自设计 **§3/§7/§10/§12**（注：设计正文只有 13 节，此前文档里引用的"第 15 节"不存在）。
 4. **审计表沿用阶段 3 的白名单动作**：`confirm_layer` 的审计动作复用 `approve_for_candidate` +
    明确备注（表带 CHECK 约束，扩枚举需重建表）。
 
 ## 8. 关闭与回退
 
 1. 关 `RAG_EVOLUTION_CANDIDATE_ENABLED`（代码补丁生成也受该开关与 `evolution_candidate_enabled` 语义管辖）；
-   或直接不调用生成器（该能力默认不在 worker 轮次里自动跑代码补丁——第 5 阶段的生成由管理员/集成脚本触发）。
+   或直接不调用生成器。**该能力默认不在 worker 轮次里自动跑**，且目前没有管理员触发端点：
+   `PatchGenerator`/`run_patch_sandbox` 的唯一调用者是未入库的
+   `real-case-handoff/e2e_code_patch.py`。接进 worker 需要先立两样现在没有的东西——预算维度
+   （`evolution_candidate_model_calls` 是只有定义、无读取点的死配置）与"已批准 + 已确认层级 +
+   无代码补丁候选"的批量查询契约。
 2. 删除候选：`evolution.db` 的 `candidates` 行（或整库）。
 3. 已导出的补丁文件在 `artifacts/patches/`，删除即撤销导出；**代码回退**按普通 git 流程（`git revert`）。

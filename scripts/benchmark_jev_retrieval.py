@@ -343,8 +343,24 @@ def evaluate_acceptance(old: PathMetrics, new: PathMetrics) -> AcceptanceVerdict
         rewrite_target = 0.0
         rewrite_ok = new_ordinary == 0.0
     top5_floor = old.top5_hit_rate - 0.02
+    executed = old.prep_p50_ms > 0.0 and new.prep_p50_ms > 0.0
 
     checks = (
+        AcceptanceCheck(
+            "executed",
+            executed,
+            (
+                f"preparation path ran on both sides (prep P50 {old.prep_p50_ms:.1f}ms / "
+                f"{new.prep_p50_ms:.1f}ms)"
+                if executed
+                else (
+                    f"preparation path never ran (old {old.prep_p50_ms:.1f}ms, "
+                    f"new {new.prep_p50_ms:.1f}ms): a knowledge-base run is the enterprise "
+                    "path and needs --user-id, otherwise every preparation is answered "
+                    "before retrieval"
+                )
+            ),
+        ),
         AcceptanceCheck(
             "p50",
             new.prep_p50_ms <= p50_target,

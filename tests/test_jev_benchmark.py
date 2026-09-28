@@ -154,6 +154,33 @@ def test_acceptance_passes_when_all_thresholds_hold():
     assert verdict.failures == ()
 
 
+def test_acceptance_fails_when_the_preparation_path_never_ran():
+    """A run that answered without preparing is not a passing benchmark.
+
+    A knowledge-base request without a principal is answered before retrieval in
+    microseconds and with no recorded failure, so both sides report identical
+    metrics. Every other threshold would hold on two empty runs; the execution
+    check is what stops such a report from reading as a result.
+    """
+    verdict = evaluate_acceptance(
+        old=metrics(prep_p50=0.0, prep_p95=0.0, route_accuracy=0.15),
+        new=metrics(prep_p50=0.0, prep_p95=0.0, route_accuracy=0.15),
+    )
+
+    assert verdict.passed is False
+    assert "executed" in verdict.failures
+    detail = next(check.detail for check in verdict.checks if check.name == "executed")
+    assert "--user-id" in detail
+
+
+def test_acceptance_reports_the_execution_check_when_the_path_ran():
+    verdict = evaluate_acceptance(old=metrics(), new=metrics())
+
+    detail = next(check.detail for check in verdict.checks if check.name == "executed")
+    assert "executed" not in verdict.failures
+    assert "1000.0ms" in detail
+
+
 def test_acceptance_route_threshold_is_absolute():
     verdict = evaluate_acceptance(
         old=metrics(route_accuracy=0.99),

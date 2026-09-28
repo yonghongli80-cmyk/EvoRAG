@@ -43,6 +43,7 @@ from rag.evolution.candidate_gates import ROUTE_DELTA_MAX_PP, TOP5_DELTA_MAX_PP
 from rag.evolution.code_patches import CodePatchCandidate
 from rag.evolution.sandbox import (
     GATE_NAME,
+    REGRESSION_TEST_PATHS,
     SandboxReport,
     run_patch_sandbox,
     sandbox_gate_outcome,
@@ -247,10 +248,18 @@ def _benchmark_payload(
     candidate_route_accuracy: float | None = None,
     top5_hit_rate: float = 0.75,
     candidate_top5_hit_rate: float | None = None,
+    prep_p50_ms: float = 800.0,
+    candidate_prep_p50_ms: float | None = None,
+    baseline_failed_calls: int = 0,
     candidate_failed_calls: int = 0,
     regressed_cases: Sequence[int] = (),
 ) -> dict:
-    """The shape ``scripts/benchmark_jev_retrieval.py`` writes with ``--json-out``."""
+    """The shape ``scripts/benchmark_jev_retrieval.py`` writes with ``--json-out``.
+
+    ``prep_p50_ms`` belongs to that shape: a report whose preparation latency is
+    zero says the preparation path never ran, which is not evidence about a
+    candidate.
+    """
     return {
         "cases": cases,
         "sample_count": cases * 2,
@@ -258,7 +267,8 @@ def _benchmark_payload(
             "sample_count": cases,
             "route_accuracy": route_accuracy,
             "top5_hit_rate": top5_hit_rate,
-            "failed_calls": 0,
+            "prep_p50_ms": prep_p50_ms,
+            "failed_calls": baseline_failed_calls,
         },
         "new": {
             "sample_count": cases,
@@ -268,6 +278,7 @@ def _benchmark_payload(
             "top5_hit_rate": (
                 top5_hit_rate if candidate_top5_hit_rate is None else candidate_top5_hit_rate
             ),
+            "prep_p50_ms": prep_p50_ms if candidate_prep_p50_ms is None else candidate_prep_p50_ms,
             "failed_calls": candidate_failed_calls,
         },
         "acceptance": {"passed": True, "failures": [], "checks": []},
@@ -924,3 +935,120 @@ def test_a_report_is_the_only_thing_the_seam_needs():
     """The write-back works on a hand-built report, so Task 4 can unit-test it."""
     refused = SandboxReport(applied=False, tests_passed=None, error="main tree dirty")
     assert sandbox_gate_outcome(refused) == ("rejected", "sandbox refused the patch: main tree dirty")
+
+
+# ------------------------------------------------------------------
+# The fixed regression net: verification that does not depend on the candidate.
+# ------------------------------------------------------------------
+
+
+def test_the_fixed_regression_suite_always_runs_beside_the_candidates_targets(
+    sandbox_repo: Path, make_runner, monkeypatch
+):
+    """Every run verifies the repository baseline, not only the candidate's own tests.
+
+    The end-to-end replay cannot run in an environment that never receives
+    credentials, so the sandbox's only offline verification is the test run: it
+    has to cover the shared surfaces a patch can reach, and it must not shrink
+    to whatever the candidate chose to name.
+    """
+    monkeypatch.setattr(sandbox_module, "REGRESSION_TEST_PATHS", PROBE_TESTS)
+    runner = make_runner()
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=False
+    )
+
+    assert report.tests_passed is True
+    command = runner.of("pytest")[0].command
+    for path in PROBE_TESTS:
+        assert path in command
+
+
+def test_a_failing_regression_test_rejects_the_candidate(sandbox_repo: Path, make_runner):
+    """A regression outside the candidate's own targets is still a rejection."""
+    failing = "tests/test_jev_passage_policy.py::test_selection_carries_the_question_set_version_of_its_judgments"
+    make_runner(
+        pytest_returncode=1,
+        pytest_stdout=f"FAILED {failing} - AssertionError: assert '' == 'passages-v1'\n1 failed, 5 passed in 0.11s\n",
+    )
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=False
+    )
+
+    assert report.tests_passed is False
+    assert report.failed_tests == (failing,)
+    status, detail = sandbox_gate_outcome(report)
+    assert status == "rejected"
+    assert "test_jev_passage_policy" in detail
+
+
+def test_every_fixed_regression_path_exists_in_this_repository():
+    """The net names real files: a typo would silently verify nothing."""
+    missing = [path for path in REGRESSION_TEST_PATHS if not (REPO_ROOT / path).is_file()]
+    assert missing == []
+
+
+def test_the_net_is_empty_only_where_the_repository_does_not_carry_it(sandbox_repo: Path):
+    """A synthetic repository runs its targets alone; the real one runs the net."""
+    assert sandbox_module._existing_regression_paths(sandbox_repo) == []
+    assert sandbox_module._existing_regression_paths(REPO_ROOT) == list(REGRESSION_TEST_PATHS)
+
+
+# ------------------------------------------------------------------
+# A replay that measured nothing is not evidence.
+# ------------------------------------------------------------------
+
+
+def test_a_replay_that_never_prepared_anything_is_not_evidence(sandbox_repo: Path, make_runner):
+    """Two empty runs must never read as "no regression".
+
+    A knowledge-base request without a principal is answered by the enterprise
+    guard before retrieval, in microseconds and without a recorded failure: both
+    sides then report identical metrics, which the layer-2 comparison would
+    otherwise call a pass.
+    """
+    make_runner(benchmark=_benchmark_payload(prep_p50_ms=0.0))
+
+    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.tests_passed is True
+    assert report.benchmark is None
+    assert "measured nothing" in report.error
+    status, detail = sandbox_gate_outcome(report)
+    assert status == "awaiting_verification"
+    assert "replay unavailable" in detail
+
+
+def test_a_replay_whose_baseline_failed_is_not_evidence(sandbox_repo: Path, make_runner):
+    """A baseline that failed some calls cannot serve as the comparison base."""
+    make_runner(benchmark=_benchmark_payload(baseline_failed_calls=3))
+
+    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.benchmark is None
+    assert "baseline" in report.error
+
+
+def test_a_replay_carrying_no_preparation_latency_is_not_evidence(sandbox_repo: Path, make_runner):
+    """A report that omits the latency cannot show the path ever ran."""
+    payload = _benchmark_payload()
+    for side in ("old", "new"):
+        payload[side].pop("prep_p50_ms")
+    make_runner(benchmark=payload)
+
+    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.benchmark is None
+    assert "no preparation latency" in report.error
+
+
+def test_a_replay_that_measured_no_samples_is_not_evidence(sandbox_repo: Path, make_runner):
+    payload = _benchmark_payload(cases=0)
+    payload["sample_count"] = 0
+    make_runner(benchmark=payload)
+
+    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.benchmark is None
+    assert "no samples" in report.error

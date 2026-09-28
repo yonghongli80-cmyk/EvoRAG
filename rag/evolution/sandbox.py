@@ -15,10 +15,12 @@ This module owns that isolation and nothing else:
    serving is only ever read from here: no ``git apply``, no ``git checkout``
    and no branch switch ever runs against it;
 4. ``git apply`` puts the diff into that worktree (stdin, UTF-8, bounded);
-5. ``python -m pytest <test_paths>`` runs with ``cwd`` and ``PYTHONPATH``
-   pointing at the worktree, ``PYTHONHASHSEED=0`` and an environment stripped of
-   every ``RAG_*`` key, so the host ``.env`` cannot reach the target tests — and
-   ``import rag`` resolves to the patched copy rather than the installed one;
+5. ``python -m pytest`` runs the candidate's own verification targets **plus the
+   fixed regression net** (:data:`REGRESSION_TEST_PATHS`) with ``cwd`` and
+   ``PYTHONPATH`` pointing at the worktree, ``PYTHONHASHSEED=0`` and an
+   environment stripped of every ``RAG_*`` key, so the host ``.env`` cannot reach
+   the target tests — and ``import rag`` resolves to the patched copy rather than
+   the installed one;
 6. one benchmark replay of the phase-2 corpus
    (``scripts/benchmark_jev_retrieval.py``) in the same worktree, decided with
    the layer-2 thresholds: route accuracy may not drop at all, Top-5 source hit
@@ -36,6 +38,13 @@ is recorded as an error with ``benchmark=None`` instead of as a rejection: a
 missing environment is not evidence *about* a candidate. The same rule skips the
 replay entirely once the target tests have already failed, because a failing
 patch does not need five more minutes of measurement to be refused.
+
+A replay that *ran* but shows no work is no evidence either, and
+:func:`benchmark_verdict` refuses it. A preparation that never happened — a
+knowledge-base request answered before retrieval, in microseconds, with no
+recorded failure — leaves both sides reporting identical metrics, and identical
+metrics would otherwise read as the one conclusion a gate must never invent:
+"no regression".
 
 The module stops at the report. Turning one into a candidate-status move is the
 caller's job, and :func:`sandbox_gate_outcome` is the seam for it: it returns the
@@ -76,6 +85,44 @@ BENCHMARK_REPORT_NAME = "benchmark.json"
 #: copy of ``scripts/`` is what the replay measures.
 BENCHMARK_SCRIPT = "scripts/benchmark_jev_retrieval.py"
 
+#: Repository-owned verification the sandbox always runs beside the candidate's
+#: own targets. Layer 1 refuses any diff that touches ``tests/**`` or a
+#: ``conftest.py``, so this set cannot be trimmed, deselected or rewritten by the
+#: candidate it judges: it is a fixed baseline over the shared surfaces a patch
+#: can reach — Jev policy and its registry seam, pipeline assembly, retrieval,
+#: reranking, chunking, structured queries, tools — and it needs no credential
+#: and no network, which is exactly what a sandboxed child process has.
+#:
+#: It carries the weight the end-to-end replay cannot: the replay's preparation
+#: path calls a routing model, a rewriter, an embedder and a reranker over the
+#: network, and the sandbox never hands a child the credentials for any of them.
+REGRESSION_TEST_PATHS: tuple[str, ...] = (
+    "tests/test_jev_client.py",
+    "tests/test_jev_passage_policy.py",
+    "tests/test_jev_routing_policy.py",
+    "tests/test_jev_question_registry.py",
+    "tests/test_jev_questions.py",
+    "tests/test_jev_shadow.py",
+    "tests/test_pipeline_jev.py",
+    "tests/test_pipeline.py",
+    "tests/test_pipeline_clean.py",
+    "tests/test_pipeline_cache_security.py",
+    "tests/test_retriever.py",
+    "tests/test_retriever_bm25_persistence.py",
+    "tests/test_retriever_default_collection_filter.py",
+    "tests/test_retriever_embed_fallback.py",
+    "tests/test_reranker.py",
+    "tests/test_agent.py",
+    "tests/test_chunker.py",
+    "tests/test_chunk_metadata.py",
+    "tests/test_rrf_dedup.py",
+    "tests/test_structured_query.py",
+    "tests/test_tools.py",
+    "tests/test_tools_overflow.py",
+    "tests/test_loader.py",
+    "tests/test_embedder.py",
+)
+
 #: ``git worktree add`` materializes a whole tree: bounded, not open-ended.
 WORKTREE_TIMEOUT_S = 120.0
 #: The replay walks the committed corpus through both preparation paths.
@@ -90,6 +137,13 @@ PP_PRECISION = 4
 MAX_LISTED = 5
 #: How many failing test names a report keeps; the count still names the rest.
 MAX_RECORDED_TESTS = 50
+
+#: A replay is evidence about a candidate only when it shows the preparation path
+#: actually ran. This floor is execution evidence, not an acceptance threshold:
+#: the layer-2 thresholds are never moved, and a run below this floor is reported
+#: as no evidence at all rather than as a pass. A real preparation on the phase-2
+#: corpus takes seconds; a request answered before retrieval takes microseconds.
+MIN_PREP_P50_MS = 1.0
 
 #: Environment keys that must never reach a sandbox child process. ``RAG_*`` is
 #: the host ``.env`` (``config.Settings`` reads ``env_prefix="RAG_"``); the rest
@@ -321,19 +375,38 @@ def _listed(names: Sequence[str]) -> str:
     return f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
+def _existing_regression_paths(worktree: Path) -> list[str]:
+    """The regression net's paths that this worktree actually carries.
+
+    The real repository carries all of them, and its own test pins that. A
+    worktree that legitimately does not (the sandbox's own synthetic probe
+    fixtures) runs the candidate's targets alone rather than failing to collect:
+    a missing baseline file is a property of the repository, not of the patch.
+    """
+    return [path for path in REGRESSION_TEST_PATHS if (worktree / path).is_file()]
+
+
 def _run_target_tests(
     candidate: CodePatchCandidate, *, worktree: Path, env: Mapping[str, str], timeout: float
 ) -> tuple[bool | None, tuple[str, ...], str]:
-    """Run the candidate's verification tests inside the worktree.
+    """Run the candidate's verification tests plus the fixed regression net.
 
     Returns ``(tests_passed, failed_tests, error)``. A timeout or a pytest that
     never ran is ``tests_passed=None`` — inconclusive, which the plan records as
     ``needs_more_evidence`` rather than as a rejection.
+
+    A candidate that names no test path is still inconclusive rather than
+    verified: the fixed net runs either way, but "we ran our own baseline" is not
+    the "the candidate's change is verified by the tests it claimed" the plan
+    asks for.
     """
     if not candidate.test_paths:
         return None, (), "target tests skipped: the candidate names no test path"
     outcome = _run_command(
-        _pytest_command(candidate.test_paths), cwd=worktree, env=env, timeout=timeout
+        _pytest_command([*candidate.test_paths, *_existing_regression_paths(worktree)]),
+        cwd=worktree,
+        env=env,
+        timeout=timeout,
     )
     if outcome.timed_out:
         return None, (), f"target tests timed out after {int(timeout)}s"
@@ -408,6 +481,41 @@ def _replay_cases(payload: Mapping, *, regressed: bool) -> list[str]:
     return case_ids
 
 
+def _execution_evidence_reason(payload: Mapping) -> str | None:
+    """Why one replay report shows no work, or ``None`` when it shows some.
+
+    The runner counts a preparation that merely *returned* as a successful
+    sample. A knowledge-base request without a principal is answered by the
+    enterprise guard before retrieval — in microseconds, without a recorded
+    failure — so both sides report full-sample metrics, identical to each other,
+    and the layer-2 comparison would call that "no regression".
+
+    Only the *baseline* has to prove it measured the preparation path: at least
+    one case, no failed call, and a preparation latency above
+    :data:`MIN_PREP_P50_MS`. A candidate that fails calls or skips preparation is
+    not discarded here — that is a regression the verdict has to report, and the
+    route and failure comparisons are what catch it.
+    """
+    cases = _count(payload.get("cases"))
+    if cases <= 0:
+        return f"the replay measured no samples (cases={cases})"
+    baseline = payload.get("old")
+    if not isinstance(baseline, Mapping):
+        return "the report carries no baseline metrics"
+    failed = _count(baseline.get("failed_calls"))
+    if failed > 0:
+        return f"the baseline side failed {failed} call(s)"
+    p50 = _number(baseline.get("prep_p50_ms"))
+    if p50 is None:
+        return "the report carries no preparation latency for the baseline side"
+    if p50 < MIN_PREP_P50_MS:
+        return (
+            f"the preparation path never ran on the baseline side "
+            f"(prep P50 {p50:.1f}ms < {MIN_PREP_P50_MS:.1f}ms)"
+        )
+    return None
+
+
 def benchmark_verdict(payload: Mapping) -> dict | None:
     """The layer-2 comparison of one replay report, or ``None`` if unreadable.
 
@@ -417,10 +525,17 @@ def benchmark_verdict(payload: Mapping) -> dict | None:
     thresholds to it (route drop ≤ 0pp, Top-5 drop ≤ 2pp). A patched side that
     fails more calls than the baseline also fails the verdict: a crash inside
     the patched code is a regression, whatever the aggregate rates say.
+
+    A report that shows no work at all is not a verdict but ``None``: two
+    preparations that never happened compare as identical, and "no regression"
+    is exactly the claim a report of nothing must not be able to make. See
+    :func:`_execution_evidence_reason`.
     """
     baseline = payload.get("old")
     candidate = payload.get("new")
     if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
+        return None
+    if _execution_evidence_reason(payload) is not None:
         return None
     baseline_route = _number(baseline.get("route_accuracy"))
     candidate_route = _number(candidate.get("route_accuracy"))
@@ -496,7 +611,9 @@ def _run_benchmark_replay(
     """Replay the committed corpus in the worktree and decide with layer-2 thresholds.
 
     A replay that cannot run is reported as an error with no benchmark, never as
-    a rejection: a missing environment is not evidence about a candidate.
+    a rejection: a missing environment is not evidence about a candidate. A
+    replay that ran without measuring anything is reported the same way, with the
+    reason it cannot be read as a result.
     """
     json_out = sandbox_root / BENCHMARK_REPORT_NAME
     outcome = _run_command(
@@ -519,6 +636,9 @@ def _run_benchmark_replay(
         return None, "benchmark replay report is not valid json"
     if not isinstance(payload, Mapping):
         return None, "benchmark replay report is not a json object"
+    no_evidence = _execution_evidence_reason(payload)
+    if no_evidence is not None:
+        return None, f"benchmark replay measured nothing: {no_evidence}"
     verdict = benchmark_verdict(payload)
     if verdict is None:
         return None, "benchmark replay report is missing the compared metrics"
@@ -780,6 +900,8 @@ __all__ = [
     "GIT_STATUS_TIMEOUT_S",
     "MAX_LISTED",
     "MAX_RECORDED_TESTS",
+    "MIN_PREP_P50_MS",
+    "REGRESSION_TEST_PATHS",
     "SANDBOX_ROOT_PREFIX",
     "SandboxReport",
     "WORKTREE_DIRNAME",
