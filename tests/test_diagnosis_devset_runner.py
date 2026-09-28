@@ -9,6 +9,8 @@ and calls no model.
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,17 @@ from scripts.run_diagnosis_devset import (
     render_markdown,
     summarize,
 )
+
+
+def test_importing_the_runner_moves_the_project_root_to_the_front():
+    """直接跑脚本时，站点目录里那份陈旧 config.py 不能赢。
+
+    The editable install appends the project root after site-packages, where a
+    ``config.py`` from before the evolution phase still lives (it has no
+    ``evolution_db_path``), so a membership check would leave the stale copy in
+    front of the real one. The module reorders instead, which this pins.
+    """
+    assert sys.path[0] == str(Path(__file__).resolve().parents[1])
 
 
 def case(case_id: str = "case-1", expected: str = "ranking_error") -> Case:

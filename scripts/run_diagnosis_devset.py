@@ -44,6 +44,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Direct script execution puts ``scripts/`` first on ``sys.path``, and this
+# environment's editable install appends the project root only *after*
+# site-packages — which still holds a stale ``config.py`` copy from before the
+# evolution phase (no ``evolution_db_path``). A plain membership check would skip
+# the reorder and that stale copy would win, so the project root is moved to the
+# front before anything project-local is imported. Same fix as
+# ``scripts/benchmark_jev_retrieval.py::_ensure_project_root_on_path``.
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+if _PROJECT_ROOT in sys.path:
+    sys.path.remove(_PROJECT_ROOT)
+sys.path.insert(0, _PROJECT_ROOT)
+
 #: Cases whose observation row is missing are reported, not silently dropped:
 #: "how much of the case set is still measurable" is part of the measurement.
 NO_OBSERVATION = "no_observation"
@@ -200,10 +212,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.repeats < 1:
         parser.error("--repeats must be >= 1")
-
-    repo_root = Path(__file__).resolve().parents[1]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
 
     from config import settings
 
