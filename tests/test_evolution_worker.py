@@ -1,6 +1,7 @@
 """Task 3: budgets, busy pause and exception isolation for the evolution worker."""
 
 import json
+import logging
 import os
 import threading
 import time
@@ -77,6 +78,101 @@ def test_one_failing_batch_never_kills_the_thread():
         time.sleep(0.01)
     worker.stop()
     assert worker.is_alive is False and state["n"] >= 3
+
+
+# ── observability: what a round did must be visible from outside ─────────────
+
+
+def test_a_completed_round_logs_what_it_did(caplog):
+    """轮次计数要能被打出来：worker 空闲轮此前一行日志都没有。
+
+    The API path logs neither the worker's start nor an idle round, so "is the
+    evolution worker actually running" could not be answered from the log at all —
+    only failures and budget exhaustion were visible.
+    """
+    run_once = lambda: {  # noqa: E731 - one inline round shape
+        "cluster_once": {"scanned": 3, "clustered": 1, "promoted": 1, "skipped": 0},
+        "diagnosed": 2,
+        "diagnosis_failed": 1,
+        "model_calls": 3,
+        "purged": 0,
+        "diagnosis_config": {},
+    }
+    worker = EvolutionWorker(
+        run_once,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        budget=EvolutionBudget(max_model_calls=3),
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert worker.run_once_when_idle() == "ok"
+
+    assert "evolution_worker_round" in caplog.text
+    assert "status=ok" in caplog.text
+    assert "scanned=3" in caplog.text
+    assert "clustered=1" in caplog.text
+    assert "diagnosed=2" in caplog.text
+    assert "model_calls=3" in caplog.text
+
+
+def test_a_round_of_an_unknown_shape_still_logs(caplog):
+    """结果形状不认识也不能把日志打断——它只是没有计数可打。"""
+    worker = EvolutionWorker(lambda: None, interval_seconds=0.01, busy_provider=lambda: False)
+
+    with caplog.at_level(logging.INFO):
+        assert worker.run_once_when_idle() == "ok"
+
+    assert "counters=unavailable" in caplog.text
+
+
+def test_a_budget_exhausted_round_logs_its_status_and_counters(caplog):
+    """预算耗尽也要留下"这一轮做了什么"，不能只有一行 warning。"""
+    worker = EvolutionWorker(
+        lambda: {"model_calls": 9},
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        budget=EvolutionBudget(max_model_calls=3),
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert worker.run_once_when_idle() == "budget_exhausted"
+
+    assert "status=budget_exhausted" in caplog.text
+    assert "model_calls=9" in caplog.text
+
+
+def test_starting_the_worker_logs_that_it_started(monkeypatch, caplog):
+    """API 启动路径此前不打任何日志：起没起来无法从外部确认。"""
+
+    class FakeWorker:
+        is_alive = True
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(worker_module, "_evolution_worker", None)
+    monkeypatch.setattr(worker_module, "build_evolution_worker", lambda: FakeWorker())
+    monkeypatch.setattr(settings, "evolution_enabled", True)
+    monkeypatch.setattr(settings, "evolution_worker_enabled", True)
+
+    with caplog.at_level(logging.INFO):
+        started = worker_module.start_evolution_worker()
+
+    assert started is not None
+    assert "evolution worker started" in caplog.text
+    assert "model_calls_per_round=" in caplog.text
+
+
+def test_a_disabled_evolution_switch_logs_nothing_and_starts_nothing(monkeypatch, caplog):
+    """关掉时不许起线程，也不该打出"started"。"""
+    monkeypatch.setattr(worker_module, "_evolution_worker", None)
+    monkeypatch.setattr(settings, "evolution_enabled", False)
+
+    with caplog.at_level(logging.INFO):
+        assert worker_module.start_evolution_worker() is None
+
+    assert "evolution worker started" not in caplog.text
 
 
 # ── budget semantics ──────────────────────────────────────────────────────────

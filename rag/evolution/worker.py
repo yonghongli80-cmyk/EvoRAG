@@ -223,13 +223,21 @@ class EvolutionWorker:
             with self._state_lock:
                 self._runs += 1
         self._record_diagnosis_config(result)
+        # One line per round whatever the outcome: the worker runs in a background
+        # thread of the API process, and without it "is it running, and is it doing
+        # anything" is unanswerable from outside — the only other records on this
+        # path are failures and budget warnings.
+        counters = _round_counts(result)
         if deadline is not None and self._clock() >= deadline:
-            return self._exhaust("max_run_seconds")
-        if self._over_model_budget(result):
-            return self._exhaust("max_model_calls")
-        if self._over_rss_budget():
-            return self._exhaust("max_rss_mb")
-        return "ok"
+            status = self._exhaust("max_run_seconds")
+        elif self._over_model_budget(result):
+            status = self._exhaust("max_model_calls")
+        elif self._over_rss_budget():
+            status = self._exhaust("max_rss_mb")
+        else:
+            status = "ok"
+        logger.info("evolution_worker_round status=%s %s", status, counters)
+        return status
 
     def _over_model_budget(self, result: object) -> bool:
         model_calls = _reported_model_calls(result)
@@ -294,6 +302,47 @@ def _reported_model_calls(result: object) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _round_counts(result: object) -> str:
+    """One round's counters as a log fragment; an unknown shape stays unread.
+
+    ``counters=unavailable`` is deliberate: the line must never depend on the
+    round's return shape, because that shape belongs to whoever built the round
+    function (``make_evolution_run_once`` in production, a lambda in tests).
+    """
+    if not isinstance(result, Mapping):
+        return "counters=unavailable"
+    cluster_once = result.get("cluster_once")
+    if not isinstance(cluster_once, Mapping):
+        cluster_once = {}
+    fields = (
+        ("scanned", cluster_once.get("scanned")),
+        ("clustered", cluster_once.get("clustered")),
+        ("promoted", cluster_once.get("promoted")),
+        ("diagnosed", result.get("diagnosed")),
+        ("failed", result.get("diagnosis_failed")),
+        ("model_calls", result.get("model_calls")),
+        ("purged", result.get("purged")),
+    )
+    return " ".join(f"{name}={value}" for name, value in fields)
+
+
+def _log_worker_started() -> None:
+    """The one line that proves the worker thread is up.
+
+    Both entry points log through here — the API lifespan and the standalone
+    ``python -m rag.evolution.worker`` — so "is it running" has the same answer
+    wherever it was started from. Before this, the API path logged nothing at
+    all and only failures were visible.
+    """
+    logger.info(
+        "evolution worker started interval=%ss run_seconds=%s batch=%s model_calls_per_round=%s",
+        settings.evolution_worker_interval_seconds,
+        settings.evolution_worker_run_seconds,
+        settings.evolution_worker_max_batch,
+        settings.evolution_diagnosis_model_calls,
+    )
 
 
 def purge_evolution_observations(store, *, retention_days: float, now: float | None = None) -> int:
@@ -668,6 +717,7 @@ def start_evolution_worker() -> EvolutionWorker | None:
             return None
         built.start()
         _evolution_worker = built
+        _log_worker_started()
         return _evolution_worker
 
 
@@ -713,13 +763,7 @@ def main() -> int:
     if worker is None:
         return 0
     worker.start()
-    logger.info(
-        "evolution worker started interval=%ss run_seconds=%s batch=%s model_calls_per_round=%s",
-        settings.evolution_worker_interval_seconds,
-        settings.evolution_worker_run_seconds,
-        settings.evolution_worker_max_batch,
-        settings.evolution_diagnosis_model_calls,
-    )
+    _log_worker_started()
     try:
         while True:
             time.sleep(0.5)

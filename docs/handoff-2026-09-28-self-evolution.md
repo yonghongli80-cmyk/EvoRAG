@@ -22,7 +22,11 @@
   - `RAG_JEV_MODE=active`、`RAG_JEV_KB_ALLOWLIST=rag_docs`（另有三个回放测试库见下）。
   - `RAG_EVOLUTION_ENABLED=true`（观测/诊断/候选基建的开关）。
   - `RAG_EVOLUTION_CANDIDATE_ENABLED=false`、`..._CANARY_PERCENT=0`——**安全默认**（问题集灰度关闭）。
-- 服务端口 **1102**（启动：`uvicorn rag.api:app --host 127.0.0.1 --port 1102`，日志 `artifacts/1102.{out,err}.log`）。
+- 服务端口 **1102**（启动：`uvicorn rag.api:app --host 127.0.0.1 --port 1102`）。日志用
+  **单句柄合并**重定向到 `artifacts/1102.log`：`... 1>> artifacts\1102.log 2>&1`。
+  不要写成 `1>>A 2>>B`（两个不同文件也不行）：本环境里 PowerShell 的双句柄追加会抢文件锁，
+  报 "being used by another process"，结果是新进程的日志**一行都不落盘**（本会话踩过，
+  一度以为 worker 没起来）。`artifacts/1102.{out,err}.log` 是旧命名的残留，不再写入。
   本机管理账号 `bench-admin`（id 1）；会话里用一次性随机密码重置登录（模式见第 5 节脚本）。
 - **Qdrant 本地模式互斥**：任何进程内使用（基准、回放、沙箱）前必须停掉 1102，否则 "already accessed"。
 - Windows 坑：`git apply` 必须显式 `encoding="utf-8"`（zh-CN locale 会把非 ASCII 上下文写坏，
