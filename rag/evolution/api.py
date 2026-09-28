@@ -36,6 +36,8 @@ lifecycle) and is preceded by an audit row.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from collections.abc import Mapping
@@ -1008,13 +1010,34 @@ def _apply_command(candidate_id: int, test_paths: list[str]) -> str:
     return f"{command} && python -m pytest {verification}" if verification else command
 
 
-def _patch_file_text(candidate_id: int, candidate: dict, apply_command: str) -> str:
+def _revert_command(candidate_id: int) -> str:
+    """The command that reverses the exported patch, for the human to run.
+
+    Design §10 asks a release to be reversible without editing files in place.
+    Producing the reverse command — never running it — is the part of that
+    requirement this endpoint can honour: reversing an applied patch is a ``git
+    apply -R`` of the same file, and the exported snapshot records it next to the
+    apply command so a rollback does not depend on anyone remembering it.
+    """
+    return (
+        f"git -C {REPO_ROOT} apply -R {_PATCH_EXPORT_SUBDIR}/candidate-{int(candidate_id)}.patch"
+    )
+
+
+def _snapshot_export_path(candidate_id: int) -> Path:
+    """``artifacts/patches/candidate-<id>.snapshot.json`` under the export directory."""
+    return PATCH_EXPORT_DIR / f"candidate-{int(candidate_id)}.snapshot.json"
+
+
+def _patch_file_text(
+    candidate_id: int, candidate: dict, apply_command: str, revert_command: str
+) -> str:
     """The exported file: a header comment, then the diff body verbatim.
 
     The comment carries what a reviewer needs at the moment they apply it — the
     layer, the base commit the diff was generated against, the touched files, the
-    verification targets and the apply command. ``git apply`` skips leading
-    comment lines, so the file stays a valid patch.
+    verification targets and both commands (apply and its reverse). ``git apply``
+    skips leading comment lines, so the file stays a valid patch.
     """
     rollback_ref = candidate.get("rollback_ref")
     base_commit = (
@@ -1032,6 +1055,7 @@ def _patch_file_text(candidate_id: int, candidate: dict, apply_command: str) -> 
         f"# files: {', '.join(paths) if paths else '—'}",
         f"# test_paths: {', '.join(test_paths) if test_paths else '—'}",
         f"# apply: {apply_command}",
+        f"# revert: {revert_command}",
     ]
     diff = str(candidate.get("diff") or "")
     if diff and not diff.endswith("\n"):
@@ -1039,21 +1063,68 @@ def _patch_file_text(candidate_id: int, candidate: dict, apply_command: str) -> 
     return "\n".join(header) + "\n" + diff
 
 
+def _snapshot_payload(
+    candidate: dict, *, apply_command: str, revert_command: str
+) -> dict:
+    """The machine-readable companion of one export (design §10, minimal form).
+
+    A full immutable version snapshot store does not exist and is not built here.
+    What an administrator needs in order to roll a single applied patch back —
+    the base commit, the exact commands, the verification targets and what the
+    sandbox concluded — is written next to the patch instead, so the export is
+    self-describing and a later rollback does not depend on this process.
+    """
+    rollback_ref = candidate.get("rollback_ref")
+    base_commit = (
+        str(rollback_ref.get("base_commit", ""))
+        if isinstance(rollback_ref, Mapping)
+        else ""
+    )
+    diff = str(candidate.get("diff") or "")
+    return {
+        "candidate_id": int(candidate["id"]),
+        "artifact_type": candidate.get("artifact_type") or "",
+        "layer": candidate.get("layer") or "",
+        "base_commit": base_commit,
+        "paths": _diff_paths(diff),
+        "test_paths": [str(path) for path in candidate.get("test_paths") or []],
+        "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        "apply_command": apply_command,
+        "revert_command": revert_command,
+        "gate_summary": _sandbox_summary(candidate.get("gate_log")),
+        "prompt_version": candidate.get("prompt_version") or "",
+        "model": candidate.get("model") or "",
+        "exported_at": time.time(),
+    }
+
+
 def _export_patch(candidate: dict) -> tuple[Path, str]:
-    """Write the exported patch file and return its path and the apply command.
+    """Write the exported patch and its snapshot, and return the path plus the apply command.
 
     Exporting is the entire effect of an approval: the directory is created when
-    it is missing, the file is written, and nothing else in the repository moves.
-    A row without a diff body cannot be exported, so the endpoint refuses it
-    before this runs (an empty ``.patch`` would be worse than no export).
+    it is missing, two files are written, and nothing else in the repository
+    moves. A row without a diff body cannot be exported, so the endpoint refuses
+    it before this runs (an empty ``.patch`` would be worse than no export).
     """
     candidate_id = int(candidate["id"])
     test_paths = [str(path) for path in candidate.get("test_paths") or []]
     apply_command = _apply_command(candidate_id, test_paths)
+    revert_command = _revert_command(candidate_id)
     export_path = _patch_export_path(candidate_id)
     export_path.parent.mkdir(parents=True, exist_ok=True)
     export_path.write_text(
-        _patch_file_text(candidate_id, candidate, apply_command), encoding="utf-8"
+        _patch_file_text(candidate_id, candidate, apply_command, revert_command),
+        encoding="utf-8",
+    )
+    _snapshot_export_path(candidate_id).write_text(
+        json.dumps(
+            _snapshot_payload(
+                candidate, apply_command=apply_command, revert_command=revert_command
+            ),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     return export_path, apply_command
 
@@ -1072,6 +1143,71 @@ def _decision_note(
         return note
     detail = f"导出补丁 {export_path}；应用命令：{apply_command}"
     return f"{detail}；备注：{note}" if note else detail
+
+
+def _serialize_generation_queue_row(row: dict) -> dict:
+    """One queue row: both layer authorities, the effective one, and the veto.
+
+    A row is actionable when the effective layer is one an administrator may
+    confirm. It is not actionable when nothing names a layer yet (no confirmation
+    and no draft) — which is exactly the state in which spending a model call
+    would be wasteful — or when the named layer is outside the taxonomy.
+    """
+    confirmed = str(row.get("confirmed_layer") or "").strip()
+    suggested = str(row.get("draft_suggested_layer") or "").strip()
+    effective = confirmed or suggested
+    if confirmed:
+        authority = "confirmed"
+    elif suggested:
+        authority = "draft"
+    else:
+        authority = ""
+    if not effective:
+        blocked: str | None = "缺少确定层级：请先确认根因层级，或等待该观测的诊断草案"
+    elif effective not in CONFIRMABLE_LAYERS:
+        blocked = f"层级 {effective} 不能用于代码补丁（支持 {' / '.join(CONFIRMABLE_LAYERS)}）"
+    else:
+        blocked = None
+    return {
+        "cluster_id": int(row["cluster_id"]),
+        "cluster_status": row["cluster_status"],
+        "observation_id": int(row["observation_id"]),
+        "question": row["question"],
+        "kb_id": row.get("observation_kb_id") or row.get("cluster_kb_id") or "",
+        "failure_stage": row.get("cluster_stage") or row.get("observation_stage") or "",
+        "root_cause_feature": row.get("root_cause_feature") or "",
+        "confirmed_layer": confirmed or None,
+        "draft_suggested_layer": suggested or None,
+        "draft_prompt_version": row.get("draft_prompt_version") or None,
+        "effective_layer": effective,
+        "layer_authority": authority,
+        "blocked_reason": blocked,
+    }
+
+
+@router.get("/code-generation-queue", summary="待生成代码补丁的观测清单（只读）")
+def list_code_generation_queue(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    user: dict = Depends(_admin_user),
+) -> dict:
+    """Member observations a manual generation could act on, oldest first.
+
+    Read-only by design: the phase-5 generator is deliberately outside the
+    worker's round and no endpoint triggers it, so this list is what an
+    administrator reads before triggering a generation by hand. Every row names
+    the layer the generator would apply — the cluster's administrator-confirmed
+    layer when one exists, otherwise the newest diagnosis draft's suggestion —
+    plus ``blocked_reason`` when that layer is missing or is not one a code patch
+    may address. Nothing here calls a model or writes anything.
+    """
+    store = _open_candidate_store()
+    rows = (
+        []
+        if store is None
+        else store.observations_awaiting_code_patch(limit=MAX_CANDIDATE_ROWS)
+    )
+    return _page([_serialize_generation_queue_row(row) for row in rows], page, page_size)
 
 
 @router.get("/code-candidates", summary="代码补丁候选列表")

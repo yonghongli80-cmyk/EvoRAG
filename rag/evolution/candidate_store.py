@@ -36,6 +36,7 @@ import time
 
 from config import settings
 from rag.evolution.candidates import JevQuestionSetCandidate
+from rag.evolution.code_patches import ARTIFACT_TYPE as CODE_PATCH_ARTIFACT_TYPE
 from rag.evolution.code_patches import CodePatchCandidate
 from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, ObservationPool
 
@@ -470,6 +471,50 @@ class CandidateStore:
                 (int(observation_id),),
             ).fetchall()
         return [_decode_candidate_row(row) for row in rows]
+
+    def observations_awaiting_code_patch(self, limit: int) -> list[dict]:
+        """Approved clusters' member observations that have no code patch yet.
+
+        The phase-5 generator runs outside the worker's round by design, so this
+        read-only query is where the queue is visible before an administrator
+        triggers a generation by hand: one row per member observation of a cluster
+        whose status is ``approved_for_candidate`` and which no ``code_patch``
+        candidate mentions yet. Each row carries both layer authorities the
+        generator weighs — the cluster's administrator-confirmed
+        ``confirmed_layer`` and the newest draft's own ``suggested_layer`` — and
+        the prompt version that draft was produced with, so the list is auditable
+        without opening the cluster detail.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT o.id AS observation_id, o.question AS question, "
+                "       o.status AS observation_status, o.kb_id AS observation_kb_id, "
+                "       o.stage AS observation_stage, "
+                "       c.id AS cluster_id, c.status AS cluster_status, "
+                "       c.kb_id AS cluster_kb_id, c.failure_stage AS cluster_stage, "
+                "       c.root_cause_feature AS root_cause_feature, "
+                "       c.confirmed_layer AS confirmed_layer, "
+                "       (SELECT json_extract(d.payload, '$.suggested_layer') "
+                "          FROM diagnosis_drafts d WHERE d.observation_id = o.id "
+                "         ORDER BY d.id DESC LIMIT 1) AS draft_suggested_layer, "
+                "       (SELECT d.prompt_version FROM diagnosis_drafts d "
+                "         WHERE d.observation_id = o.id "
+                "         ORDER BY d.id DESC LIMIT 1) AS draft_prompt_version "
+                "FROM failure_observations o "
+                "JOIN failure_clusters c ON c.id = o.cluster_id "
+                "WHERE c.status = ? "
+                "  AND NOT EXISTS ("
+                "      SELECT 1 FROM candidates p WHERE p.artifact_type = ? "
+                "        AND p.observation_id = o.id"
+                "  ) "
+                "ORDER BY o.id ASC LIMIT ?",
+                (
+                    EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+                    CODE_PATCH_ARTIFACT_TYPE,
+                    int(limit),
+                ),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def candidates_without_gate_result(self, gate_name: str, limit: int) -> list[dict]:
         """Candidates still in ``candidate_testing`` that ``gate_name`` never ran on.

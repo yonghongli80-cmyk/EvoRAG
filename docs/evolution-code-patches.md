@@ -57,19 +57,33 @@
 
 ## 5. 管理员审核与导出
 
+- `GET /knowledge-operations/evolution/code-generation-queue`（**只读"待生成清单"**）：
+  已批准聚类里还没有代码补丁候选的成员观测，逐行给出 `confirmed_layer`、
+  草案 `draft_suggested_layer` 及其 `prompt_version`、`effective_layer`、
+  `layer_authority`（`confirmed` / `draft` / 空）与 `blocked_reason`
+  （未定层级，或层级不在可确认枚举里）。该端点**不调模型、不写任何东西**：
+  第 5 阶段的生成仍由管理员/集成脚本显式触发（见第 8 节）。
+  当前只有后端端点，前端"代码补丁"页签尚未渲染这份清单。
 - `GET /knowledge-operations/evolution/code-candidates`（列表：layer/状态/文件/沙箱摘要/置信度）
 - `GET .../code-candidates/{id}`（+ diff 全文 + 五层 gate_log + 审计）
 - `POST .../code-candidates/{id}/decision`：
-  `approve_for_apply`（导出补丁 + 记录应用命令 + 推进 `approved_for_canary`，**不应用**）、
+  `approve_for_apply`（导出补丁与快照 + 记录 apply/revert 命令 + 推进 `approved_for_canary`，**不应用**）、
   `reject`、`needs_revision`。400/404/409 边界均不写审计、不导出。
 
-导出文件 `artifacts/patches/candidate-<id>.patch` 头部含 apply 命令，例如：
+导出文件 `artifacts/patches/candidate-<id>.patch` 头部含 apply 与 revert 两条命令，例如：
 
 ```
 # apply: git -C <repo> apply --3way artifacts/patches/candidate-<id>.patch && python -m pytest <test_paths>
+# revert: git -C <repo> apply -R artifacts/patches/candidate-<id>.patch
 ```
 
-应用后人工检查、跑全量测试、重启服务——全部由人执行，系统不留任何自动合入路径。
+同目录另写一份机器可读快照 `artifacts/patches/candidate-<id>.snapshot.json`：`base_commit`、
+`paths`、`test_paths`、`diff_sha256`、两条命令、沙箱门禁摘要、`prompt_version`/`model` 与导出时间。
+这是设计 §10"不可变版本快照"的**当前最小形态**：不建快照库（那是一个尚不存在的子系统），
+只保证一次导出自描述、后来的人能干净回退。回退仍由人执行——系统不留任何自动合入或自动回退路径。
+
+应用后人工检查、跑全量测试、重启服务；回退同样由人执行 `# revert` 那条命令。
+测试在真实仓库的一次隔离 worktree 上验证过 apply 与 revert 互为逆操作，且导出前后主工作树字节不变。
 
 ## 6. 端到端留痕（2026-09-28 首跑，真实模型调用）
 
@@ -102,7 +116,9 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
    query 向量与重排顺序并入库，沙箱内重放这四个 seam——列为后续事项（当前不阻塞门禁有效性）。
 2. **目标测试由模型提议**：`test_paths` 必须真实存在（层 1 校验），但模型可能只挑弱测试；
    固定回归网已覆盖仓库共享路径（缓解此项），人工审核仍应自行补充更严的验证命令。
-3. **一次一轮、单候选**：不做多分支探索（DGM 式）与知识库级灰度；快照回退的不可变版本存储也尚不存在。
+3. **一次一轮、单候选**：不做多分支探索（DGM 式）与知识库级灰度。
+   快照回退的**不可变版本存储**（绑定提示词/检索参数/切块/解析/Jev 集/索引版本）仍不存在；
+   当前只有第 5 节的"导出即自描述"最小形态（apply/revert 命令 + `snapshot.json`）。
    这三项出自设计 **§3/§7/§10/§12**（注：设计正文只有 13 节，此前文档里引用的"第 15 节"不存在）。
 4. **审计表沿用阶段 3 的白名单动作**：`confirm_layer` 的审计动作复用 `approve_for_candidate` +
    明确备注（表带 CHECK 约束，扩枚举需重建表）。

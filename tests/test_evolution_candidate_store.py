@@ -15,6 +15,7 @@ import pytest
 from rag.evolution.candidate_store import CandidateStore
 from rag.evolution.candidates import JevQuestionSetCandidate
 from rag.evolution.models import (
+    DiagnosisDraft,
     EvolutionStatus,
     FailureObservation,
     ObservationPool,
@@ -627,3 +628,99 @@ def test_the_benchmark_gate_scan_skips_code_patch_candidates(tmp_path):
     rows = store.candidates_without_gate_result("benchmark", limit=10)
 
     assert [row["artifact_type"] for row in rows] == ["jev_question_set"]
+
+
+# ------------------------------------------------------------------
+# The read-only "what could be generated next" queue (phase 5).
+# ------------------------------------------------------------------
+
+
+def sample_draft(suggested_layer: str = "reranking") -> DiagnosisDraft:
+    """A contract-complete draft whose only interesting field is the layer."""
+    return DiagnosisDraft.model_validate({
+        "failure_category": "ranking_error",
+        "stage": "retrieval",
+        "first_divergence": "重排后真实候选排在撞名候选之后。",
+        "direct_evidence": "失败时 offered 的块哈希仍在重检索结果中。",
+        "root_cause": "假设：重排分数区分度不足，需复核。",
+        "impact_scope": "同 kb 的配件类问题。",
+        "suggested_layer": suggested_layer,
+        "reproduction_steps": "用原问题重检索，比较真实候选与撞名候选的排名。",
+        "acceptance_criteria": "真实候选排在撞名候选之前。",
+        "confidence": "low",
+        "reproducible": True,
+        "evidence_refs": ["a" * 64],
+    })
+
+
+def test_the_code_patch_queue_lists_approved_observations_without_a_patch(tmp_path):
+    """待生成清单：已批准聚类里还没有代码补丁候选的成员观测。
+
+    Phase 5's generator is deliberately outside the worker's round, so this
+    read-only query is the only place an administrator can see what a manual
+    generation would act on.
+    """
+    _, store, cluster, member = seeded(tmp_path)
+
+    queue = store.observations_awaiting_code_patch(limit=50)
+
+    assert [row["observation_id"] for row in queue] == [member["id"]]
+    row = queue[0]
+    assert row["cluster_id"] == cluster["id"]
+    assert row["cluster_status"] == EvolutionStatus.APPROVED_FOR_CANDIDATE.value
+    assert row["observation_kb_id"] == "kb1"
+    assert row["cluster_stage"] == "retrieval"
+    assert row["question"] == "年假额度怎么算"
+    assert row["confirmed_layer"] is None
+    assert row["draft_suggested_layer"] is None
+    assert row["draft_prompt_version"] is None
+
+
+def test_the_queue_carries_the_draft_layer_without_confirmation(tmp_path):
+    """未确认层级时，清单要如实给出草案建议层与它的提示词版本。"""
+    trace, store, cluster, member = seeded(tmp_path)
+    trace.add_draft(
+        cluster["id"],
+        sample_draft("reranking"),
+        observation_id=member["id"],
+        prompt_version="diagnosis-v3",
+        model="test-model",
+    )
+
+    row = store.observations_awaiting_code_patch(limit=50)[0]
+
+    assert row["confirmed_layer"] is None
+    assert row["draft_suggested_layer"] == "reranking"
+    assert row["draft_prompt_version"] == "diagnosis-v3"
+
+
+def test_the_queue_reports_the_confirmed_layer_next_to_the_draft(tmp_path):
+    """确认层是权威：清单同时给出两者，取舍由生成器/管理员决定。"""
+    trace, store, cluster, member = seeded(tmp_path)
+    trace.add_draft(
+        cluster["id"], sample_draft("retrieval_config"), observation_id=member["id"], prompt_version="v1"
+    )
+    trace.set_confirmed_layer(cluster["id"], confirmed_layer="reranking", now=time.time())
+
+    row = store.observations_awaiting_code_patch(limit=50)[0]
+
+    assert row["confirmed_layer"] == "reranking"
+    assert row["draft_suggested_layer"] == "retrieval_config"
+
+
+def test_the_queue_drops_an_observation_that_already_has_a_code_patch(tmp_path):
+    """已经生成过代码补丁的观测不再出现，避免重复触发。"""
+    _, store, cluster, member = seeded(tmp_path)
+    store.add_candidate(member["id"], cluster["id"], sample_code_patch())
+
+    assert store.observations_awaiting_code_patch(limit=50) == []
+
+
+def test_a_question_set_candidate_leaves_the_code_patch_queue_untouched(tmp_path):
+    """问题集候补不是代码补丁：它不能让这条观测从清单里消失。"""
+    _, store, cluster, member = seeded(tmp_path)
+    store.add_candidate(member["id"], cluster["id"], sample_candidate())
+
+    queue = store.observations_awaiting_code_patch(limit=50)
+
+    assert [row["observation_id"] for row in queue] == [member["id"]]

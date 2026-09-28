@@ -47,6 +47,7 @@ from rag.user_db import UserDB
 PREFIX = "/knowledge-operations/evolution"
 CANDIDATES_URL = f"{PREFIX}/candidates"
 CODE_CANDIDATES_URL = f"{PREFIX}/code-candidates"
+GENERATION_QUEUE_URL = f"{PREFIX}/code-generation-queue"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TARGET_FILE = REPO_ROOT / "rag" / "reranker.py"
@@ -599,3 +600,161 @@ def test_the_two_candidate_lists_never_mix_artifact_types(evolution_client, admi
     # The question-set endpoint stays a question-set contract: a patch row (NULL
     # target/payload) would break it, so its body never mentions the diff.
     assert PATCH_DIFF not in evolution_client.get(CANDIDATES_URL, headers=admin_headers).text
+
+
+# ------------------------------------------------------------------
+# The read-only generation queue: what a manual trigger would act on.
+# ------------------------------------------------------------------
+
+
+def test_the_generation_queue_is_admin_only_and_names_the_missing_layer(
+    evolution_client, admin_headers, user_headers
+):
+    """待生成清单：管理员可读，成员 403、匿名 401；未定层级时给出原因。
+
+    Phase 5's generator is not in the worker's round, so this list is the only
+    admin-facing surface of the queue; it stays read-only and calls no model.
+    """
+    store = _store()
+    try:
+        cluster_id, observation_id = _approved_cluster(store, "queue-admin")
+    finally:
+        store.close()
+
+    assert evolution_client.get(GENERATION_QUEUE_URL).status_code == 401
+    assert evolution_client.get(GENERATION_QUEUE_URL, headers=user_headers).status_code == 403
+
+    response = evolution_client.get(GENERATION_QUEUE_URL, headers=admin_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["observation_id"] == observation_id
+    assert item["cluster_id"] == cluster_id
+    assert item["question"] == "年假额度怎么算"
+    assert item["confirmed_layer"] is None
+    assert item["draft_suggested_layer"] is None
+    assert item["effective_layer"] == ""
+    assert item["layer_authority"] == ""
+    assert "层级" in item["blocked_reason"]
+
+
+def test_the_queue_reports_the_confirmed_layer_as_the_effective_one(
+    evolution_client, admin_headers
+):
+    store = _store()
+    try:
+        cluster_id, _ = _approved_cluster(store, "queue-confirmed")
+        store.set_confirmed_layer(cluster_id, confirmed_layer="reranking", now=time.time())
+    finally:
+        store.close()
+
+    item = evolution_client.get(GENERATION_QUEUE_URL, headers=admin_headers).json()["items"][0]
+
+    assert item["confirmed_layer"] == "reranking"
+    assert item["effective_layer"] == "reranking"
+    assert item["layer_authority"] == "confirmed"
+    assert item["blocked_reason"] is None
+
+
+def test_an_observation_that_already_has_a_patch_leaves_the_queue(
+    evolution_client, admin_headers
+):
+    store = _store()
+    try:
+        _add_candidate(store, sample_patch(), "queue-patched", status=None)
+    finally:
+        store.close()
+
+    body = evolution_client.get(GENERATION_QUEUE_URL, headers=admin_headers).json()
+
+    assert body["total"] == 0
+    assert body["items"] == []
+
+
+# ------------------------------------------------------------------
+# The exported snapshot: the revert path is part of the export.
+# ------------------------------------------------------------------
+
+
+def _real_comment_diff(path: Path) -> str:
+    """A diff that really applies to ``path`` at HEAD (git's own unified format)."""
+    import difflib
+
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    edited = [*lines, "# evolution candidate: tightened filename collision penalty\n"]
+    relative = path.relative_to(REPO_ROOT).as_posix()
+    return "".join(difflib.unified_diff(lines, edited, fromfile=f"a/{relative}", tofile=f"b/{relative}"))
+
+
+def test_the_exported_patch_carries_a_revert_command_that_really_reverses_it(
+    evolution_client, admin_headers, export_dir, tmp_path
+):
+    """批准导出同时给出 apply 与 revert，且 revert 在隔离 worktree 里验证过。
+
+    回退不做成"自动 git 操作"：导出的是**可复制的命令**加一份机器可读快照，
+    由人执行；这条测试证明那两条命令在真实仓库的一次 worktree 上互为逆操作，
+    而主工作树始终未被触碰。
+    """
+    import json
+
+    real_diff = _real_comment_diff(TARGET_FILE)
+    target_text = TARGET_FILE.read_text(encoding="utf-8")
+    before = _worktree_state()
+    store = _store()
+    try:
+        candidate_id = _add_candidate(
+            store,
+            sample_patch(diff=real_diff),
+            "revert-one",
+            status=EvolutionStatus.AWAITING_VERIFICATION.value,
+        )
+    finally:
+        store.close()
+
+    response = _decision(evolution_client, candidate_id, "approve_for_apply", admin_headers, note="导出验证")
+    assert response.status_code == 200
+
+    patch_file = export_dir / f"candidate-{candidate_id}.patch"
+    snapshot_file = export_dir / f"candidate-{candidate_id}.snapshot.json"
+    text = patch_file.read_text(encoding="utf-8")
+    assert "# revert: " in text
+    snapshot = json.loads(snapshot_file.read_text(encoding="utf-8"))
+    assert snapshot["base_commit"] == BASE_COMMIT
+    assert snapshot["layer"] == "reranking"
+    assert snapshot["test_paths"] == ["tests/test_reranker.py"]
+    assert snapshot["apply_command"] in text
+    assert snapshot["revert_command"] in text
+
+    worktree = tmp_path / "revert-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree), "--detach", "HEAD"],
+        cwd=str(REPO_ROOT), check=True, capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+    try:
+        applied = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", str(patch_file)],
+            cwd=str(worktree), capture_output=True, text=True, encoding="utf-8", timeout=120,
+        )
+        assert applied.returncode == 0, applied.stderr
+        assert (worktree / "rag" / "reranker.py").read_text(encoding="utf-8") != target_text
+
+        reverted = subprocess.run(
+            ["git", "apply", "-R", "--whitespace=nowarn", str(patch_file)],
+            cwd=str(worktree), capture_output=True, text=True, encoding="utf-8", timeout=120,
+        )
+        assert reverted.returncode == 0, reverted.stderr
+        assert (worktree / "rag" / "reranker.py").read_text(encoding="utf-8") == target_text
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, encoding="utf-8", timeout=120,
+        )
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, encoding="utf-8", timeout=120,
+        )
+
+    # The red line still holds: approving never touched the main work tree.
+    assert _worktree_state() == before
