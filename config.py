@@ -133,17 +133,19 @@ class Settings(BaseSettings):
 
     # 诊断阶段（第 3 阶段）：每轮对“无草稿的 awaiting_diagnosis_review 聚类”的模型调用
     # 预算。成功与失败的调用都计入预算，达到上限即停止本轮诊断，剩余聚类留待下轮。
-    evolution_diagnosis_model_calls: int = Field(default=5, ge=0)
+    # 3：单次调用为拿到完整 JSON 需要更长的完成预算与墙钟（见下面两项），
+    # 3 × 150s = 450s 与原本 5 × 90s 的最坏值相同，**单轮上界不因本次调整而变长**。
+    evolution_diagnosis_model_calls: int = Field(default=3, ge=0)
     # 单次诊断调用的超时：诊断用独立客户端（不复用在线生成的断路器），该超时即注入
     # 诊断客户端；证据包含多样本时推理模型可能超过 30s，默认放宽到 90s。
-    evolution_diagnosis_timeout_seconds: float = Field(default=90.0, gt=0.0)
+    # 150s：实测把完成上限提到 16000 后，同一请求会出现 >90s 的调用（撞 90s 超时）。
+    evolution_diagnosis_timeout_seconds: float = Field(default=150.0, gt=0.0)
     # 单次诊断输出的 token 上限：该提供商的 reasoning token 计入完成预算，无上限时调用
-    # 可达数分钟，过小则会挤掉 JSON 正文。**默认 8000 已知会在证据包较大时饿死正文**：
-    # 实测某条问题（提示词约 9k 字符）finish_reason=length、reasoning_tokens=7942、
-    # text_tokens=0，正文只剩 137 字符的半个 JSON；提到 16000 后同一请求返回完整 JSON，
-    # 但会撞上 90s 诊断超时（同一批 3 次里 1 次 APITimeoutError）。放宽上限与放宽超时
-    # 必须一起评估，因此默认值暂不动，取舍见 docs/evolution-diagnosis.md 第 5 节。
-    evolution_diagnosis_max_tokens: int = Field(default=8000, ge=1)
+    # 可达数分钟，过小则会挤掉 JSON 正文。默认 16000：实测某条问题（提示词约 9k 字符）
+    # 在 8000 下 finish_reason=length、reasoning_tokens=7942、text_tokens=0，正文只剩
+    # 137 字符的半个 JSON（契约违规率实测 12/90 = 13.3%）；16000 下同一请求返回完整 JSON。
+    # 该上限与上面的超时必须一起看：只放宽上限会把截断换成超时。
+    evolution_diagnosis_max_tokens: int = Field(default=16000, ge=1)
     # 管理员确认标签 JSON 路径（诊断证据的最高优先级）；为空=无标签，此时草案根因只能是
     # 假设级（diagnoser 后校验强制）。
     evolution_diagnosis_labels_path: str = ""

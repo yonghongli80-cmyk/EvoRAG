@@ -18,15 +18,14 @@
 
 | 设置 | 默认 | 语义 |
 | --- | --- | --- |
-| `evolution_diagnosis_model_calls` | 5 | 每轮最多诊断的聚类数；**成功与失败都计 1**，达到即停，剩余聚类下轮重试 |
-| `evolution_diagnosis_timeout_seconds` | 90 | 单次调用超时，注入诊断专用客户端（与在线生成的 30s、断路器相互隔离） |
-| `evolution_diagnosis_max_tokens` | 8000 | 单次完成 token 上限。该提供商的 reasoning token **计入**完成预算：无上限时调用可达数分钟，过小（如 2000）会把 JSON 正文挤没 |
+| `evolution_diagnosis_model_calls` | 3 | 每轮最多诊断的聚类数；**成功与失败都计 1**，达到即停，剩余聚类下轮重试。3 × 下面的 150s = 450s，与旧值 5 × 90s 的单轮最坏值相同 |
+| `evolution_diagnosis_timeout_seconds` | 150 | 单次调用超时，注入诊断专用客户端（与在线生成的 30s、断路器相互隔离）；提到 150 是因为完成上限放宽后实测有 >90s 的调用 |
+| `evolution_diagnosis_max_tokens` | 16000 | 单次完成 token 上限。该提供商的 reasoning token **计入**完成预算：无上限时调用可达数分钟，过小会把 JSON 正文挤没——8000 下实测 `reasoning_tokens=7942`、`text_tokens=0`、正文截断（见第 5.2 节基线的 13.3% 契约违规率） |
 | `evolution_diagnosis_labels_path` | 空 | 管理员确认标签 JSON 路径（证据最高优先级）；为空时草案根因只能是假设级（后校验强制） |
 
 诊断模型复用 `RAG_DEEPSEEK_*`（当前 Command Code `deepseek/deepseek-v4.1-flash`，
 推理模型）。**注意**：它每次调用都产生 reasoning token，实测诊断尺寸提示词下单次
-10–80 秒不等，5 成员聚类的提示词可能超过 90s 超时——超时不是故障，该聚类无草稿、
-下轮自动重试。
+P50 约 40 秒、上限 150s；超时不是故障，该聚类无草稿、下轮自动重试。
 
 ## 3. 一次诊断里面发生什么
 
@@ -159,8 +158,13 @@ ASCII 词 + CJK 二字组（最多 8 个词），在**重检索的前 24 块全�
 - `max_tokens=16000`：同一请求 `finish_reason=stop`、正文 1428 字符、契约通过。
 - 但把上限提到 16000 后，同一族 3 次里出现 1 次 `APITimeoutError`（90s 诊断超时）
   与 2 次字段级违规，**类别答案仍然在 `ranking_error` 与 `undetermined` 之间摇摆**。
-因此默认值暂不动（8000），取舍交管理员决定：放宽上限必须与放宽超时、
-或与"缩小证据包/要求更紧凑输出"一起评估；单纯调一个值只是把截断换成超时。
+**据此已调整（2026-09-28，依据第 5.2 节基线）**：`max_tokens` 8000 → **16000**、
+超时 90s → **150s**、每轮调用 5 → **3**（3 × 150s 与旧值 5 × 90s 的单轮最坏值相同）。
+这次调整**没有复测**：截断的因果（`finish_reason=length`、`reasoning_tokens` 吃满、
+`text_tokens=0`）是实测确证的，但"调整后契约违规率是否下降"**未验证**——要验证就跑第 5.1 节
+的协议，拿 `agreement_by_run` 与 `contract_violation_rate` 前后对比。
+另需注意：类别边界（`ranking_error` ↔ `generator_ignored_evidence` ↔ `undetermined`）
+不是 token 能解决的，这族即使不再截断也可能继续判错。
 
 **测量口径的诚实说明**：本节 v3 的数字都在**12 条子集**上测得，不是原来的 28 条——
 上一轮会话已把多数聚类推进过 `awaiting_diagnosis_review`，本轮 harness 的
@@ -220,4 +224,5 @@ ranking_error：适马副厂遮光罩表内容确实存在。
   日志只含聚类 id 与原因分类，不含提示词/原文/密钥。
 - 草稿与审计只能在 `evolution.db` 里看（管理员工具）；API 序列化前经
   `redact_source_config` 脱敏密钥形字段。
-- 单轮成本上界：预算 5 × (超时 90s) = 最坏 7.5 分钟；成功调用实测 10–80s。
+- 单轮成本上界：预算 3 × (超时 150s) = 最坏 7.5 分钟（与调整前的 5 × 90s 相同）；
+  单次实测 P50 40s（第 5.2 节基线）。

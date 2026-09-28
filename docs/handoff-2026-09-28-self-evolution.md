@@ -178,8 +178,11 @@ POST /knowledge-operations/evolution/code-candidates/{id}/decision  # approve_fo
    recall_miss，已撤回并记录）。关键发现：`real-020` 家族的不稳定**不是判据偏弱**，而是
    completion 被推理 token 吃满而截断——`max_tokens=8000` 时实测 `finish_reason=length`、
    `reasoning_tokens=7942`、`text_tokens=0`、正文仅 137 字符；提到 16000 后同一请求返回完整
-   JSON，但换成 90s 超时且仍不稳定。默认值因此**未改**，取舍写在
-   `docs/evolution-diagnosis.md` 第 5 节"v3 复核"。
+   JSON，但换成 90s 超时且仍不稳定。**2026-09-28 据 30×3 基线（逐次一致率 25/24/25、
+   契约违规率 12/90）已调整默认值**：`max_tokens` 16000、超时 150s、每轮调用 3
+   （3×150s 与旧值 5×90s 的单轮最坏值相同）。**这次调整没有复测**：截断因果是实测确证的，
+   "调整后违规率是否下降"未验证——要验证就用第 5.1 节的协议跑前后对比。
+   取舍与证据见 `docs/evolution-diagnosis.md` 第 5 节"v3 复核"与 5.2 节"基线测量"。
 9. **本会话的验证口径提醒**：1102 在跑时不能直接开本机 Qdrant；本轮所有回放/诊断实验都用
    `RAG_QDRANT_PATH` 指向 `qdrant_data` 的临时快照（`robocopy /E /XF .lock`）完成，
    未停服务、未动主库。回放/诊断脚本会清库或改状态，跑前务必备份 `data/evolution.db`
