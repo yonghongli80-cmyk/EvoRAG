@@ -267,3 +267,41 @@ def test_make_pipeline_injects_the_recorder_only_when_evolution_is_enabled(monke
     api.close_pipeline_processors()
     assert api._failure_recorder is None
     assert recorder.stats()["closed"] is True
+
+
+def test_stream_endpoint_builds_a_non_default_kb_pipeline_through_the_factory(
+    isolated_api, make_user
+):
+    """每个请求的 pipeline 必须走 ``_make_pipeline``，否则灰度候选在服务路径上不生效。
+
+    ``RAGPipeline(...)`` 直接构造不会拿到 ``question_set_rollout``：pipeline 只在收到
+    控制器时才发布每请求的灰度键，控制器缺失时 ``provide()`` 永远回落当前问题集。所以
+    "候选已灰度"在服务路径上曾经等于"永不生效"（2026-09-29 由端到端归因核对发现）。
+    """
+
+    import rag.api as api
+
+    _, headers = make_user("kb-admin", is_admin=True)
+    built: list[dict] = []
+
+    class FakePipeline:
+        def query_stream(self, *args, **kwargs):
+            async def events():
+                yield 'data: {"type": "done", "reliability": null}\n\n'
+
+            return events()
+
+    def fake_make_pipeline(**kwargs):
+        built.append(kwargs)
+        return FakePipeline()
+
+    with patch.object(api, "_make_pipeline", fake_make_pipeline):
+        response = isolated_api.post(
+            "/query/stream",
+            json={"question": "灰度路径检查", "kb_id": "test_kb", "session_id": "s1"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert built == [{"kb_id": "test_kb"}], "非默认库的请求也必须由注入工厂构造 pipeline"
+

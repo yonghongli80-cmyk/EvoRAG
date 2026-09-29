@@ -1369,10 +1369,9 @@ async def upload_file(
     )
 
     global pipeline
-    from rag.pipeline import RAGPipeline
     with _pipeline_lock.write():
         try:
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         except Exception:
             logger.exception("Pipeline refresh failed after upload")
     return result
@@ -1662,7 +1661,6 @@ async def index(
     duplicate_action: str = Form("reject"),
     user: dict = Depends(require_user),
 ):
-    from rag.pipeline import RAGPipeline
     global pipeline
     content = await file.read(MAX_FILE_SIZE + 1)
     result = await _ingest_default_document(
@@ -1672,10 +1670,10 @@ async def index(
         db=user_db,
         duplicate_action=duplicate_action,
     )
-    # 刷新 pipeline（冷启动时创建，运行时更新）
+    # 刷新 pipeline（冷启动时创建，运行时更新）；走注入工厂以带上灰度/观测协作器。
     with _pipeline_lock.write():
         try:
-            pipeline = RAGPipeline(kb_id="rag_docs", user_db=user_db)
+            pipeline = _make_pipeline(kb_id="rag_docs")
         except Exception:
             logger.exception("Pipeline refresh failed after index")
     return {**result, "status": "indexed"}
@@ -1871,10 +1869,9 @@ async def query_stream(
     if target_kb != "rag_docs":
         require_kb_view(user_db, target_kb, user)
         await asyncio.to_thread(_audit_org_event, user, "answer_requested", target_kb)
-        from rag.pipeline import RAGPipeline
-        current_pipeline = await asyncio.to_thread(
-            RAGPipeline, kb_id=target_kb, user_db=user_db
-        )
+        # 必须走注入工厂：灰度控制器（层 4）与失败记录器只在那里注入，直接构造
+        # RAGPipeline 会让该库的在线请求永远拿不到候选问题集。
+        current_pipeline = await asyncio.to_thread(_make_pipeline, kb_id=target_kb)
     else:
         with _pipeline_lock.read():
             if pipeline is None:
