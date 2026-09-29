@@ -131,11 +131,19 @@ class RAGPipeline:
         self.memory = DialogueMemory(db_path=memory_db_path, generate_fn=generate)
         self.reranker = Reranker()
         # Jev 决策服务：仅当模式非 off 时创建默认实例；注入的服务由调用方负责生命周期。
+        # 层 4 灰度：控制器既提供每请求的灰度键（下面发布），也提供问题集本身——把它的
+        # provide() 交给客户端，候选问题集才可能在服务路径上生效。未注入控制器时客户端
+        # 走静态问题集，在线行为零变化。
         self._owns_jev_service = False
         if jev_service is not None:
             self.jev = jev_service
         elif settings.jev_mode != "off":
-            self.jev = JevDecisionService()
+            from rag.jev.client import JevClient
+
+            provider = (
+                question_set_rollout.provide if question_set_rollout is not None else None
+            )
+            self.jev = JevDecisionService(JevClient(question_set_provider=provider))
             self._owns_jev_service = True
         else:
             self.jev = None

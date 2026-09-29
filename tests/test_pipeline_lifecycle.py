@@ -269,6 +269,36 @@ def test_make_pipeline_injects_the_recorder_only_when_evolution_is_enabled(monke
     assert recorder.stats()["closed"] is True
 
 
+def test_pipeline_hands_the_rollout_controller_to_its_jev_client(monkeypatch, tmp_path):
+    """灰度要在服务路径上真的生效，客户端必须拿到控制器的 ``provide()``。
+
+    只把控制器交给 pipeline 只够发布灰度键；真正决定"用当前问题集还是候选问题集"的
+    是 ``JevClient.question_set_provider``。此前没有任何地方传它，于是层 4 的候选
+    虽然能灰度、能归因，却永远服务不到流量（2026-09-29 端到端发现）。
+    """
+
+    from config import settings
+    from rag.pipeline import RAGPipeline
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    controller = MagicMock()
+    controller.provide = MagicMock(return_value=({}, "passages-v1+candidate-9"))
+
+    with patch("rag.pipeline.Retriever"), patch("rag.pipeline.Reranker"), patch(
+        "rag.memory.DialogueMemory"
+    ), patch("rag.pipeline.ExecutionTracker"), patch("rag.pipeline.RedisCache"), patch(
+        "rag.feedback_processor.FeedbackProcessor"
+    ), patch("rag.gap_analyzer.GapAnalyzer"):
+        pipeline = RAGPipeline(
+            kb_id="test_kb", memory_db_path=":memory:", question_set_rollout=controller
+        )
+
+    try:
+        assert pipeline.jev._client._question_set_provider == controller.provide
+    finally:
+        pipeline.close()
+
+
 def test_stream_endpoint_builds_a_non_default_kb_pipeline_through_the_factory(
     isolated_api, make_user
 ):
