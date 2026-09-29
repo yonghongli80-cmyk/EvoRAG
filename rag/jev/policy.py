@@ -64,6 +64,17 @@ class PassageSelection:
     excluded_ids: tuple[str, ...]
     has_answer_evidence: bool
     question_set_version: str = ""
+    #: What the judge said about the candidates it saw, counted **before** the
+    #: policy turns those judgments into a selection: one candidate can cross
+    #: several thresholds at once (relevant *and* injected, for instance), and the
+    #: raw counts are what let a later diagnosis tell "nothing was retrieved" apart
+    #: from "candidates were retrieved and judged relevant, yet none carried answer
+    #: evidence" — the second is a judging defect, not a content gap.
+    judged: int = 0
+    relevant: int = 0
+    with_evidence: int = 0
+    contradicted: int = 0
+    injected: int = 0
 
 
 def choose_route(
@@ -130,20 +141,31 @@ def select_passages(
     conflicts: list[Chunk] = []
     evidence: list[tuple[float, float, int, Chunk]] = []
     background: list[tuple[float, int, Chunk]] = []
+    relevant = with_evidence = contradicted = injected = 0
     for index, candidate in enumerate(candidates):
         chunk_id = f"c{index}"
         judgment = by_chunk_id.get(chunk_id)
         if judgment is None:
             raise ValueError(f"missing judgment for chunk {chunk_id}")
-        if judgment.prompt_injection >= effective.injection_threshold:
+        is_injected = judgment.prompt_injection >= effective.injection_threshold
+        is_contradiction = judgment.contradiction >= effective.contradiction_threshold
+        is_evidence = judgment.answer_evidence >= effective.evidence_threshold
+        is_relevant = judgment.relevance >= effective.relevance_threshold
+        # Raw judge statistics first: the policy's exclusions must not hide what the
+        # judge actually said about the candidates it was given.
+        relevant += 1 if is_relevant else 0
+        with_evidence += 1 if is_evidence else 0
+        contradicted += 1 if is_contradiction else 0
+        injected += 1 if is_injected else 0
+        if is_injected:
             excluded.append(chunk_id)
             continue
         marked = _with_jev_provenance(candidate, judgment, effective)
-        if judgment.contradiction >= effective.contradiction_threshold:
+        if is_contradiction:
             conflicts.append(marked)
-        elif judgment.answer_evidence >= effective.evidence_threshold:
+        elif is_evidence:
             evidence.append((-judgment.answer_evidence, -judgment.relevance, index, marked))
-        elif judgment.relevance >= effective.relevance_threshold:
+        elif is_relevant:
             background.append((-judgment.relevance, index, marked))
 
     accepted = [item[3] for item in sorted(evidence, key=lambda item: item[:3])]
@@ -156,6 +178,11 @@ def select_passages(
         excluded_ids=tuple(excluded),
         has_answer_evidence=any(item.metadata.get("jev_answer_evidence") == "true" for item in accepted),
         question_set_version=version,
+        judged=len(candidates),
+        relevant=relevant,
+        with_evidence=with_evidence,
+        contradicted=contradicted,
+        injected=injected,
     )
 
 

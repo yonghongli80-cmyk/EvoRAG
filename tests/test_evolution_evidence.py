@@ -202,6 +202,52 @@ def test_pack_carries_the_single_observation_failed_hashes(tmp_path):
     assert pack.failed_hashes == tuple(sorted((md5("a1"), md5("a2"))))  # not the sibling's b1
 
 
+def test_pack_carries_what_the_passage_judge_saw(tmp_path):
+    """判定层统计量随观测进证据包；缺失就是"未记录"，不能当成 0。
+
+    这是"召回了却没被采用"（判定/改写层可修）与"根本没召回"（内容缺口）的分界证据，
+    来源必须是失败请求自己写下的 decision_metadata，而不是事后重判。
+    """
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="q1")
+    member = {
+        **member,
+        "details_decision_metadata": {
+            "passage_judged": 12,
+            "passage_relevant": 5,
+            "passage_evidence": 0,
+            "passage_contradicted": 1,
+            "passage_injected": 0,
+            "jev_route": "rag",  # 非统计量键不进包
+        },
+    }
+
+    pack = assemble_evidence(member, cluster, store=store)
+
+    assert dict(pack.passage_judging) == {
+        "passage_judged": 12,
+        "passage_relevant": 5,
+        "passage_evidence": 0,
+        "passage_contradicted": 1,
+        "passage_injected": 0,
+    }
+
+
+def test_pack_leaves_judging_counts_empty_when_the_request_predates_them(tmp_path):
+    """旧观测没有这些键：空元组（未记录），不是全 0。"""
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="q1")
+    member = {**member, "details_decision_metadata": '{"jev_route": "rag"}'}
+
+    pack = assemble_evidence(member, cluster, store=store)
+
+    assert pack.passage_judging == ()
+
+
 def test_pack_prefers_the_observation_signals_over_the_cluster(tmp_path):
     """stage / root_cause_feature come from the observation row when present."""
 

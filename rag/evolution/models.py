@@ -180,6 +180,11 @@ class EvidencePack:
     failed_hashes: tuple[str, ...] = ()
     recall_previews: tuple[dict, ...] = ()
     question_term_coverage: tuple[dict, ...] = ()
+    #: 失败请求里**判定层自己报的**原始统计量：候选数（passage_judged），以及判为相关 /
+    #: 含答案证据 / 前提冲突 / 注入的块数。空元组表示该失败早于统计量上线（读不到，不等于 0）。
+    #: 它把"一个块都没采纳"拆成两种完全不同的失败：候选没进来（召回/内容缺口），
+    #: 还是候选进来了、被判为相关却没有一块含答案证据（判定/改写层）。
+    passage_judging: tuple[tuple[str, int], ...] = ()
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 

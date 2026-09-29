@@ -329,6 +329,44 @@ def test_decision_metadata_carries_both_stage_versions(active_jev):
     assert trace.decision_metadata["passages_question_set_version"] == "passages-v1+candidate-3"
 
 
+def test_decision_metadata_carries_what_the_passage_judge_saw(active_jev):
+    """The trace records how many candidates the judge saw and how it scored them.
+
+    Without those counts a failure is only visible as "no chunk was adopted", which the
+    diagnosis can only read as a content gap. With them, "candidates were retrieved and
+    judged relevant, yet none carried answer evidence" is visible as a judging-layer
+    failure — the layer a question-set candidate can actually fix.
+    """
+    jev = MagicMock()
+    jev.route.return_value = rag_route()
+    visible = Chunk(text="年假为 7 天", doc_name="policy.md", chunk_index=0)
+    jev.select.return_value = PassageSelection(
+        accepted=(),
+        conflicts=(),
+        excluded_ids=(),
+        has_answer_evidence=False,
+        question_set_version="passages-v1",
+        judged=9,
+        relevant=4,
+        with_evidence=0,
+        contradicted=1,
+        injected=2,
+    )
+    pipeline = build_pipeline(jev)
+    pipeline.retriever.retrieve.return_value = [visible]
+    pipeline.tracker = MagicMock()
+
+    with patch("rag.pipeline.generate", return_value="answer"):
+        pipeline.query("年假有几天")
+
+    metadata = pipeline.tracker.save.call_args.args[0].decision_metadata
+    assert metadata["passage_judged"] == 9
+    assert metadata["passage_relevant"] == 4
+    assert metadata["passage_evidence"] == 0
+    assert metadata["passage_contradicted"] == 1
+    assert metadata["passage_injected"] == 2
+
+
 def test_streaming_parity_for_jev_path(active_jev):
     import asyncio
     import json

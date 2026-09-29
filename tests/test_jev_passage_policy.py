@@ -31,6 +31,31 @@ def judgment(
     )
 
 
+def test_selection_counts_what_the_judge_saw_so_a_failure_can_be_attributed():
+    """判定层的原始统计量：诊断要能区分「没召回」与「召回了但没被判为证据」。
+
+    没有这些计数时，失败只能读成"一个块都没采纳"，于是诊断一律落到内容缺口；
+    有了计数就能看出候选块其实进了判定、被判为相关却没有答案证据——那是判定/改写层的问题。
+    计数是**原始**量：同一块可以同时计入相关与注入（它确实同时满足两个阈值）。
+    """
+    selected = select_passages(
+        [chunk("c0"), chunk("c1"), chunk("c2"), chunk("c3")],
+        [
+            judgment("c0", relevance=.9, evidence=.0, contradiction=.0, injection=.0),
+            judgment("c1", relevance=.7, evidence=.8, contradiction=.0, injection=.0),
+            judgment("c2", relevance=.1, evidence=.0, contradiction=.0, injection=.0),
+            judgment("c3", relevance=.9, evidence=.0, contradiction=.6, injection=.9),
+        ],
+        policy=JevPolicy(),
+    )
+
+    assert selected.judged == 4
+    assert selected.relevant == 3  # c0, c1, c3；c2 低于相关阈值
+    assert selected.with_evidence == 1  # 只有 c1
+    assert selected.contradicted == 1  # c3
+    assert selected.injected == 1  # c3（同一块可以同时计入相关与注入）
+
+
 def test_selection_carries_the_question_set_version_of_its_judgments():
     """The selection names the version that produced the judgments it applied.
 

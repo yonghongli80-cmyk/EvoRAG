@@ -43,7 +43,7 @@ P50 约 40 秒、上限 150s；超时不是故障，该聚类无草稿、下轮�
      不可复现则该聚类建议 `needs_more_evidence`。
    - 哈希列表按排序取前 12 条进入提示词（控制成本），复现检查仍看全量。
 3. `Diagnoser.draft`：恰好一次模型调用，版本化提示词（`DIAGNOSIS_PROMPT_VERSION`，
-   当前 `diagnosis-v3`），输出经 Pydantic 校验 + 后校验硬规则：
+   当前 `diagnosis-v4`），输出经 Pydantic 校验 + 后校验硬规则：
    - 无管理员标签 → `confidence=low` 且根因含“假设”；
    - 不可复现 → `confidence=low`、根因含“待复核”、`reproducible=false`；
    - 违反任一即 `DiagnosisUnavailable("invalid")`，**不产半成品**。
@@ -145,6 +145,7 @@ robocopy qdrant_data %TEMP%\qdrant-snapshot /E /XF .lock
 | v2b（预览 8 块） | 21/28 (75%) | 预览太少，深层相关块不可见 | 预览上限 8 → 24 |
 | v2c（预览 24 块） | **24/28 (86%)** | 4 个偏差均为边界类（ranking_error↔generator_ignored_evidence、轻微漂移） | —— |
 | v3（问题词覆盖度信号，仅作证据渲染） | 见下方"v3 复核"，未改变 24/28 的参考口径 | 覆盖度是确定性证据，但它**不是**那一族问题的主因 | 证据包加入逐词覆盖度（命中块数 + 最早排名）并渲染；**不附加判定口径** |
+| v4（判定层统计量，仅作证据渲染） | 收益面**无样本**可测；风险面实测 5 条内容缺口 0 次假阳（见下方"v4 复核"） | 失败请求只记下"没采纳任何块"，判定层看到什么从不可见 | 轨迹与证据包加入 `passage_judging`（候选数/相关/答案证据/冲突/注入计数）并渲染；再一条口径尝试被实测否决 |
 
 ### v3 复核（2026-09-28，含失败的尝试，如实记录）
 
@@ -186,8 +187,31 @@ ASCII 词 + CJK 二字组（最多 8 个词），在**重检索的前 24 块全�
 （带口径第 2 次）、`focused-coverage-ab.json`、`focused-coverage-repeat.json`、
 `focused-truncation-probe.json`。
 
-**"输出更紧凑"的调研（负结果，如实记录）**：同一问题、同一证据包，用真实 provider 对比三种写法：
+### v4 复核（2026-09-29，含失败的尝试，如实记录）
 
+**信号本身（确定性、无模型）**：失败请求此前只留下"没有采纳任何块"这一个可见事实，
+判定层到底看到了什么从不可见——于是诊断只能把失败读成内容缺口或召回缺口。v4 让链路
+把它记下来：`PassageSelection` 增加 `judged/relevant/with_evidence/contradicted/injected`
+四个**原始**计数（同一块可同时计入相关与注入），pipeline 写进 `decision_metadata`
+（跨尝试取最大值），tracker 白名单放行，证据包以 `passage_judging` 渲染给模型。
+只读统计量，不含块文本、不含问题原文。
+
+**口径尝试（已撤回）**：曾同时加过一条"`passage_relevant > 0` 且 `passage_evidence == 0`
+⇒ 取 `prompt`/`query_rewrite`"的口径。成对实测（同一批观测、同一证据包，v3 从 HEAD 取出
+作为对照，见 `real-case-handoff/evolab/diagnosis-rule-ab-with-rule.json`）显示它把
+**5 条内容缺口中的 2 条**推成判定层缺陷（"人员盘点覆盖哪些人" rel=6、"一般从哪里发货" rel=2，
+两条的事实经确定性探针确认**不在库里**）。口径删除后复测，内容缺口族 **0/5** 假阳
+（`diagnosis-rule-ab.json`）。这与 v3 覆盖度信号当年的结论一致：**证据可以渲染，口径不能
+从启发式信号推**——`relevant` 只表示判定层认为文本相关，不等于库里写了所问的事实。
+
+**收益面没有样本（这是当前的瓶颈）**：为测量口径而新问的 14 条里，8 条"内容存在"的问题
+**全部答对**（无观测），只有 5 条内容缺口失败入观测。也就是说：本语料里"事实存在却失败"
+的失败样本几乎为零，而**只有那类失败才可能被判定层口径正确修复**。因此 v4 只声称
+"记录并渲染了判定层证据、且未在可测的风险面上引入假阳"，**不声称类别一致率提升**。
+要继续推进需要一个能稳定产出"事实存在却失败"的语料（合成库已证明现构造造不出来：
+答案不在库时管线根本不采纳任何块，`stage` 恒为 `retrieval`）。
+
+**"输出更紧凑"的调研（负结果，如实记录）**：同一问题、同一证据包，用真实 provider 对比三种写法：
 | 变体 | prompt 字符 | max_tokens | finish_reason | reasoning_tokens | 正文 | 契约 | 类别 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | A 现状 | 8958 | 8000 | stop | 6714 | 1384 字符 | 通过 | generator_ignored_evidence |

@@ -422,6 +422,13 @@ class RAGPipeline:
             ),
             "attempts": 0,
             "rewrites": 0,
+            # 判定层原始统计量：多轮尝试各取最大值（"判定层最多看到过多少"），
+            # 失败的归因据此区分"没召回"与"召回了却没被判为答案证据"。
+            "passage_judged": 0,
+            "passage_relevant": 0,
+            "passage_evidence": 0,
+            "passage_contradicted": 0,
+            "passage_injected": 0,
         }
 
         if route_decision.route == "clarification":
@@ -510,6 +517,13 @@ class RAGPipeline:
                 break
             conflicts = [self._conflict_payload(item) for item in selection.conflicts]
             stage["passages_question_set_version"] = selection.question_set_version
+            # 判定层原始统计量（跨尝试取最大）：末次尝试可能因为改写而候选更少，取最大
+            # 才是"判定层本可以依据的最强证据"，也才不会把改写后的退化读成召回缺口。
+            stage["passage_judged"] = max(stage["passage_judged"], selection.judged)
+            stage["passage_relevant"] = max(stage["passage_relevant"], selection.relevant)
+            stage["passage_evidence"] = max(stage["passage_evidence"], selection.with_evidence)
+            stage["passage_contradicted"] = max(stage["passage_contradicted"], selection.contradicted)
+            stage["passage_injected"] = max(stage["passage_injected"], selection.injected)
             if selection.has_answer_evidence:
                 context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
                 context = self._drop_injected_chunks(context)[:top_k]
@@ -547,6 +561,11 @@ class RAGPipeline:
             "failure_kind": stage["failure_kind"],
             "attempt_count": stage["attempts"],
             "rewrite_count": stage["rewrites"],
+            "passage_judged": stage["passage_judged"],
+            "passage_relevant": stage["passage_relevant"],
+            "passage_evidence": stage["passage_evidence"],
+            "passage_contradicted": stage["passage_contradicted"],
+            "passage_injected": stage["passage_injected"],
         }
         return prepared
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from rag.evolution.models import EvidencePack, ReproductionResult
@@ -380,8 +380,43 @@ def assemble_evidence(
         question_term_coverage=(
             _term_coverage(_question_terms(question), recall_texts) if recall_texts else ()
         ),
+        passage_judging=_passage_judging(observation),
         reproduction=reproduction,
     )
+
+
+#: 判定层写进 decision_metadata 的统计量；缺失即"该失败早于统计量上线"。
+_JUDGING_KEYS = (
+    "passage_judged",
+    "passage_relevant",
+    "passage_evidence",
+    "passage_contradicted",
+    "passage_injected",
+)
+
+
+def _passage_judging(observation: dict) -> tuple[tuple[str, int], ...]:
+    """What the passage judge reported for the failed request, straight from its metadata.
+
+    Read from the observation rather than recomputed: re-judging now would answer a
+    different question (what the current question set thinks) than the one the diagnosis
+    asks (what the failing request's judge saw).
+    """
+    metadata = observation.get("details_decision_metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return ()
+    if not isinstance(metadata, Mapping):
+        return ()
+    counts = []
+    for key in _JUDGING_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            continue
+        counts.append((key, int(value)))
+    return tuple(counts)
 
 
 __all__ = ["assemble_evidence", "normalize_question"]

@@ -24,6 +24,13 @@ _DECISION_METADATA_KEYS = frozenset(
         "failure_kind",
         "attempt_count",
         "rewrite_count",
+        # 判定层原始统计量：候选数，以及判为相关/含答案证据/前提冲突/注入的块数。
+        # 不含任何块文本或问题原文，只用于把失败归因到召回侧还是判定侧。
+        "passage_judged",
+        "passage_relevant",
+        "passage_evidence",
+        "passage_contradicted",
+        "passage_injected",
         "jev_preflight_ms",
         "jev_passages_ms",
         "preparation_ms",

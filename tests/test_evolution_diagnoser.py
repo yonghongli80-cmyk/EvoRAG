@@ -113,7 +113,8 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     assert draft.suggested_layer == "retrieval_config"
     assert draft.evidence_refs == ("hash-a", "hash-c")
     # Prompt version is traceable on the instance and inside the request.
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v3"
+    # v4 起：证据包带上判定层统计量 passage_judging，并给出对应的分类口径。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v4"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -160,6 +161,46 @@ def test_a_pack_without_coverage_renders_an_explicit_empty_section():
     prompt = _request_text(fake)
     assert "question_term_coverage" in prompt
     assert "question_term_coverage: （无）" in prompt
+
+
+def test_prompt_renders_what_the_passage_judge_saw():
+    """判定层统计量进提示词：候选数 + 判为相关/答案证据/冲突/注入的块数。
+
+    这是"召回了却没用上"与"根本没召回"的分界证据。**只渲染证据，不附加强制口径**：
+    2026-09-29 成对实测显示"relevant>0 且 evidence==0 ⇒ 取 prompt/query_rewrite"这条口径
+    会把内容缺口推成判定层缺陷，故与覆盖度信号同样只留证据
+    （real-case-handoff/evolab/diagnosis-rule-ab.json）。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(
+        passage_judging=(
+            ("passage_judged", 12),
+            ("passage_relevant", 5),
+            ("passage_evidence", 0),
+            ("passage_contradicted", 1),
+            ("passage_injected", 0),
+        )
+    )
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "passage_judging" in prompt
+    assert "passage_judged=12" in prompt
+    assert "passage_evidence=0" in prompt
+    # 只作为证据：不得出现"必须取 prompt/query_rewrite"这类强制口径。
+    assert "必须取 prompt 或 query_rewrite" not in prompt
+
+
+def test_prompt_says_when_the_judging_counts_were_not_recorded():
+    """统计量缺失时显式写"未记录"，不能当作 0 参与判断。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    prompt = _request_text(fake)
+    assert "passage_judging" in prompt
+    assert "未记录" in prompt
 
 
 def test_missing_admin_labels_forces_low_confidence_with_hypothesis_root_cause():

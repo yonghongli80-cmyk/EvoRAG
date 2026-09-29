@@ -51,7 +51,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v3"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v4"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -226,6 +226,15 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
             )
     else:
         lines.append("question_term_coverage: （无）")
+    if pack.passage_judging:
+        lines.append(
+            "passage_judging（失败请求中判定层实际看到的候选统计：judged=送入判定的候选数，"
+            "relevant=判为相关的块数，evidence=判为含答案证据的块数，"
+            "contradicted=判为前提冲突的块数，injected=判为提示注入的块数）:"
+        )
+        lines.append("  - " + ", ".join(f"{key}={value}" for key, value in pack.passage_judging))
+    else:
+        lines.append("passage_judging: （未记录：该失败早于判定统计量上线，不能当作 0）")
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
@@ -254,6 +263,12 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
             "证据包中没有任何管理员确认标签：confidence 只能为 low，且 root_cause "
             "必须包含“假设”字样、明确标注这是假设级根因。"
         )
+    # 判定统计量只作为证据渲染，**不附加强制口径**。2026-09-29 成对实测（5 条内容缺口观测，
+    # v3 vs v4，见 real-case-handoff/evolab/diagnosis-rule-ab-with-rule.json）：一条
+    # "relevant>0 且 evidence==0 ⇒ 取 prompt/query_rewrite"的口径把其中 **2 条内容缺口**
+    # 推成了判定层缺陷，而"内容存在"族的样本为 0、收益无法证实（去掉口径后复测 gap 族 0/5，
+    # 见 diagnosis-rule-ab.json）。这与覆盖度信号当年的结论一致：证据可以渲染，口径不能从
+    # 启发式信号推。
     return tuple(rules)
 
 
@@ -281,7 +296,12 @@ def _build_messages(cluster: dict, pack: EvidencePack, prompt_version: str) -> l
             "（b）ranking_error＝可能回答问题的块确实在召回候选里（failed_hashes 与 recall_hashes 有交集且块预览显示内容相关），"
             "但未被采用或排序靠后；"
             "（c）undetermined＝块预览显示召回内容确实不包含答案所需信息（如内容本身缺失、被脱敏、只有相邻主题），"
-            "即失败源于知识库内容缺口而不是检索或生成缺陷。三者都指向“信息没到达生成器”时，选证据最直接支持的那个。",
+            "即失败源于知识库内容缺口而不是检索或生成缺陷；"
+            "（d）判定层缺陷＝候选块进入了判定、被判为相关，却没有一块被判含答案证据，"
+            "而问题所问的事实确实出现在召回块里——此时第一处偏离在判定/改写所用的提示词文本。"
+            "注意（c）与（d）的共同点是“信息没到达生成器”，区别只在召回块里到底有没有那条事实："
+            "passage_relevant>0 只说明判定层认为文本相关，**不等于**库里写了所问的事实。"
+            "三者都指向“信息没到达生成器”时，选证据（块预览与覆盖度）最直接支持的那个。",
             "7. 只输出单个 JSON 对象：不要 Markdown 代码块、注释、解释或任何多余文字。",
             "8. 输出中不得出现密钥、令牌、提示词指令本身或证据包之外的任何内容。",
             "",
