@@ -29,7 +29,12 @@ P50 约 40 秒、上限 150s；超时不是故障，该聚类无草稿、下轮�
 
 ## 3. 一次诊断里面发生什么
 
-1. `clusters_awaiting_diagnosis_without_draft` 取待诊断聚类（最旧优先，已生成草稿的不重复）。
+1. `observations_awaiting_diagnosis_without_draft` 取**待诊断的成员观测**（最旧优先；聚类状态为
+   `awaiting_diagnosis_review` **或** `approved_for_candidate`，且该观测还没有成员级草案）。
+   已批准聚类也在内：候选是**按观测**生成的、生成器要求该观测自己有一份草案，
+   若批准后就停止起草，聚类里那些还没草案的成员将永远产不出候选
+   （2026-09-29 修正；此前只收 `awaiting_diagnosis_review`，配件聚类 26 个成员因此只有 1 份草案）。
+   成员数未达阈值的 `clustered` 聚类不在内——它还没被准入审核。
 2. `assemble_evidence` 装配证据包（**确定性优先**，不调模型）：
    - 管理员确认标签（按规范化问题文本匹配，`priority="admin_confirmed"`）；
    - 同 kb 成功轨迹摘要（`answer_source="system_history"`，**不得**当管理员答案引用）；

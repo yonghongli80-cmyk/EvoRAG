@@ -696,25 +696,36 @@ class FailureTraceStore:
         """Member observations that still owe a diagnosis, oldest first.
 
         Returns one ``{"observation": row, "cluster": row}`` pairing per member
-        observation whose cluster is ``awaiting_diagnosis_review`` and which has
-        no member-level draft (``diagnosis_drafts.observation_id`` pointing at
-        it). A legacy cluster-level draft (``observation_id`` NULL) never blocks
-        a member draft, so databases migrated from phase 3 still get their
-        per-observation drafts. This drives the worker's phase-4 diagnosis step,
-        replacing the cluster-level scan (design sections 5/6: a failure
-        trajectory is the observation-level entity; the cluster is only the
-        admission grouping).
+        observation whose cluster is ``awaiting_diagnosis_review`` **or
+        ``approved_for_candidate``** and which has no member-level draft
+        (``diagnosis_drafts.observation_id`` pointing at it). A legacy
+        cluster-level draft (``observation_id`` NULL) never blocks a member
+        draft, so databases migrated from phase 3 still get their per-observation
+        drafts. This drives the worker's phase-4 diagnosis step, replacing the
+        cluster-level scan (design sections 5/6: a failure trajectory is the
+        observation-level entity; the cluster is only the admission grouping).
+
+        Approval is not a reason to stop drafting: a candidate is generated
+        **per observation** and the generator requires that observation's own
+        draft, so a cluster approved while some members still owe one would
+        otherwise strand those members with no way to reach a candidate. A
+        sub-threshold ``clustered`` cluster stays out — it has not been admitted
+        for review yet.
         """
         with self._lock:
             observation_rows = self._conn.execute(
                 "SELECT o.* FROM failure_observations o "
                 "JOIN failure_clusters c ON c.id = o.cluster_id "
-                "WHERE c.status = ? "
+                "WHERE c.status IN (?, ?) "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM diagnosis_drafts d WHERE d.observation_id = o.id"
                 ") "
                 "ORDER BY o.id ASC LIMIT ?",
-                (EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value, int(limit)),
+                (
+                    EvolutionStatus.AWAITING_DIAGNOSIS_REVIEW.value,
+                    EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+                    int(limit),
+                ),
             ).fetchall()
             if not observation_rows:
                 return []

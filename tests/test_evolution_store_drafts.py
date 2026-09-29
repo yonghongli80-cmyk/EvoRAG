@@ -474,6 +474,41 @@ def test_legacy_cluster_draft_does_not_block_member_drafts(tmp_path):
     assert [item["observation"]["id"] for item in result] == [members[0]["id"]]
 
 
+def test_observations_awaiting_diagnosis_includes_members_of_approved_clusters(tmp_path):
+    """已批准聚类里还没草案的成员仍然欠一份草案。
+
+    候选是**按观测**生成的，生成器要求该观测自己有一份草案。所以"聚类已批准"不能
+    停止 worker 继续给欠草案的成员出草案——否则这些成员永远产不出候选（配件那个聚类
+    就是这样：26 个成员只有 1 份草案，其余 25 个再也不会被诊断）。
+    """
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, members = make_awaiting_cluster_with_members(
+        store, key="approved-1", questions=["q-a1", "q-a2"]
+    )
+    store.add_draft(
+        cluster["id"],
+        sample_draft(),
+        observation_id=members[0]["id"],
+        prompt_version="v1",
+        model="m",
+    )
+    approved = store.decide_cluster(
+        cluster["id"],
+        new_status=EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
+        pool=ObservationPool.CANDIDATE_POOL.value,
+        member_status=EvolutionStatus.CLUSTERED.value,
+        now=time.time(),
+    )
+    assert approved["status"] == EvolutionStatus.APPROVED_FOR_CANDIDATE.value
+
+    result = store.observations_awaiting_diagnosis_without_draft(limit=10)
+
+    # The already-drafted member is still skipped; its undrafted sibling is now owed one.
+    assert [item["observation"]["id"] for item in result] == [members[1]["id"]]
+    assert result[0]["cluster"]["status"] == EvolutionStatus.APPROVED_FOR_CANDIDATE.value
+
+
 def test_observations_awaiting_diagnosis_respects_the_limit(tmp_path):
     store = FailureTraceStore(tmp_path / "evolution.db")
     _, members = make_awaiting_cluster_with_members(
