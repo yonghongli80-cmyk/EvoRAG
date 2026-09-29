@@ -156,7 +156,11 @@ def test_shadow_mode_legacy_path_submits_case_without_altering_response(monkeypa
 
 def test_api_pipeline_factory_injects_memory_db_singletons(monkeypatch):
     import rag.api as api
+    from config import settings
 
+    # 候选开关钉死为关：工厂是否额外注入灰度控制器取决于本机 .env，本用例只关心
+    # 记忆库单例与共享 user_db 的注入。
+    monkeypatch.setattr(settings, "evolution_candidate_enabled", False)
     feedback_processor = MagicMock()
     gap_analyzer = MagicMock()
     monkeypatch.setattr(api, "_feedback_processor", feedback_processor)

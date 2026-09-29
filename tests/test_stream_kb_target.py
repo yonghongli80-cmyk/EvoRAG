@@ -10,7 +10,8 @@ def test_stream_query_uses_explicit_authorized_kb(
     constructed = []
 
     class FakePipeline:
-        def __init__(self, kb_id, user_db):
+        def __init__(self, kb_id, user_db, **kwargs):
+            # 工厂会按需再注入记录器/灰度控制器等协作器；本用例只断言"用了哪个库"。
             constructed.append((kb_id, user_db))
 
         async def query_stream(self, question, **kwargs) -> AsyncIterator[str]:
