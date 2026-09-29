@@ -1,0 +1,218 @@
+[
+  {
+    "id": "real-001",
+    "question": "有保修服务吗，保修范围是什么?怎么申请保修",
+    "expected_route": "rag",
+    "kb_id": "kb_after_sales",
+    "expected_source_names": ["after-sales-policy.docx", "after-sales-workflow.docx"],
+    "category": "ordinary",
+    "notes": "证据：after-sales-policy.docx 有『店保服务』条款、after-sales-workflow.docx 有售后流程（含保修贴检查）。"
+  },
+  {
+    "id": "real-002",
+    "question": "机器什么时候的",
+    "expected_route": "clarification",
+    "kb_id": "kb_after_sales",
+    "expected_source_names": [],
+    "category": "special",
+    "notes": "原话未指明机器或想要的时间含义，正确行为是追问，不进入检索评分。"
+  },
+  {
+    "id": "real-003",
+    "question": "机器哪里发货呢",
+    "expected_route": "rag",
+    "kb_id": "kb_after_sales",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "内容缺口：库内有发货『时效』（customer-service-script.docx『17点之前付款的都能在当天发出』）与『仓库』用于退换货验收，但没有任何『发货地/发货仓/从某地发出』的表述——问『哪里』在库里无答案，因此只计路由。"
+  },
+  {
+    "id": "real-004",
+    "question": "怎么申请退换货",
+    "expected_route": "rag",
+    "kb_id": "kb_after_sales",
+    "expected_source_names": ["after-sales-policy.docx", "after-sales-workflow.docx"],
+    "category": "ordinary",
+    "notes": "证据：after-sales-policy.docx#1『退换货流程：步骤/时效』与 after-sales-workflow.docx#0 的申请引导步骤。"
+  },
+  {
+    "id": "real-006",
+    "question": "人员盘点的范围包括哪些人员？",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "内容缺口：hr-inventory-template.xlsx 有盘点报告模板与流程（发出通知/各部门盘点/校准），字段含『是否试用期/是否劳务』，但『盘点范围/哪些人员』没有任何成文表述（正则 盘点范围|盘点对象|包括哪些|全体|在职员工 零命中），因此只计路由。"
+  },
+  {
+    "id": "real-007",
+    "question": "帮我查一下招聘经理的sop",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": ["hr-recruitment-manager.docx"],
+    "category": "ordinary",
+    "notes": "证据：hr-recruitment-manager.docx 即招聘经理岗位说明书（含职责与考核口径）。"
+  },
+  {
+    "id": "real-008",
+    "question": "帮我调一下7月份的招聘数量及入职人数",
+    "expected_route": "structured",
+    "kb_id": "kb_hr",
+    "expected_source_names": [],
+    "category": "special",
+    "notes": "数据查询：正确路由是结构化查询，2026-09-29 复测基线确实走 structured（路由正确）。库内没有招聘/入职统计数据表，因此没有期望来源、只计路由；缺的是数据本身，不是路由。"
+  },
+  {
+    "id": "real-009",
+    "question": "人事主管的岗位说明书帮我调一下",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": ["hr-supervisor.docx"],
+    "category": "special",
+    "notes": "证据：hr-supervisor.docx#0 即『人事主管岗位说明书』。"
+  },
+  {
+    "id": "real-010",
+    "question": "人事主管的岗位说明书",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": ["hr-supervisor.docx"],
+    "category": "ordinary",
+    "notes": "同上（文件名式查询）。"
+  },
+  {
+    "id": "real-011",
+    "question": "人事专员岗位说明书",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": ["hr-specialist.docx"],
+    "category": "ordinary",
+    "notes": "证据：hr-specialist.docx#0 即『人事专员岗位说明书』。"
+  },
+  {
+    "id": "real-012",
+    "question": "帮我看一下2025年招聘数据",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": [],
+    "category": "special",
+    "notes": "内容缺口：库内无招聘数据表（与 real-008 同源），因此只计路由。"
+  },
+  {
+    "id": "real-013",
+    "question": "试用期面谈表",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": ["hr-interview-form.xlsx"],
+    "category": "special",
+    "notes": "证据：hr-interview-form.xlsx#0『附件1《试工期员工考核表》试工期员工面谈沟通表』。"
+  },
+  {
+    "id": "real-014",
+    "question": "回收岗位做什么",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "内容缺口：库内没有回收岗位说明书（kb_hr 只有招聘经理/主管/专员三份与盘点、面试表），因此只计路由。"
+  },
+  {
+    "id": "real-016",
+    "question": "镜头质检流程",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "内容缺口：kb_accessories 内『质检』零命中，唯一相关的是 lens-mold-assessment.xlsx 的霉斑/划痕定级（回收定级用），不构成质检流程，因此只计路由（与维护者结论一致：属内容充分性判断，不是系统缺陷）。"
+  },
+  {
+    "id": "real-017",
+    "question": "r50电池价格",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "内容缺口：R50 行确实在 accessory-models.xlsx/camera-battery-charger.xlsx，但价格列全部是 <金额> 脱敏占位符，价格不可答，因此只计路由。"
+  },
+  {
+    "id": "real-018",
+    "question": "r50原厂电池价格",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": [],
+    "category": "ordinary",
+    "notes": "同 real-017（『原厂』限定不改变脱敏事实）。"
+  },
+  {
+    "id": "real-019",
+    "question": "r50原厂电池型号是多少",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["accessory-models.xlsx", "camera-battery-charger.xlsx"],
+    "category": "ordinary",
+    "notes": "证据：accessory-models.xlsx#8『佳能 EOS R50 LP-E17 LC-E17C』；camera-battery-charger.xlsx#30 同型号。"
+  },
+  {
+    "id": "real-020",
+    "question": "找一下副厂配件明细",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["lens-hood-price-redacted.xlsx", "camera-parameters-excerpt.xlsx"],
+    "category": "special",
+    "notes": "证据：lens-hood-price-redacted.xlsx 按品牌列第三方（适马/腾龙）遮光罩型号，camera-parameters-excerpt.xlsx#4 有『理光副厂品牌参数镜头』表。2026-09-29 复测：基线对这条答 insufficient_evidence（内容存在却未被采用），是本语料的判别样本。"
+  },
+  {
+    "id": "real-021",
+    "question": "腾龙17-70E口的遮光罩是什么型号",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["lens-hood-price-redacted.xlsx"],
+    "category": "ordinary",
+    "notes": "证据：lens-hood-price-redacted.xlsx#0『腾龙 17-70mm f/2.8 Di III-A VC RXD（B070）_E口 67 HA036』。"
+  },
+  {
+    "id": "real-022",
+    "question": "r50",
+    "expected_route": "clarification",
+    "kb_id": "kb_accessories",
+    "expected_source_names": [],
+    "category": "special",
+    "notes": "只有产品型号、缺少查询属性，正确行为是追问，不进入检索评分。"
+  },
+  {
+    "id": "real-023",
+    "question": "尼康z9电池型号是什么",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["camera-parameters-excerpt.xlsx"],
+    "category": "ordinary",
+    "notes": "证据：camera-parameters-excerpt.xlsx#3 的尼康 Z9 行含 EN-EL18d 与充电器 EH-7P/MH-33。维护者已核对系统答对——这条是回归守卫。"
+  },
+  {
+    "id": "real-024",
+    "question": "佳能r8用什么电池",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["accessory-models.xlsx", "camera-battery-charger.xlsx"],
+    "category": "ordinary",
+    "notes": "证据：accessory-models.xlsx#8『佳能 EOS R8 LP-E17 LC-E17C』。"
+  },
+  {
+    "id": "real-025",
+    "question": "富士 X-S20   电池和充电器是什么型号",
+    "expected_route": "rag",
+    "kb_id": "kb_accessories",
+    "expected_source_names": ["camera-parameters-excerpt.xlsx"],
+    "category": "ordinary",
+    "notes": "证据：camera-parameters-excerpt.xlsx#2 的富士 X-S20 行含『电池类型/充电器类型』两列。"
+  },
+  {
+    "id": "real-026",
+    "question": "帮我找一下质检培训课件",
+    "expected_route": "rag",
+    "kb_id": "kb_hr",
+    "expected_source_names": [],
+    "category": "special",
+    "notes": "内容缺口：库内无质检培训课件（与 real-016 同源的资料缺口），因此只计路由。"
+  }
+]
