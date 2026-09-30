@@ -128,3 +128,45 @@ def test_purge_observations_before_deletes_only_old_rows(tmp_path):
     assert store.purge_observations_before(time.time() - 90 * 86400) == 1
     assert store.get_observation(fresh["id"]) is not None
     assert store.get_observation(stale["id"]) is None
+
+def test_an_exception_failure_is_clustered_as_a_code_defect(tmp_path):
+    """未捕获异常必须聚成 code_defect：召回启发式不能抢占异常的根因判定。
+
+    2026-09-30：`ValueError: versioned evidence required` 的 6 条观测被聚成
+    `root_cause_feature=recall_miss`——因为 `_classify_root_cause` 先看"没有块哈希 ⇒ 召回未命中"，
+    而异常失败通常死在采纳任何块之前，于是 `exception_class ⇒ CODE_DEFECT` 那条**永远到不了**。
+    """
+    from rag.evolution.models import FailureStage
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    clusterer = FailureClusterer(store, threshold=3, window_days=30)
+    for index in range(3):
+        observation(
+            store,
+            f"异常问题{index}",
+            route="error",
+            chunk_hashes=(),
+            best_score=None,
+            answerability_kind=None,
+            exception_class="ValueError",
+        )
+        clusterer.cluster_once()
+
+    cluster = store.list_clusters()[0]
+    assert cluster["root_cause_feature"] == "code_defect"
+    assert cluster["failure_stage"] == FailureStage.UNKNOWN.value
+
+
+def test_an_exception_never_becomes_a_retrieval_stage_failure(tmp_path):
+    """异常失败即使带着低分也不得被归到检索阶段——异常本身才是第一处偏离。"""
+    from rag.evolution.models import FailureStage
+
+    assert (
+        FailureClusterer._classify_stage("error", (), (), 0.01, None, "ValueError")
+        == FailureStage.UNKNOWN
+    )
+    # 非异常的同形观测仍按原启发式落到检索阶段。
+    assert (
+        FailureClusterer._classify_stage("rag", (), (), 0.01, None, None)
+        == FailureStage.RETRIEVAL
+    )

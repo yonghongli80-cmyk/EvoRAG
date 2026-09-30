@@ -147,6 +147,10 @@ class FailureClusterer:
     ) -> FailureStage:
         if route == "structured" and exception_class:
             return FailureStage.STRUCTURED_QUERY
+        # 未捕获异常：请求死在异常里，既不是检索也不是生成阶段（异常本身才是第一处偏离）。
+        # 必须排在低分启发式之前，否则"异常 + 低分"会被误记成检索阶段失败。
+        if exception_class:
+            return FailureStage.UNKNOWN
         if tool_names:
             return FailureStage.TOOL
         if _is_low_score(best_score) and not chunk_hashes:
@@ -163,14 +167,17 @@ class FailureClusterer:
         feedback_kind: str | None,
         exception_class: str | None,
     ) -> RootCauseFeature:
+        # 异常优先于召回启发式：异常失败通常在采纳任何块之前就死了，"没有块哈希"描述的是
+        # 后果而不是根因。此前这条检查排在最后，因此**永远不可达**（2026-09-30：6 条
+        # ValueError 观测被聚成 recall_miss，而它们的真实根因是代码缺陷）。
+        if exception_class:
+            return RootCauseFeature.CODE_DEFECT
         if not chunk_hashes or _is_low_score(best_score):
             return RootCauseFeature.RECALL_MISS
         if answerability_kind == "insufficient_evidence":
             return RootCauseFeature.GENERATOR_IGNORED_EVIDENCE
         if feedback_kind in NEGATIVE_FEEDBACK_KINDS:
             return RootCauseFeature.PROMPT_OR_WORKFLOW_DEFECT
-        if exception_class:
-            return RootCauseFeature.CODE_DEFECT
         if answerability_kind in CONFLICT_ANSWERABILITY_KINDS:
             return RootCauseFeature.EVIDENCE_CONFLICT
         return RootCauseFeature.UNDETERMINED
