@@ -50,6 +50,164 @@ def test_jev_clarification_route_streams_fixed_copy_without_generator(monkeypatc
     pipeline.close()
 
 
+def _streaming_pipeline(**kwargs):
+    """A pipeline on the Jev RAG path with one visible chunk, for stream-failure tests."""
+    from rag.jev.policy import PassageSelection, RouteDecision
+    from rag.models import Chunk
+
+    jev = MagicMock()
+    jev.route.return_value = RouteDecision(
+        route="rag", should_rewrite=False, reason="retrieval_confident", preflight=None,
+    )
+    chunk = Chunk(text="年假为 7 天", doc_name="policy.md", chunk_index=0)
+    jev.select.return_value = PassageSelection(
+        accepted=(chunk,),
+        conflicts=(),
+        excluded_ids=(),
+        has_answer_evidence=True,
+        question_set_version="passages-v1",
+    )
+    return jev, chunk
+
+
+def test_stream_failure_records_a_trace_and_an_observation_for_internal_errors(monkeypatch):
+    """流式中途失败必须留痕；内部异常要记成**观测**并带 exception_class。
+
+    轨迹原本只在成功路径末尾保存，token 流抛异常时既不写轨迹也不记 skip——运营侧连
+    "有请求失败了"都看不到。而内部缺陷（不是网络抖动）正是进化回路该看到的东西。
+    """
+    import pytest
+
+    from config import settings
+    from rag.pipeline import RAGPipeline
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "rag_docs")
+    jev, chunk = _streaming_pipeline()
+    recorder = MagicMock()
+
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.deduplicate_chunks", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"), \
+         patch("rag.pipeline.generate_stream", side_effect=ValueError("versioned evidence required")):
+        pipeline = RAGPipeline(
+            "test.txt", session_id="s1", memory_db_path=":memory:",
+            feedback_processor=MagicMock(), gap_analyzer=MagicMock(),
+            jev_service=jev, failure_recorder=recorder,
+        )
+        pipeline.retriever.retrieve.return_value = [chunk]
+        pipeline.tracker = MagicMock()
+
+        async def collect():
+            async for _ in pipeline.query_stream("年假有几天", session_id="s1"):
+                pass
+
+        with pytest.raises(ValueError):
+            asyncio.run(collect())
+
+    trace = pipeline.tracker.save.call_args.args[0]
+    assert trace.route == "error"
+    assert trace.decision_metadata.get("jev_route") == "rag"
+    assert trace.decision_metadata.get("passages_question_set_version") == "passages-v1"
+    detail = recorder.submit.call_args.args[1]
+    assert detail.exception_class == "ValueError"
+    assert detail.non_evolvable_reason is None
+    pipeline.close()
+
+
+def test_stream_failure_marks_transport_errors_as_skips(monkeypatch):
+    """传输/供应商侧故障是设计第 5 节排除的类别：记跳过，不进诊断队列。"""
+    import pytest
+
+    from config import settings
+    from rag.evolution.models import NonEvolvableReason
+    from rag.pipeline import RAGPipeline
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "rag_docs")
+    jev, chunk = _streaming_pipeline()
+    recorder = MagicMock()
+
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.deduplicate_chunks", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"), \
+         patch("rag.pipeline.generate_stream", side_effect=TimeoutError("read timed out")):
+        pipeline = RAGPipeline(
+            "test.txt", session_id="s1", memory_db_path=":memory:",
+            feedback_processor=MagicMock(), gap_analyzer=MagicMock(),
+            jev_service=jev, failure_recorder=recorder,
+        )
+        pipeline.retriever.retrieve.return_value = [chunk]
+        pipeline.tracker = MagicMock()
+
+        async def collect():
+            async for _ in pipeline.query_stream("年假有几天", session_id="s1"):
+                pass
+
+        with pytest.raises(TimeoutError):
+            asyncio.run(collect())
+
+    detail = recorder.submit.call_args.args[1]
+    assert detail.non_evolvable_reason is NonEvolvableReason.TRANSIENT_EXTERNAL
+    assert detail.exception_class is None
+    pipeline.close()
+
+
+def test_stream_failure_during_preparation_is_also_recorded(monkeypatch):
+    """准备阶段的失败同样要留痕：实测 `build_evidence_bundle` 会抛版本元数据缺失。"""
+    import pytest
+
+    from config import settings
+    from rag.pipeline import RAGPipeline
+
+    monkeypatch.setattr(settings, "jev_mode", "active")
+    monkeypatch.setattr(settings, "jev_kb_allowlist", "rag_docs")
+    jev, _ = _streaming_pipeline()
+    recorder = MagicMock()
+
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.deduplicate_chunks", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"):
+        pipeline = RAGPipeline(
+            "test.txt", session_id="s1", memory_db_path=":memory:",
+            feedback_processor=MagicMock(), gap_analyzer=MagicMock(),
+            jev_service=jev, failure_recorder=recorder,
+        )
+        pipeline.tracker = MagicMock()
+        pipeline._prepare_context = MagicMock(side_effect=ValueError("versioned evidence required"))
+
+        async def collect():
+            async for _ in pipeline.query_stream("年假有几天", session_id="s1"):
+                pass
+
+        with pytest.raises(ValueError):
+            asyncio.run(collect())
+
+    trace = pipeline.tracker.save.call_args.args[0]
+    assert trace.route == "error"
+    detail = recorder.submit.call_args.args[1]
+    assert detail.exception_class == "ValueError"
+    pipeline.close()
+
+
 def test_query_stream_yields_sse_events():
     """query_stream 应该 yield SSE 格式的事件。"""
     from rag.pipeline import RAGPipeline

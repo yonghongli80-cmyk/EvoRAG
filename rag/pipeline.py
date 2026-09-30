@@ -37,6 +37,26 @@ logger = logging.getLogger(__name__)
 _HISTORICAL_EVIDENCE_WARNING = "注意：以下回答仅依据历史版本资料，内容可能已过期。\n\n"
 _RETRIEVAL_OVERSAMPLE = 3
 
+#: 传输/供应商侧故障的异常类名：这类失败重试即可，记为跳过而不是观测（设计第 5 节把
+#: 瞬态外部故障排除在诊断之外）。按类名判断，避免 pipeline 直接依赖 provider SDK——
+#: 诊断器在自己的模块里引入 openai 是因为它必须构造客户端，这里只是在分类异常。
+_TRANSIENT_ERROR_NAMES = frozenset(
+    {
+        "APITimeoutError",
+        "APIConnectionError",
+        "APIConnectionTimeoutError",
+        "RateLimitError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ReadError",
+        "RemoteProtocolError",
+        "TimeoutError",
+        "ConnectionError",
+        "ConnectionResetError",
+    }
+)
+
 
 class QueryResult(NamedTuple):
     answer: str
@@ -269,6 +289,47 @@ class RAGPipeline:
         if detail is None:
             return
         recorder.submit(trace, detail)
+
+    def _record_stream_failure(
+        self,
+        question: str,
+        start_time: float,
+        prepared: dict | None,
+        error: BaseException,
+    ) -> None:
+        """一次死掉的流式请求：先留痕，再分类。
+
+        传输/供应商侧故障（超时、连接、限流）是设计第 5 节明确排除的类别，记为跳过；
+        **其余异常是内部缺陷**（例如证据缺少版本元数据），记为观测并带上 exception_class
+        ——这类失败恰恰是进化回路该看到的东西，不该被当成网络抖动埋掉。异常本身由调用方
+        继续上抛，客户端照旧收到一个 error 事件。
+        """
+        trace = ExecutionTrace(
+            question=question,
+            route="error",
+            answer="",
+            total_ms=(time.time() - start_time) * 1000,
+            chunk_hashes=(prepared or {}).get("chunk_hashes") or [],
+            stage_timings=(prepared or {}).get("stage_timings") or {},
+            decision_metadata=(prepared or {}).get("decision_metadata") or {},
+        )
+        self.tracker.save(trace)
+        recorder = getattr(self, "_failure_recorder", None)
+        if recorder is None:
+            return
+        if type(error).__name__ in _TRANSIENT_ERROR_NAMES:
+            recorder.submit(
+                trace,
+                DiagnosticDetail(
+                    kb_id=self._kb_id,
+                    non_evolvable_reason=NonEvolvableReason.TRANSIENT_EXTERNAL,
+                ),
+            )
+            return
+        recorder.submit(
+            trace,
+            DiagnosticDetail(kb_id=self._kb_id, exception_class=type(error).__name__),
+        )
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
@@ -851,9 +912,16 @@ class RAGPipeline:
         sid = session_id or self.session_id or "default"
         start_time = time.time()
 
-        prepared, error = await asyncio.to_thread(
-            self._prepare_context, question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id
-        )
+        try:
+            prepared, error = await asyncio.to_thread(
+                self._prepare_context, question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id
+            )
+        except Exception as exc:
+            # 准备阶段就可能失败（实测：检索到的证据缺版本元数据时 build_evidence_bundle
+            # 抛 ValueError）。此前这类请求以 HTTP 200 + error 事件收场，却没有轨迹、没有
+            # 观测、没有跳过记录——运营侧连"有请求失败了"都看不到（2026-09-30 踩到）。
+            await asyncio.to_thread(self._record_stream_failure, question, start_time, None, exc)
+            raise
         if error:
             yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
             trace = ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
@@ -861,6 +929,19 @@ class RAGPipeline:
             self._submit_failure_observation(trace, None, error)
             return
 
+        try:
+            async for event in self._stream_prepared(question, prepared, sid, start_time):
+                yield event
+        except Exception as exc:
+            # 流式中途失败：同样先留痕再分类。已准备好的判定统计量与问题集版本照旧写进
+            # 轨迹，所以这次失败仍然可归因。异常继续上抛，端点照旧给客户端一个 error 事件。
+            await asyncio.to_thread(
+                self._record_stream_failure, question, start_time, prepared, exc
+            )
+            raise
+
+    async def _stream_prepared(self, question, prepared, sid, start_time):
+        """一次已准备完毕的请求的流式输出；异常由 :meth:`query_stream` 兜底留痕。"""
         if prepared["route"] == "cached":
             yield f'data: {_json.dumps({"type": "token", "content": prepared["answer"]}, ensure_ascii=False)}\n\n'
             yield f'data: {_json.dumps({"type": "sources", "sources": prepared["sources"]}, ensure_ascii=False)}\n\n'
