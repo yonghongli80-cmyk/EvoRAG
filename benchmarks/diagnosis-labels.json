@@ -1,0 +1,42 @@
+[
+  {
+    "question": "找一下副厂配件明细",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
+    "expected_answer": "副厂（第三方）配件在库内以品牌行存在：lens-hood-price-redacted.xlsx 按品牌列出第三方遮光罩型号（如 适马 16mm f/1.4 DC DN Contemporary_E口 → LH716-01；腾龙 17-70mm f/2.8 Di III-A VC RXD（B070）_E口 → HA036），camera-parameters-excerpt.xlsx#4 另有『理光副厂品牌参数镜头』表。",
+    "admin_note": "2026-09-29 管理员按全库探针核对：内容存在却未被采用（同库内该问题的失败观测实测无一块被采纳）。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-09-29"
+  },
+  {
+    "question": "第三方配件明细查一下",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
+    "expected_answer": "同上：第三方（副厂）配件以品牌行存在于 lens-hood-price-redacted.xlsx（适马/腾龙 遮光罩型号）与 camera-parameters-excerpt.xlsx 的『理光副厂品牌参数镜头』表；库内确实没有把『副厂』二字写在遮光罩表里。",
+    "admin_note": "与『找一下副厂配件明细』同族、同证据；内容存在，失败在取用侧。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-09-29"
+  },
+  {
+    "question": "帮我找副厂配件清单",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
+    "expected_answer": "同上（同义改写）。第三方配件清单在库：适马/腾龙 遮光罩型号行 + 理光副厂品牌参数表。",
+    "admin_note": "与『找一下副厂配件明细』同族、同证据。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-09-29"
+  },
+  {
+    "question": "富士 X-S20   电池和充电器是什么型号",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "camera-parameters-excerpt.xlsx",
+    "expected_answer": "camera-parameters-excerpt.xlsx#2 的『富士 X-S20』行含『电池类型』与『充电器类型』两列（同表的列定义见 #0 表头）。",
+    "admin_note": "问题原文带两个空格（保留原话）；内容存在，失败在取用侧。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-09-29"
+  }
+]
