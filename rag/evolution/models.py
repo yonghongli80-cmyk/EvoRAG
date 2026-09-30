@@ -185,6 +185,12 @@ class EvidencePack:
     #: 它把"一个块都没采纳"拆成两种完全不同的失败：候选没进来（召回/内容缺口），
     #: 还是候选进来了、被判为相关却没有一块含答案证据（判定/改写层）。
     passage_judging: tuple[tuple[str, int], ...] = ()
+    #: 失败观测自身的路由与异常类。``failure_route="error"`` 且 ``exception_class`` 非空表示
+    #: 这次请求是**未捕获异常**（例如缺版本元数据触发的 ValueError），不是检索/生成缺陷：
+    #: 诊断必须据此判类别，而不能顺着管理员标签里的 expected_route 把它解释成路由问题
+    #: （2026-09-30：6 条 ValueError 观测因为提示词里没有这两项，被误判成 intent_route_error）。
+    failure_route: str = ""
+    exception_class: str = ""
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 

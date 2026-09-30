@@ -51,7 +51,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v4"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v5"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -235,6 +235,8 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append("  - " + ", ".join(f"{key}={value}" for key, value in pack.passage_judging))
     else:
         lines.append("passage_judging: （未记录：该失败早于判定统计量上线，不能当作 0）")
+    lines.append("failure_route: " + (pack.failure_route or "（未记录）"))
+    lines.append("exception_class: " + (pack.exception_class or "（无：不是异常失败）"))
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
@@ -262,6 +264,16 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
         rules.append(
             "证据包中没有任何管理员确认标签：confidence 只能为 low，且 root_cause "
             "必须包含“假设”字样、明确标注这是假设级根因。"
+        )
+    if pack.exception_class:
+        rules.append(
+            f"本次失败是**未捕获异常**（exception_class={pack.exception_class}，"
+            f"failure_route={pack.failure_route or 'error'}），第一处偏离就是异常本身，"
+            "不是检索、排序或生成缺陷：failure_category 必须取 code_defect（异常来自业务代码/数据契约）"
+            "或 prompt_or_workflow_defect（异常来自提示词或工作流定义），suggested_layer 必须取 "
+            "code 或该异常实际指向的层；**不得**判成 intent_route_error / undetermined / none。"
+            "管理员标签只说明内容事实（答案在哪个文档），不改变“失败是异常”这一判断；"
+            "direct_evidence 里写明异常类型。"
         )
     # 判定统计量只作为证据渲染，**不附加强制口径**。2026-09-29 成对实测（5 条内容缺口观测，
     # v3 vs v4，见 real-case-handoff/evolab/diagnosis-rule-ab-with-rule.json）：一条

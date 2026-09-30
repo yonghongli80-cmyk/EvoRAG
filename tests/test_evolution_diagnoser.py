@@ -114,7 +114,9 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     assert draft.evidence_refs == ("hash-a", "hash-c")
     # Prompt version is traceable on the instance and inside the request.
     # v4 起：证据包带上判定层统计量 passage_judging，并给出对应的分类口径。
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v4"
+    # v5 起：异常失败（failure_route=error + exception_class）必须按缺陷判类，
+    #        不得顺着管理员标签的 expected_route 解释成路由问题。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v5"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -150,6 +152,37 @@ def test_prompt_renders_question_term_coverage_as_evidence():
     assert "question_term_coverage" in prompt
     assert "term=副厂 chunks=3 best_rank=11" in prompt
     assert "term=报价 chunks=0 best_rank=0" in prompt
+
+
+def test_prompt_renders_an_exception_failure_and_requires_a_defect_category():
+    """异常失败必须渲染出来并按缺陷判类。
+
+    2026-09-30：6 条 `ValueError: versioned evidence required` 观测被诊断成
+    `intent_route_error`——因为异常类只进了观测、没进证据包，模型只能顺着管理员标签里的
+    `expected_route=rag` 把"请求异常"解释成"路由没走 RAG"。异常必须显式出现，且类别被钉在
+    代码/提示词缺陷上。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(failure_route="error", exception_class="ValueError")
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "failure_route: error" in prompt
+    assert "exception_class: ValueError" in prompt
+    assert "未捕获异常" in prompt
+    assert "不得**判成 intent_route_error" in prompt or "intent_route_error" in prompt
+
+
+def test_prompt_has_no_exception_rule_for_ordinary_failures():
+    """非异常失败不得被这条口径影响：规则只在 exception_class 非空时出现。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    prompt = _request_text(fake)
+    assert "exception_class: （无：不是异常失败）" in prompt
+    assert "未捕获异常" not in prompt
 
 
 def test_a_pack_without_coverage_renders_an_explicit_empty_section():

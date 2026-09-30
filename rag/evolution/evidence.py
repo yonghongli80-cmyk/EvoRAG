@@ -381,6 +381,8 @@ def assemble_evidence(
             _term_coverage(_question_terms(question), recall_texts) if recall_texts else ()
         ),
         passage_judging=_passage_judging(observation),
+        failure_route=str(observation.get("route") or ""),
+        exception_class=str(observation.get("details_exception_class") or ""),
         reproduction=reproduction,
     )
 

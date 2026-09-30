@@ -248,6 +248,24 @@ def test_pack_leaves_judging_counts_empty_when_the_request_predates_them(tmp_pat
     assert pack.passage_judging == ()
 
 
+def test_pack_carries_the_failure_route_and_exception_class(tmp_path):
+    """异常失败的路由与异常类必须进证据包，否则诊断只能把它解释成检索/路由问题。"""
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="q1")
+    member = {
+        **member,
+        "route": "error",
+        "details_exception_class": "ValueError",
+    }
+
+    pack = assemble_evidence(member, cluster, store=store)
+
+    assert pack.failure_route == "error"
+    assert pack.exception_class == "ValueError"
+
+
 def test_pack_prefers_the_observation_signals_over_the_cluster(tmp_path):
     """stage / root_cause_feature come from the observation row when present."""
 
