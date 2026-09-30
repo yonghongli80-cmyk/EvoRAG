@@ -464,11 +464,18 @@ class RAGPipeline:
             return self._attach_jev_stage(prepared, stage), None
 
         elif route_decision.route == "legacy":
-            # 预判低置信度或 Jev 不可用：完整降级到旧路由与旧 reranker
-            return self._prepare_context_legacy(
+            # 预判低置信度或 Jev 不可用：完整降级到旧路由与旧 reranker。
+            # **降级也留痕**：否则这些请求既没有预判版本也没有判定统计，事后只看到
+            # "旧链路作答"，无法解释是谁降级的、为什么，也无法与候选对照
+            # （2026-09-30 端到端灰度验证时踩到）。判定阶段确实没跑，故统计量为 0，
+            # 由 jev_route="legacy" 与 route_reason 表达降级事实。
+            prepared, error = self._prepare_context_legacy(
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
             )
+            if prepared is not None:
+                prepared = self._attach_jev_stage(prepared, stage)
+            return prepared, error
 
         prepared, stage = self._prepare_rag_with_jev(
             question, session_id, doc_name, top_k, tags, user, kb_id,

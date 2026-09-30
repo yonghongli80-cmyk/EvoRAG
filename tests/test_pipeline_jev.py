@@ -204,6 +204,40 @@ def test_preflight_failure_falls_back_to_legacy_router(active_jev):
     jev.select.assert_not_called()
 
 
+def test_legacy_fallback_still_records_the_preflight_verdict(active_jev):
+    """被 Jev 预判降级到旧链路的请求，也要留下"是谁降级的、为什么"。
+
+    这些请求不跑判定阶段，因此既没有版本也没有判定统计；如果连预判都不记，事后只能看到
+    "旧链路作答"，无法解释、也无法与候选对照（2026-09-30 端到端验证时踩到）。
+    """
+
+    jev = MagicMock()
+    jev.route.return_value = RouteDecision(
+        route="legacy",
+        should_rewrite=False,
+        reason="preflight_unavailable:timeout",
+        preflight=None,
+    )
+    pipeline = build_pipeline(jev)
+    pipeline.retriever.retrieve.return_value = [
+        Chunk(text="chunk1", doc_name="test.txt", chunk_index=0)
+    ]
+    pipeline.tracker = MagicMock()
+
+    with patch("rag.agent.route_question", return_value="rag"), patch(
+        "rag.pipeline.rewrite_query", return_value="rewritten"
+    ), patch("rag.pipeline.generate", return_value="legacy answer"):
+        pipeline.query("年假有几天")
+
+    metadata = pipeline.tracker.save.call_args.args[0].decision_metadata
+    assert metadata["jev_route"] == "legacy"
+    assert metadata["route_reason"] == "preflight_unavailable:timeout"
+    assert metadata["jev_mode"] == settings.jev_mode
+    # 判定阶段确实没跑：统计量为 0，而"是 Jev 降级的"由 jev_route 表达。
+    assert metadata["passage_judged"] == 0
+    assert metadata["passages_question_set_version"] == ""
+
+
 def test_passage_failure_falls_back_to_legacy_reranker(active_jev):
     jev = MagicMock()
     jev.route.return_value = rag_route()
