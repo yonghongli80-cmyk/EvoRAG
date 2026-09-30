@@ -390,9 +390,42 @@ def test_baseline_route_failure_makes_the_gate_inconclusive():
     )
 
     assert result.passed is False
+    assert result.inconclusive is True
     assert result.stats["baseline"]["errors"] == 1
     assert "baseline route call failed" in result.verdict
     assert "inconclusive" in result.verdict
+
+
+def test_both_sides_crashing_on_the_same_case_is_inconclusive():
+    """两侧都被基础设施打断：比较不可信，不能记成候选退化。"""
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 5)]
+    routes, sources = correct_routes(cases)
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(routes, sources=sources, error_on=("rag-001", "rag-002")),
+        route_fn(routes, sources=sources, error_on=("rag-001", "rag-002")),
+        cases,
+    )
+
+    assert result.passed is False
+    assert result.inconclusive is True
+
+
+def test_candidate_specific_crash_is_not_inconclusive():
+    """候选独有的崩溃是候选自己的问题：必须判失败，不给重试。"""
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 5)]
+    routes, sources = correct_routes(cases)
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(routes, sources=sources),
+        route_fn(routes, sources=sources, error_on=("rag-002",)),
+        cases,
+    )
+
+    assert result.passed is False
+    assert result.inconclusive is False
 
 
 def test_cases_without_expected_sources_skip_the_top5_check():
@@ -483,6 +516,49 @@ def test_run_benchmark_gate_advances_and_records_the_gate_log(tmp_path):
         limit=10,
     )
     assert again == []
+
+
+def test_inconclusive_gate_keeps_the_candidate_retryable(tmp_path):
+    """未决轮次不烧候选：保持 candidate_testing，下一轮仍会重试它。
+
+    实测（2026-09-30）：provider 超时让两侧都在 8 个用例上崩掉，门禁把这次未决记成了
+    `rejected`（终态）——一个候选被基础设施故障白白烧掉，而且看起来像候选退化。
+    """
+    _, store, cluster, member = seeded(tmp_path)
+    candidate_id = store.add_candidate(member["id"], cluster["id"], gate_candidate())
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 5)]
+    routes, sources = correct_routes(cases)
+    flaky = route_fn(routes, sources=sources, error_on=("rag-001",))
+
+    first = run_benchmark_gate(
+        store,
+        actor_id="evolver/benchmark",
+        baseline_route_fn=flaky,
+        candidate_route_fn=flaky,
+        cases=cases,
+        limit=10,
+    )
+
+    assert [result.inconclusive for result in first] == [True]
+    row = store.get_candidate(candidate_id)
+    assert row["status"] == EvolutionStatus.CANDIDATE_TESTING.value
+    entry = row["gate_log"][-1]
+    assert entry["gate"] == "benchmark"
+    assert entry["result"] == "inconclusive"
+    assert "baseline route call failed" in entry["detail"]
+
+    # 关键：未决不算门禁结果，所以下一轮仍会重试——这次两侧正常，应当通过。
+    second = run_benchmark_gate(
+        store,
+        actor_id="evolver/benchmark",
+        baseline_route_fn=route_fn(routes, sources=sources),
+        candidate_route_fn=route_fn(routes, sources=sources),
+        cases=cases,
+        limit=10,
+    )
+
+    assert [result.passed for result in second] == [True]
+    assert store.get_candidate(candidate_id)["status"] == EvolutionStatus.AWAITING_VERIFICATION.value
 
 
 def test_run_benchmark_gate_rebuilds_the_candidate_from_a_stored_row(tmp_path):

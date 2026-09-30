@@ -72,6 +72,12 @@ class GateResult:
     ``passed`` is the single gate decision. ``stats`` aggregates both sides and
     the two deltas, ``per_case`` explains the decision case by case, and
     ``verdict`` is the human paragraph used as the ``gate_log``/audit detail.
+
+    ``inconclusive`` says the comparison could not be trusted: the *baseline*
+    side crashed on cases the candidate did not (a provider timeout, typically),
+    so a "failure" would blame the candidate for an infrastructure fault. The
+    runner keeps such a candidate in ``candidate_testing`` for a retry instead
+    of rejecting it.
     """
 
     gate: str
@@ -79,6 +85,7 @@ class GateResult:
     stats: dict
     per_case: list
     verdict: str
+    inconclusive: bool = False
 
 
 # ------------------------------------------------------------------
@@ -421,7 +428,18 @@ def evaluate_on_benchmark(
         },
         "candidate_ref": _candidate_ref(candidate),
     }
-    return GateResult(gate=GATE_NAME, passed=passed, stats=stats, per_case=per_case, verdict=verdict)
+    return GateResult(
+        gate=GATE_NAME,
+        passed=passed,
+        stats=stats,
+        per_case=per_case,
+        verdict=verdict,
+        # 基线侧崩了、而候选侧在这些用例上没崩：这次比较不可信（多为 provider 超时），
+        # 不能把基础设施故障记成候选退化。候选独有的崩溃仍算候选问题，不算未决。
+        inconclusive=bool(baseline_errors) and not [
+            case for case in candidate_errors if case not in baseline_errors
+        ],
+    )
 
 
 # ------------------------------------------------------------------
@@ -481,6 +499,19 @@ def run_benchmark_gate(
         # An illegal move here means another writer advanced the row between
         # the scan and the report; the store raises and the round stops rather
         # than silently skipping a candidate.
+        if result.inconclusive:
+            # 未决（基线侧撞上基础设施故障）：保留候选在 candidate_testing 等待重试，
+            # 只记录未决原因为何没推进。写成"拒绝"会白烧一个候选，也可能把 provider
+            # 超时伪造成候选退化。
+            store.record_inconclusive_gate(
+                row["id"],
+                actor_id=actor_id,
+                note=f"层2 基准门禁未决（保留候选等待重试）: {result.verdict}",
+                gate=GATE_NAME,
+                gate_detail=result.verdict,
+            )
+            results.append(result)
+            continue
         store.advance_candidate(
             row["id"],
             EvolutionStatus.AWAITING_VERIFICATION.value if result.passed else EvolutionStatus.REJECTED.value,

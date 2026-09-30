@@ -71,6 +71,10 @@ _GATE_RESULT_BY_STATUS = {
 }
 _DEFAULT_GATE_RESULT = "passed"
 
+#: 未决轮次在 ``gate_log`` 里记的结果值。它**不算门禁结果**：候选仍在
+#: ``candidate_testing``，下一轮扫描会再次给它机会（基础设施故障不该烧掉候选）。
+_INCONCLUSIVE_GATE_RESULT = "inconclusive"
+
 _STATUS_IN = _sql_in("status", _enum_values(EvolutionStatus))
 _POOL_IN = _sql_in("pool", _enum_values(ObservationPool))
 _CONFIDENCE_IN = _sql_in("confidence", ("low", "medium", "high"))
@@ -366,6 +370,51 @@ class CandidateStore:
             self._conn.commit()
         return candidate_id
 
+    def record_inconclusive_gate(
+        self, id: int, *, actor_id: str, note: str, gate: str, gate_detail: str
+    ) -> dict:
+        """Record a gate attempt that could not decide, without moving the candidate.
+
+        An inconclusive round is usually infrastructure — the provider timed out on the
+        baseline side — so rejecting the candidate would blame it for a fault it did not
+        cause and burn the artifact. The candidate therefore stays in
+        ``candidate_testing`` and the attempt is written to ``gate_log`` with
+        ``result="inconclusive"``: visible to an operator, and explicitly *not* a gate
+        result, so :meth:`candidates_without_gate_result` still offers it for a retry.
+
+        The audit action is ``advance`` because the audit whitelist has no better home
+        for "the gate ran and did not conclude"; the note carries the reason.
+        """
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM candidates WHERE id = ?", (int(id),)
+            ).fetchone()
+            if row is None:
+                raise KeyError("candidate not found")
+            candidate_id = int(row["id"])
+            self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
+            gate_log = _decode_json(row["gate_log"])
+            if not isinstance(gate_log, list):
+                gate_log = []
+            gate_log.append(
+                {
+                    "gate": str(gate),
+                    "result": _INCONCLUSIVE_GATE_RESULT,
+                    "detail": "" if gate_detail is None else str(gate_detail),
+                    "created_at": now,
+                }
+            )
+            self._conn.execute(
+                "UPDATE candidates SET gate_log = ? WHERE id = ?",
+                (json.dumps(gate_log, ensure_ascii=False), candidate_id),
+            )
+            self._conn.commit()
+            updated = self._conn.execute(
+                "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return _decode_candidate_row(updated)
+
     def advance_candidate(
         self,
         id: int,
@@ -526,19 +575,25 @@ class CandidateStore:
 
         The benchmark gate serves question sets only — code patches are validated
         by the sandbox gate instead — so the scan filters by artifact type.
+
+        A gate entry whose result is ``inconclusive`` does **not** count as a result: that
+        round could not decide (an infrastructure fault, typically), so the candidate is
+        offered again until a round actually concludes.
         """
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM candidates WHERE status = ? AND artifact_type = ? "
                 "AND NOT EXISTS ("
                 "    SELECT 1 FROM json_each(candidates.gate_log) AS entry "
-                "    WHERE json_extract(entry.value, '$.gate') = ?"
+                "    WHERE json_extract(entry.value, '$.gate') = ? "
+                "      AND json_extract(entry.value, '$.result') != ?"
                 ") "
                 "ORDER BY id ASC LIMIT ?",
                 (
                     EvolutionStatus.CANDIDATE_TESTING.value,
                     "jev_question_set",
                     str(gate_name),
+                    _INCONCLUSIVE_GATE_RESULT,
                     int(limit),
                 ),
             ).fetchall()
