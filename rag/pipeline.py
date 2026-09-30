@@ -717,6 +717,24 @@ class RAGPipeline:
     ):
         """Build messages, sources, feedback weights, and the optional reliability gate."""
         import hashlib
+        if build_bundle and context:
+            # 版本边界：版本化 bundle 只能引用带 document_id/document_version_id 的块。
+            # BM25 降级快照的块没有这些字段（密集检索抖动时会走到那条路），此前它们会让
+            # build_evidence_bundle 抛 ValueError("versioned evidence required")，整条请求
+            # 以 HTTP 200 + error 事件收场（2026-09-30 实测 3/4 概率）。这里把不可引用的块
+            # 摘掉：答案、引用与哈希都只基于可引用的块；全不可引用时自然落到"证据不足"。
+            # 检索层保持原样——BM25 快照没有版本元数据是它的正当形态，不该在检索层被禁掉。
+            citable = [
+                chunk
+                for chunk in context
+                if chunk.document_id is not None and chunk.document_version_id is not None
+            ]
+            if len(citable) != len(context):
+                logger.warning(
+                    "dropped %d chunk(s) without version metadata before the evidence bundle",
+                    len(context) - len(citable),
+                )
+                context = citable
         chunk_hashes = [hashlib.md5(c.text.encode()).hexdigest() for c in context]
         weights = self._feedback_processor.get_weights(chunk_hashes)
 

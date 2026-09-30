@@ -844,3 +844,67 @@ def test_answerable_query_submits_no_observation(
     assert result.answer == "rag answer"
     recorder.submit.assert_not_called()
     pipeline.close()
+
+# ------------------------------------------------------------------
+# 版本化证据边界：不可引用的块（缺版本元数据）不得让整条请求崩掉。
+# ------------------------------------------------------------------
+
+
+def _unversioned_finalize_pipeline():
+    """构造一个只用于 _finalize_rag_context 的 pipeline（索引外部依赖全部打桩）。"""
+    with patch("rag.pipeline.load", return_value="text"), \
+         patch("rag.pipeline.clean_document", return_value=("text", {})), \
+         patch("rag.pipeline.chunk", return_value=[]), \
+         patch("rag.pipeline.embed", return_value=[]), \
+         patch("rag.pipeline.clear"), \
+         patch("rag.pipeline.add"), \
+         patch("rag.pipeline.Retriever"), \
+         patch("rag.pipeline.Reranker"):
+        return RAGPipeline(
+            "test.txt", session_id="s1", memory_db_path=":memory:",
+            feedback_processor=MagicMock(), gap_analyzer=MagicMock(),
+        )
+
+
+def test_finalize_drops_unversioned_chunks_before_the_versioned_bundle():
+    """版本化 bundle 只能引用带版本元数据的块：摘掉不可引用的，而不是让请求崩掉。
+
+    实测（2026-09-30）：密集检索抖动 → 降级纯 BM25 → 快照块没有 document_id/
+    document_version_id → build_evidence_bundle 抛 ValueError("versioned evidence required")
+    → HTTP 200 + 单个 error 事件，整条请求失败。检索层保持原样（BM25 快照没有版本元数据是
+    它的正当形态），正确性底线放在证据边界：答案与引用都只基于可引用的块。
+    """
+    pipeline = _unversioned_finalize_pipeline()
+    try:
+        versioned = Chunk(
+            text="年假为 7 天", doc_name="policy.md", chunk_index=0,
+            document_id=1, document_version_id=2,
+        )
+        unversioned = Chunk(text="legacytoken", doc_name="old.md", chunk_index=0)
+
+        prepared = pipeline._finalize_rag_context(
+            "年假有几天", "s1", [versioned, unversioned], 5, "kb1", build_bundle=True
+        )
+
+        assert [chunk.doc_name for chunk in prepared["context"]] == ["policy.md"]
+        assert [source["doc_name"] for source in prepared["sources"]] == ["policy.md"]
+        assert prepared["chunk_hashes"] == [hashlib.md5(versioned.text.encode()).hexdigest()]
+    finally:
+        pipeline.close()
+
+
+def test_finalize_refuses_gracefully_when_nothing_is_citable():
+    """全都不可引用时落到"证据不足"的固定答复，而不是异常。"""
+    pipeline = _unversioned_finalize_pipeline()
+    try:
+        unversioned = Chunk(text="legacytoken", doc_name="old.md", chunk_index=0)
+
+        prepared = pipeline._finalize_rag_context(
+            "年假有几天", "s1", [unversioned], 5, "kb1", build_bundle=True
+        )
+
+        assert prepared["context"] == []
+        assert prepared["route"] == "fixed"
+        assert prepared["decision"].kind == "insufficient_evidence"
+    finally:
+        pipeline.close()
