@@ -116,6 +116,7 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     # v4 起：证据包带上判定层统计量 passage_judging，并给出对应的分类口径。
     # v5 起：异常失败（failure_route=error + exception_class）必须按缺陷判类，
     #        不得顺着管理员标签的 expected_route 解释成路由问题。
+    # （试过的 v6「散文字段禁贴哈希 + 限长」在 ranking_error 族实测无改善，已撤回并留档。）
     assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v5"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
