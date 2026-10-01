@@ -30,6 +30,11 @@ _PAUSE_POLL_SECONDS = 0.1
 #: caps its own recall the same way; the worker only owns the request.
 _DIAGNOSIS_RECALL_TOP_K = 24
 
+#: 每个观测在一轮内最多尝试几次模型调用。第二次只用于 ``invalid``（模型没遵守输出契约）：
+#: 同一证据包换一次采样往往就合规（实测 ranking 族的截断属此类），而超时/限流是容量信号，
+#: 重试只会更快耗尽预算。重试计入每轮调用预算，所以这是成本上限而不是绕过它。
+_MAX_DIAGNOSIS_ATTEMPTS = 2
+
 #: A round without a diagnosis step (phase 2 builds, or a caller that wires only
 #: clustering) reports no diagnosis work at all.
 _NO_DIAGNOSIS: dict = {
@@ -512,7 +517,7 @@ def make_evolution_diagnosis_step(
     ``ExecutionTracker`` over ``memory_db_path`` and the admin-only read-only
     retrieval reader.
     """
-    from rag.evolution.diagnoser import DiagnosisUnavailable
+    from rag.evolution.diagnoser import REASON_INVALID, DiagnosisUnavailable
     from rag.evolution.evidence import assemble_evidence
 
     cfg = settings_obj or settings
@@ -555,7 +560,8 @@ def make_evolution_diagnosis_step(
             "prompt_version": "",
             "model": "",
         }
-        outcome = {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_config": config}
+        outcome = {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_retries": 0,
+                   "diagnosis_config": config}
         if budget <= 0:
             return outcome  # zero budget: no diagnosis work, not even a store scan
         pending = store.observations_awaiting_diagnosis_without_draft(limit=budget)
@@ -577,7 +583,6 @@ def make_evolution_diagnosis_step(
             for item in pending:
                 if outcome["model_calls"] >= budget:
                     break  # budget reached: the remaining observations wait for the next round
-                outcome["model_calls"] += 1
                 observation = item["observation"]
                 cluster = item["cluster"]
                 try:
@@ -589,42 +594,75 @@ def make_evolution_diagnosis_step(
                         labels_path=labels_path,
                         retrieve=reader.retrieve,
                     )
-                    # The diagnoser keeps receiving the cluster row for its identity
-                    # signals (design section 6); the evidence pack is the single
-                    # observation's. A draft is cluster-scoped for the admin decision
-                    # but observation-scoped through observation_id.
-                    draft = diagnoser.draft(cluster, pack)
-                    store.add_draft(
-                        cluster["id"],
-                        draft,
-                        observation_id=observation["id"],
-                        prompt_version=diagnoser.prompt_version,
-                        model=diagnoser.model_name,
-                    )
-                except DiagnosisUnavailable as error:
-                    # No draft for this observation: it stays queued and the next
-                    # round may retry it. ``invalid`` means the answer broke the
-                    # prompt contract, ``timeout``/``rate_limited`` are capacity signals.
-                    outcome["diagnosis_failed"] += 1
-                    logger.warning(
-                        "evolution_diagnosis_unavailable cluster=%s observation=%s reason=%s detail=%s",
-                        cluster.get("id"),
-                        observation.get("id"),
-                        error.reason,
-                        error.detail,
-                    )
-                    continue
                 except Exception:
-                    # One broken observation (evidence, store, reader) never ends the
-                    # round or kills the thread; the loop moves to the next one.
+                    # 证据装配失败（store/reader 异常）不影响本轮其它观测。
                     outcome["diagnosis_failed"] += 1
                     logger.exception(
-                        "evolution_diagnosis_cluster_failed cluster=%s observation=%s",
+                        "evolution_diagnosis_evidence_failed cluster=%s observation=%s",
                         cluster.get("id"),
                         observation.get("id"),
                     )
                     continue
-                outcome["diagnosed"] += 1
+                attempts = 0
+                while attempts < _MAX_DIAGNOSIS_ATTEMPTS and outcome["model_calls"] < budget:
+                    attempts += 1
+                    outcome["model_calls"] += 1
+                    try:
+                        # The diagnoser keeps receiving the cluster row for its identity
+                        # signals (design section 6); the evidence pack is the single
+                        # observation's. A draft is cluster-scoped for the admin decision
+                        # but observation-scoped through observation_id.
+                        draft = diagnoser.draft(cluster, pack)
+                        store.add_draft(
+                            cluster["id"],
+                            draft,
+                            observation_id=observation["id"],
+                            prompt_version=diagnoser.prompt_version,
+                            model=diagnoser.model_name,
+                        )
+                    except DiagnosisUnavailable as error:
+                        # ``invalid`` = 模型没遵守输出契约（约 1/4 的 ranking 族调用如此，
+                        # 实测被截断的 JSON）。同一证据包再采样一次往往就合规了，所以同轮
+                        # 重试一次；重试计入每轮调用预算，运营侧的成本账才不会失真。
+                        # ``timeout``/``rate_limited`` 是容量信号：重试只会更快耗尽预算，
+                        # 交给下一轮。
+                        if (
+                            error.reason == REASON_INVALID
+                            and attempts < _MAX_DIAGNOSIS_ATTEMPTS
+                            and outcome["model_calls"] < budget
+                        ):
+                            outcome["diagnosis_retries"] += 1
+                            logger.info(
+                                "evolution_diagnosis_retry cluster=%s observation=%s attempt=%s detail=%s",
+                                cluster.get("id"),
+                                observation.get("id"),
+                                attempts + 1,
+                                error.detail,
+                            )
+                            continue
+                        # No draft for this observation: it stays queued and the next
+                        # round may retry it.
+                        outcome["diagnosis_failed"] += 1
+                        logger.warning(
+                            "evolution_diagnosis_unavailable cluster=%s observation=%s reason=%s detail=%s",
+                            cluster.get("id"),
+                            observation.get("id"),
+                            error.reason,
+                            error.detail,
+                        )
+                        break
+                    except Exception:
+                        # One broken observation (evidence, store, reader) never ends the
+                        # round or kills the thread; the loop moves to the next one.
+                        outcome["diagnosis_failed"] += 1
+                        logger.exception(
+                            "evolution_diagnosis_cluster_failed cluster=%s observation=%s",
+                            cluster.get("id"),
+                            observation.get("id"),
+                        )
+                        break
+                    outcome["diagnosed"] += 1
+                    break
         finally:
             _close_quietly(reader)
             _close_quietly(tracker)

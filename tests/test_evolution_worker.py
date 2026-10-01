@@ -672,12 +672,14 @@ def test_one_failing_cluster_never_stops_the_round_and_is_retried_next_round(tmp
     middle = awaiting_cluster(store, "kb1|retrieval|second")
     newest = awaiting_cluster(store, "kb1|retrieval|third")
     valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
-    model = FakeModel("not json at all", valid, APITimeoutError(request=None))
+    # 两个 timeout（不可重试的容量信号）+ 一个成功：验证失败不会中断本轮、并留到下一轮。
+    # invalid 现在会在同轮重采样一次（见 test_an_invalid_draft_is_retried_once_within_the_round）。
+    model = FakeModel(APITimeoutError(request=None), valid, APITimeoutError(request=None))
     step = build_step(store, model)
 
     outcome = step()
 
-    # invalid -> no draft, round continues; timeout -> counted as failed, round continues.
+    # timeout -> 计为失败，本轮继续；成功那条留下草案。
     assert outcome["diagnosed"] == 1
     assert outcome["diagnosis_failed"] == 2
     assert outcome["model_calls"] == 3
@@ -957,3 +959,63 @@ def test_build_evolution_worker_with_a_zero_budget_never_calls_the_model(tmp_pat
     assert store.list_drafts() == []
     assert worker.stats()["last_diagnosis_config"]["timeout_seconds"] == 30.0
     assert worker.stats()["last_diagnosis_config"]["max_tokens"] == 2000
+
+def test_an_invalid_draft_is_retried_once_within_the_round(tmp_path):
+    """契约违规（invalid）在同一轮内重采样一次：模型没遵守输出格式时，同样的证据包换个
+    采样往往就合规了；重试**计入每轮调用预算**，运营侧的成本账不能失真。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|only")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel("garbage", valid))
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 1
+    assert outcome["diagnosis_failed"] == 0
+    assert outcome["diagnosis_retries"] == 1
+    assert outcome["model_calls"] == 2  # 两次调用都算进预算
+    assert len(store.list_drafts()) == 1
+
+
+def test_an_invalid_draft_is_retried_only_once(tmp_path):
+    """重试只做一次：连续两次不守契约就不再烧预算，留给下一轮。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|only")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel("garbage", "garbage", valid))
+
+    outcome = step()
+
+    assert outcome["diagnosed"] == 0
+    assert outcome["diagnosis_failed"] == 1
+    assert outcome["diagnosis_retries"] == 1
+    assert outcome["model_calls"] == 2
+    assert store.list_drafts() == []
+
+
+def test_a_timeout_is_not_retried(tmp_path):
+    """超时是容量信号，不是契约问题：重试只会更快耗尽预算，交给下一轮。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|only")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel(TimeoutError("diagnosis timed out"), valid))
+
+    outcome = step()
+
+    assert outcome["diagnosis_failed"] == 1
+    assert outcome["diagnosis_retries"] == 0
+    assert outcome["model_calls"] == 1
+
+
+def test_an_invalid_draft_is_not_retried_without_budget(tmp_path):
+    """预算只剩一次调用时不重试：宁可留下未诊断的观测，也不越过每轮上限。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|only")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel("garbage", valid), budget=1)
+
+    outcome = step()
+
+    assert outcome["diagnosis_failed"] == 1
+    assert outcome["diagnosis_retries"] == 0
+    assert outcome["model_calls"] == 1
