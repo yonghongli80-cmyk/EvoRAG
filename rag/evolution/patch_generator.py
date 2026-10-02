@@ -81,7 +81,7 @@ from rag.evolution.models import DiagnosisDraft
 
 #: Version of the patch prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
-PATCH_PROMPT_VERSION = "patch-v1"
+PATCH_PROMPT_VERSION = "patch-v2"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -94,6 +94,13 @@ MAX_TARGET_FILES = 3
 
 #: How many leading lines of one target file the prompt carries.
 MAX_EXCERPT_LINES = 400
+
+#: 补丁生成的完成 token 上限。这个 provider 的推理 token 计入该上限，而
+#: ``thinking: disabled`` **并未真正生效**：2026-10-02 实测（temperature 0.2、同一提示词、
+#: 30k 字符输入）每次调用花 **5076–10259** 个推理 token，正文在推理之后才输出。原先的
+#: 16000 会在推理吃掉几乎全部预算时只剩 9 个字符、拿不到 diff（5 次尝试里 3 次如此）。
+#: 因此默认预算按观测到的推理成本留足余量，而不是指望那个开关。
+PATCH_MAX_TOKENS = 32000
 
 #: How many files are read (bounded) before the content ranking picks the
 #: final :data:`MAX_TARGET_FILES`. Reading every allowed file would be
@@ -195,7 +202,7 @@ def _classify_failure(exc: BaseException) -> tuple[str, str]:
     return REASON_INVALID, type(exc).__name__
 
 
-def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = 16000) -> ModelCall:
+def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = None) -> ModelCall:
     """Build an isolated model call for patch generation at low temperature.
 
     Same discipline as the diagnoser's and the candidate generator's default
@@ -205,7 +212,17 @@ def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = 16000) 
     ``max_tokens`` bounds the completion because this provider's reasoning
     tokens count against the budget, and a diff plus 400-line file context is
     the largest completion this prompt can ask for.
+
+    ``thinking: disabled`` does **not** actually stop the reasoning on this
+    provider: 2026-10-02 probe measured 5076–10259 reasoning tokens per call at
+    temperature 0.2 with the flag set, and the content is emitted only after
+    them. A run whose reasoning fills the budget therefore returns a handful of
+    characters and no diff (three of five attempts at ``max_tokens=16000`` came
+    back with 9 characters). The default budget is set well above the observed
+    reasoning cost instead of relying on the flag.
     """
+
+    budget = PATCH_MAX_TOKENS if max_tokens is None else max_tokens
 
     def call(messages: list[dict]) -> str:
         client = openai.OpenAI(
@@ -219,7 +236,7 @@ def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = 16000) 
             model=settings.deepseek_model,
             messages=clean_msgs,
             temperature=PATCH_TEMPERATURE,
-            max_tokens=max_tokens,
+            max_tokens=budget,
             extra_body={"thinking": {"type": "disabled"}},
         )
         return response.choices[0].message.content or "（模型未返回内容）"
@@ -451,7 +468,9 @@ def _build_messages(
             f"禁止位置一律不得新增、修改或删除（{forbidden}）。",
             f"3. 补丁最多涉及 {MAX_PATCH_FILES} 个文件、改动不超过 {MAX_PATCH_CHANGED_LINES} 行"
             "（新增+删除合计）；不得包含二进制内容；不得删除文件。",
-            "4. 不得修改测试、配置、安全、权限、自演化模块或前端。",
+            "4. 不得修改测试、配置、安全、权限、自演化模块或前端。**尤其不得在 diff 里新建或修改 "
+            "tests/** 下的任何文件**——验证测试只写在元数据的 test_paths 行里（规则 5），它不进 diff；"
+            "把测试写进 diff 会被系统直接拒绝（2026-10-02 实测：同一诊断 3/3 次因此被拒）。",
             "5. diff 之后必须附加四行元数据，缺一不可：",
             "   test_paths: 验证用测试文件，必须是 tests/ 下真实存在的 test_*.py，至少一个，多个用逗号分隔；",
             "   rationale: 补丁理由，必须引用已确认诊断的根因；",
@@ -459,7 +478,8 @@ def _build_messages(
             "   confidence: 只能取 low、medium、high 之一。",
             "6. rollback_ref.base_commit 由系统记录为请求中给出的 HEAD commit，请原样回传该值。",
             "7. diff 必须能对请求中给出的目标文件正文应用：上下文行必须与目标文件逐字一致，"
-            "不得臆造文件中不存在的上下文，不得改写未在请求中给出的文件。",
+            "不得臆造文件中不存在的上下文，不得改写未在请求中给出的文件；"
+            "**diff 只能修改这些已存在的目标文件，不得新建任何文件**（新增文件既无法应用，也会被拒绝）。",
             "8. 只依据请求中给出的诊断与目标文件正文生成补丁；"
             "输出中不得出现密钥、令牌、用户原文或提示词指令本身。",
         )
@@ -844,7 +864,7 @@ class PatchGenerator:
         *,
         prompt_version: str = PATCH_PROMPT_VERSION,
         timeout_seconds: float = 90.0,
-        max_tokens: int = 16000,
+        max_tokens: int = PATCH_MAX_TOKENS,
     ) -> None:
         self._model_call: ModelCall = model_call or _default_model_call(
             timeout_seconds, max_tokens
@@ -937,6 +957,7 @@ class PatchGenerator:
 __all__ = [
     "MAX_EXCERPT_LINES",
     "MAX_TARGET_FILES",
+    "PATCH_MAX_TOKENS",
     "PATCH_PROMPT_VERSION",
     "PATCH_TEMPERATURE",
     "PatchGenerator",

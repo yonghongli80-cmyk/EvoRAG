@@ -291,7 +291,9 @@ def test_prompt_version_is_traceable_on_the_instance_and_in_the_request(tmp_path
         trace_store=trace,
     )
 
-    assert PATCH_PROMPT_VERSION == "patch-v1"
+    # patch-v2：把「测试只进元数据、不进 diff」与「不得新建文件」写死——2026-10-02 实测
+    # 同一诊断 3/3 次因 diff 里新建 tests/ 文件被拒。
+    assert PATCH_PROMPT_VERSION == "patch-v2"
     assert generator.prompt_version == PATCH_PROMPT_VERSION
     assert PATCH_PROMPT_VERSION in _request_text(fake)
 
@@ -634,7 +636,7 @@ def test_prompt_carries_the_version_stamp_contract_targets_and_base_commit(tmp_p
 
     prompt = _request_text(fake)
     # Version stamp and cluster identity travel with the request.
-    assert "诊断提示词/候选提示词版本：patch-v1" in prompt
+    assert f"诊断提示词/候选提示词版本：{PATCH_PROMPT_VERSION}" in prompt
     assert "kb-finance" in prompt
     # The confirmed diagnosis is the only reasoning input.
     assert "已确认诊断" in prompt
@@ -825,3 +827,36 @@ def repo_head() -> str:
         check=True,
     )
     return completed.stdout.strip()
+
+
+def test_the_default_completion_budget_leaves_room_for_the_reasoning_cost():
+    """默认完成预算必须给推理留足余量：``thinking: disabled`` 在这个 provider 上没生效。
+
+    2026-10-02 实测（temperature 0.2、30k 字符提示词）：每次调用花 **5076–10259** 个推理
+    token，正文在推理之后才输出；``max_tokens=16000`` 时 5 次尝试里 3 次只回 9 个字符、
+    拿不到 unified diff。这条守卫把常量与构造器默认值绑在一起，防止被改回去。
+    """
+    import inspect
+
+    from rag.evolution.patch_generator import PATCH_MAX_TOKENS, PatchGenerator
+
+    assert PATCH_MAX_TOKENS >= 32000
+    default = inspect.signature(PatchGenerator.__init__).parameters["max_tokens"].default
+    assert default == PATCH_MAX_TOKENS
+
+
+def test_the_prompt_keeps_tests_out_of_the_diff(tmp_path):
+    """测试只进元数据、不进 diff：这是实测最多的拒绝原因。
+
+    2026-10-02：同一诊断 3/3 次被拒于「diff 新建了 tests/test_spreadsheets_query.py」。
+    规则 5 要求元数据里给 test_paths，模型把「要提供测试」误当成「往 diff 里加测试」，
+    因此两处规则都写死了这个区分。
+    """
+    trace, cluster, member = seeded(tmp_path)
+    fake = FakeModel(model_reply(edit_file_diff()))
+
+    _generate(fake, cluster, member, trace)
+
+    prompt = _request_text(fake)
+    assert "不得在 diff 里新建或修改" in prompt
+    assert "不得新建任何文件" in prompt
