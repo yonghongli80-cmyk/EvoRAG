@@ -149,11 +149,15 @@ class Settings(BaseSettings):
     # 管理员确认标签 JSON 路径（诊断证据的最高优先级）；为空=无标签，此时草案根因只能是
     # 假设级（diagnoser 后校验强制）。
     evolution_diagnosis_labels_path: str = ""
-    # 代码补丁沙箱的**基准回放**用的只读知识库快照目录；为空=不给（回放按环境默认路径跑，
-    # 通常因主库被服务占用而不可用）。沙箱子进程会剥掉所有 RAG_* 设置以保持隔离，所以回放
-    # 此前拿不到语料、只能报 "replay unavailable"——层 2/3 因此只能证明"目标测试通过"。
-    # 只在**回放**这一条命令上注入该路径：目标测试仍跑在剥离后的真空环境里。
-    evolution_sandbox_qdrant_snapshot: str = ""
+    # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
+    # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录
+    # 里按需放：`qdrant_data/`（语料副本）、`users.db`（ACL/主体）、`memory.db`。
+    # 只注入给**回放**这一条命令：目标测试仍跑在剥离后的真空环境里。
+    evolution_sandbox_data_snapshot: str = ""
+    # 回放用的主体 id（0 = 不传 --user-id）。实测：不传主体时每条请求都在检索前被回答，
+    # prep P50=0.0ms、route accuracy 0.15，回放"跑了但什么都没量到"——这类空转必须避免，
+    # 否则层 2/3 的"无回归"是假的。
+    evolution_sandbox_replay_user_id: int = Field(default=0, ge=0)
 
     # 候选阶段（第 4 阶段）：候选生成默认关闭（与观测总开关独立，需显式开启）；
     # 模型调用预算沿用第 3 阶段诊断通道（次/轮）。

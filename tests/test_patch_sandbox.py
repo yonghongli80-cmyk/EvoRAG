@@ -1090,3 +1090,71 @@ def test_the_replay_env_omits_a_missing_or_unconfigured_snapshot(tmp_path):
     assert "RAG_QDRANT_PATH" not in _replay_env(worktree, None)
     assert "RAG_QDRANT_PATH" not in _replay_env(worktree, "")
     assert "RAG_QDRANT_PATH" not in _replay_env(worktree, str(tmp_path / "nope"))
+
+
+def test_the_replay_env_hands_over_the_acl_database_too(tmp_path):
+    """快照目录里的 users.db 也要交给回放：没有主体时回放的指标全是空转值。"""
+    from rag.evolution.sandbox import _replay_env
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    snapshot = tmp_path / "data"
+    (snapshot / "qdrant_data").mkdir(parents=True)
+    (snapshot / "users.db").write_bytes(b"")
+
+    env = _replay_env(worktree, str(snapshot))
+
+    assert env["RAG_QDRANT_PATH"] == str(snapshot / "qdrant_data")
+    assert env["RAG_USERS_DB_PATH"] == str(snapshot / "users.db")
+    assert "RAG_MEMORY_DB_PATH" not in env  # 目录里没有就不注入
+
+
+def test_the_replay_command_replays_as_a_principal():
+    """配置了主体才传 --user-id：没主体时实测 prep P50=0.0ms、route 0.15（空转）。"""
+    from rag.evolution.sandbox import _benchmark_command
+
+    plain = _benchmark_command(kb_id="kb1", json_out=Path("x.json"))
+    assert "--user-id" not in plain
+
+    with_principal = _benchmark_command(kb_id="kb1", json_out=Path("x.json"), user_id=1)
+    assert with_principal[with_principal.index("--user-id") + 1] == "1"
+
+
+def test_a_failed_threshold_exit_still_yields_a_verdict(tmp_path, monkeypatch):
+    """runner 因**自身阈值**不达标而 exit 1 时，要以报告文件为准给出门禁结论。
+
+    否则层 2/3 永远读不到结论（这正是"回放不可用"长期存在的另一半原因）。
+    """
+    from rag.evolution import sandbox as sandbox_module
+
+    def fake_run_command(command, *, cwd=None, env=None, timeout=None, stdin_text=None):
+        path = Path(command[command.index("--json-out") + 1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_benchmark_payload()), encoding="utf-8")
+        return sandbox_module.CommandOutcome(returncode=1, stderr="thresholds failed")
+
+    monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
+
+    verdict, error = sandbox_module._run_benchmark_replay(
+        worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="kb1", timeout=10.0, user_id=1
+    )
+
+    assert error == ""
+    assert verdict is not None and "verdict" in verdict
+
+
+def test_an_exit_without_a_report_is_still_an_error(tmp_path, monkeypatch):
+    """没有报告文件时，非零退出仍是"没跑完"——不能让缺证据变成结论。"""
+    from rag.evolution import sandbox as sandbox_module
+
+    def fake_run_command(command, *, cwd=None, env=None, timeout=None, stdin_text=None):
+        return sandbox_module.CommandOutcome(returncode=1, stderr="boom")
+
+    monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
+
+    verdict, error = sandbox_module._run_benchmark_replay(
+        worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="kb1", timeout=10.0
+    )
+
+    assert verdict is None
+    assert error == "benchmark replay did not complete: exit_1"

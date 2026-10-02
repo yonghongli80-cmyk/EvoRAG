@@ -304,21 +304,31 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     return env
 
 
-def _replay_env(worktree: Path, qdrant_snapshot: str | None) -> dict[str, str]:
+def _replay_env(worktree: Path, data_snapshot: str | None) -> dict[str, str]:
     """The environment for the benchmark replay alone.
 
-    Identical to :func:`_sandbox_env` except for one opt-in key: when a read-only snapshot of
-    the knowledge base is configured and exists, the replay child gets ``RAG_QDRANT_PATH``
-    pointing at it. Without that, the replay has no corpus (every ``RAG_*`` setting is
-    stripped to keep the sandbox isolated) and layers 2/3 can only ever prove that the
-    target tests pass — never that nothing regressed. The target tests keep the stripped
-    environment, so this widens the replay's read access only.
+    Identical to :func:`_sandbox_env` except for the read-only copies a replay needs: every
+    ``RAG_*`` setting is stripped to keep the sandbox isolated, which also leaves the replay
+    with no corpus and no principal — and a replay without a principal answers every request
+    before retrieval, so its preparation metrics are all zero and its verdict means nothing.
+    Whatever exists inside ``data_snapshot`` is therefore handed to the replay child and to
+    nothing else: the target tests keep the stripped environment.
+
+    Recognised entries: ``qdrant_data/`` (or the directory itself when it is a corpus) becomes
+    ``RAG_QDRANT_PATH``; ``users.db`` and ``memory.db`` become the matching settings.
     """
 
     env = _sandbox_env(worktree)
-    snapshot = str(qdrant_snapshot or "").strip()
-    if snapshot and Path(snapshot).is_dir():
-        env["RAG_QDRANT_PATH"] = snapshot
+    snapshot = str(data_snapshot or "").strip()
+    if not snapshot or not Path(snapshot).is_dir():
+        return env
+    root = Path(snapshot)
+    corpus = root / "qdrant_data"
+    env["RAG_QDRANT_PATH"] = str(corpus if corpus.is_dir() else root)
+    for filename, key in (("users.db", "RAG_USERS_DB_PATH"), ("memory.db", "RAG_MEMORY_DB_PATH")):
+        candidate = root / filename
+        if candidate.is_file():
+            env[key] = str(candidate)
     return env
 
 
@@ -447,9 +457,15 @@ def _run_target_tests(
 # ------------------------------------------------------------------
 
 
-def _benchmark_command(*, kb_id: str, json_out: Path) -> list[str]:
-    """One replay of the committed corpus, as a relative script path."""
-    return [
+def _benchmark_command(*, kb_id: str, json_out: Path, user_id: int | None = None) -> list[str]:
+    """One replay of the committed corpus, as a relative script path.
+
+    ``user_id`` makes the replay run the authenticated path. Without a principal every
+    request is answered before retrieval, so the preparation metrics come back as zeros and
+    the verdict says nothing — the runner rejects that shape on its own, but only after
+    spending the run, so the principal is passed whenever one is configured.
+    """
+    command = [
         sys.executable,
         BENCHMARK_SCRIPT,
         "--kb-id",
@@ -457,6 +473,9 @@ def _benchmark_command(*, kb_id: str, json_out: Path) -> list[str]:
         "--json-out",
         str(json_out),
     ]
+    if user_id:
+        command.extend(["--user-id", str(int(user_id))])
+    return command
 
 
 def _number(value: object) -> float | None:
@@ -625,9 +644,20 @@ def benchmark_verdict(payload: Mapping) -> dict | None:
 
 
 def _run_benchmark_replay(
-    *, worktree: Path, env: Mapping[str, str], sandbox_root: Path, kb_id: str, timeout: float
+    *,
+    worktree: Path,
+    env: Mapping[str, str],
+    sandbox_root: Path,
+    kb_id: str,
+    timeout: float,
+    user_id: int | None = None,
 ) -> tuple[dict | None, str]:
     """Replay the committed corpus in the worktree and decide with layer-2 thresholds.
+
+    The report file decides, not the exit code: the runner exits non-zero when its own
+    thresholds fail, which is a **verdict** (the layer-2 thresholds here may still pass), so
+    the report is read whenever it exists and parses. Only a missing or unreadable report
+    turns the exit code into an error.
 
     A replay that cannot run is reported as an error with no benchmark, never as
     a rejection: a missing environment is not evidence about a candidate. A
@@ -636,7 +666,7 @@ def _run_benchmark_replay(
     """
     json_out = sandbox_root / BENCHMARK_REPORT_NAME
     outcome = _run_command(
-        _benchmark_command(kb_id=kb_id, json_out=json_out),
+        _benchmark_command(kb_id=kb_id, json_out=json_out, user_id=user_id),
         cwd=worktree,
         env=env,
         timeout=timeout,
@@ -645,9 +675,9 @@ def _run_benchmark_replay(
         return None, f"benchmark replay timed out after {int(timeout)}s"
     if outcome.unavailable:
         return None, "benchmark replay unavailable: the interpreter could not be started"
-    if outcome.returncode != 0:
-        return None, f"benchmark replay did not complete: exit_{outcome.returncode}"
     if not json_out.is_file():
+        if outcome.returncode != 0:
+            return None, f"benchmark replay did not complete: exit_{outcome.returncode}"
         return None, "benchmark replay produced no report"
     try:
         payload = json.loads(json_out.read_text(encoding="utf-8"))
@@ -680,7 +710,8 @@ def _execute(
     run_benchmark: bool,
     kb_id: str,
     benchmark_timeout: float,
-    qdrant_snapshot: str | None = None,
+    data_snapshot: str | None = None,
+    replay_user_id: int | None = None,
 ) -> SandboxReport:
     """One sandbox run; the caller still owns cleanup, whatever happens here."""
 
@@ -758,10 +789,11 @@ def _execute(
     if run_benchmark and tests_passed is True:
         benchmark, replay_error = _run_benchmark_replay(
             worktree=worktree,
-            env=_replay_env(worktree, qdrant_snapshot),
+            env=_replay_env(worktree, data_snapshot),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
+            user_id=replay_user_id,
         )
         if replay_error:
             return report(
@@ -811,7 +843,8 @@ def run_patch_sandbox(
     run_benchmark: bool = True,
     kb_id: str = "rag_docs",
     benchmark_timeout: float = BENCHMARK_TIMEOUT_S,
-    qdrant_snapshot: str | None = None,
+    data_snapshot: str | None = None,
+    replay_user_id: int | None = None,
 ) -> SandboxReport:
     """Validate one code-patch candidate in an isolated worktree.
 
@@ -824,10 +857,12 @@ def run_patch_sandbox(
     ``kb_id`` is the knowledge base the diagnosis came from and is what the
     replay replays; ``tests_timeout`` bounds the target tests (a timeout is
     inconclusive, not a rejection); ``run_benchmark=False`` skips the replay,
-    which is what a local smoke run wants. ``qdrant_snapshot`` is the read-only
-    knowledge-base copy the replay child reads (defaults to
-    ``settings.evolution_sandbox_qdrant_snapshot``); with none configured the
-    replay has no corpus and reports "unavailable", which is not a rejection.
+    which is what a local smoke run wants. ``data_snapshot`` names a directory of
+    read-only copies (``qdrant_data/``, ``users.db``) the replay child may read and
+    ``replay_user_id`` the principal it replays as — both default to
+    ``settings.evolution_sandbox_data_snapshot`` / ``..._replay_user_id``; with
+    neither, the replay has no corpus and no principal and reports "unavailable",
+    which is not a rejection.
 
     Returns a :class:`SandboxReport`. Nothing is raised for a refused candidate:
     a boundary violation, a dirty main tree, a diff that does not apply, a
@@ -837,7 +872,10 @@ def run_patch_sandbox(
     started = time.perf_counter()
     root = Path(repo_root)
     snapshot = (
-        settings.evolution_sandbox_qdrant_snapshot if qdrant_snapshot is None else qdrant_snapshot
+        settings.evolution_sandbox_data_snapshot if data_snapshot is None else data_snapshot
+    )
+    user_id = (
+        settings.evolution_sandbox_replay_user_id if replay_user_id is None else replay_user_id
     )
 
     sandbox_root = Path(tempfile.mkdtemp(prefix=SANDBOX_ROOT_PREFIX))
@@ -854,7 +892,8 @@ def run_patch_sandbox(
             run_benchmark=run_benchmark,
             kb_id=kb_id,
             benchmark_timeout=benchmark_timeout,
-            qdrant_snapshot=snapshot,
+            data_snapshot=snapshot,
+            replay_user_id=user_id,
         )
     finally:
         # Whatever happened above — a report, a refusal, or an exception — the
