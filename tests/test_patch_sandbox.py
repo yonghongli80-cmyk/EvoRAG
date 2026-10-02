@@ -1052,3 +1052,41 @@ def test_a_replay_that_measured_no_samples_is_not_evidence(sandbox_repo: Path, m
 
     assert report.benchmark is None
     assert "no samples" in report.error
+
+
+# ------------------------------------------------------------------
+# 基准回放的只读语料（层 2/3 能证明"无回归"的前提）。
+# ------------------------------------------------------------------
+
+
+def test_the_replay_env_carries_the_read_only_corpus_snapshot(tmp_path):
+    """配了快照且目录存在时，**只有回放**拿到 RAG_QDRANT_PATH。
+
+    沙箱子进程会剥掉所有 RAG_* 设置以保持隔离，于是回放此前拿不到语料、只能报
+    "replay unavailable"——层 2/3 因此只能证明"目标测试通过"，不能证明"无回归"。
+    """
+    from rag.evolution.sandbox import _replay_env, _sandbox_env
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    snapshot = tmp_path / "snap"
+    snapshot.mkdir()
+
+    replay_env = _replay_env(worktree, str(snapshot))
+
+    assert replay_env["RAG_QDRANT_PATH"] == str(snapshot)
+    assert replay_env["PYTHONPATH"] == str(worktree)  # 其余隔离语义不变
+    # 目标测试仍跑在剥离后的真空环境里，只有回放这一条命令放宽读取。
+    assert "RAG_QDRANT_PATH" not in _sandbox_env(worktree)
+
+
+def test_the_replay_env_omits_a_missing_or_unconfigured_snapshot(tmp_path):
+    """没配置、或配置了但目录不存在时不得注入：宁可报"回放不可用"，也不要假通过。"""
+    from rag.evolution.sandbox import _replay_env
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    assert "RAG_QDRANT_PATH" not in _replay_env(worktree, None)
+    assert "RAG_QDRANT_PATH" not in _replay_env(worktree, "")
+    assert "RAG_QDRANT_PATH" not in _replay_env(worktree, str(tmp_path / "nope"))

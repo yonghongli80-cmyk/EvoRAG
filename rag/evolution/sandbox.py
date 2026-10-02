@@ -65,6 +65,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from config import settings
 from rag.evolution.candidate_gates import ROUTE_DELTA_MAX_PP, TOP5_DELTA_MAX_PP
 from rag.evolution.candidates import PayloadBoundaryError
 from rag.evolution.code_patches import (
@@ -300,6 +301,24 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _replay_env(worktree: Path, qdrant_snapshot: str | None) -> dict[str, str]:
+    """The environment for the benchmark replay alone.
+
+    Identical to :func:`_sandbox_env` except for one opt-in key: when a read-only snapshot of
+    the knowledge base is configured and exists, the replay child gets ``RAG_QDRANT_PATH``
+    pointing at it. Without that, the replay has no corpus (every ``RAG_*`` setting is
+    stripped to keep the sandbox isolated) and layers 2/3 can only ever prove that the
+    target tests pass — never that nothing regressed. The target tests keep the stripped
+    environment, so this widens the replay's read access only.
+    """
+
+    env = _sandbox_env(worktree)
+    snapshot = str(qdrant_snapshot or "").strip()
+    if snapshot and Path(snapshot).is_dir():
+        env["RAG_QDRANT_PATH"] = snapshot
     return env
 
 
@@ -661,6 +680,7 @@ def _execute(
     run_benchmark: bool,
     kb_id: str,
     benchmark_timeout: float,
+    qdrant_snapshot: str | None = None,
 ) -> SandboxReport:
     """One sandbox run; the caller still owns cleanup, whatever happens here."""
 
@@ -738,7 +758,7 @@ def _execute(
     if run_benchmark and tests_passed is True:
         benchmark, replay_error = _run_benchmark_replay(
             worktree=worktree,
-            env=env,
+            env=_replay_env(worktree, qdrant_snapshot),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
@@ -791,6 +811,7 @@ def run_patch_sandbox(
     run_benchmark: bool = True,
     kb_id: str = "rag_docs",
     benchmark_timeout: float = BENCHMARK_TIMEOUT_S,
+    qdrant_snapshot: str | None = None,
 ) -> SandboxReport:
     """Validate one code-patch candidate in an isolated worktree.
 
@@ -803,7 +824,10 @@ def run_patch_sandbox(
     ``kb_id`` is the knowledge base the diagnosis came from and is what the
     replay replays; ``tests_timeout`` bounds the target tests (a timeout is
     inconclusive, not a rejection); ``run_benchmark=False`` skips the replay,
-    which is what a local smoke run wants.
+    which is what a local smoke run wants. ``qdrant_snapshot`` is the read-only
+    knowledge-base copy the replay child reads (defaults to
+    ``settings.evolution_sandbox_qdrant_snapshot``); with none configured the
+    replay has no corpus and reports "unavailable", which is not a rejection.
 
     Returns a :class:`SandboxReport`. Nothing is raised for a refused candidate:
     a boundary violation, a dirty main tree, a diff that does not apply, a
@@ -812,6 +836,9 @@ def run_patch_sandbox(
     """
     started = time.perf_counter()
     root = Path(repo_root)
+    snapshot = (
+        settings.evolution_sandbox_qdrant_snapshot if qdrant_snapshot is None else qdrant_snapshot
+    )
 
     sandbox_root = Path(tempfile.mkdtemp(prefix=SANDBOX_ROOT_PREFIX))
     worktree = sandbox_root / WORKTREE_DIRNAME
@@ -827,6 +854,7 @@ def run_patch_sandbox(
             run_benchmark=run_benchmark,
             kb_id=kb_id,
             benchmark_timeout=benchmark_timeout,
+            qdrant_snapshot=snapshot,
         )
     finally:
         # Whatever happened above — a report, a refusal, or an exception — the
