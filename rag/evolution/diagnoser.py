@@ -51,7 +51,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v5"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v7"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -237,6 +237,20 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append("passage_judging: （未记录：该失败早于判定统计量上线，不能当作 0）")
     lines.append("failure_route: " + (pack.failure_route or "（未记录）"))
     lines.append("exception_class: " + (pack.exception_class or "（无：不是异常失败）"))
+    if pack.label_evidence:
+        lines.append(
+            "label_evidence（**精确包含检查**：管理员写下的答案文本里的型号串是否出现在召回块里；"
+            "chunks=包含它的块数，first_rank=最早出现的块序号）:"
+        )
+        for record in pack.label_evidence:
+            lines.append(
+                f"  - token={record.get('token')} chunks={record.get('chunks')} "
+                f"first_rank={record.get('first_rank')} hash={record.get('hash') or '（窗口外）'}"
+            )
+    else:
+        lines.append(
+            "label_evidence: （无：没有管理员答案文本，或该文本的型号串未出现在召回块中）"
+        )
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
@@ -274,6 +288,19 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
             "code 或该异常实际指向的层；**不得**判成 intent_route_error / undetermined / none。"
             "管理员标签只说明内容事实（答案在哪个文档），不改变“失败是异常”这一判断；"
             "direct_evidence 里写明异常类型。"
+        )
+    if pack.label_evidence and not pack.exception_class:
+        # 这条口径的依据是**确定性事实**而不是启发式：管理员写下的答案型号串**确实出现在
+        # 召回块里**（精确包含检查，见 evidence._label_evidence）。它只在"有管理员答案
+        # 且该答案文本在召回中"时触发，因此不会像前两条被否决的口径那样在无标签的内容缺口
+        # 行上误伤；异常失败由上面的分支优先处理。
+        rules.append(
+            "本次证据包含 label_evidence：管理员给出的答案文本（型号串）**确实出现在召回块里**"
+            "（这是精确包含检查，不是关键词相关度判断）。若同时 failed_hashes 为空（没有任何块"
+            "被采纳），则第一处偏离在**取用/排序**侧：failure_category 必须取 ranking_error，"
+            "suggested_layer 取 reranking（检索能拿到却没被采用）；**不得**判成 undetermined"
+            "（内容缺口）或 recall_miss（内容明明在召回窗口内，first_rank 给出了位置）。"
+            "只有在 label_evidence 为空、且块预览里也确实找不到所问事实时，才按内容缺口处理。"
         )
     # 判定统计量只作为证据渲染，**不附加强制口径**。2026-09-29 成对实测（5 条内容缺口观测，
     # v3 vs v4，见 real-case-handoff/evolab/diagnosis-rule-ab-with-rule.json）：一条

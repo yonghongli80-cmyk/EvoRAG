@@ -191,6 +191,12 @@ class EvidencePack:
     #: （2026-09-30：6 条 ValueError 观测因为提示词里没有这两项，被误判成 intent_route_error）。
     failure_route: str = ""
     exception_class: str = ""
+    #: 管理员标签里给出的**答案文本**在召回块中的确定性包含检查：每个条目形如
+    #: ``{"question", "token", "chunks", "first_rank", "hash"}``，``token`` 是从
+    #: ``expected_answer`` 里抽出的型号串（含字母与数字），``chunks`` 是召回窗口里包含它的
+    #: 块数。它把"内容到底在不在召回里"从关键词相关度变成**可核对的精确包含**——这是
+    #: `ranking_error`（能拿到却没被采用）与 `undetermined`（内容缺口）之间唯一不靠猜的判据。
+    label_evidence: tuple[dict, ...] = ()
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 

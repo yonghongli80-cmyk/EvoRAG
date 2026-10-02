@@ -117,7 +117,9 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     # v5 起：异常失败（failure_route=error + exception_class）必须按缺陷判类，
     #        不得顺着管理员标签的 expected_route 解释成路由问题。
     # （试过的 v6「散文字段禁贴哈希 + 限长」在 ranking_error 族实测无改善，已撤回并留档。）
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v5"
+    # v7 起：label_evidence —— 管理员答案文本在召回块中的**精确包含检查**，命中即可判
+    #        ranking_error（能拿到却没被采用），这是"内容存在"唯一不靠猜的确定性判据。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v7"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -420,3 +422,56 @@ def test_default_model_call_uses_an_isolated_client_with_the_configured_timeout(
     assert recorded["temperature"] == 0.2
     assert recorded["max_tokens"] == 8000
     assert recorded["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_prompt_renders_label_evidence_and_requires_ranking_error():
+    """命中 label_evidence 时必须判取用侧，而不是内容缺口或召回缺口。
+
+    依据是确定性事实：管理员写下的答案型号串**确实出现在召回块里**（精确包含），
+    因此"内容存在却没被采用"不再需要模型去猜。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(
+        label_evidence=(
+            {"question": "找一下副厂配件明细", "token": "LH716-01", "chunks": 2,
+             "first_rank": 3, "hash": "a" * 64},
+        )
+    )
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "label_evidence" in prompt
+    assert "token=LH716-01 chunks=2 first_rank=3" in prompt
+    assert "ranking_error" in prompt
+    assert "取用/排序" in prompt
+
+
+def test_label_evidence_rule_is_absent_without_a_hit():
+    """没有命中时不得出现该口径：无标签的内容缺口行不能受影响。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    prompt = _request_text(fake)
+    assert "label_evidence: （无" in prompt
+    assert "取用/排序" not in prompt
+
+
+def test_the_exception_rule_wins_over_label_evidence():
+    """异常失败优先：即使标签答案命中了召回，也不得把这族判成取用问题。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(
+        failure_route="error",
+        exception_class="ValueError",
+        label_evidence=(
+            {"question": "第三方配件明细查一下", "token": "SZ-B40", "chunks": 1,
+             "first_rank": 0, "hash": "b" * 64},
+        ),
+    )
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "未捕获异常" in prompt
+    assert "取用/排序" not in prompt

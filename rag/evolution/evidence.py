@@ -383,6 +383,9 @@ def assemble_evidence(
         passage_judging=_passage_judging(observation),
         failure_route=str(observation.get("route") or ""),
         exception_class=str(observation.get("details_exception_class") or ""),
+        label_evidence=_label_evidence(
+            _matched_admin_labels(questions, labels), recall_texts, previews
+        ),
         reproduction=reproduction,
     )
 
@@ -419,6 +422,61 @@ def _passage_judging(observation: dict) -> tuple[tuple[str, int], ...]:
             continue
         counts.append((key, int(value)))
     return tuple(counts)
+
+
+#: 从管理员答案文本里抽型号串：必须同时含字母与数字（LH716-01、HA036、EN-EL18d、LP-E17…），
+#: 长度 ≥4。纯中文短语与纯数字都不取——前者无法精确匹配，后者噪声太大。
+_ANSWER_TOKEN = re.compile(r"[A-Za-z]{1,6}[-]?\d[\w.\-]{0,12}")
+_ANSWER_TOKEN_LIMIT = 6
+
+
+def _answer_tokens(text: str) -> tuple[str, ...]:
+    """The part-number-shaped tokens an admin answer states, deduplicated and capped."""
+    tokens: list[str] = []
+    for match in _ANSWER_TOKEN.finditer(text or ""):
+        token = match.group(0)
+        if len(token) < 4 or not any(char.isalpha() for char in token) or not any(
+            char.isdigit() for char in token
+        ):
+            continue
+        if token not in tokens:
+            tokens.append(token)
+        if len(tokens) >= _ANSWER_TOKEN_LIMIT:
+            break
+    return tuple(tokens)
+
+
+def _label_evidence(
+    labels: tuple[dict, ...], recall_texts: list[str], previews: list[dict]
+) -> tuple[dict, ...]:
+    """Do the admin answer's own part numbers appear in the recall window?
+
+    The one deterministic way to tell "the content is there and was not adopted"
+    (``ranking_error``) from "the content is not there" (``undetermined``): look for the
+    exact answer string the administrator wrote, in the same recall window the coverage
+    signal measures. Words matching is not enough — this looks for the answer itself.
+    """
+    hits: list[dict] = []
+    for label in labels:
+        for token in _answer_tokens(str(label.get("expected_answer") or "")):
+            matched_ranks = [
+                index
+                for index, text in enumerate(recall_texts)
+                if token.lower() in (text or "").lower()
+            ]
+            if not matched_ranks:
+                continue
+            first = matched_ranks[0]
+            hits.append(
+                {
+                    "question": str(label.get("question") or ""),
+                    "token": token,
+                    "chunks": len(matched_ranks),
+                    "first_rank": first,
+                    "hash": previews[first]["hash"] if first < len(previews) else "",
+                }
+            )
+    return tuple(hits)
 
 
 __all__ = ["assemble_evidence", "normalize_question"]

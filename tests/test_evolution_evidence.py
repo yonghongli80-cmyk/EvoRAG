@@ -530,3 +530,73 @@ def test_question_term_coverage_terms_are_deterministic_and_bounded(tmp_path):
     assert 0 < len(first.question_term_coverage) <= 8
     terms = [record["term"] for record in first.question_term_coverage]
     assert len(set(terms)) == len(terms)
+
+
+def test_label_evidence_checks_the_admin_answer_against_the_recall(tmp_path):
+    """label_evidence：把管理员答案里的型号串拿去召回块做**精确包含检查**。
+
+    这是 `ranking_error`（能拿到却没被采用）与 `undetermined`（内容缺口）之间唯一不靠猜的
+    判据——它查的是答案本身，而不是关键词相关度。
+    """
+
+    import json as _json
+
+    from rag.evolution.evidence import assemble_evidence
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="找一下副厂配件明细")
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        _json.dumps(
+            [
+                {
+                    "question": "找一下副厂配件明细",
+                    "expected_answer": "适马 16mm 的遮阳罩型号为 LH716-01，售价已脱敏；另一支是 A046。",
+                    "expected_source": "lens-hood-price-redacted.xlsx",
+                    "admin_note": "答案在表里",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    retriever = FakeRetriever(
+        {"找一下副厂配件明细": (Chunk("镜头 LH716-01 遮阳罩 金额<金额>"), Chunk("无关内容"))}
+    )
+
+    pack = assemble_evidence(
+        member, cluster, store=store, labels_path=str(labels), retrieve=retriever
+    )
+
+    hits = {record["token"]: record for record in pack.label_evidence}
+    assert "LH716-01" in hits  # 答案文本确实出现在召回块里
+    assert hits["LH716-01"]["chunks"] == 1
+    assert hits["LH716-01"]["first_rank"] == 0
+    assert hits["LH716-01"]["hash"] == md5("镜头 LH716-01 遮阳罩 金额<金额>")
+    # A046 只在标签里、不在召回里：没有命中就不该出现在证据里。
+    assert "A046" not in hits
+
+
+def test_label_evidence_is_empty_without_a_retriever(tmp_path):
+    """没有召回窗口就没有包含检查：不能把"没查"渲染成"查过但没命中"。"""
+
+    import json as _json
+
+    from rag.evolution.evidence import assemble_evidence
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="找一下副厂配件明细")
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        _json.dumps(
+            [{"question": "找一下副厂配件明细", "expected_answer": "型号 LH716-01"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    pack = assemble_evidence(member, cluster, store=store, labels_path=str(labels))
+
+    assert pack.label_evidence == ()
