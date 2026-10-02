@@ -14,8 +14,8 @@
     "kb_id": "kb_accessories",
     "expected_route": "rag",
     "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
-    "expected_answer": "同上：第三方（副厂）配件以品牌行存在于 lens-hood-price-redacted.xlsx（适马/腾龙 遮光罩型号）与 camera-parameters-excerpt.xlsx 的『理光副厂品牌参数镜头』表；库内确实没有把『副厂』二字写在遮光罩表里。",
-    "admin_note": "与『找一下副厂配件明细』同族、同证据；内容存在，失败在取用侧。",
+    "expected_answer": "第三方（副厂）配件以品牌行存在于 lens-hood-price-redacted.xlsx：如 适马 40mm f/1.4 DG HSM Art_尼康口 → LH878-01、适马 105mm f/1.4 DG HSM Art_佳能口 → LH1113-01、适马 16mm f/1.4 DC DN Contemporary_E口 → LH716-01；camera-parameters-excerpt.xlsx 的『理光副厂品牌参数镜头』表另有 腾龙 11-20mm f/2.8 Di III-A RXD（B060）等参数行。库内没有把『副厂』二字写进遮光罩表，所以按字面检索不到。",
+    "admin_note": "与『找一下副厂配件明细』同族、同证据；内容存在，失败在取用侧。2026-10-02 补齐具体型号串，使『管理员答案文本是否出现在召回块里』可做确定性包含检查。",
     "confirmed_by": "admin",
     "confirmed_at": "2026-09-29"
   },
@@ -24,8 +24,8 @@
     "kb_id": "kb_accessories",
     "expected_route": "rag",
     "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
-    "expected_answer": "同上（同义改写）。第三方配件清单在库：适马/腾龙 遮光罩型号行 + 理光副厂品牌参数表。",
-    "admin_note": "与『找一下副厂配件明细』同族、同证据。",
+    "expected_answer": "同上（同义改写）：第三方配件清单在库为品牌行 —— 适马遮光罩型号 LH878-01（40mm 尼康口）、LH1113-01（105mm 佳能口）、LH716-01（16mm E口），以及 camera-parameters-excerpt.xlsx『理光副厂品牌参数镜头』表的 腾龙 B060 参数行。",
+    "admin_note": "与『找一下副厂配件明细』同族、同证据。2026-10-02 补齐具体型号串以供确定性包含检查。",
     "confirmed_by": "admin",
     "confirmed_at": "2026-09-29"
   },
@@ -34,8 +34,8 @@
     "kb_id": "kb_accessories",
     "expected_route": "rag",
     "expected_source": "camera-parameters-excerpt.xlsx",
-    "expected_answer": "camera-parameters-excerpt.xlsx#2 的『富士 X-S20』行含『电池类型』与『充电器类型』两列（同表的列定义见 #0 表头）。",
-    "admin_note": "问题原文带两个空格（保留原话）；内容存在，失败在取用侧。",
+    "expected_answer": "camera-parameters-excerpt.xlsx 的『富士 X-S20』行含『电池类型』与『充电器类型』两列（列定义见表头行）。已核实的事实：该行共 22 列而检索到的块只含该行前 12 列，电池/充电器两列在行尾（第 19/20 列），所以在当前召回窗口内看不到这两列的具体型号值。",
+    "admin_note": "问题原文带两个空格（保留原话）；内容存在，失败在取用侧。2026-10-02 管理员复核补记切块事实（未改判类别：该行的答案列确实不在召回窗口内）。",
     "confirmed_by": "admin",
     "confirmed_at": "2026-09-29"
   }
