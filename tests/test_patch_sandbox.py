@@ -685,7 +685,9 @@ def test_the_benchmark_replay_compares_both_sides_against_the_layer_two_threshol
         baseline_benchmark=_benchmark_payload(cases=4, route_accuracy=0.75),
     )
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.applied is True
     assert report.tests_passed is True
@@ -725,7 +727,9 @@ def test_a_benchmark_regression_is_reported_without_rejecting_the_run(
         baseline_benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=1.0),  # 干净：1.0
     )
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.applied is True
     assert report.tests_passed is True  # 运行本身没有被拒绝……
@@ -742,7 +746,9 @@ def test_candidate_side_failures_fail_the_replay_verdict(sandbox_repo: Path, mak
         baseline_benchmark=_benchmark_payload(cases=4),
     )
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.benchmark["passed"] is False
     assert "failed" in report.benchmark["verdict"]
@@ -753,7 +759,9 @@ def test_a_pass_replay_is_reported_as_a_pass(sandbox_repo: Path, make_runner):
     runner = make_runner(benchmark=_benchmark_payload(cases=4, top5_hit_rate=0.75))
     # 两侧同载荷 ⇒ 补丁没有影响
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.benchmark["passed"] is True
     assert report.benchmark["route_delta_pp"] == 0.0
@@ -766,7 +774,9 @@ def test_a_benchmark_that_cannot_run_is_an_error_not_a_rejection(
 ):
     runner = make_runner(benchmark_returncode=1)
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.applied is True
     assert report.tests_passed is True
@@ -863,7 +873,9 @@ def test_cleanup_removes_a_real_worktree_when_pytest_explodes(sandbox_repo: Path
 def test_a_report_carries_a_json_safe_summary(sandbox_repo: Path, make_runner):
     """The report is what an audit endpoint stores, so it must serialize as it is."""
     make_runner(benchmark=_benchmark_payload())
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     payload = report.to_dict()
     assert payload["applied"] is True
@@ -882,22 +894,36 @@ def test_the_gate_name_is_the_one_the_review_endpoints_read():
     assert GATE_NAME == "sandbox"
 
 
-def test_a_green_run_writes_back_awaiting_verification(sandbox_repo: Path, make_runner):
-    make_runner(benchmark=_benchmark_payload())
+def test_a_green_run_claims_only_what_the_sandbox_can_prove(sandbox_repo: Path, make_runner):
+    """默认**不跑**回放：沙箱只证"能应用 + 目标测试与固定回归网通过"。
+
+    回归 A/B 需要模型凭据（嵌入与重排都是外部调用），而沙箱刻意不带凭据——在里面跑回放
+    量到的是"没有密钥"，不是补丁。所以默认关闭，且门禁结论必须**明说缺了哪一步、归谁做**。
+    """
+    runner = make_runner(benchmark=_benchmark_payload())
+
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.applied is True
+    assert report.tests_passed is True
+    assert report.benchmark is None  # 默认不跑回放
+    assert runner.of("benchmark_jev_retrieval.py") == []
 
     status, detail = sandbox_gate_outcome(report)
 
     assert status == "awaiting_verification"
-    assert detail.startswith("sandbox passed;")
-    assert "route delta +0.0pp" in detail
+    assert detail.startswith("sandbox passed:")
+    assert "regression A/B is not measured here" in detail
+    assert "administrator after applying" in detail
 
 
 def test_a_replay_that_could_not_run_still_writes_back_awaiting_verification(
     sandbox_repo: Path, make_runner
 ):
     make_runner(benchmark_returncode=1)
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     status, detail = sandbox_gate_outcome(report)
 
@@ -938,7 +964,9 @@ def test_a_replay_regression_writes_back_rejected(sandbox_repo: Path, make_runne
         benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=0.75),
         baseline_benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=1.0),
     )
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     status, detail = sandbox_gate_outcome(report)
 
@@ -1025,7 +1053,9 @@ def test_a_replay_that_never_prepared_anything_is_not_evidence(sandbox_repo: Pat
     """
     make_runner(benchmark=_benchmark_payload(prep_p50_ms=0.0))
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.tests_passed is True
     assert report.benchmark is None
@@ -1039,7 +1069,9 @@ def test_a_replay_whose_baseline_failed_is_not_evidence(sandbox_repo: Path, make
     """A baseline that failed some calls cannot serve as the comparison base."""
     make_runner(benchmark=_benchmark_payload(baseline_failed_calls=3))
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.benchmark is None
     assert "baseline" in report.error
@@ -1052,7 +1084,9 @@ def test_a_replay_carrying_no_preparation_latency_is_not_evidence(sandbox_repo: 
         payload[side].pop("prep_p50_ms")
     make_runner(benchmark=payload)
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.benchmark is None
     assert "no preparation latency" in report.error
@@ -1063,7 +1097,9 @@ def test_a_replay_that_measured_no_samples_is_not_evidence(sandbox_repo: Path, m
     payload["sample_count"] = 0
     make_runner(benchmark=payload)
 
-    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=True
+    )
 
     assert report.benchmark is None
     assert "no samples" in report.error

@@ -899,7 +899,7 @@ def run_patch_sandbox(
     *,
     repo_root: str | Path,
     tests_timeout: float = 600.0,
-    run_benchmark: bool = True,
+    run_benchmark: bool = False,
     kb_id: str = "rag_docs",
     benchmark_timeout: float = BENCHMARK_TIMEOUT_S,
     data_snapshot: str | None = None,
@@ -915,13 +915,19 @@ def run_patch_sandbox(
 
     ``kb_id`` is the knowledge base the diagnosis came from and is what the
     replay replays; ``tests_timeout`` bounds the target tests (a timeout is
-    inconclusive, not a rejection); ``run_benchmark=False`` skips the replay,
-    which is what a local smoke run wants. ``data_snapshot`` names a directory of
-    read-only copies (``qdrant_data/``, ``users.db``) the replay child may read and
-    ``replay_user_id`` the principal it replays as — both default to
-    ``settings.evolution_sandbox_data_snapshot`` / ``..._replay_user_id``; with
-    neither, the replay has no corpus and no principal and reports "unavailable",
-    which is not a rejection.
+    inconclusive, not a rejection).
+
+    ``run_benchmark`` defaults to **off**, and that is the honest default: the
+    replay needs the model APIs (both embedding and reranking are external calls)
+    while a sandbox child deliberately carries no credentials, so a replay inside
+    the sandbox measures the absence of a key rather than the patch. The sandbox
+    therefore proves what it can prove — the diff applies, the candidate's target
+    tests and the fixed regression net pass — and the layer-2 regression A/B is
+    the administrator's step after applying, run where the credentials live
+    (``docs/evolution-code-patches.md`` section 5). The replay remains available
+    as an experiment: ``run_benchmark=True`` plus ``data_snapshot`` and
+    ``replay_user_id`` runs the same benchmark in a clean worktree and in the
+    patched one and compares each side (``patch_verdict``).
 
     Returns a :class:`SandboxReport`. Nothing is raised for a refused candidate:
     a boundary violation, a dirty main tree, a diff that does not apply, a
@@ -1011,9 +1017,19 @@ def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str]:
             f"sandbox target tests inconclusive: {report.error}",
         )
     if report.benchmark is None:
+        if report.error:
+            return (
+                EvolutionStatus.AWAITING_VERIFICATION.value,
+                f"sandbox passed; replay unavailable: {report.error}",
+            )
+        # 沙箱不声称"无回归"：它证明的是"能应用 + 目标测试与固定回归网通过"。回归 A/B 需要
+        # 模型凭据（嵌入与重排都走外部 API），而沙箱刻意不带凭据——那一步属于管理员在应用之后、
+        # 在服务所在的环境里按既有 20 用例协议跑（docs/evolution-code-patches.md 第 5 节）。
         return (
             EvolutionStatus.AWAITING_VERIFICATION.value,
-            f"sandbox passed; replay unavailable: {report.error}",
+            "sandbox passed: the patch applied and the target tests plus the fixed regression net "
+            "are green; the layer-2 regression A/B is not measured here (the sandbox carries no "
+            "credentials) and belongs to the administrator after applying",
         )
     verdict = report.benchmark.get("verdict") or "no verdict"
     if not report.benchmark.get("passed"):

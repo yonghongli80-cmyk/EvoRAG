@@ -247,3 +247,23 @@ legacy 侧要**调模型**——干净树里每次调用都抛异常（100 = 10 
 
 在选定之前，层 2/3 对代码补丁能证明的仍然只有"目标测试通过"；双层回放的**机制**已经就位，
 缺的是一个**能在无凭据沙箱里跑完的回放**。
+
+### 11.3 决定与落地：沙箱只证"能应用 + 测试通过"（方案 C，2026-10-02）
+
+三选项里选了 **C**：A（给回放凭据）会把密钥交给**待评审的补丁代码**（同一个子进程），B（词法
+专用确定性回放）需要新写一个回放脚本，今天不做。落地内容：
+
+* `run_patch_sandbox(..., run_benchmark=False)` 成为**默认**——沙箱不再声称"无回归"；
+* 门禁结论如实说明缺的那一步：
+  `sandbox passed: the patch applied and the target tests plus the fixed regression net are
+  green; the layer-2 regression A/B is not measured here (the sandbox carries no credentials)
+  and belongs to the administrator after applying`；
+* 回归 A/B 的规程写进 `docs/evolution-code-patches.md` **§5.1**：应用 → 目标测试 + 固定回归网 →
+  既有 20 用例协议（路由 0pp、Top-5 ≤2pp）→ 通过才合入，否则 `git apply -R` 回退；
+* 双层回放代码**保留**（`run_benchmark=True` + `data_snapshot` + `replay_user_id`）：它是将来
+  "词法专用回放"或"录制-回放 fixture"落地时**现成**的机制，用例覆盖完整。
+
+**值得一提（避免被当成新发现）**：`docs/evolution-code-patches.md` §7 第 1 条**上一轮就已经**
+记过同一结论——沙箱按红线永不把凭证交给子进程，且同一份**未打补丁**的代码两次跑 0.579 / 0.529，
+会让"route 不得降 0pp"的阈值产生**假红**。今天的实测（干净侧 100 次调用失败、打过补丁侧 0 次）
+是那条判断的**又一次独立确认**。
