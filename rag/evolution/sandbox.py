@@ -79,12 +79,21 @@ from rag.evolution.models import EvolutionStatus
 SANDBOX_ROOT_PREFIX = "rag-patch-sandbox-"
 #: The worktree directory name inside the sandbox root.
 WORKTREE_DIRNAME = "worktree"
+#: The second, **unpatched** worktree the regression replay needs: the patch's effect is the
+#: difference between the two runs, so both must exist at the same HEAD.
+BASELINE_WORKTREE_DIRNAME = "baseline"
 #: Where the replay writes its report: next to the worktree, never inside it,
 #: so the tree the tests ran in stays exactly the patched tree.
 BENCHMARK_REPORT_NAME = "benchmark.json"
+#: The clean run's report, kept apart from the patched one.
+BASELINE_REPORT_NAME = "benchmark-baseline.json"
 #: The phase-2 A/B runner, addressed as a *relative* path so the worktree's own
 #: copy of ``scripts/`` is what the replay measures.
 BENCHMARK_SCRIPT = "scripts/benchmark_jev_retrieval.py"
+#: The runner's two sides: ``old`` is the legacy preparation path and ``new`` is the Jev
+#: path. They are *not* baseline and patched — the patch's effect is the same side measured
+#: in the clean worktree and in the patched one.
+REPLAY_SIDES = (("old", "legacy"), ("new", "jev"))
 
 #: Repository-owned verification the sandbox always runs beside the candidate's
 #: own targets. Layer 1 refuses any diff that touches ``tests/**`` or a
@@ -554,96 +563,109 @@ def _execution_evidence_reason(payload: Mapping) -> str | None:
     return None
 
 
-def benchmark_verdict(payload: Mapping) -> dict | None:
-    """The layer-2 comparison of one replay report, or ``None`` if unreadable.
+def patch_verdict(baseline: Mapping, patched: Mapping) -> dict | None:
+    """The layer-2 comparison of the **clean** replay against the **patched** one, per side.
 
-    The runner replays the legacy preparation path against the Jev path over the
-    same labeled corpus and writes both sides' metrics; the sandbox reads that
-    pair as baseline-versus-candidate and applies the never-weakened layer-2
-    thresholds to it (route drop ≤ 0pp, Top-5 drop ≤ 2pp). A patched side that
-    fails more calls than the baseline also fails the verdict: a crash inside
-    the patched code is a regression, whatever the aggregate rates say.
+    ``scripts/benchmark_jev_retrieval.py`` compares two implementation paths — its own
+    ``old`` is the legacy preparation and ``new`` is the Jev one — so a single report says
+    nothing about a patch. The patch's effect is the *same side* measured twice: once in a
+    worktree at HEAD and once in the worktree the diff was applied to. Both sides are
+    compared, because a code patch can move either path, and the never-weakened layer-2
+    thresholds decide (route drop ≤ 0pp, Top-5 drop ≤ 2pp, no extra failed calls). A side
+    that fails any of them fails the verdict.
 
-    A report that shows no work at all is not a verdict but ``None``: two
-    preparations that never happened compare as identical, and "no regression"
-    is exactly the claim a report of nothing must not be able to make. See
-    :func:`_execution_evidence_reason`.
+    A report that shows no work at all is not a verdict but ``None``: two preparations that
+    never happened compare as identical, and "no regression" is exactly the claim a report of
+    nothing must not be able to make. See :func:`_execution_evidence_reason`.
     """
-    baseline = payload.get("old")
-    candidate = payload.get("new")
-    if not isinstance(baseline, Mapping) or not isinstance(candidate, Mapping):
-        return None
-    if _execution_evidence_reason(payload) is not None:
-        return None
-    baseline_route = _number(baseline.get("route_accuracy"))
-    candidate_route = _number(candidate.get("route_accuracy"))
-    baseline_top5 = _number(baseline.get("top5_hit_rate"))
-    candidate_top5 = _number(candidate.get("top5_hit_rate"))
-    if None in (baseline_route, candidate_route, baseline_top5, candidate_top5):
-        return None
+    for payload in (baseline, patched):
+        if _execution_evidence_reason(payload) is not None:
+            return None
 
-    route_delta_pp = _pp(candidate_route - baseline_route)
-    top5_delta_pp = _pp(candidate_top5 - baseline_top5)
-    failed_calls_delta = _count(candidate.get("failed_calls")) - _count(baseline.get("failed_calls"))
-    regressed = _replay_cases(payload, regressed=True)
-    improved = _replay_cases(payload, regressed=False)
-
-    route_ok = -route_delta_pp <= ROUTE_DELTA_MAX_PP
-    top5_ok = -top5_delta_pp <= TOP5_DELTA_MAX_PP
-    calls_ok = failed_calls_delta <= 0
-
+    sides: dict[str, dict] = {}
     reasons: list[str] = []
-    if not route_ok:
-        reasons.append(
-            f"route accuracy dropped {-route_delta_pp:.1f}pp beyond {-ROUTE_DELTA_MAX_PP:.1f}pp "
-            f"(regressed cases: {_listed(regressed)})"
+    for key, label in REPLAY_SIDES:
+        base_side = baseline.get(key)
+        patched_side = patched.get(key)
+        if not isinstance(base_side, Mapping) or not isinstance(patched_side, Mapping):
+            return None
+        base_route = _number(base_side.get("route_accuracy"))
+        patched_route = _number(patched_side.get("route_accuracy"))
+        base_top5 = _number(base_side.get("top5_hit_rate"))
+        patched_top5 = _number(patched_side.get("top5_hit_rate"))
+        if None in (base_route, patched_route, base_top5, patched_top5):
+            return None
+        route_delta_pp = _pp(patched_route - base_route)
+        top5_delta_pp = _pp(patched_top5 - base_top5)
+        base_calls = _count(base_side.get("failed_calls"))
+        patched_calls = _count(patched_side.get("failed_calls"))
+        failed_calls_delta = patched_calls - base_calls
+        passed = (
+            -route_delta_pp <= ROUTE_DELTA_MAX_PP
+            and -top5_delta_pp <= TOP5_DELTA_MAX_PP
+            and failed_calls_delta <= 0
         )
-    if not top5_ok:
-        reasons.append(
-            f"top-5 hit dropped {-top5_delta_pp:.1f}pp beyond {-TOP5_DELTA_MAX_PP:.1f}pp "
-            f"(regressed cases: {_listed(regressed)})"
-        )
-    if not calls_ok:
-        reasons.append(
-            f"the patched side failed {failed_calls_delta} more call(s) than the baseline"
-        )
+        sides[label] = {
+            "baseline": {
+                "route_accuracy": base_route,
+                "top5_hit_rate": base_top5,
+                "failed_calls": base_calls,
+                "prep_p50_ms": _number(base_side.get("prep_p50_ms")),
+            },
+            "patched": {
+                "route_accuracy": patched_route,
+                "top5_hit_rate": patched_top5,
+                "failed_calls": patched_calls,
+                "prep_p50_ms": _number(patched_side.get("prep_p50_ms")),
+            },
+            "route_delta_pp": route_delta_pp,
+            "top5_delta_pp": top5_delta_pp,
+            "failed_calls_delta": failed_calls_delta,
+            "passed": passed,
+        }
+        if not passed:
+            # 每条原因都带上是哪一侧：补丁可能只影响 legacy 或只影响 Jev。
+            if not (-route_delta_pp <= ROUTE_DELTA_MAX_PP):
+                reasons.append(
+                    f"{label} side: route accuracy dropped {-route_delta_pp:.1f}pp beyond "
+                    f"{-ROUTE_DELTA_MAX_PP:.1f}pp"
+                )
+            if not (-top5_delta_pp <= TOP5_DELTA_MAX_PP):
+                reasons.append(
+                    f"{label} side: top-5 hit dropped {-top5_delta_pp:.1f}pp beyond "
+                    f"{-TOP5_DELTA_MAX_PP:.1f}pp"
+                )
+            if failed_calls_delta > 0:
+                reasons.append(
+                    f"{label} side: {failed_calls_delta} more failed call(s) than the clean run"
+                )
 
-    cases = _count(payload.get("cases"))
+    cases = _count(baseline.get("cases"))
+    production = sides["jev"]
     if reasons:
         verdict = "failed: " + "; ".join(reasons)
     else:
         verdict = (
-            f"passed: route delta {route_delta_pp:+.1f}pp (limit {-ROUTE_DELTA_MAX_PP:+.1f}pp), "
-            f"top-5 delta {top5_delta_pp:+.1f}pp (limit {-TOP5_DELTA_MAX_PP:+.1f}pp) "
+            f"passed: Jev side route delta {production['route_delta_pp']:+.1f}pp "
+            f"(limit {-ROUTE_DELTA_MAX_PP:+.1f}pp), top-5 delta "
+            f"{production['top5_delta_pp']:+.1f}pp (limit {-TOP5_DELTA_MAX_PP:+.1f}pp) "
             f"over {cases} cases"
         )
     return {
         "cases": cases,
-        "baseline": {
-            "route_accuracy": baseline_route,
-            "top5_hit_rate": baseline_top5,
-            "sample_count": _count(baseline.get("sample_count")),
-        },
-        "candidate": {
-            "route_accuracy": candidate_route,
-            "top5_hit_rate": candidate_top5,
-            "sample_count": _count(candidate.get("sample_count")),
-            "failed_calls": _count(candidate.get("failed_calls")),
-        },
-        "route_delta_pp": route_delta_pp,
-        "top5_delta_pp": top5_delta_pp,
+        "sides": sides,
+        "route_delta_pp": production["route_delta_pp"],
+        "top5_delta_pp": production["top5_delta_pp"],
         "thresholds": {
             "route_drop_max_pp": ROUTE_DELTA_MAX_PP,
             "top5_drop_max_pp": TOP5_DELTA_MAX_PP,
         },
-        "regressed_cases": regressed,
-        "improved_cases": improved,
         "passed": not reasons,
         "verdict": verdict,
     }
 
 
-def _run_benchmark_replay(
+def _run_benchmark(
     *,
     worktree: Path,
     env: Mapping[str, str],
@@ -651,20 +673,20 @@ def _run_benchmark_replay(
     kb_id: str,
     timeout: float,
     user_id: int | None = None,
+    report_name: str = BENCHMARK_REPORT_NAME,
 ) -> tuple[dict | None, str]:
-    """Replay the committed corpus in the worktree and decide with layer-2 thresholds.
+    """One replay, returning the runner's raw report and an error string.
 
     The report file decides, not the exit code: the runner exits non-zero when its own
     thresholds fail, which is a **verdict** (the layer-2 thresholds here may still pass), so
     the report is read whenever it exists and parses. Only a missing or unreadable report
     turns the exit code into an error.
 
-    A replay that cannot run is reported as an error with no benchmark, never as
-    a rejection: a missing environment is not evidence about a candidate. A
-    replay that ran without measuring anything is reported the same way, with the
-    reason it cannot be read as a result.
+    A replay that cannot run is reported as an error with no report, never as a rejection: a
+    missing environment is not evidence about a candidate. A replay that ran without measuring
+    anything is reported the same way, with the reason it cannot be read as a result.
     """
-    json_out = sandbox_root / BENCHMARK_REPORT_NAME
+    json_out = sandbox_root / report_name
     outcome = _run_command(
         _benchmark_command(kb_id=kb_id, json_out=json_out, user_id=user_id),
         cwd=worktree,
@@ -688,10 +710,7 @@ def _run_benchmark_replay(
     no_evidence = _execution_evidence_reason(payload)
     if no_evidence is not None:
         return None, f"benchmark replay measured nothing: {no_evidence}"
-    verdict = benchmark_verdict(payload)
-    if verdict is None:
-        return None, "benchmark replay report is missing the compared metrics"
-    return verdict, ""
+    return dict(payload), ""
 
 
 # ------------------------------------------------------------------
@@ -785,9 +804,39 @@ def _execute(
         candidate, worktree=worktree, env=env, timeout=tests_timeout
     )
 
-    # (6) One replay of the committed corpus, decided with the layer-2 thresholds.
+    # (6) The patch's own effect: the same replay, once in a clean worktree at HEAD and
+    # once here. The runner's own old/new pair is legacy-versus-Jev, so one report says
+    # nothing about the diff; the difference between the two runs does.
     if run_benchmark and tests_passed is True:
-        benchmark, replay_error = _run_benchmark_replay(
+        baseline_worktree = sandbox_root / BASELINE_WORKTREE_DIRNAME
+        added_baseline = _run_command(
+            ("git", "worktree", "add", str(baseline_worktree), "--detach", "HEAD"),
+            cwd=root,
+            env=env,
+            timeout=WORKTREE_TIMEOUT_S,
+        )
+        if not added_baseline.ok:
+            return report(
+                applied=True,
+                tests_passed=True,
+                benchmark=None,
+                error=(
+                    "baseline worktree failed: "
+                    f"{_failure_kind(added_baseline, WORKTREE_TIMEOUT_S)}"
+                ),
+            )
+        # Each run imports its own tree: PYTHONPATH decides what ``import rag`` resolves to,
+        # so the clean run must point at the clean worktree.
+        baseline_payload, baseline_error = _run_benchmark(
+            worktree=baseline_worktree,
+            env=_replay_env(baseline_worktree, data_snapshot),
+            sandbox_root=sandbox_root,
+            kb_id=kb_id,
+            timeout=benchmark_timeout,
+            user_id=replay_user_id,
+            report_name=BASELINE_REPORT_NAME,
+        )
+        patched_payload, patched_error = _run_benchmark(
             worktree=worktree,
             env=_replay_env(worktree, data_snapshot),
             sandbox_root=sandbox_root,
@@ -795,6 +844,7 @@ def _execute(
             timeout=benchmark_timeout,
             user_id=replay_user_id,
         )
+        replay_error = baseline_error or patched_error
         if replay_error:
             return report(
                 applied=True,
@@ -803,7 +853,16 @@ def _execute(
                 benchmark=None,
                 error=replay_error,
             )
-        return report(applied=True, tests_passed=True, benchmark=benchmark)
+        verdict = patch_verdict(baseline_payload or {}, patched_payload or {})
+        if verdict is None:
+            return report(
+                applied=True,
+                tests_passed=True,
+                failed_tests=(),
+                benchmark=None,
+                error="benchmark replay report is missing the compared metrics",
+            )
+        return report(applied=True, tests_passed=True, benchmark=verdict)
 
     return report(
         applied=True,
@@ -900,6 +959,9 @@ def run_patch_sandbox(
         # second working tree leaves the repository here, and the sandbox root
         # leaves the disk.
         cleanup_errors = _release_worktree(root=root, worktree=worktree)
+        baseline_worktree = sandbox_root / BASELINE_WORKTREE_DIRNAME
+        if baseline_worktree.exists():
+            cleanup_errors.extend(_release_worktree(root=root, worktree=baseline_worktree))
         shutil.rmtree(sandbox_root, ignore_errors=True)
         if worktree.exists():
             # The remove could not take (a locked file, a hung handle): with the
@@ -973,7 +1035,7 @@ __all__ = [
     "SandboxReport",
     "WORKTREE_DIRNAME",
     "WORKTREE_TIMEOUT_S",
-    "benchmark_verdict",
+    "patch_verdict",
     "run_patch_sandbox",
     "sandbox_gate_outcome",
 ]

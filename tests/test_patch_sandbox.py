@@ -309,6 +309,7 @@ class FakeRunner:
         *,
         benchmark: dict | None = None,
         benchmark_returncode: int = 0,
+        baseline_benchmark: dict | None = None,
         pytest_returncode: int = 0,
         pytest_stdout: str = "1 passed in 0.01s\n",
         apply_returncode: int = 0,
@@ -318,6 +319,10 @@ class FakeRunner:
     ) -> None:
         self._benchmark = benchmark
         self._benchmark_returncode = benchmark_returncode
+        # 干净工作树那一侧的报告；缺省与 patched 相同 ⇒ 零差异（补丁无影响）
+        self._baseline_benchmark = (
+            benchmark if baseline_benchmark is None else baseline_benchmark
+        )
         self._pytest_returncode = pytest_returncode
         self._pytest_stdout = pytest_stdout
         self._apply_returncode = apply_returncode
@@ -362,10 +367,15 @@ class FakeRunner:
         return _outcome(0, "")
 
     def _replay(self, words: tuple[str, ...]):
-        if self._benchmark_returncode == 0 and self._benchmark is not None:
-            path = Path(words[words.index("--json-out") + 1])
+        path = Path(words[words.index("--json-out") + 1])
+        payload = (
+            self._baseline_benchmark
+            if path.name == sandbox_module.BASELINE_REPORT_NAME
+            else self._benchmark
+        )
+        if self._benchmark_returncode == 0 and payload is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._benchmark), encoding="utf-8")
+            path.write_text(json.dumps(payload), encoding="utf-8")
         return _outcome(self._benchmark_returncode, "", "benchmark runner failed")
 
     def of(self, needle: str) -> list[RecordedCall]:
@@ -671,12 +681,8 @@ def test_the_benchmark_replay_compares_both_sides_against_the_layer_two_threshol
     sandbox_repo: Path, make_runner
 ):
     runner = make_runner(
-        benchmark=_benchmark_payload(
-            cases=4,
-            route_accuracy=0.75,
-            top5_hit_rate=0.75,
-            candidate_top5_hit_rate=0.5,
-        )
+        benchmark=_benchmark_payload(cases=4, route_accuracy=0.75, candidate_top5_hit_rate=0.5),
+        baseline_benchmark=_benchmark_payload(cases=4, route_accuracy=0.75),
     )
 
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
@@ -687,8 +693,11 @@ def test_the_benchmark_replay_compares_both_sides_against_the_layer_two_threshol
     benchmark = report.benchmark
     assert benchmark is not None
     assert benchmark["cases"] == 4
-    assert benchmark["baseline"]["route_accuracy"] == 0.75
-    assert benchmark["candidate"]["route_accuracy"] == 0.75
+    # 逐侧比较：干净工作树 vs 打过补丁的工作树（不是脚本自己的 legacy/Jev 两面）
+    jev = benchmark["sides"]["jev"]
+    assert jev["baseline"]["top5_hit_rate"] == 0.75
+    assert jev["patched"]["top5_hit_rate"] == 0.5
+    assert jev["top5_delta_pp"] == pytest.approx(-25.0)
     assert benchmark["route_delta_pp"] == 0.0
     assert benchmark["top5_delta_pp"] == pytest.approx(-25.0)
     assert benchmark["thresholds"] == {
@@ -698,41 +707,40 @@ def test_the_benchmark_replay_compares_both_sides_against_the_layer_two_threshol
     assert benchmark["passed"] is False
     assert "top-5" in benchmark["verdict"]
 
-    replay = runner.of("benchmark_jev_retrieval.py")[0]
-    assert replay.cwd.name == "worktree"
-    assert replay.command[replay.command.index("--kb-id") + 1] == "rag_docs"
-    assert replay.env["PYTHONPATH"] == str(replay.cwd)
-    # The replay report is written outside the worktree it measures.
-    json_out = Path(replay.command[replay.command.index("--json-out") + 1])
-    assert json_out.parent == replay.cwd.parent
+    replays = runner.of("benchmark_jev_retrieval.py")
+    assert [call.cwd.name for call in replays] == ["baseline", "worktree"]
+    for replay in replays:
+        assert replay.command[replay.command.index("--kb-id") + 1] == "rag_docs"
+        # 每一次回放都要 import 自己那棵树，否则两次都在量同一份代码
+        assert replay.env["PYTHONPATH"] == str(replay.cwd)
+        json_out = Path(replay.command[replay.command.index("--json-out") + 1])
+        assert json_out.parent == replay.cwd.parent
 
 
 def test_a_benchmark_regression_is_reported_without_rejecting_the_run(
     sandbox_repo: Path, make_runner
 ):
     runner = make_runner(
-        benchmark=_benchmark_payload(
-            cases=4,
-            route_accuracy=1.0,
-            candidate_route_accuracy=0.75,
-            regressed_cases=(0, 1),
-        )
+        benchmark=_benchmark_payload(cases=4),  # 打过补丁：Jev 路由 0.75
+        baseline_benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=1.0),  # 干净：1.0
     )
 
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
 
     assert report.applied is True
-    assert report.tests_passed is True
+    assert report.tests_passed is True  # 运行本身没有被拒绝……
     assert report.benchmark["route_delta_pp"] == pytest.approx(-25.0)
-    assert report.benchmark["passed"] is False
+    assert report.benchmark["passed"] is False  # ……但门禁结论是失败
     assert "route" in report.benchmark["verdict"]
-    assert report.benchmark["regressed_cases"] == ["rag-000", "rag-001"]
     assert report.error == ""
     assert runner.of("benchmark_jev_retrieval.py")
 
 
 def test_candidate_side_failures_fail_the_replay_verdict(sandbox_repo: Path, make_runner):
-    runner = make_runner(benchmark=_benchmark_payload(cases=4, candidate_failed_calls=2))
+    runner = make_runner(
+        benchmark=_benchmark_payload(cases=4, candidate_failed_calls=2),
+        baseline_benchmark=_benchmark_payload(cases=4),
+    )
 
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
 
@@ -743,6 +751,7 @@ def test_candidate_side_failures_fail_the_replay_verdict(sandbox_repo: Path, mak
 
 def test_a_pass_replay_is_reported_as_a_pass(sandbox_repo: Path, make_runner):
     runner = make_runner(benchmark=_benchmark_payload(cases=4, top5_hit_rate=0.75))
+    # 两侧同载荷 ⇒ 补丁没有影响
 
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
 
@@ -829,7 +838,11 @@ def test_cleanup_runs_when_the_worktree_add_itself_raises(sandbox_repo: Path, mo
 
 def runner_root_exists(runner: FakeRunner) -> bool:
     """Whether any recorded child-process root still exists on disk."""
-    return any(call.cwd.parent.exists() for call in runner.calls if call.cwd.name == "worktree")
+    return any(
+        call.cwd.parent.exists()
+        for call in runner.calls
+        if call.cwd.name in ("worktree", "baseline")
+    )
 
 
 def test_cleanup_removes_a_real_worktree_when_pytest_explodes(sandbox_repo: Path, monkeypatch):
@@ -921,7 +934,9 @@ def test_a_failing_test_run_writes_back_rejected_with_the_test_names(sandbox_rep
 
 def test_a_replay_regression_writes_back_rejected(sandbox_repo: Path, make_runner):
     make_runner(
-        benchmark=_benchmark_payload(cases=4, route_accuracy=1.0, candidate_route_accuracy=0.75)
+        # 干净一侧 Jev 路由 1.0，打过补丁一侧 0.75 ⇒ 补丁造成 25pp 回归
+        benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=0.75),
+        baseline_benchmark=_benchmark_payload(cases=4, candidate_route_accuracy=1.0),
     )
     report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
 
@@ -1135,12 +1150,14 @@ def test_a_failed_threshold_exit_still_yields_a_verdict(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
 
-    verdict, error = sandbox_module._run_benchmark_replay(
+    payload, error = sandbox_module._run_benchmark(
         worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="kb1", timeout=10.0, user_id=1
     )
 
     assert error == ""
-    assert verdict is not None and "verdict" in verdict
+    assert payload is not None
+    verdict = sandbox_module.patch_verdict(payload, payload)
+    assert verdict is not None and "passed" in verdict
 
 
 def test_an_exit_without_a_report_is_still_an_error(tmp_path, monkeypatch):
@@ -1152,9 +1169,9 @@ def test_an_exit_without_a_report_is_still_an_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
 
-    verdict, error = sandbox_module._run_benchmark_replay(
+    payload, error = sandbox_module._run_benchmark(
         worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="kb1", timeout=10.0
     )
 
-    assert verdict is None
+    assert payload is None
     assert error == "benchmark replay did not complete: exit_1"
