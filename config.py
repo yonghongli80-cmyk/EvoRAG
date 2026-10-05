@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     # 管理员确认标签 JSON 路径（诊断证据的最高优先级）；为空=无标签，此时草案根因只能是
     # 假设级（diagnoser 后校验强制）。
     evolution_diagnosis_labels_path: str = ""
+    # 每个观测采几次样取多数（1 = 与过去完全一致，不增加成本；上限 5）。
+    # 动机是实测的**方差**：同一观测、同一证据包、同一提示词，两次给出不同类别
+    # （obs#8 一次 chunking_structure_damage、一次 recall_miss），单次采样在那些行上等于抛硬币。
+    # 代价是模型调用数 ×samples，**按调用计入每轮预算**（工人侧 `diagnosis_unstable` 记录票不一致）。
+    evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录
     # 里按需放：`qdrant_data/`（语料副本）、`users.db`（ACL/主体）、`memory.db`。

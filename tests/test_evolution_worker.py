@@ -804,6 +804,8 @@ def test_diagnosis_config_records_the_timeout_and_token_settings(tmp_path):
     assert config["model_call_budget"] == 3
     assert config["timeout_seconds"] == 12.5
     assert config["max_tokens"] == 777
+    # 采样次数也随配置记录：默认 1（与过去完全一致），提高即为降方差付出的成本。
+    assert config["samples"] == 1
     assert config["labels_path"] == ""
     assert config["prompt_version"] == DIAGNOSIS_PROMPT_VERSION
     assert config["model"] == settings.deepseek_model
@@ -1019,3 +1021,55 @@ def test_an_invalid_draft_is_not_retried_without_budget(tmp_path):
     assert outcome["diagnosis_failed"] == 1
     assert outcome["diagnosis_retries"] == 0
     assert outcome["model_calls"] == 1
+
+
+def test_sampling_costs_one_model_call_per_sample_and_stores_one_draft(tmp_path):
+    """samples=3 ⇒ 一个观测花 3 次调用、只落一条（多数）草案，并把票型计数。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = awaiting_cluster(store, "kb1|retrieval|sampled")
+    member = store.list_observations(cluster["id"])[0]
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    other = json.dumps(
+        sample_draft(failure_category="ranking_error", suggested_layer="reranking").model_dump(
+            mode="json"
+        ),
+        ensure_ascii=False,
+    )
+    step = build_step(store, FakeModel(other, valid, valid), evolution_diagnosis_samples=3)
+
+    outcome = step()
+
+    assert outcome["model_calls"] == 3  # 每次采样都算进预算
+    assert outcome["diagnosed"] == 1
+    assert outcome["diagnosis_unstable"] == 1  # 票不一致被记下来
+    drafts = store.list_drafts()
+    assert len(drafts) == 1
+    assert drafts[0]["observation_id"] == member["id"]
+    assert drafts[0]["payload"]["failure_category"] == "recall_miss"  # 两票胜出一票
+
+
+def test_sampling_never_exceeds_the_round_budget(tmp_path):
+    """预算只剩两次时不采第三次：少采一次并如实记账，不越过每轮上限。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|capped")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel(valid, valid, valid), evolution_diagnosis_samples=3, budget=2)
+
+    outcome = step()
+
+    assert outcome["model_calls"] == 2
+    assert outcome["diagnosed"] == 1
+
+
+def test_one_sample_keeps_the_previous_cost(tmp_path):
+    """默认 samples=1：调用数、草案数与过去完全一致。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|single")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    step = build_step(store, FakeModel(valid))
+
+    outcome = step()
+
+    assert outcome["model_calls"] == 1
+    assert outcome["diagnosed"] == 1
+    assert outcome["diagnosis_unstable"] == 0

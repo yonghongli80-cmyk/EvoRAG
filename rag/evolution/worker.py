@@ -517,7 +517,7 @@ def make_evolution_diagnosis_step(
     ``ExecutionTracker`` over ``memory_db_path`` and the admin-only read-only
     retrieval reader.
     """
-    from rag.evolution.diagnoser import REASON_INVALID, DiagnosisUnavailable
+    from rag.evolution.diagnoser import REASON_INVALID, draft_by_majority
     from rag.evolution.evidence import assemble_evidence
 
     cfg = settings_obj or settings
@@ -525,6 +525,8 @@ def make_evolution_diagnosis_step(
     timeout_seconds = float(cfg.evolution_diagnosis_timeout_seconds)
     max_tokens = int(cfg.evolution_diagnosis_max_tokens)
     labels_path = cfg.evolution_diagnosis_labels_path or None
+    #: 每个观测采几次样取多数（默认 1 = 与过去完全一致，不增加成本）。
+    samples = max(1, int(getattr(cfg, "evolution_diagnosis_samples", 1)))
 
     def resolve_diagnoser_factory():
         if diagnoser_factory is not None:
@@ -555,13 +557,14 @@ def make_evolution_diagnosis_step(
         config = {
             "model_call_budget": budget,
             "timeout_seconds": timeout_seconds,
+            "samples": samples,
             "max_tokens": max_tokens,
             "labels_path": labels_path or "",
             "prompt_version": "",
             "model": "",
         }
         outcome = {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_retries": 0,
-                   "diagnosis_config": config}
+                   "diagnosis_unstable": 0, "diagnosis_config": config}
         if budget <= 0:
             return outcome  # zero budget: no diagnosis work, not even a store scan
         pending = store.observations_awaiting_diagnosis_without_draft(limit=budget)
@@ -606,26 +609,42 @@ def make_evolution_diagnosis_step(
                 attempts = 0
                 while attempts < _MAX_DIAGNOSIS_ATTEMPTS and outcome["model_calls"] < budget:
                     attempts += 1
-                    outcome["model_calls"] += 1
+                    # 采样次数受本轮剩余预算限制：宁可少采一次（票型会记下来），也不越过上限。
+                    allowance = min(samples, budget - outcome["model_calls"])
                     try:
                         # The diagnoser keeps receiving the cluster row for its identity
                         # signals (design section 6); the evidence pack is the single
                         # observation's. A draft is cluster-scoped for the admin decision
                         # but observation-scoped through observation_id.
-                        draft = diagnoser.draft(cluster, pack)
-                        store.add_draft(
-                            cluster["id"],
-                            draft,
-                            observation_id=observation["id"],
-                            prompt_version=diagnoser.prompt_version,
-                            model=diagnoser.model_name,
-                        )
-                    except DiagnosisUnavailable as error:
-                        # ``invalid`` = 模型没遵守输出契约（约 1/4 的 ranking 族调用如此，
-                        # 实测被截断的 JSON）。同一证据包再采样一次往往就合规了，所以同轮
-                        # 重试一次；重试计入每轮调用预算，运营侧的成本账才不会失真。
-                        # ``timeout``/``rate_limited`` 是容量信号：重试只会更快耗尽预算，
-                        # 交给下一轮。
+                        sampled = draft_by_majority(diagnoser, cluster, pack, samples=allowance)
+                        outcome["model_calls"] += max(1, sampled.calls)
+                        if sampled.draft is not None:
+                            store.add_draft(
+                                cluster["id"],
+                                sampled.draft,
+                                observation_id=observation["id"],
+                                prompt_version=diagnoser.prompt_version,
+                                model=diagnoser.model_name,
+                            )
+                            if sampled.unstable:
+                                # 同一证据包下样本给出了不同类别：多半票仍存下，但这个数字
+                                # 告诉运营者这条草案有多可信（族级方差的直接度量）。
+                                outcome["diagnosis_unstable"] += 1
+                                logger.info(
+                                    "evolution_diagnosis_unstable cluster=%s observation=%s votes=%s",
+                                    cluster.get("id"),
+                                    observation.get("id"),
+                                    ",".join(sampled.votes),
+                                )
+                            outcome["diagnosed"] += 1
+                            break
+                        error = sampled.error
+                        if error is None:  # pragma: no cover - 采样要么有草案要么有错误
+                            outcome["diagnosis_failed"] += 1
+                            break
+                        # ``invalid`` = 模型没遵守输出契约（约 1/4 的 ranking 族调用如此，实测被
+                        # 截断的 JSON）。整轮采样都没产出时同轮再采一轮；重试计入每轮调用预算，
+                        # 成本账才不失真。``timeout``/``rate_limited`` 是容量信号，交给下一轮。
                         if (
                             error.reason == REASON_INVALID
                             and attempts < _MAX_DIAGNOSIS_ATTEMPTS
@@ -661,8 +680,6 @@ def make_evolution_diagnosis_step(
                             observation.get("id"),
                         )
                         break
-                    outcome["diagnosed"] += 1
-                    break
         finally:
             _close_quietly(reader)
             _close_quietly(tracker)

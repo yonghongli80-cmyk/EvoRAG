@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import get_args
 
 import openai
@@ -409,6 +410,77 @@ def _enforce_evidence_rules(draft: DiagnosisDraft, pack: EvidencePack) -> None:
         problems.append("reproducible pack requires reproducible=true")
     if problems:
         raise DiagnosisUnavailable(REASON_INVALID, "; ".join(problems))
+
+
+@dataclass(frozen=True)
+class SampledDraft:
+    """One sampling round's outcome: the winning draft, its votes, its cost, its failure.
+
+    ``draft is None`` means every sample failed and ``error`` carries the last failure, so a
+    caller keeps its existing reason handling (the worker's retry is keyed on the reason).
+    ``votes`` is the observed category per successful sample, in sample order: a round whose
+    votes disagree is exactly the variance the sampling exists to absorb.
+    """
+
+    draft: DiagnosisDraft | None
+    votes: tuple[str, ...] = ()
+    calls: int = 0
+    error: DiagnosisUnavailable | None = None
+
+    @property
+    def failure_reason(self) -> str:
+        """The failure reason, or ``""`` when the round produced a draft."""
+        return "" if self.error is None else self.error.reason
+
+    @property
+    def unstable(self) -> bool:
+        """Whether the successful samples disagreed on the category."""
+        return len(set(self.votes)) > 1
+
+
+def draft_by_majority(
+    diagnoser: Diagnoser,
+    cluster: dict,
+    pack: EvidencePack,
+    *,
+    samples: int = 1,
+) -> SampledDraft:
+    """Sample the diagnosis up to ``samples`` times and keep the majority category.
+
+    Single-shot diagnoses flip categories on identical evidence for some families (the
+    accessory family's obs 8 came back ``chunking_structure_damage`` once and ``recall_miss``
+    the next), which makes the category a coin toss on those rows. Sampling attacks that
+    variance directly. It costs ``samples`` model calls, which the caller must budget: this
+    function never reads settings and never writes anything.
+
+    Failed samples are dropped rather than fatal — one contract violation among three samples
+    should not discard two good diagnoses — and only an all-failed round reports ``draft=None``.
+    The winning draft is the most frequent category; ties go to the earliest sample, so the
+    same evidence and the same samples always pick the same draft.
+    """
+
+    wanted = max(1, int(samples))
+    drafts: list[DiagnosisDraft] = []
+    votes: list[str] = []
+    calls = 0
+    last_error: DiagnosisUnavailable | None = None
+    for _ in range(wanted):
+        calls += 1
+        try:
+            draft = diagnoser.draft(cluster, pack)
+        except DiagnosisUnavailable as error:
+            last_error = error
+            continue
+        drafts.append(draft)
+        votes.append(draft.failure_category)
+    if not drafts:
+        return SampledDraft(draft=None, votes=(), calls=calls, error=last_error)
+    counts: dict[str, int] = {}
+    for vote in votes:
+        counts[vote] = counts.get(vote, 0) + 1
+    winner_vote = max(counts.items(), key=lambda item: (item[1], -votes.index(item[0])))[0]
+    winner = next(draft for draft, vote in zip(drafts, votes, strict=True) if vote == winner_vote)
+    return SampledDraft(draft=winner, votes=tuple(votes), calls=calls)
 
 
 class Diagnoser:

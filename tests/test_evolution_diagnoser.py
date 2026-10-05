@@ -24,6 +24,7 @@ from rag.evolution.diagnoser import (
     DIAGNOSIS_PROMPT_VERSION,
     Diagnoser,
     DiagnosisUnavailable,
+    draft_by_majority,
 )
 from rag.evolution.models import DiagnosisDraft, EvidencePack, ReproductionResult
 
@@ -475,3 +476,98 @@ def test_the_exception_rule_wins_over_label_evidence():
     prompt = _request_text(fake)
     assert "未捕获异常" in prompt
     assert "取用/排序" not in prompt
+
+
+# ------------------------------------------------------------------
+# 多次采样取多数：降方差（单次采样在部分族上等于抛硬币）。
+# ------------------------------------------------------------------
+
+
+class _StubDiagnoser:
+    """A diagnoser whose samples come from a scripted list (or raise it)."""
+
+    def __init__(self, *replies) -> None:
+        self.replies = list(replies)
+        self.calls = 0
+
+    def draft(self, cluster, pack):
+        self.calls += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def _draft_with(category: str):
+    """采样只读 ``failure_category``：一个最小替身即可。"""
+    return SimpleNamespace(failure_category=category)
+
+
+def test_majority_sampling_keeps_the_most_frequent_category():
+    """三次采样里出现两次的类别胜出，票型原样留下（供运营者看一致性）。"""
+    stub = _StubDiagnoser(
+        _draft_with("recall_miss"),
+        _draft_with("ranking_error"),
+        _draft_with("recall_miss"),
+    )
+
+    result = draft_by_majority(stub, {}, None, samples=3)
+
+    assert result.draft is not None
+    assert result.draft.failure_category == "recall_miss"
+    assert result.votes == ("recall_miss", "ranking_error", "recall_miss")
+    assert result.calls == 3
+    assert result.unstable is True
+
+
+def test_majority_sampling_breaks_ties_by_the_earliest_sample():
+    """平票取最早出现的那个：同证据同采样必然给同一结果（可复现）。"""
+    stub = _StubDiagnoser(_draft_with("ranking_error"), _draft_with("recall_miss"))
+
+    result = draft_by_majority(stub, {}, None, samples=2)
+
+    assert result.draft is not None
+    assert result.draft.failure_category == "ranking_error"
+    assert result.unstable is True
+
+
+def test_a_failed_sample_is_dropped_not_fatal():
+    """三次里坏一次不丢两次好结果——契约违规不该整轮作废。"""
+    stub = _StubDiagnoser(
+        _draft_with("ranking_error"),
+        DiagnosisUnavailable("invalid", "response is not a JSON object"),
+        _draft_with("ranking_error"),
+    )
+
+    result = draft_by_majority(stub, {}, None, samples=3)
+
+    assert result.draft is not None
+    assert result.votes == ("ranking_error", "ranking_error")
+    assert result.calls == 3
+    assert result.error is None
+
+
+def test_an_all_failed_round_reports_the_failure():
+    """全失败时把失败原因交回调用方（worker 的 invalid 重试仍然按 reason 生效）。"""
+    stub = _StubDiagnoser(
+        DiagnosisUnavailable("invalid", "response is not a JSON object"),
+        DiagnosisUnavailable("invalid", "response is not a JSON object"),
+    )
+
+    result = draft_by_majority(stub, {}, None, samples=2)
+
+    assert result.draft is None
+    assert result.votes == ()
+    assert result.failure_reason == "invalid"
+    assert result.calls == 2
+
+
+def test_one_sample_is_the_previous_behaviour():
+    """默认 1 次采样 = 与过去完全一致（不改变任何既有行为与成本）。"""
+    stub = _StubDiagnoser(_draft_with("undetermined"))
+
+    result = draft_by_majority(stub, {}, None)
+
+    assert result.draft is not None
+    assert result.calls == 1
+    assert result.unstable is False
