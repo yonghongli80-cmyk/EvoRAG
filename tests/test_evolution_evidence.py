@@ -600,3 +600,62 @@ def test_label_evidence_is_empty_without_a_retriever(tmp_path):
     pack = assemble_evidence(member, cluster, store=store, labels_path=str(labels))
 
     assert pack.label_evidence == ()
+
+
+def test_label_evidence_absent_names_the_tokens_the_recall_lacks(tmp_path):
+    """负向包含检查：标签里**没在召回窗口出现**的型号串被点名。
+
+    模型看得到"召回了什么"、看不到"缺了什么"，所以它在 recall_miss 与
+    generator_ignored_evidence 之间摇摆。这条把"缺了什么"变成事实。
+    """
+
+    import json as _json
+
+    from rag.evolution.evidence import assemble_evidence
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="找一下副厂配件明细")
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        _json.dumps(
+            [{"question": "找一下副厂配件明细", "expected_answer": "遮阳罩型号 LH716-01；另一支 A046。"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    retriever = FakeRetriever({"找一下副厂配件明细": (Chunk("镜头 LH716-01 遮阳罩"),)})
+
+    pack = assemble_evidence(
+        member, cluster, store=store, labels_path=str(labels), retrieve=retriever
+    )
+
+    assert [record["token"] for record in pack.label_evidence] == ["LH716-01"]
+    assert pack.label_evidence_absent == ("A046",)  # 只在标签里、召回窗口里完全没有
+
+
+def test_label_evidence_absent_is_empty_when_every_token_is_recalled(tmp_path):
+    """全命中时不得报"缺失"：否则会把"能拿到却没采用"误判成召回缺口。"""
+
+    import json as _json
+
+    from rag.evolution.evidence import assemble_evidence
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="找一下副厂配件明细")
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        _json.dumps(
+            [{"question": "找一下副厂配件明细", "expected_answer": "遮阳罩型号 LH716-01。"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    retriever = FakeRetriever({"找一下副厂配件明细": (Chunk("镜头 LH716-01 遮阳罩"),)})
+
+    pack = assemble_evidence(
+        member, cluster, store=store, labels_path=str(labels), retrieve=retriever
+    )
+
+    assert pack.label_evidence_absent == ()

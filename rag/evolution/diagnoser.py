@@ -52,7 +52,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v7"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v8"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -252,6 +252,13 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append(
             "label_evidence: （无：没有管理员答案文本，或该文本的型号串未出现在召回块中）"
         )
+    if pack.label_evidence_absent:
+        lines.append(
+            "label_evidence_absent（**这些答案型号在该召回窗口里完全没出现**——确定性的负向包含检查）: "
+            + "、".join(pack.label_evidence_absent)
+        )
+    else:
+        lines.append("label_evidence_absent: （无：标签里的型号串都能在召回里找到，或没有管理员答案）")
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
@@ -302,6 +309,17 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
             "suggested_layer 取 reranking（检索能拿到却没被采用）；**不得**判成 undetermined"
             "（内容缺口）或 recall_miss（内容明明在召回窗口内，first_rank 给出了位置）。"
             "只有在 label_evidence 为空、且块预览里也确实找不到所问事实时，才按内容缺口处理。"
+        )
+    if pack.label_evidence_absent and not pack.exception_class:
+        # 负向包含检查：模型看得到"召回了什么"，看不到"缺了什么"，所以它在"没被召回"与
+        # "召回了却没被采用"之间摇摆（实测 obs#7 两轮各给一个）。这条给出事实依据。
+        rules.append(
+            "本次证据包含 label_evidence_absent：管理员给出的答案型号串在该召回窗口里"
+            "**完全没出现**（确定性负向包含检查）。若 label_evidence 同时为空（一个都没命中），"
+            "说明答案内容**根本没有被召回**：failure_category 必须取 recall_miss，"
+            "suggested_layer 取 retrieval_config；**不得**判成 generator_ignored_evidence"
+            "（它预设答案块已经在召回集合里）或 ranking_error。"
+            "若 label_evidence 非空（部分命中），则按命中的那部分走取用侧判断。"
         )
     # 判定统计量只作为证据渲染，**不附加强制口径**。2026-09-29 成对实测（5 条内容缺口观测，
     # v3 vs v4，见 real-case-handoff/evolab/diagnosis-rule-ab-with-rule.json）：一条

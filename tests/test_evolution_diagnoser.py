@@ -120,7 +120,9 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     # （试过的 v6「散文字段禁贴哈希 + 限长」在 ranking_error 族实测无改善，已撤回并留档。）
     # v7 起：label_evidence —— 管理员答案文本在召回块中的**精确包含检查**，命中即可判
     #        ranking_error（能拿到却没被采用），这是"内容存在"唯一不靠猜的确定性判据。
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v7"
+    # v8 起：label_evidence_absent —— 同一检查读反向：哪些答案型号在召回窗口里完全没出现，
+    #        让"没被召回 ⇒ recall_miss"也有事实依据（模型看不到"缺了什么"）。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v8"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -571,3 +573,28 @@ def test_one_sample_is_the_previous_behaviour():
     assert result.draft is not None
     assert result.calls == 1
     assert result.unstable is False
+
+
+def test_prompt_renders_absent_answer_tokens_and_requires_recall_miss():
+    """负向包含检查命中时必须判召回侧：模型看不到"缺了什么"，这条给它事实依据。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(label_evidence_absent=("LH716-01", "B070"))
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "label_evidence_absent" in prompt
+    assert "LH716-01" in prompt and "B070" in prompt
+    assert "recall_miss" in prompt
+    assert "根本没有被召回" in prompt
+
+
+def test_the_absent_rule_is_absent_without_absent_tokens():
+    """没有"完全没出现"的型号时不出现该口径：不得影响无标签或全命中的行。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    prompt = _request_text(fake)
+    assert "label_evidence_absent: （无" in prompt
+    assert "根本没有被召回" not in prompt

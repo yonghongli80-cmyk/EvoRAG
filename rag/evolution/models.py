@@ -197,6 +197,10 @@ class EvidencePack:
     #: 块数。它把"内容到底在不在召回里"从关键词相关度变成**可核对的精确包含**——这是
     #: `ranking_error`（能拿到却没被采用）与 `undetermined`（内容缺口）之间唯一不靠猜的判据。
     label_evidence: tuple[dict, ...] = ()
+    #: 管理员答案里的型号串中，在召回窗口里**完全没出现**的那些（确定性的负向包含检查）。
+    #: 它是 `recall_miss` 唯一不靠猜的依据：模型看得到"已召回了什么"，看不到"缺了什么"，
+    #: 所以在"没被召回"与"召回了但判定没采用"之间摇摆（实测 obs#7 两轮各给一个）。
+    label_evidence_absent: tuple[str, ...] = ()
     reproduction: ReproductionResult = ReproductionResult(reproducible=False)
 
 

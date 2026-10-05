@@ -358,6 +358,8 @@ def assemble_evidence(
         recall_texts=recall_texts,
     )
     failed_hashes = _hash_tuple(observation.get("details_chunk_hashes"))
+    matched_labels = _matched_admin_labels(questions, labels)
+    label_hits = _label_evidence(matched_labels, recall_texts, previews)
     # The pack is prompt input for a reasoning model: every 64-character hash is a
     # token cost, so both lists are capped (sorted, so the cap is deterministic and
     # the reproduction check — which runs on the full sets — is unaffected).
@@ -369,7 +371,7 @@ def assemble_evidence(
         root_cause_feature=str(
             observation.get("root_cause_feature") or cluster.get("root_cause_feature") or ""
         ),
-        admin_labels=_matched_admin_labels(questions, labels),
+        admin_labels=matched_labels,
         success_traces=_success_traces(kb_id, questions, tracker),
         recall_hashes=tuple(sorted(recall)[:_HASH_PROMPT_LIMIT]),
         failed_hashes=tuple(sorted(failed_hashes)[:_HASH_PROMPT_LIMIT]),
@@ -383,9 +385,8 @@ def assemble_evidence(
         passage_judging=_passage_judging(observation),
         failure_route=str(observation.get("route") or ""),
         exception_class=str(observation.get("details_exception_class") or ""),
-        label_evidence=_label_evidence(
-            _matched_admin_labels(questions, labels), recall_texts, previews
-        ),
+        label_evidence=label_hits,
+        label_evidence_absent=_label_evidence_absent(matched_labels, recall_texts),
         reproduction=reproduction,
     )
 
@@ -477,6 +478,27 @@ def _label_evidence(
                 }
             )
     return tuple(hits)
+
+
+def _label_evidence_absent(labels: tuple[dict, ...], recall_texts: list[str]) -> tuple[str, ...]:
+    """Which of the admin answer's part numbers the recall window never contains.
+
+    The same deterministic check as :func:`_label_evidence`, read the other way round and from
+    the same source of truth (the recall window's full text). The model can see what was
+    retrieved and never what is missing, so without this it cannot tell "the answer was never
+    recalled" (``recall_miss``) from "the answer came back and the judge ignored it" — the two
+    it alternates between on identical evidence.
+    """
+
+    absent: list[str] = []
+    for label in labels:
+        for token in _answer_tokens(str(label.get("expected_answer") or "")):
+            if token in absent:
+                continue
+            if any(token.lower() in (text or "").lower() for text in recall_texts):
+                continue
+            absent.append(token)
+    return tuple(absent)
 
 
 __all__ = ["assemble_evidence", "normalize_question"]
