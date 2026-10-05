@@ -517,7 +517,11 @@ def make_evolution_diagnosis_step(
     ``ExecutionTracker`` over ``memory_db_path`` and the admin-only read-only
     retrieval reader.
     """
-    from rag.evolution.diagnoser import REASON_INVALID, draft_by_majority
+    from rag.evolution.diagnoser import (
+        REASON_INSUFFICIENT_SAMPLES,
+        REASON_INVALID,
+        draft_by_majority,
+    )
     from rag.evolution.evidence import assemble_evidence
 
     cfg = settings_obj or settings
@@ -616,7 +620,14 @@ def make_evolution_diagnosis_step(
                         # signals (design section 6); the evidence pack is the single
                         # observation's. A draft is cluster-scoped for the admin decision
                         # but observation-scoped through observation_id.
-                        sampled = draft_by_majority(diagnoser, cluster, pack, samples=allowance)
+                        sampled = draft_by_majority(
+                            diagnoser,
+                            cluster,
+                            pack,
+                            samples=allowance,
+                            # 单票不得定稿：采到两次以上时要求至少两个成功样本。
+                            min_successes=min(2, allowance),
+                        )
                         outcome["model_calls"] += max(1, sampled.calls)
                         if sampled.draft is not None:
                             store.add_draft(
@@ -642,11 +653,13 @@ def make_evolution_diagnosis_step(
                         if error is None:  # pragma: no cover - 采样要么有草案要么有错误
                             outcome["diagnosis_failed"] += 1
                             break
-                        # ``invalid`` = 模型没遵守输出契约（约 1/4 的 ranking 族调用如此，实测被
-                        # 截断的 JSON）。整轮采样都没产出时同轮再采一轮；重试计入每轮调用预算，
-                        # 成本账才不失真。``timeout``/``rate_limited`` 是容量信号，交给下一轮。
+                        # 可重试的两种：``invalid`` = 模型没遵守输出契约（约 1/4 的 ranking 族
+                        # 调用如此，实测被截断的 JSON）；``insufficient_samples`` = 成功样本太少，
+                        # 单票不足以定稿。两者都同轮再采一轮，且都计入每轮调用预算，成本账才不失真。
+                        # ``timeout``/``rate_limited`` 是容量信号，重试只会更快耗尽预算，交给下一轮。
                         if (
-                            error.reason == REASON_INVALID
+                            error.reason
+                            in (REASON_INVALID, REASON_INSUFFICIENT_SAMPLES)
                             and attempts < _MAX_DIAGNOSIS_ATTEMPTS
                             and outcome["model_calls"] < budget
                         ):

@@ -63,6 +63,8 @@ REASON_INVALID = "invalid"
 REASON_TIMEOUT = "timeout"
 REASON_RATE_LIMITED = "rate_limited"
 REASON_BUDGET = "budget"
+#: 采样成功数不足以下结论（例如三次采样只活下来一次）：单票不得定稿，让调用方决定是否再采。
+REASON_INSUFFICIENT_SAMPLES = "insufficient_samples"
 
 _TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, openai.APITimeoutError)
 _RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (openai.RateLimitError,)
@@ -462,6 +464,7 @@ def draft_by_majority(
     pack: EvidencePack,
     *,
     samples: int = 1,
+    min_successes: int = 1,
 ) -> SampledDraft:
     """Sample the diagnosis up to ``samples`` times and keep the majority category.
 
@@ -472,12 +475,19 @@ def draft_by_majority(
     function never reads settings and never writes anything.
 
     Failed samples are dropped rather than fatal — one contract violation among three samples
-    should not discard two good diagnoses — and only an all-failed round reports ``draft=None``.
+    should not discard two good diagnoses — but **a single surviving vote must not decide a
+    category**: with ``min_successes`` above one, a round that ends with too few successes
+    reports ``REASON_INSUFFICIENT_SAMPLES`` instead of a draft, and the caller decides whether
+    to sample again. The two failure modes need different handling: a dropped sample is a
+    contract incident, while a one-vote outcome is a weak measurement that would otherwise look
+    like a confident answer.
+
     The winning draft is the most frequent category; ties go to the earliest sample, so the
     same evidence and the same samples always pick the same draft.
     """
 
     wanted = max(1, int(samples))
+    required = max(1, int(min_successes))
     drafts: list[DiagnosisDraft] = []
     votes: list[str] = []
     calls = 0
@@ -493,6 +503,21 @@ def draft_by_majority(
         votes.append(draft.failure_category)
     if not drafts:
         return SampledDraft(draft=None, votes=(), calls=calls, error=last_error)
+    if len(drafts) < required:
+        # 单票定稿会把"弱测量"伪装成"有把握的答案"：样本被丢弃后只剩一票时必须报出来，
+        # 由调用方决定再采一轮（worker 把 insufficient_samples 当作可重试原因）。
+        detail = (
+            f"only {len(drafts)} of {wanted} samples succeeded; "
+            f"{required} are required to decide a category"
+        )
+        if last_error is not None:
+            detail = f"{detail} (last sample failure: {last_error.detail})"
+        return SampledDraft(
+            draft=None,
+            votes=tuple(votes),
+            calls=calls,
+            error=DiagnosisUnavailable(REASON_INSUFFICIENT_SAMPLES, detail),
+        )
     counts: dict[str, int] = {}
     for vote in votes:
         counts[vote] = counts.get(vote, 0) + 1

@@ -1073,3 +1073,26 @@ def test_one_sample_keeps_the_previous_cost(tmp_path):
     assert outcome["model_calls"] == 1
     assert outcome["diagnosed"] == 1
     assert outcome["diagnosis_unstable"] == 0
+
+
+def test_insufficient_samples_are_resampled_once_then_counted_as_failure(tmp_path):
+    """成功样本不足时同轮再采一轮；仍不足则计失败且不落草案（单票不得定稿）。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    awaiting_cluster(store, "kb1|retrieval|weak")
+    valid = json.dumps(sample_draft().model_dump(mode="json"), ensure_ascii=False)
+    bad = "response is not a JSON object"
+    step = build_step(
+        store,
+        # 每轮 3 次采样只活下来 1 次，两轮都一样
+        FakeModel(valid, bad, bad, valid, bad, bad),
+        evolution_diagnosis_samples=3,
+        budget=8,
+    )
+
+    outcome = step()
+
+    assert outcome["model_calls"] == 6  # 两轮各 3 次，全部计入预算
+    assert outcome["diagnosis_retries"] == 1
+    assert outcome["diagnosed"] == 0
+    assert outcome["diagnosis_failed"] == 1
+    assert store.list_drafts() == []

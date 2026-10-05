@@ -598,3 +598,34 @@ def test_the_absent_rule_is_absent_without_absent_tokens():
     prompt = _request_text(fake)
     assert "label_evidence_absent: （无" in prompt
     assert "根本没有被召回" not in prompt
+
+
+def test_one_surviving_vote_does_not_decide_a_category():
+    """成功样本太少时不得定稿：单票定出来的类别会伪装成"有把握的答案"。"""
+    stub = _StubDiagnoser(
+        _draft_with("ranking_error"),
+        DiagnosisUnavailable("invalid", "response is not a JSON object"),
+        DiagnosisUnavailable("invalid", "response is not a JSON object"),
+    )
+
+    result = draft_by_majority(stub, {}, None, samples=3, min_successes=2)
+
+    assert result.draft is None
+    assert result.failure_reason == "insufficient_samples"
+    assert result.votes == ("ranking_error",)  # 票型仍留档，供运营者看
+    assert result.calls == 3
+
+
+def test_the_floor_does_not_reject_two_surviving_votes():
+    """两个成功样本就足以定稿：下限不是"必须全成功"。"""
+    stub = _StubDiagnoser(
+        _draft_with("chunking_structure_damage"),
+        DiagnosisUnavailable("invalid", "truncated"),
+        _draft_with("chunking_structure_damage"),
+    )
+
+    result = draft_by_majority(stub, {}, None, samples=3, min_successes=2)
+
+    assert result.draft is not None
+    assert result.draft.failure_category == "chunking_structure_damage"
+    assert result.calls == 3
