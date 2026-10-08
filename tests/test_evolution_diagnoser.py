@@ -629,3 +629,32 @@ def test_the_floor_does_not_reject_two_surviving_votes():
     assert result.draft is not None
     assert result.draft.failure_category == "chunking_structure_damage"
     assert result.calls == 3
+
+
+def test_a_pack_without_admin_labels_renders_no_label_evidence_lines():
+    """无标签时**不渲染**标签证据两行：这是开发集无标签协议不被带偏的前提。
+
+    2026-10-02 实测：v8 起总是渲染（空值时也渲染"（无…）"），等于给无标签提示词塞进
+    "召回/管理员答案"的暗示，把 dev-28 与 qb-31 两条 undetermined 行推成了 recall_miss
+    （v5 33/39 → v8 31/39）。修法是"有标签才渲染"。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack(admin_labels=()))
+
+    prompt = _request_text(fake)
+    assert 'label_evidence' not in prompt
+    # 其余证据照旧渲染：改动只影响这两行。
+    assert 'question_term_coverage' in prompt or 'coverage' in prompt
+
+
+def test_a_labelled_pack_without_tokens_says_so_plainly():
+    """有标签但没有可核对型号串时，如实说明"无"，而不是沉默。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(label_evidence=(), label_evidence_absent=())
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert 'label_evidence: （无' in prompt
+    assert 'label_evidence_absent: （无' in prompt

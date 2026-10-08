@@ -240,27 +240,31 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append("passage_judging: （未记录：该失败早于判定统计量上线，不能当作 0）")
     lines.append("failure_route: " + (pack.failure_route or "（未记录）"))
     lines.append("exception_class: " + (pack.exception_class or "（无：不是异常失败）"))
-    if pack.label_evidence:
-        lines.append(
-            "label_evidence（**精确包含检查**：管理员写下的答案文本里的型号串是否出现在召回块里；"
-            "chunks=包含它的块数，first_rank=最早出现的块序号）:"
-        )
-        for record in pack.label_evidence:
+    # 只在**匹配到管理员标签**时渲染这两行：无标签时渲染"（无…）"会给提示词塞进"召回/管理员答案"
+    # 的暗示，实测把两条 undetermined 行推成了 recall_miss（2026-10-02 开发集 v5→v8 逐行对比）。
+    # 无标签路径的提示词必须与引入标签证据之前完全一致。
+    if pack.admin_labels:
+        if pack.label_evidence:
             lines.append(
-                f"  - token={record.get('token')} chunks={record.get('chunks')} "
-                f"first_rank={record.get('first_rank')} hash={record.get('hash') or '（窗口外）'}"
+                "label_evidence（**精确包含检查**：管理员写下的答案文本里的型号串是否出现在召回块里；"
+                "chunks=包含它的块数，first_rank=最早出现的块序号）:"
             )
-    else:
-        lines.append(
-            "label_evidence: （无：没有管理员答案文本，或该文本的型号串未出现在召回块中）"
-        )
-    if pack.label_evidence_absent:
-        lines.append(
-            "label_evidence_absent（**这些答案型号在该召回窗口里完全没出现**——确定性的负向包含检查）: "
-            + "、".join(pack.label_evidence_absent)
-        )
-    else:
-        lines.append("label_evidence_absent: （无：标签里的型号串都能在召回里找到，或没有管理员答案）")
+            for record in pack.label_evidence:
+                lines.append(
+                    f"  - token={record.get('token')} chunks={record.get('chunks')} "
+                    f"first_rank={record.get('first_rank')} hash={record.get('hash') or '（窗口外）'}"
+                )
+        else:
+            lines.append(
+                "label_evidence: （无：管理员答案文本里没有可核对的型号串，或它们都未出现在召回块中）"
+            )
+        if pack.label_evidence_absent:
+            lines.append(
+                "label_evidence_absent（**这些答案型号在该召回窗口里完全没出现**——确定性的负向包含检查）: "
+                + "、".join(pack.label_evidence_absent)
+            )
+        else:
+            lines.append("label_evidence_absent: （无：标签里的型号串都能在召回里找到）")
     lines.append("reproduction.reproducible: " + str(bool(pack.reproduction.reproducible)).lower())
     lines.append("reproduction.missing_hashes: " + (", ".join(pack.reproduction.missing_hashes) or "（无）"))
     if pack.reproduction.note:
