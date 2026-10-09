@@ -618,7 +618,8 @@ def make_evolution_diagnosis_step(
         try:
             config["prompt_version"] = str(diagnoser.prompt_version)
             config["model"] = str(diagnoser.model_name)
-            for item in pending:
+            marked = _marked_not_a_defect(cfg)
+            for item in _keep_defects(pending, marked):
                 if outcome["model_calls"] >= budget:
                     break  # budget reached: the remaining observations wait for the next round
                 observation = item["observation"]
@@ -732,6 +733,26 @@ def make_evolution_diagnosis_step(
     return step
 
 
+def _marked_not_a_defect(cfg) -> frozenset[str]:
+    """Questions an administrator marked as correct behaviour (never worked on)."""
+    from rag.evolution.verdicts import not_a_defect_questions
+
+    return not_a_defect_questions(getattr(cfg, "evolution_diagnosis_labels_path", "") or None)
+
+
+def _keep_defects(items: list[dict], marked: frozenset[str]) -> list[dict]:
+    """Drop the observations whose question carries a not-a-defect verdict, keeping order."""
+    from rag.evolution.verdicts import is_not_a_defect
+
+    if not marked:
+        return items
+    return [
+        item
+        for item in items
+        if not is_not_a_defect(str((item.get("observation") or {}).get("question") or ""), marked)
+    ]
+
+
 def _eligible_patch_items(store, candidate_store) -> list[dict]:
     """``{cluster, observation, draft}`` for clusters that may receive a code patch.
 
@@ -818,7 +839,8 @@ def make_evolution_patch_step(
             return outcome
         candidates = candidate_store or CandidateStore(store)
         generator = (generator_factory or PatchGenerator)()
-        items = _eligible_patch_items(store, candidates)
+        items = _keep_defects(_eligible_patch_items(store, candidates),
+                              _marked_not_a_defect(cfg))
         for item in items:
             if outcome["patch_model_calls"] >= budget:
                 outcome["patch_pending"] += 1
@@ -954,7 +976,8 @@ def make_evolution_candidate_step(
         generator = (generator_factory or CandidateGenerator)()
         reader = (retrieval_factory or default_retrieval_factory)()
         try:
-            items = _eligible_question_set_items(store, candidates)
+            items = _keep_defects(_eligible_question_set_items(store, candidates),
+                              _marked_not_a_defect(cfg))
             for item in items:
                 if outcome["candidate_model_calls"] >= budget:
                     outcome["candidate_pending"] += 1
