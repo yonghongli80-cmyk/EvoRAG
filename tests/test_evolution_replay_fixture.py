@@ -1,0 +1,154 @@
+"""Golden replay fixture：四个外部 seam 的录制与重放（无凭据）。
+
+动机（实测）：沙箱剥掉所有 `RAG_*`（含凭据），而这条链路有四处出网调用——嵌入、重排、路由模型调用、
+查询改写——所以层 2 在沙箱里**永远**报 "replay unavailable"，回归 A/B 只能搬到宿主手工跑。
+本模块是文档里早写明的回程：在有凭据的地方录一次，在沙箱里重放。
+
+两条性质比"能录"本身更要紧：
+**缺答案必须失败**（strict 抛 `FixtureMiss`，绝不静默回退到网络或编一个值——会静默降级的门禁等于说谎）；
+**过期 fixture 必须被拒**（记录了语料指纹与四个 seam 模块的源码哈希：改过 reranker 的补丁会让录下的
+评分不再是"被打补丁代码"的证据，此时 `stale_reason` 报出来，调用方必须当作不可用）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+
+import pytest
+
+from rag.evolution.replay_fixture import (
+    FIXTURE_VERSION,
+    FixtureMiss,
+    ReplayFixture,
+    corpus_fingerprint,
+    install,
+    normalize,
+    seam_hashes,
+)
+
+
+class _Chunk:
+    def __init__(self, doc_name, text=""):
+        self.doc_name = doc_name
+        self.text = text
+
+
+def _fixture(**overrides) -> ReplayFixture:
+    base = dict(
+        embeddings={hashlib.sha256(b"hello").hexdigest(): [0.1, 0.2]},
+        reranks={},
+        routes={normalize("算一下增长率"): "agent"},
+        rewrites={normalize("年假是多少"): "年假有多少天"},
+        corpus="corpus-hash",
+        base_commit="a" * 40,
+        seams={"rag.reranker": "hash-1"},
+        created_at=123.0,
+        version=FIXTURE_VERSION,
+    )
+    base.update(overrides)
+    return ReplayFixture(**base)
+
+
+def test_recorded_answers_are_served_by_key(tmp_path):
+    fixture = _fixture()
+    path = tmp_path / "fixture.json"
+    fixture.save(path)
+    loaded = ReplayFixture.load(path)
+
+    assert loaded.embed(["hello"]) == [[0.1, 0.2]]
+    assert loaded.route("算一下增长率  ") == "agent"
+    assert loaded.rewrite("年假是多少") == "年假有多少天"
+    assert loaded.version == FIXTURE_VERSION
+
+
+def test_a_missing_answer_raises_instead_of_reaching_the_network():
+    """严格模式：没录到的调用必须失败，绝不静默回退。"""
+    fixture = _fixture()
+
+    with pytest.raises(FixtureMiss):
+        fixture.embed(["never recorded"])
+    with pytest.raises(FixtureMiss):
+        fixture.route("没录过的问题")
+    with pytest.raises(FixtureMiss):
+        fixture.rerank("q", ["a", "b"])
+
+
+def test_the_rerank_key_covers_the_query_and_the_exact_text_order():
+    key = hashlib.sha256("\x00".join(["q", "a", "b"]).encode()).hexdigest()
+    fixture = _fixture(reranks={key: [{"index": 0, "score": 0.9}]})
+
+    assert fixture.rerank("q", ["a", "b"]) == [{"index": 0, "score": 0.9}]
+    with pytest.raises(FixtureMiss):  # 顺序不同 ⇒ 不是同一次调用
+        fixture.rerank("q", ["b", "a"])
+
+
+def test_install_replaces_the_seams_and_uninstall_puts_them_back():
+    import rag.agent
+    import rag.embedder
+    import rag.query_rewriter
+
+    fixture = _fixture()
+    before_embed = rag.embedder.embed
+    before_route = rag.agent.route_question
+    before_rewrite = rag.query_rewriter.rewrite_query
+
+    uninstall = install(fixture)
+
+    assert rag.embedder.embed(["hello"]) == [[0.1, 0.2]]
+    assert rag.agent.route_question("算一下增长率") == "agent"
+    assert rag.query_rewriter.rewrite_query("年假是多少") == "年假有多少天"
+    with pytest.raises(FixtureMiss):
+        rag.embedder.embed(["not recorded"])
+
+    uninstall()
+
+    assert rag.embedder.embed is before_embed
+    assert rag.agent.route_question is before_route
+    assert rag.query_rewriter.rewrite_query is before_rewrite
+
+
+def test_a_non_strict_install_falls_back_to_the_original_seam(monkeypatch):
+    """非严格模式回退到"安装时的原实现"——用哨兵验证，不依赖真实网络是否可达。"""
+    import rag.embedder
+
+    calls = []
+
+    def sentinel(texts):
+        calls.append(list(texts))
+        return [["from-original"]]
+
+    monkeypatch.setattr(rag.embedder, "embed", sentinel)
+    uninstall = install(_fixture(), strict=False)
+    try:
+        assert rag.embedder.embed(["not recorded"]) == [["from-original"]]
+        assert calls == [["not recorded"]]
+    finally:
+        uninstall()
+
+    assert rag.embedder.embed is sentinel  # 还原的是安装时的那一份
+
+
+def test_staleness_covers_version_corpus_and_seam_drift():
+    fixture = _fixture()
+
+    assert fixture.stale_reason(corpus="corpus-hash", seams={"rag.reranker": "hash-1"}) == ""
+    assert "corpus changed" in fixture.stale_reason(corpus="other", seams={"rag.reranker": "hash-1"})
+    changed = fixture.stale_reason(corpus="corpus-hash", seams={"rag.reranker": "hash-2"})
+    assert "seam modules changed" in changed and "rag.reranker" in changed
+    assert "format" in _fixture(version=99).stale_reason(corpus="corpus-hash", seams={})
+
+
+def test_corpus_fingerprint_notices_a_changed_snapshot():
+    a = corpus_fingerprint([_Chunk("x.md"), _Chunk("y.md")])
+    b = corpus_fingerprint([_Chunk("x.md"), _Chunk("y.md")])
+    c = corpus_fingerprint([_Chunk("x.md"), _Chunk("z.md")])
+
+    assert a == b
+    assert a != c
+
+
+def test_seam_hashes_describe_the_code_that_is_running():
+    hashes = seam_hashes()
+
+    assert set(hashes) == {"rag.embedder", "rag.reranker", "rag.agent", "rag.query_rewriter"}
+    assert all(len(digest) == 64 for digest in hashes.values())
