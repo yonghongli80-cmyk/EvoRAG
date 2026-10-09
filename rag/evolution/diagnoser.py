@@ -52,7 +52,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v9"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v10"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -295,7 +295,10 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
     else:
         rules.append(
             "证据包中没有任何管理员确认标签：confidence 只能为 low，且 root_cause "
-            "必须包含“假设”字样、明确标注这是假设级根因。"
+            "必须包含“假设”字样、明确标注这是假设级根因。**若结论是内容缺口"
+            "（failure_category=undetermined），root_cause 还必须包含“需管理员标签”字样**"
+            "——没有标签就等于没有核实过“库里真的没有”，而这个结论会被用来建知识采编工单；"
+            "写清这一点，别让一次猜测变成一张工单。"
         )
     if pack.exception_class:
         rules.append(
@@ -428,6 +431,12 @@ def _enforce_evidence_rules(draft: DiagnosisDraft, pack: EvidencePack) -> None:
             problems.append("no admin labels requires confidence=low")
         if "假设" not in draft.root_cause:
             problems.append("no admin labels requires a hypothesis root cause")
+        # 未核实的内容缺口结论必须自带"需管理员标签"标记：队列 5 会拿这类结论去建知识采编
+        # 工单，没有标记的话，一次模型猜测就会变成一张要人去补内容的工单。
+        if draft.failure_category == "undetermined" and "需管理员标签" not in draft.root_cause:
+            problems.append(
+                "an unlabelled content-gap conclusion requires '需管理员标签' in root_cause"
+            )
     if not pack.reproduction.reproducible:
         if draft.confidence != "low":
             problems.append("unreproducible requires confidence=low")

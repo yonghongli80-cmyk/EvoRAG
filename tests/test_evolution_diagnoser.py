@@ -123,7 +123,8 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     # v8 起：label_evidence_absent —— 同一检查读反向：哪些答案型号在召回窗口里完全没出现，
     #        让"没被召回 ⇒ recall_miss"也有事实依据（模型看不到"缺了什么"）。
     # v9 起：异常栈最后一帧进证据包，草案必须写明它（补丁生成器据此选文件）。
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v9"
+    # v10 起：无标签的内容缺口结论必须自带"需管理员标签"标记（队列 5 的工单输出来自它）。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v10"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -689,3 +690,50 @@ def test_the_frame_line_is_absent_for_non_exception_failures():
     Diagnoser(model_call=fake).draft(_cluster(), _pack())
 
     assert "exception_frame" not in _request_text(fake)
+
+
+def test_an_unlabelled_content_gap_must_say_it_needs_a_label():
+    """没有标签却断言"库里没有"⇒ 必须写明需要管理员标签。
+
+    这个结论会被用来建知识采编工单（队列 5）：没有标记的话，一次模型猜测就会变成一张要人去
+    补内容的工单。校验是硬的（拒绝而非修补），与既有"假设""待复核"两条同风格。
+    """
+    import pytest
+
+    fake = FakeModel(json.dumps(_payload(
+        failure_category="undetermined",
+        suggested_layer="none",
+        root_cause="假设（待复核）：库内可能没有该内容。",
+    ), ensure_ascii=False))
+
+    with pytest.raises(DiagnosisUnavailable) as excinfo:
+        Diagnoser(model_call=fake).draft(_cluster(), _pack(admin_labels=()))
+
+    assert excinfo.value.reason == "invalid"
+    assert "需管理员标签" in excinfo.value.detail
+
+
+def test_the_marker_satisfies_the_guard():
+    """写明标记即可通过（模型只要照提示词的字样写就行）。"""
+    fake = FakeModel(json.dumps(_payload(
+        failure_category="undetermined",
+        suggested_layer="none",
+        root_cause="假设（待复核）：库内可能没有该内容，需管理员标签确认。",
+    ), ensure_ascii=False))
+
+    draft = Diagnoser(model_call=fake).draft(_cluster(), _pack(admin_labels=()))
+
+    assert draft.failure_category == "undetermined"
+
+
+def test_a_labelled_content_gap_does_not_need_the_marker():
+    """有管理员标签时该规则不适用：标签本身就是确认过的证据。"""
+    fake = FakeModel(json.dumps(_payload(
+        failure_category="undetermined",
+        suggested_layer="none",
+        root_cause="假设（待复核）：该库内没有所问内容。",
+    ), ensure_ascii=False))
+
+    draft = Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    assert draft.failure_category == "undetermined"

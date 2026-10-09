@@ -38,5 +38,35 @@
     "admin_note": "问题原文带两个空格（保留原话）；内容存在，失败在取用侧。2026-10-02 管理员复核补记切块事实（未改判类别：该行的答案列确实不在召回窗口内）。",
     "confirmed_by": "admin",
     "confirmed_at": "2026-09-29"
+  },
+  {
+    "question": "副厂配件明细表",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
+    "expected_answer": "副厂（第三方）遮光罩以品牌行存在：适马 40mm f/1.4 DG HSM Art_尼康口 → LH878-01、适马 105mm f/1.4 DG HSM Art_佳能口 → LH1113-01、适马 20mm f/1.4 DG DN Art_E口 → LH878-04；camera-parameters-excerpt.xlsx 另有腾龙 11-20mm f/2.8 Di III-A RXD（B060）参数行。库内没有把『副厂』二字写进遮光罩表。",
+    "admin_note": "2026-10-09 依全库探针复核：该问题的召回窗口内确实含上述品牌行（型号串在其中），内容存在。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-10-09"
+  },
+  {
+    "question": "第三方配件明细有哪些",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "lens-hood-price-redacted.xlsx / camera-parameters-excerpt.xlsx",
+    "expected_answer": "第三方（副厂）配件以品牌行存在：适马 40mm f/1.4 DG HSM Art_尼康口 → LH878-01、适马 105mm f/1.4 DG HSM Art_佳能口 → LH1113-01、腾龙 90mm f/2.8 Di III MACRO VXD（F072）_E口 → HF072。",
+    "admin_note": "2026-10-09 依全库探针复核：召回窗口含这些行。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-10-09"
+  },
+  {
+    "question": "R50原电价格多少",
+    "kb_id": "kb_accessories",
+    "expected_route": "rag",
+    "expected_source": "camera-battery-charger.xlsx",
+    "expected_answer": "该机型的电池与充电器行确实存在于相机电池充电器表中，但**金额列被脱敏**，因此价格本身不可答。",
+    "admin_note": "负向标签（2026-10-09）：内容（型号）在、金额被脱敏 ⇒ 价格类问题落到『证据不足』是**正确行为**，不是检索/排序/生成缺陷。**刻意不写型号串**：否则确定性包含检查（label_evidence）会把这条脱敏确认误推成取用侧缺陷。",
+    "confirmed_by": "admin",
+    "confirmed_at": "2026-10-09"
   }
 ]
