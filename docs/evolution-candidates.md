@@ -16,6 +16,13 @@
 | `RAG_EVOLUTION_CANDIDATE_MODEL_CALLS` | 2 | 每轮候选生成的模型调用预算 |
 | `RAG_EVOLUTION_CANDIDATE_SHADOW_SAMPLE_RATE` | 0.05 | 层 3 影子对比的流量采样率 |
 
+**2026-10-09 起，候选生成已接进 worker 轮次**（`make_evolution_candidate_step`）：每轮扫描
+"聚类已批准 + 该成员观测**最新**草案的 `suggested_layer ∈ {prompt, query_rewrite}` + 尚无问题集候选"
+的项，自动生成并落库。预算就是上表的 `RAG_EVOLUTION_CANDIDATE_MODEL_CALLS`——这一行此前是**只有定义、
+没有读取点的死配置**，现在真正生效；开关关闭或预算为 0 时**零调用**。每轮汇总新增
+`candidates_created / candidate_failed / candidate_pending / candidate_model_calls` 四个计数。
+**门禁与灰度仍由管理员触发**：这一步只生成候选，不跑层 2/3、不放大流量。
+
 ## 2. 五层门禁（按序，不可跳过、不可弱化）
 
 | 层 | 名称 | 做什么 | 通过后状态 | 失败 |

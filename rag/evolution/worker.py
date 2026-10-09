@@ -37,6 +37,14 @@ _DIAGNOSIS_RECALL_TOP_K = 24
 #: 重试只会更快耗尽预算。重试计入每轮调用预算，所以这是成本上限而不是绕过它。
 _MAX_DIAGNOSIS_ATTEMPTS = 2
 
+#: A round without a candidate step reports no candidate work.
+_NO_CANDIDATE: dict = {
+    "candidates_created": 0,
+    "candidate_failed": 0,
+    "candidate_pending": 0,
+    "candidate_model_calls": 0,
+}
+
 #: A round without a patch step reports no patch work, exactly like a pre-phase-5 round.
 _NO_PATCH: dict = {
     "patches_created": 0,
@@ -376,6 +384,7 @@ def make_evolution_run_once(
     purge_every_rounds: int = 1,
     diagnosis_step: Callable[[], dict] | None = None,
     patch_step: Callable[[], dict] | None = None,
+    candidate_step: Callable[[], dict] | None = None,
 ) -> Callable[[], dict]:
     """Build the round function: clustering, diagnosis, patch generation, then retention.
 
@@ -394,6 +403,7 @@ def make_evolution_run_once(
         diagnosis = diagnosis_step() if diagnosis_step is not None else dict(_NO_DIAGNOSIS)
         # 补丁生成在诊断之后：它只处理"已批准 + 已确认层级"的聚类，与诊断互不依赖。
         patch = patch_step() if patch_step is not None else dict(_NO_PATCH)
+        candidate = candidate_step() if candidate_step is not None else dict(_NO_CANDIDATE)
         purged = 0
         if purge_every_rounds > 0 and rounds["n"] % purge_every_rounds == 0:
             purged = purge_evolution_observations(store, retention_days=retention_days)
@@ -405,6 +415,10 @@ def make_evolution_run_once(
             "patch_failed": patch["patch_failed"],
             "patch_pending": patch["patch_pending"],
             "patch_model_calls": patch["patch_model_calls"],
+            "candidates_created": candidate["candidates_created"],
+            "candidate_failed": candidate["candidate_failed"],
+            "candidate_pending": candidate["candidate_pending"],
+            "candidate_model_calls": candidate["candidate_model_calls"],
             "model_calls": diagnosis["model_calls"],
             "purged": purged,
             "diagnosis_config": diagnosis["diagnosis_config"],
@@ -856,6 +870,151 @@ def make_evolution_patch_step(
     return step
 
 
+def _eligible_question_set_items(store, candidate_store) -> list[dict]:
+    """``{cluster, observation, drafts}`` for clusters that may receive a question-set candidate.
+
+    Narrow for the same reasons as the patch step: the cluster must be approved, the newest
+    stored draft must suggest a layer the generator can actually address (``prompt`` or
+    ``query_rewrite`` — anything else is structurally impossible, so asking would only burn a
+    call), and the observation must have no question-set candidate yet.
+    """
+    from rag.evolution.candidate_generator import ADDRESSABLE_LAYERS
+    from rag.evolution.candidates import ARTIFACT_TYPE as QUESTION_SET_ARTIFACT_TYPE
+
+    newest_draft: dict[int, dict] = {}
+    for draft in store.list_drafts():  # newest first
+        observation_id = draft.get("observation_id")
+        if observation_id is not None:
+            newest_draft.setdefault(int(observation_id), draft)
+    have_candidate = {
+        (int(row["observation_id"]), row["artifact_type"])
+        for row in candidate_store.list_candidates()
+        if row.get("observation_id") is not None
+    }
+    items: list[dict] = []
+    for cluster in store.list_clusters():
+        if cluster.get("status") != EvolutionStatus.APPROVED_FOR_CANDIDATE.value:
+            continue
+        for observation in store.list_observations(cluster_id=cluster["id"]):
+            observation_id = int(observation["id"])
+            draft = newest_draft.get(observation_id)
+            if draft is None:
+                continue
+            if str((draft.get("payload") or {}).get("suggested_layer") or "") not in ADDRESSABLE_LAYERS:
+                continue
+            if (observation_id, QUESTION_SET_ARTIFACT_TYPE) in have_candidate:
+                continue
+            items.append({"cluster": cluster, "observation": observation, "draft": draft})
+    return items
+
+
+def make_evolution_candidate_step(
+    store,
+    *,
+    settings_obj=None,
+    model_call_budget: int = 0,
+    generator_factory: Callable[[], object] | None = None,
+    candidate_store=None,
+    retrieval_factory: Callable[[], object] | None = None,
+    target: str = "passages",
+    chunk_ids_used: int = 12,
+) -> Callable[[], dict]:
+    """Phase 4's generation step: eligible confirmed clusters become question-set candidates.
+
+    The provenance follows the recipe the integration scripts proved: the passages question set
+    is rebuilt from positional chunk ids (``c0``…) for the observation's own question, so the
+    candidate is a bounded text variant of the live set rather than a free invention. Nothing
+    is applied here either — a candidate only exists to be gated and reviewed.
+    """
+
+    from functools import partial
+
+    from rag.evolution.candidate_generator import CandidateGenerator, CandidateUnavailable
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.diagnoser import DiagnosisUnavailable
+    from rag.jev.questions import PASSAGE_QUESTION_SET_VERSION, build_passage_questions
+
+    cfg = settings_obj or settings
+    budget = max(0, int(model_call_budget))
+    enabled = bool(getattr(cfg, "evolution_candidate_enabled", False))
+
+    def default_retrieval_factory():
+        return AdminReadOnlyRetrievalReader(cfg.users_db_path)
+
+    def step() -> dict:
+        outcome = {
+            "candidates_created": 0,
+            "candidate_failed": 0,
+            "candidate_pending": 0,
+            "candidate_model_calls": 0,
+        }
+        if not enabled or budget <= 0:
+            return outcome
+        candidates = candidate_store or CandidateStore(store)
+        generator = (generator_factory or CandidateGenerator)()
+        reader = (retrieval_factory or default_retrieval_factory)()
+        try:
+            items = _eligible_question_set_items(store, candidates)
+            for item in items:
+                if outcome["candidate_model_calls"] >= budget:
+                    outcome["candidate_pending"] += 1
+                    continue
+                outcome["candidate_model_calls"] += 1
+                observation = item["observation"]
+                cluster_id = int(item["cluster"]["id"])
+                observation_id = int(observation["id"])
+                try:
+                    chunks = reader.retrieve(
+                        observation["question"], kb_id=observation["kb_id"]
+                    ) or []
+                    chunk_ids = [f"c{index}" for index, _ in enumerate(chunks[:chunk_ids_used])]
+                    candidate = generator.generate(
+                        item["cluster"],
+                        [item["draft"].get("payload") or {}],
+                        target=target,
+                        base_builder=partial(build_passage_questions, chunk_ids),
+                        base_version=PASSAGE_QUESTION_SET_VERSION,
+                        observation_id=observation_id,
+                        cluster_id=cluster_id,
+                        trace_store=store,
+                    )
+                    candidates.add_candidate(
+                        observation_id,
+                        cluster_id,
+                        candidate,
+                        prompt_version=str(getattr(generator, "prompt_version", "")),
+                        model=str(getattr(generator, "model_name", "")),
+                    )
+                    outcome["candidates_created"] += 1
+                    logger.info(
+                        "evolution_candidate_created cluster=%s observation=%s target=%s",
+                        cluster_id,
+                        observation_id,
+                        target,
+                    )
+                except (CandidateUnavailable, DiagnosisUnavailable) as error:
+                    outcome["candidate_failed"] += 1
+                    logger.warning(
+                        "evolution_candidate_unavailable cluster=%s observation=%s reason=%s detail=%s",
+                        cluster_id,
+                        observation_id,
+                        getattr(error, "reason", ""),
+                        str(error)[:200],
+                    )
+                except Exception:
+                    outcome["candidate_failed"] += 1
+                    logger.exception(
+                        "evolution_candidate_failed cluster=%s observation=%s",
+                        cluster_id,
+                        observation_id,
+                    )
+        finally:
+            _close_quietly(reader)
+        return outcome
+
+    return step
+
+
 def build_evolution_worker(
     *,
     settings_obj=None,
@@ -920,6 +1079,15 @@ def build_evolution_worker(
             settings_obj=cfg,
             model_call_budget=int(getattr(cfg, "evolution_candidate_model_calls", 0)),
             repo_root=Path(__file__).resolve().parents[2],
+        )
+        if getattr(cfg, "evolution_candidate_enabled", False)
+        else None,
+        # 第 4 阶段：把可寻址层（prompt / query_rewrite）的已批准聚类自动变成问题集候选。
+        candidate_step=make_evolution_candidate_step(
+            store,
+            settings_obj=cfg,
+            model_call_budget=int(getattr(cfg, "evolution_candidate_model_calls", 0)),
+            retrieval_factory=retrieval_factory,
         )
         if getattr(cfg, "evolution_candidate_enabled", False)
         else None,

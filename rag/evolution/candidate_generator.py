@@ -72,7 +72,7 @@ CANDIDATE_TEMPERATURE = 0.2
 #: section 6 suggestion layers): the judgement prompt itself and the
 #: query-rewrite / intent calibration it feeds. Every other layer belongs to
 #: another phase and must be refused here.
-_ADDRESSABLE_LAYERS: tuple[str, ...] = ("prompt", "query_rewrite")
+ADDRESSABLE_LAYERS: tuple[str, ...] = ("prompt", "query_rewrite")
 
 #: The one JSON object the model must emit — nothing else, nothing missing.
 _ANSWER_FIELDS: tuple[str, ...] = (
@@ -457,7 +457,7 @@ def _enforce_candidate_rules(
     """Apply the four hard rules; return the candidate or refuse it whole.
 
     1. the confirmed diagnosis addresses a layer a question-set text variant
-       can fix (``suggested_layer`` in :data:`_ADDRESSABLE_LAYERS`);
+       can fix (``suggested_layer`` in :data:`ADDRESSABLE_LAYERS`);
     2. the payload stays inside the boundary of this target's current set
        (:func:`~rag.evolution.candidates.validate_payload`: ids, count,
        criteria keys, lengths and the ≤40% per-field change bound);
@@ -470,7 +470,7 @@ def _enforce_candidate_rules(
     """
     for index, fields in enumerate(drafts):
         layer = fields.get("suggested_layer")
-        if layer not in _ADDRESSABLE_LAYERS:
+        if layer not in ADDRESSABLE_LAYERS:
             raise CandidateUnavailable(
                 REASON_INVALID,
                 f"draft[{index}].suggested_layer {layer!r} is not addressable by a "
@@ -590,6 +590,7 @@ class CandidateGenerator:
 
 
 __all__ = [
+    "ADDRESSABLE_LAYERS",
     "CANDIDATE_PROMPT_VERSION",
     "CANDIDATE_TEMPERATURE",
     "CandidateGenerator",

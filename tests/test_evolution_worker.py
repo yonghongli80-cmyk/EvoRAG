@@ -1255,3 +1255,119 @@ def test_the_patch_step_is_off_without_the_switch_or_a_budget(tmp_path):
     assert _patch_step(store, generator, enabled=False)()["patch_model_calls"] == 0
     assert _patch_step(store, generator, budget=0)()["patch_model_calls"] == 0
     assert generator.calls == 0
+
+
+# ------------------------------------------------------------------
+# 第 4 阶段运行化：问题集候选步骤（只生成；门禁与灰度仍归管理员）。
+# ------------------------------------------------------------------
+
+
+def _question_set_candidate():
+    from rag.evolution.candidates import JevQuestionSetCandidate
+
+    return JevQuestionSetCandidate(
+        artifact_type="jev_question_set",
+        target="passages",
+        payload={"c1": {"instructions": "更明确地引用型号与品牌行"}},
+        rationale="根因由已确认诊断给出。",
+        expected_effect="同族问题的取用命中提升。",
+        rollback_ref={"question_set_version": "passages-v1", "payload_sha256": "0" * 64},
+        confidence="low",
+    )
+
+
+class FakeCandidateGenerator:
+    prompt_version = "candidate-v1"
+    model_name = "scripted"
+
+    def __init__(self, *, refuse_with=None):
+        self._refuse_with = refuse_with
+        self.calls = 0
+
+    def generate(self, cluster, drafts, **kwargs):
+        self.calls += 1
+        if self._refuse_with is not None:
+            raise self._refuse_with
+        return _question_set_candidate()
+
+
+def _candidate_step(store, generator, *, budget=3, enabled=True, reader=None):
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.worker import make_evolution_candidate_step
+
+    cfg = _fake_settings(evolution_candidate_enabled=enabled)
+    return make_evolution_candidate_step(
+        store,
+        settings_obj=cfg,
+        model_call_budget=budget,
+        generator_factory=lambda: generator,
+        candidate_store=CandidateStore(store),
+        retrieval_factory=lambda: reader or FakeReader((Chunk(text="年假额度为每年 10 天"),)),
+    )
+
+
+def test_the_candidate_step_generates_for_an_addressable_layer(tmp_path):
+    """可寻址层（prompt/query_rewrite）的已批准聚类 → 自动产出问题集候选。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|addressable", layer="prompt", suggested_layer="prompt")
+    generator = FakeCandidateGenerator()
+
+    outcome = _candidate_step(store, generator)()
+
+    assert outcome["candidates_created"] == 1
+    assert outcome["candidate_model_calls"] == 1
+    assert generator.calls == 1
+    rows = CandidateStore(store).list_candidates()
+    assert [row["artifact_type"] for row in rows] == ["jev_question_set"]
+
+
+def test_the_candidate_step_skips_unaaddressable_layers(tmp_path):
+    """生成器结构上无法寻址的层（如 retrieval_config）→ 跳过且**零调用**。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(
+        store, "kb1|retrieval|config", layer="retrieval_config", suggested_layer="retrieval_config"
+    )
+    generator = FakeCandidateGenerator()
+
+    outcome = _candidate_step(store, generator)()
+
+    assert outcome["candidates_created"] == 0
+    assert outcome["candidate_model_calls"] == 0
+    assert generator.calls == 0
+
+
+def test_the_candidate_step_respects_its_budget_and_reports_refusals(tmp_path):
+    """预算内只生成一条、其余记 pending；拒绝只记原因不中断。"""
+    from rag.evolution.candidate_generator import CandidateUnavailable
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|first", layer="prompt", suggested_layer="prompt")
+    _confirmed_cluster(store, "kb2|retrieval|second", kb_id="kb2", layer="prompt", suggested_layer="prompt")
+
+    outcome = _candidate_step(store, FakeCandidateGenerator(), budget=1)()
+
+    assert outcome["candidates_created"] == 1
+    assert outcome["candidate_pending"] == 1
+    assert outcome["candidate_model_calls"] == 1
+
+    store2 = FailureTraceStore(tmp_path / "evolution2.db")
+    _confirmed_cluster(store2, "kb1|retrieval|refuse", layer="prompt", suggested_layer="prompt")
+    refused = _candidate_step(
+        store2, FakeCandidateGenerator(refuse_with=CandidateUnavailable("invalid", "bad payload"))
+    )()
+    assert refused["candidate_failed"] == 1
+    assert CandidateStore(store2).list_candidates() == []
+
+
+def test_the_candidate_step_is_off_without_the_switch_or_a_budget(tmp_path):
+    """开关关闭或预算 0 时零调用（默认部署不偷偷花钱）。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|addressable", layer="prompt", suggested_layer="prompt")
+    generator = FakeCandidateGenerator()
+
+    assert _candidate_step(store, generator, enabled=False)()["candidate_model_calls"] == 0
+    assert _candidate_step(store, generator, budget=0)()["candidate_model_calls"] == 0
+    assert generator.calls == 0

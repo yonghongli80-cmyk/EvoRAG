@@ -142,7 +142,7 @@
 
 | 队列 | 状态 | 提交 / 证据 |
 | --- | --- | --- |
-| 1 Worker 运行化 | **1a 已完成**（代码补丁步骤）；1b 待做（问题集候选，需 Jev 注册表接缝） | 见下 |
+| 1 Worker 运行化 | **已完成**（1a 代码补丁步骤 + 1b 问题集候选步骤） | 见下 |
 | 2 Agent 路径加固 | **已完成**（审计 + 2 处修复 + 失败纳入观测） | 见下 |
 | 3 标签覆盖 + 护栏 | 待开始 | — |
 | 4 AST 符号 + 靶心窗口 | 待开始 | — |
@@ -203,3 +203,21 @@ try/except，**上报失败绝不影响答复**。`pipeline._agent_run_kwargs(pr
 **验收**：5 条用例钉住——合格即生成；层不一致/已有候选跳过（0 调用）；预算内只生成 1 条、其余记
 `patch_pending`；拒绝（`PatchUnavailable`）只记原因不中断、不落候选；开关关闭或预算 0 时**零调用**。
 worker 套件 54 passed。
+
+### 队列 1b 记录（问题集候选步骤）
+
+**配方**（照抄本地脚本里已验证的那条，没有自己发明）：`target="passages"`，
+`base_builder=partial(build_passage_questions, chunk_ids)`，
+`base_version=PASSAGE_QUESTION_SET_VERSION`（`rag/jev/questions.py`）。`chunk_ids` 是**位置 id**
+（`c0…c11`，来自该观测自身问题的一次只读重检索）——与被重写问题集的键一一对应，所以不需要 Qdrant
+point id。
+
+**准入**：聚类 `approved_for_candidate`；最新草案的 `suggested_layer` ∈ `ADDRESSABLE_LAYERS`
+（`prompt` / `query_rewrite`；该常量此前是私有的 `_ADDRESSABLE_LAYERS`，已转正并进 `__all__`）；
+该观测尚无 `jev_question_set` 候选。预算同样来自 `RAG_EVOLUTION_CANDIDATE_MODEL_CALLS`（与补丁
+步骤各自计一份），每轮汇总 `candidates_created / candidate_failed / candidate_pending /
+candidate_model_calls`。**门禁与灰度不在这一步**。
+
+**验收**：4 条用例——可寻址层自动生成并落库；不可寻址层（如 `retrieval_config`）跳过且**零调用**；
+预算内只生成一条、其余 `candidate_pending`，拒绝只记原因不落库；开关关闭或预算 0 时零调用。
+worker 套件 58 passed。
