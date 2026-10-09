@@ -1,6 +1,7 @@
 """Agent module -- LangChain Agent + router."""
 
 import json as _json
+import logging as _logging
 import re as _re
 import threading as _threading
 import time as _time
@@ -9,6 +10,8 @@ from rag.generator import deepseek_default_headers, generate
 from rag.prompt_manager import PromptManager
 
 _pm = PromptManager()
+
+logger = _logging.getLogger(__name__)
 
 
 def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts", permission_filter=None) -> list:
@@ -228,6 +231,13 @@ class RAGAgent:
         self._run_ctx.tool_calls = tool_calls
         try:
             answer, chart_paths = self._run_reflection(question)
+        except Exception as error:
+            # 与路由器同一类缺陷：模型/工具/递归上限的异常此前会直接终止整条请求。
+            # 这里降级成可解释的答复（请求完成、失败可见），异常类进日志，异常消息与用户
+            # 文本都不进答复文本。
+            logger.warning("agent_run_failed exception=%s", type(error).__name__)
+            answer = f"Agent 模式执行失败（{type(error).__name__}），请改用知识库问答重试。"
+            chart_paths = []
         finally:
             self._run_ctx.user = None
             self._run_ctx.kb_id = None
@@ -330,7 +340,13 @@ def _check_answer_quality(question: str, answer: str) -> dict:
         {"role": "system", "content": "你是一个答案质量审查员。"},
         {"role": "user", "content": prompt},
     ]
-    result = generate(messages)
+    try:
+        result = generate(messages)
+    except Exception as error:
+        # 质量自检是增强项：它跑不了不该终止请求。返回"通过"让主循环采用已有答案，
+        # 异常类写进日志（信息不丢，也不进答复文本）。
+        logger.warning("agent_quality_check_failed exception=%s", type(error).__name__)
+        return {"verdict": "pass", "missing": [], "check_failed": type(error).__name__}
     try:
         return _json.loads(result)
     except _json.JSONDecodeError:

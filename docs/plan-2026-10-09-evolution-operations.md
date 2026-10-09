@@ -143,13 +143,30 @@
 | 队列 | 状态 | 提交 / 证据 |
 | --- | --- | --- |
 | 1 Worker 运行化 | **1a 已完成**（代码补丁步骤）；1b 待做（问题集候选，需 Jev 注册表接缝） | 见下 |
-| 2 Agent 路径加固 | 待开始（先审计） | — |
+| 2 Agent 路径加固 | **审计完成，2 处缺陷已修**；2b 待做（把 Agent 失败纳入观测） | 见下 |
 | 3 标签覆盖 + 护栏 | 待开始 | — |
 | 4 AST 符号 + 靶心窗口 | 待开始 | — |
 | 5 知识缺口工单 | 待开始 | — |
 | 6 沙箱 Golden Fixture | 待开始 | — |
 | 7 前端审查台 | 待开始 | — |
 | 前置：真实失败供给 | **等你的输入** | worker `scanned=0`（2026-10-09 实测） |
+
+### 队列 2 记录（Agent 路径审计）
+
+**审计范围**：`rag/agent.py` 全文件（`RAGAgent`、工具与包装器、`route_question`）+ 它在
+`rag/pipeline.py` 的接入点（构造 197–199、同步 901–903、流式 1005–1008）。**所有发现都有代码位置**。
+
+| # | 发现 | 请求路径可达 | 处置 |
+| --- | --- | --- | --- |
+| 1 | **`RAGAgent.run` 对 agent 调用无异常处理**：`try/finally` 只清线程局部上下文，`_run_reflection` 里的 `_ensure_agent()`（模型客户端构造）、`self.agent.invoke(...)`（模型/工具异常、LangChain 递归上限 `recursion_limit=10`）任一异常都会一路冒到 API 层，**整条请求以 error 收场** | ✅ 同步与流式都可达 | **已修**：降级为可解释答复，带**异常类名**（可观测）、不带异常消息与用户文本；上下文清理保持不变；异常类进日志 |
+| 2 | **`_check_answer_quality` 的模型调用无保护**：`generate()` 抛出即终止请求——而它只是"答案质量自检"这一**增强项** | ✅（在 agent 循环内每轮调用） | **已修**：失败即返回 `verdict=pass` + `check_failed=<异常类>`，让主循环采用已有答案，并写日志（不吞信息、不空转重试） |
+| 3 | **Agent 路径的失败对进化回路完全不可见**：agent 分支在检索前就返回（`prepared={"route":"agent",...}`），既不产生 `insufficient_evidence` 决策，也不走 `_record_stream_failure`，所以**没有任何观测** | — | **未修，列为 2b**：给 `run` 加可选的失败上报回调，由 pipeline 用与流式失败相同的路径提交观测（`DiagnosticEvent`：route/error + exception_class + exception_frame）。现在失败只在日志里可见 |
+| 4 | `_is_empty_or_error` 把结果里出现"失败/错误/异常/出错"当失败 ⇒ 对**内容本身在讲失败**的正常回答会多打一次工具调用 | ✅（仅成本） | 记录不修：属误触发成本，改动风险（判据变松）大于收益 |
+| 5 | `_wrap_tool_with_reflection` 的异常分支返回**字符串**错误（请求不死）✓、重试分支的 `except: pass` 保留原结果 ✓ | ✅ | 无需改动：行为与 docstring 一致，失败对模型可见 |
+
+**验收**：2 条新用例钉住修复——`run` 在 `_run_reflection` 抛异常时返回降级答复（含类名、不含异常
+消息、上下文仍清理）；`_check_answer_quality` 在 `generate` 抛异常时返回 `pass` + `check_failed`。
+Agent 套件 14 passed。
 
 ### 队列 1a 记录（代码补丁步骤）
 

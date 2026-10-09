@@ -148,3 +148,34 @@ def test_router_fails_closed_when_the_prompt_render_raises(mock_generate):
     with patch("rag.agent._pm.render", side_effect=KeyError("router")):
         assert route_question("What is RAG?") == "rag"
     mock_generate.assert_not_called()
+
+
+def test_the_agent_run_degrades_instead_of_killing_the_request():
+    """Agent 运行期的异常必须降级成可解释答复，而不是终止整条请求。
+
+    与路由器同一类缺陷（见候选 #10）：模型/工具/LangChain 递归上限的异常此前会一路冒到
+    API 层，整条请求以 error 收场。降级答复里带异常**类名**（可观测），不带异常消息与用户文本。
+    """
+    from rag.agent import RAGAgent
+
+    agent = RAGAgent(retriever=MagicMock(), db_path=":memory:")
+
+    with patch.object(RAGAgent, "_run_reflection", side_effect=RuntimeError("model exploded")):
+        answer = agent.run("帮我算一下同比")
+
+    assert "Agent 模式执行失败" in answer
+    assert "RuntimeError" in answer
+    assert "model exploded" not in answer  # 异常消息不进答复
+    assert agent._run_ctx.user is None  # 线程局部上下文仍被清理
+
+
+def test_the_quality_check_failure_does_not_kill_the_answer():
+    """质量自检是增强项：它的模型调用失败不得终止请求，也不得让主循环空转重试。"""
+    from rag.agent import _check_answer_quality
+
+    with patch("rag.agent.generate", side_effect=TimeoutError("slow")):
+        result = _check_answer_quality("问题", "答案")
+
+    assert result["verdict"] == "pass"
+    assert result["missing"] == []
+    assert result["check_failed"] == "TimeoutError"
