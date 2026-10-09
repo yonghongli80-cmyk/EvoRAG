@@ -466,7 +466,14 @@ def _run_target_tests(
 # ------------------------------------------------------------------
 
 
-def _benchmark_command(*, kb_id: str, json_out: Path, user_id: int | None = None) -> list[str]:
+def _benchmark_command(
+    *,
+    kb_id: str,
+    json_out: Path,
+    user_id: int | None = None,
+    runs: int | None = None,
+    warmups: int | None = None,
+) -> list[str]:
     """One replay of the committed corpus, as a relative script path.
 
     ``user_id`` makes the replay run the authenticated path. Without a principal every
@@ -484,6 +491,12 @@ def _benchmark_command(*, kb_id: str, json_out: Path, user_id: int | None = None
     ]
     if user_id:
         command.extend(["--user-id", str(int(user_id))])
+    # 次数可调：带凭据的回放走完整企业路径，默认 5 次重复 ×(10 用例) 每侧要十几分钟，
+    # 回归检查用 2 次即可（沙箱默认不变，人工 A/B 才降）。
+    if runs is not None:
+        command.extend(["--runs", str(int(runs))])
+    if warmups is not None:
+        command.extend(["--warmups", str(int(warmups))])
     return command
 
 
@@ -674,6 +687,8 @@ def _run_benchmark(
     timeout: float,
     user_id: int | None = None,
     report_name: str = BENCHMARK_REPORT_NAME,
+    runs: int | None = None,
+    warmups: int | None = None,
 ) -> tuple[dict | None, str]:
     """One replay, returning the runner's raw report and an error string.
 
@@ -688,7 +703,9 @@ def _run_benchmark(
     """
     json_out = sandbox_root / report_name
     outcome = _run_command(
-        _benchmark_command(kb_id=kb_id, json_out=json_out, user_id=user_id),
+        _benchmark_command(
+            kb_id=kb_id, json_out=json_out, user_id=user_id, runs=runs, warmups=warmups
+        ),
         cwd=worktree,
         env=env,
         timeout=timeout,

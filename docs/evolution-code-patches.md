@@ -103,6 +103,31 @@
 （只走词法检索 + 融合 + 过滤 + 确定性判定，不碰嵌入/重排）。机制已就位（双工作树 + 逐侧比较），
 缺的只是这样一个"能在无密钥环境里跑完"的回放脚本。
 
+### 5.2 已脚本化的回归 A/B（2026-10-02 起）
+
+第 5.1 节的三步已有入库脚本，运维直接跑：
+
+```powershell
+# 1) 放一份只读数据副本（语料 + ACL 库）；服务占用主库时必须有副本：
+#    目录里放 qdrant_data/ 与 users.db
+# 2) 同一份回放在"干净工作树"与"打过补丁的工作树"各跑一次，逐侧比较（层 2 阈值）
+python scripts/measure_patch_regression_ab.py --candidate-id 10 --snapshot <只读副本目录> `
+  --kb-id kb_accessories --user-id 1 --runs 2 --warmups 0
+```
+
+脚本在补丁的 `base_commit` 上建两棵临时工作树、只对其中一棵 `git apply`，两次回放各自使用
+**自己工作树的 `PYTHONPATH`**（否则两次都在量同一份代码），最后用与沙箱相同的 `patch_verdict`
+给出逐侧结论并写入 `real-case-handoff/evolab/regression-ab-candidate-<id>.json`；工作树在
+`finally` 里移除，**主树永远不动**。
+
+**实测（候选 #10，20 用例，每侧 2 次重复）**：`applied: true`；Jev 侧 route 1.0 → 1.0
+（Δ0.0pp，限 ≤0）、Top-5 1.0 → 1.0（Δ0.0pp，限 ≤2）、失败调用 0 → 0、prep P50 951ms → 635ms；
+legacy 侧 route Δ+2.5pp、Top-5 Δ0.0pp、失败 0 ⇒ **`passed: true`**。
+
+**同一轮发现的运维点**：带凭据的回放走完整企业路径，脚本默认的 `--runs 5 --warmups 1` 每侧会
+超过 900s 超时（实测两侧各 900s 全超时）；因此 `_benchmark_command` 增加 `runs`/`warmups`
+参数（沙箱默认不变），人工 A/B 用 `--runs 2 --warmups 0`（约 5–10 分钟）。
+
 应用后人工检查、跑全量测试、重启服务；回退同样由人执行 `# revert` 那条命令。
 测试在真实仓库的一次隔离 worktree 上验证过 apply 与 revert 互为逆操作，且导出前后主工作树字节不变。
 

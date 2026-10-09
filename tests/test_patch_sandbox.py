@@ -1211,3 +1211,15 @@ def test_an_exit_without_a_report_is_still_an_error(tmp_path, monkeypatch):
 
     assert payload is None
     assert error == "benchmark replay did not complete: exit_1"
+
+
+def test_the_replay_command_can_bound_its_repetitions():
+    """回放次数可调：带凭据时默认 5 次重复每侧要十几分钟，回归检查用 2 次即可。"""
+    from rag.evolution.sandbox import _benchmark_command
+
+    plain = _benchmark_command(kb_id="kb1", json_out=Path("x.json"))
+    assert "--runs" not in plain and "--warmups" not in plain  # 沙箱默认不变
+
+    bounded = _benchmark_command(kb_id="kb1", json_out=Path("x.json"), runs=2, warmups=0)
+    assert bounded[bounded.index("--runs") + 1] == "2"
+    assert bounded[bounded.index("--warmups") + 1] == "0"
