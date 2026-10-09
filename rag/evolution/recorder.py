@@ -144,6 +144,7 @@ class FailureRecorder:
             tool_names=detail.tool_names or tuple(call.tool_name for call in trace.tool_calls or ()),
             structured_query_kind=detail.structured_query_kind,
             exception_class=detail.exception_class,
+            exception_frame=detail.exception_frame,
             feedback_kind=detail.feedback_kind,
             jev_question_set_version=version,
             decision_metadata=metadata,

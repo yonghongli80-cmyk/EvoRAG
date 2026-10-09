@@ -322,3 +322,41 @@ def test_unscoped_enterprise_stream_emits_fixed_refusal_without_generators():
     generate_stream.assert_not_called()
     agent_run.assert_not_called()
     pipeline.close()
+
+
+def test_internal_error_records_the_frame_that_raised_it():
+    """内部异常的观测要带**异常栈最后一帧**（文件:行:函数），且不含异常消息。
+
+    没有它，代码补丁生成器只能按诊断措辞猜文件——实测就是这样把补丁打到了
+    ``rag/agent.py``（路由兜底），而真实缺陷在证据/管线侧。
+    """
+    from rag.pipeline import RAGPipeline, _exception_frame
+
+    def raiser():
+        raise ValueError("versioned evidence required")
+
+    try:
+        raiser()
+    except ValueError as error:
+        frame = _exception_frame(error)
+        caught = error
+
+    # 1) 助手：指向真正抛出的那个函数，且**只含位置**（文件:行:函数）。
+    assert frame.endswith(":raiser")
+    assert frame.count(":") == 2
+    assert "versioned evidence required" not in frame
+
+    # 2) 记录接线：观测详情带上同一个帧（``__init__`` 被跳过，只测这一个方法）。
+    recorder = MagicMock()
+    pipeline = object.__new__(RAGPipeline)
+    pipeline._kb_id = "kb1"
+    pipeline.tracker = MagicMock()
+    pipeline._failure_recorder = recorder
+
+    pipeline._record_stream_failure("问题", 0.0, {"chunk_hashes": []}, caught)
+
+    trace, detail = recorder.submit.call_args[0]
+    assert trace.route == "error"
+    assert detail.exception_class == "ValueError"
+    assert detail.exception_frame == frame
+    assert detail.non_evolvable_reason is None

@@ -860,3 +860,79 @@ def test_the_prompt_keeps_tests_out_of_the_diff(tmp_path):
     prompt = _request_text(fake)
     assert "不得在 diff 里新建或修改" in prompt
     assert "不得新建任何文件" in prompt
+
+
+# ------------------------------------------------------------------
+# 异常栈最后一帧：选文件的事实依据（而不是按诊断措辞猜关键词）。
+# ------------------------------------------------------------------
+
+
+def test_the_exception_frame_file_outranks_the_keyword_ranking(tmp_path):
+    """帧点名的文件必须被选中并排在第一位——即使关键词排序会把它挤出去。
+
+    实测：cluster #30 的真实帧在 rag/pipeline.py（证据边界），但生成器按诊断措辞
+    选中了 rag/agent.py，补丁因此打在症状上。
+    """
+    from rag.evolution.patch_generator import _select_target_files
+
+    repo = tmp_path
+    (repo / "rag").mkdir()
+    for name in ("pipeline.py", "agent.py", "reranker.py"):
+        (repo / "rag" / name).write_text("def placeholder():\n    return None\n", encoding="utf-8")
+    files = ["rag/agent.py", "rag/pipeline.py", "rag/reranker.py"]
+
+    without = _select_target_files(repo, files, ("agent", "router"))
+    with_frame = _select_target_files(repo, files, ("agent", "router"), prefer="rag/pipeline.py")
+
+    assert without[0][0] == "rag/agent.py"  # 关键词排序：agent 赢
+    assert with_frame[0][0] == "rag/pipeline.py"  # 帧赢，且排在第一位
+    assert with_frame[0][0] in {entry[0] for entry in with_frame}
+
+
+def test_an_unknown_or_absent_frame_falls_back_to_keyword_ranking(tmp_path):
+    """帧缺失或指向层外文件时不得改变既有排序（回退，而不是报错）。"""
+    from rag.evolution.patch_generator import _select_target_files
+
+    repo = tmp_path
+    (repo / "rag").mkdir()
+    for name in ("agent.py", "reranker.py"):
+        (repo / "rag" / name).write_text("def placeholder():\n    return None\n", encoding="utf-8")
+    files = ["rag/agent.py", "rag/reranker.py"]
+
+    baseline = _select_target_files(repo, files, ("agent",))
+    assert [entry[0] for entry in _select_target_files(repo, files, ("agent",), prefer="")] == [
+        entry[0] for entry in baseline
+    ]
+    assert [entry[0] for entry in _select_target_files(repo, files, ("agent",), prefer="rag/nope.py")] == [
+        entry[0] for entry in baseline
+    ]
+
+
+def test_the_frame_is_read_from_the_stored_observation():
+    """帧从观测里读（``details_exception_frame``），没有就回退到关键词。"""
+    from rag.evolution.patch_generator import _observation_exception_path
+
+    class Store:
+        def __init__(self, frame):
+            self.frame = frame
+
+        def get_observation(self, observation_id):
+            return {"id": observation_id, "details_exception_frame": self.frame}
+
+    assert (
+        _observation_exception_path(Store("rag/pipeline.py:700:_finalize_rag_context"), 132)
+        == "rag/pipeline.py"
+    )
+    assert _observation_exception_path(Store(None), 132) == ""
+    assert _observation_exception_path(None, 132) == ""
+
+
+def test_a_store_that_cannot_answer_is_not_a_failed_generation():
+    """存储读失败不得让生成失败：回退关键词排序即可。"""
+    from rag.evolution.patch_generator import _observation_exception_path
+
+    class Broken:
+        def get_observation(self, observation_id):
+            raise RuntimeError("store exploded")
+
+    assert _observation_exception_path(Broken(), 1) == ""

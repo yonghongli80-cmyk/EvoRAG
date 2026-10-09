@@ -659,3 +659,21 @@ def test_label_evidence_absent_is_empty_when_every_token_is_recalled(tmp_path):
     )
 
     assert pack.label_evidence_absent == ()
+
+
+def test_pack_carries_the_recorded_exception_frame(tmp_path):
+    """帧从观测进证据包（供诊断渲染），缺席时为空字符串而不是 None。"""
+    from rag.evolution.evidence import assemble_evidence
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    cluster = build_cluster(store)
+    member = add_member(store, cluster, question="q1")
+    member = {**member, "route": "error", "details_exception_class": "ValueError",
+              "details_exception_frame": "rag/pipeline.py:700:_finalize_rag_context"}
+
+    pack = assemble_evidence(member, cluster, store=store)
+
+    assert pack.exception_frame == "rag/pipeline.py:700:_finalize_rag_context"
+    assert assemble_evidence(
+        {**member, "details_exception_frame": None}, cluster, store=store
+    ).exception_frame == ""

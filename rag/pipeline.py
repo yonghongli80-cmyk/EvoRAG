@@ -3,6 +3,8 @@ import json as _json
 import logging
 import threading
 import time
+import traceback
+from pathlib import Path
 from typing import NamedTuple
 
 from config import settings
@@ -109,6 +111,25 @@ def _log_shadow_comparison(comparison: ShadowComparison) -> None:
         comparison.failure_kind,
         comparison.top_k_overlap,
     )
+
+
+def _exception_frame(error: BaseException) -> str:
+    """异常栈的最后一帧，形如 ``rag/pipeline.py:700:_finalize_rag_context``。
+
+    只取帧引用（文件:行:函数）：它足够让诊断与补丁生成指向正确的位置，又不会把异常消息、
+    提示词或用户文本带进"存储不含模型/用户文本"的边界。库外的帧（例如 site-packages 里的
+    调用）退化成文件名，让下游按关键词回退排序。
+    """
+    frames = traceback.extract_tb(error.__traceback__)
+    if not frames:
+        return ""
+    frame = frames[-1]
+    try:
+        root = Path(__file__).resolve().parent.parent
+        label = Path(frame.filename).resolve().relative_to(root).as_posix()
+    except ValueError:
+        label = Path(frame.filename).name
+    return f"{label}:{frame.lineno}:{frame.name}"
 
 
 class RAGPipeline:
@@ -328,7 +349,11 @@ class RAGPipeline:
             return
         recorder.submit(
             trace,
-            DiagnosticDetail(kb_id=self._kb_id, exception_class=type(error).__name__),
+            DiagnosticDetail(
+                kb_id=self._kb_id,
+                exception_class=type(error).__name__,
+                exception_frame=_exception_frame(error),
+            ),
         )
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):

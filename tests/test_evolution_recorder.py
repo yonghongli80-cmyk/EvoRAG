@@ -95,3 +95,58 @@ def test_failure_observation_defaults_to_the_observation_queue():
     assert observation.status == "observed"
     assert observation.pool == "observation_queue"
     assert observation.priority == "normal"
+
+
+def test_the_exception_frame_round_trips_through_the_store(tmp_path):
+    """帧要能存能读：它是补丁生成器选文件的事实依据。"""
+    store = FailureTraceStore(tmp_path / "e.db")
+
+    row = store.add_observation(
+        FailureObservation(
+            kb_id="kb1",
+            question="q",
+            route="error",
+            exception_class="ValueError",
+            exception_frame="rag/reliability/bundle.py:29:_require_versioned",
+        )
+    )
+
+    assert row["details_exception_frame"] == "rag/reliability/bundle.py:29:_require_versioned"
+    assert store.get_observation(row["id"])["details_exception_frame"] == row["details_exception_frame"]
+    store.close()
+
+
+def test_a_database_written_before_the_frame_column_gains_it(tmp_path):
+    """既有库用 ADD COLUMN 补列（旧行读回 NULL），不重建表——重建会删掉已审核的历史。"""
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "CREATE TABLE failure_observations ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, kb_id TEXT NOT NULL, stage TEXT NOT NULL, "
+        "root_cause_feature TEXT, status TEXT NOT NULL, pool TEXT NOT NULL, "
+        "priority TEXT NOT NULL, question TEXT NOT NULL, route TEXT NOT NULL, cluster_id INTEGER, "
+        "details_answerability_kind TEXT, details_confidence_level TEXT, "
+        "details_chunk_hashes TEXT NOT NULL DEFAULT '[]', details_best_score REAL, "
+        "details_adopted_evidence_hashes TEXT NOT NULL DEFAULT '[]', "
+        "details_tool_names TEXT NOT NULL DEFAULT '[]', details_structured_query_kind TEXT, "
+        "details_exception_class TEXT, details_feedback_kind TEXT, "
+        "details_jev_question_set_version TEXT, "
+        "details_decision_metadata TEXT NOT NULL DEFAULT '{}', total_ms REAL NOT NULL DEFAULT 0, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO failure_observations (kb_id, stage, status, pool, priority, question, route, "
+        "created_at, updated_at) VALUES ('kb1', 'unknown', 'observed', 'observation_queue', "
+        "'normal', 'old', 'rag', 1.0, 1.0)"
+    )
+    connection.commit()
+    connection.close()
+
+    store = FailureTraceStore(db)
+
+    columns = {row["name"] for row in store._conn.execute("PRAGMA table_info(failure_observations)")}
+    assert "details_exception_frame" in columns
+    assert store.list_observations()[0]["question"] == "old"  # 旧行还在
+    store.close()

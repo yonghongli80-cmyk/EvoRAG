@@ -52,7 +52,7 @@ from rag.evolution.models import DiagnosisDraft, EvidencePack
 #: and a paired dev-set run showed it moved content-gap rows into recall_miss
 #: without improving the ranking_error rows (which turn out to be unstable on
 #: their own). Evidence without a nudge is the honest version of this signal.
-DIAGNOSIS_PROMPT_VERSION = "diagnosis-v8"
+DIAGNOSIS_PROMPT_VERSION = "diagnosis-v9"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -240,6 +240,10 @@ def _render_evidence_pack(pack: EvidencePack) -> str:
         lines.append("passage_judging: （未记录：该失败早于判定统计量上线，不能当作 0）")
     lines.append("failure_route: " + (pack.failure_route or "（未记录）"))
     lines.append("exception_class: " + (pack.exception_class or "（无：不是异常失败）"))
+    if pack.exception_frame:
+        lines.append(
+            "exception_frame（异常栈最后一帧，文件:行:函数）: " + pack.exception_frame
+        )
     # 只在**匹配到管理员标签**时渲染这两行：无标签时渲染"（无…）"会给提示词塞进"召回/管理员答案"
     # 的暗示，实测把两条 undetermined 行推成了 recall_miss（2026-10-02 开发集 v5→v8 逐行对比）。
     # 无标签路径的提示词必须与引入标签证据之前完全一致。
@@ -301,7 +305,8 @@ def _conditional_rules(pack: EvidencePack) -> tuple[str, ...]:
             "或 prompt_or_workflow_defect（异常来自提示词或工作流定义），suggested_layer 必须取 "
             "code 或该异常实际指向的层；**不得**判成 intent_route_error / undetermined / none。"
             "管理员标签只说明内容事实（答案在哪个文档），不改变“失败是异常”这一判断；"
-            "direct_evidence 里写明异常类型。"
+            "direct_evidence 里写明异常类型与上面给出的 exception_frame（文件:行:函数）——"
+            "补丁生成器会据此选中要修改的文件，写错位置会让补丁打在症状上。"
         )
     if pack.label_evidence and not pack.exception_class:
         # 这条口径的依据是**确定性事实**而不是启发式：管理员写下的答案型号串**确实出现在

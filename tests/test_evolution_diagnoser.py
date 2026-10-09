@@ -122,7 +122,8 @@ def test_valid_json_yields_nine_field_draft_and_records_prompt_version():
     #        ranking_error（能拿到却没被采用），这是"内容存在"唯一不靠猜的确定性判据。
     # v8 起：label_evidence_absent —— 同一检查读反向：哪些答案型号在召回窗口里完全没出现，
     #        让"没被召回 ⇒ recall_miss"也有事实依据（模型看不到"缺了什么"）。
-    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v8"
+    # v9 起：异常栈最后一帧进证据包，草案必须写明它（补丁生成器据此选文件）。
+    assert DIAGNOSIS_PROMPT_VERSION == "diagnosis-v9"
     assert diagnoser.prompt_version == DIAGNOSIS_PROMPT_VERSION
     assert DIAGNOSIS_PROMPT_VERSION in _request_text(fake)
 
@@ -658,3 +659,33 @@ def test_a_labelled_pack_without_tokens_says_so_plainly():
     prompt = _request_text(fake)
     assert 'label_evidence: （无' in prompt
     assert 'label_evidence_absent: （无' in prompt
+
+
+def test_prompt_renders_the_exception_frame_and_requires_it_in_the_draft():
+    """异常帧必须被渲染，并要求草案写明：它是补丁生成器选文件的事实依据。
+
+    实测：cluster #30 的真实帧在证据/管线侧，但生成器按诊断措辞选中了 rag/agent.py，
+    补丁因此打在症状上（给路由加兜底而不是修证据边界）。
+    """
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+    pack = _pack(
+        failure_route="error",
+        exception_class="ValueError",
+        exception_frame="rag/reliability/bundle.py:29:_require_versioned",
+    )
+
+    Diagnoser(model_call=fake).draft(_cluster(), pack)
+
+    prompt = _request_text(fake)
+    assert "exception_frame" in prompt
+    assert "rag/reliability/bundle.py:29:_require_versioned" in prompt
+    assert "补丁生成器会据此选中要修改的文件" in prompt
+
+
+def test_the_frame_line_is_absent_for_non_exception_failures():
+    """非异常失败不渲染该行：不得改变内容缺口与排序族的提示词。"""
+    fake = FakeModel(json.dumps(_payload(), ensure_ascii=False))
+
+    Diagnoser(model_call=fake).draft(_cluster(), _pack())
+
+    assert "exception_frame" not in _request_text(fake)

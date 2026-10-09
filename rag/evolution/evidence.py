@@ -385,6 +385,7 @@ def assemble_evidence(
         passage_judging=_passage_judging(observation),
         failure_route=str(observation.get("route") or ""),
         exception_class=str(observation.get("details_exception_class") or ""),
+        exception_frame=str(observation.get("details_exception_frame") or ""),
         label_evidence=label_hits,
         label_evidence_absent=_label_evidence_absent(matched_labels, recall_texts),
         reproduction=reproduction,

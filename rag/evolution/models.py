@@ -113,6 +113,10 @@ class FailureObservation:
     tool_names: tuple[str, ...] = ()
     structured_query_kind: str | None = None
     exception_class: str | None = None
+    #: 异常栈的最后一帧，形如 ``rag/pipeline.py:700:_finalize_rag_context``。只含帧引用
+    #: （文件:行:函数），不含异常消息与用户文本——它让诊断与补丁生成指向正确的位置，
+    #: 而不越过"不存模型/用户文本"的边界。
+    exception_frame: str | None = None
     feedback_kind: str | None = None
     jev_question_set_version: str | None = None
     decision_metadata: dict[str, object] = field(default_factory=dict)
@@ -140,6 +144,7 @@ class DiagnosticDetail(BaseModel):
     tool_names: tuple[str, ...] = ()
     structured_query_kind: str | None = None
     exception_class: str | None = None
+    exception_frame: str | None = None
     feedback_kind: str | None = None
     jev_question_set_version: str | None = None
     non_evolvable_reason: NonEvolvableReason | None = None
@@ -191,6 +196,8 @@ class EvidencePack:
     #: （2026-09-30：6 条 ValueError 观测因为提示词里没有这两项，被误判成 intent_route_error）。
     failure_route: str = ""
     exception_class: str = ""
+    #: 异常栈最后一帧（文件:行:函数）；补丁生成器据此直接选中正确文件，而不是按关键词猜。
+    exception_frame: str = ""
     #: 管理员标签里给出的**答案文本**在召回块中的确定性包含检查：每个条目形如
     #: ``{"question", "token", "chunks", "first_rank", "hash"}``，``token`` 是从
     #: ``expected_answer`` 里抽出的型号串（含字母与数字），``chunks`` 是召回窗口里包含它的

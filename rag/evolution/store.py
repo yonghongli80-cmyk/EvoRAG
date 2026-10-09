@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS failure_observations (
     details_tool_names TEXT NOT NULL DEFAULT '[]',
     details_structured_query_kind TEXT,
     details_exception_class TEXT,
+    details_exception_frame TEXT,
     details_feedback_kind TEXT,
     details_jev_question_set_version TEXT,
     details_decision_metadata TEXT NOT NULL DEFAULT '{{}}',
@@ -187,6 +188,15 @@ class FailureTraceStore:
             self._conn.execute(_SKIP_LOG_TABLE_SQL)
             self._conn.execute(_DIAGNOSIS_DRAFTS_TABLE_SQL)
             self._conn.execute(_EVOLUTION_AUDIT_TABLE_SQL)
+            # 迁移：异常栈最后一帧是后加的列，既有库（CREATE TABLE IF NOT EXISTS 不会补列）
+            # 用 ADD COLUMN 补上，旧行读回 NULL。丢掉重建会删掉已审核的历史。
+            observation_columns = {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(failure_observations)")
+            }
+            if "details_exception_frame" not in observation_columns:
+                self._conn.execute(
+                    "ALTER TABLE failure_observations ADD COLUMN details_exception_frame TEXT"
+                )
             # Phase-4 migration: a database written before drafts became
             # member-level has a ``diagnosis_drafts`` table without the nullable
             # ``observation_id`` column. Add it in place so the stored cluster-level
@@ -253,6 +263,7 @@ class FailureTraceStore:
             json.dumps(list(observation.tool_names), ensure_ascii=False),
             observation.structured_query_kind,
             observation.exception_class,
+            observation.exception_frame,
             observation.feedback_kind,
             observation.jev_question_set_version,
             json.dumps(observation.decision_metadata, ensure_ascii=False),
@@ -266,9 +277,10 @@ class FailureTraceStore:
                 "kb_id, stage, root_cause_feature, status, pool, priority, question, route, "
                 "details_answerability_kind, details_confidence_level, details_chunk_hashes, "
                 "details_best_score, details_adopted_evidence_hashes, details_tool_names, "
-                "details_structured_query_kind, details_exception_class, details_feedback_kind, "
+                "details_structured_query_kind, details_exception_class, details_exception_frame, "
+                "details_feedback_kind, "
                 "details_jev_question_set_version, details_decision_metadata, total_ms, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 values,
             )
             self._conn.commit()

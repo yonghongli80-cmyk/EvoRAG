@@ -357,8 +357,27 @@ def _excerpt(path: Path) -> tuple[str, int, bool]:
     return excerpt, len(lines), truncated
 
 
+def _observation_exception_path(trace_store, observation_id: int) -> str:
+    """The repository file the observation's exception frame names, or ``""``.
+
+    The frame is ``rag/pipeline.py:700:_finalize_rag_context``; only the file matters here. A
+    store that cannot answer, a missing observation or an unrecorded frame all yield ``""`` so
+    the caller falls back to keyword ranking — never an error, never a guess.
+    """
+    if trace_store is None or observation_id is None:
+        return ""
+    try:
+        observation = trace_store.get_observation(int(observation_id))
+    except Exception:  # noqa: BLE001 - a store that cannot answer is not a failed generation
+        return ""
+    frame = str((observation or {}).get("details_exception_frame") or "").strip()
+    if not frame:
+        return ""
+    return frame.split(":", 1)[0].strip()
+
+
 def _select_target_files(
-    repo_root: Path, files: list[str], keywords: tuple[str, ...]
+    repo_root: Path, files: list[str], keywords: tuple[str, ...], prefer: str = ""
 ) -> tuple[tuple[str, str, int, bool], ...]:
     """``(path, excerpt, total_lines, truncated)`` for the 1–3 relevant files.
 
@@ -371,32 +390,44 @@ def _select_target_files(
     mentions the keyword — ``rag/vector_store.py`` for a diagnosis that says
     ``vector_store``, not whichever module happens to discuss vectors at
     length. Full ties fall back to the layer's static file order.
+
+    ``prefer`` is the file an exception's last stack frame names, and it wins outright: it goes
+    first and it is included even when the keyword ranking would leave it out. A frame is a
+    fact about where the failure was raised, so ranking files by diagnosis wording can only
+    lose to it — that is how a NotImplementedError-style crash in the evidence path ended up
+    producing a patch to the router instead.
     """
+    ordered = list(files)
+    wanted = prefer.removeprefix("./")
+    if wanted and wanted in ordered:
+        ordered.remove(wanted)
+        ordered.insert(0, wanted)
     ranked = sorted(
-        files,
+        ordered,
         key=lambda path: (
+            -int(path == wanted),
             -int(_path_hits(path, keywords) > 0),
             -_path_hits(path, keywords),
         ),
     )
-    scored: list[tuple[int, int, int, str, str, int, bool]] = []
+    scored: list[tuple[str, str, int, bool, int]] = []
     for path in ranked[:MAX_PATH_SHORTLIST]:
         excerpt, total_lines, truncated = _excerpt(repo_root / path)
-        scored.append(
-            (
-                int(_path_hits(path, keywords) > 0),
-                _path_hits(path, keywords),
-                _content_hits(excerpt, keywords),
-                path,
-                excerpt,
-                total_lines,
-                truncated,
-            )
+        scored.append((path, excerpt, total_lines, truncated, _content_hits(excerpt, keywords)))
+    # 帧文件排在第一位；其余按"路径命中关键词 → 路径命中数 → 内容命中数 → 层内静态顺序"，
+    # 与引入帧之前完全一致（帧为空时 wanted 不会命中任何文件）。
+    scored.sort(
+        key=lambda item: (
+            item[0] != wanted,
+            -int(_path_hits(item[0], keywords) > 0),
+            -_path_hits(item[0], keywords),
+            -item[4],
+            ordered.index(item[0]),
         )
-    scored.sort(key=lambda item: (-item[0], -item[1], -item[2], files.index(item[3])))
+    )
     return tuple(
         (path, excerpt, total_lines, truncated)
-        for _, _, _, path, excerpt, total_lines, truncated in scored[:MAX_TARGET_FILES]
+        for path, excerpt, total_lines, truncated, _ in scored[:MAX_TARGET_FILES]
     )
 
 
@@ -906,7 +937,9 @@ class PatchGenerator:
                 REASON_INVALID, f"layer {layer} has no candidate files in the repository"
             )
         keywords = _diagnosis_keywords(normalized, cluster)
-        targets = _select_target_files(root, files, keywords)
+        # 异常栈最后一帧是"失败发生在哪"的事实，优先级高于按诊断措辞猜关键词。
+        exception_path = _observation_exception_path(trace_store, observation_id)
+        targets = _select_target_files(root, files, keywords, prefer=exception_path)
         base_commit = _git_head_commit(root)
         messages = _build_messages(cluster, normalized, layer, targets, base_commit, self.prompt_version)
 
