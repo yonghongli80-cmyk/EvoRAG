@@ -1096,3 +1096,162 @@ def test_insufficient_samples_are_resampled_once_then_counted_as_failure(tmp_pat
     assert outcome["diagnosed"] == 0
     assert outcome["diagnosis_failed"] == 1
     assert store.list_drafts() == []
+
+
+# ------------------------------------------------------------------
+# 第 5 阶段运行化：补丁生成步骤（只生成；沙箱与回归 A/B 仍归管理员）。
+# ------------------------------------------------------------------
+
+
+def _code_patch_candidate():
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    return CodePatchCandidate(
+        artifact_type="code_patch",
+        layer="code",
+        paths=("rag/agent.py",),
+        test_paths=("tests/test_agent.py",),
+        rationale="根因由已确认诊断给出。",
+        expected_effect="同族问题不再以 error 结束。",
+        rollback_ref={"base_commit": "a" * 40},
+        confidence="low",
+        diff="--- a/rag/agent.py\n+++ b/rag/agent.py\n@@ -1 +1 @@\n-x\n+y\n",
+    )
+
+
+class FakePatchGenerator:
+    """Scripted patch generator: one candidate, or a refusal."""
+
+    prompt_version = "patch-v2"
+    model_name = "scripted"
+
+    def __init__(self, *, refuse_with=None):
+        self._refuse_with = refuse_with
+        self.calls = 0
+
+    def generate(self, cluster, drafts, **kwargs):
+        self.calls += 1
+        if self._refuse_with is not None:
+            raise self._refuse_with
+        return _code_patch_candidate()
+
+
+def _confirmed_cluster(store, key, *, layer="code", suggested_layer="code", with_draft=True, kb_id="kb1"):
+    """一个 approved_for_candidate + 已确认层级的聚类（可选：带上对应层的草案）。"""
+    cluster = awaiting_cluster(store, key, kb_id=kb_id)
+    members = store.list_observations(cluster["id"])
+    now = time.time()
+    if with_draft:
+        store.add_draft(
+            cluster["id"],
+            sample_draft(suggested_layer=suggested_layer),
+            observation_id=members[0]["id"],
+            prompt_version="diagnosis-v9",
+            model="scripted",
+        )
+    store.decide_cluster(
+        cluster["id"],
+        new_status="approved_for_candidate",
+        pool="candidate_pool",
+        member_status="clustered",
+        now=now,
+        confirmed_layer=layer,
+    )
+    return cluster, members[0]
+
+
+def _patch_step(store, generator, *, budget=3, enabled=True):
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.worker import make_evolution_patch_step
+
+    cfg = _fake_settings(evolution_candidate_enabled=enabled)
+    return make_evolution_patch_step(
+        store,
+        settings_obj=cfg,
+        model_call_budget=budget,
+        generator_factory=lambda: generator,
+        candidate_store=CandidateStore(store),
+    )
+
+
+def test_the_patch_step_generates_for_an_eligible_confirmed_cluster(tmp_path):
+    """合格聚类（已批准 + 已确认层级 + 草案层级一致 + 尚无补丁）→ 自动产出补丁候选。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|unknown|code_defect")
+    generator = FakePatchGenerator()
+
+    outcome = _patch_step(store, generator)()
+
+    assert outcome["patches_created"] == 1
+    assert outcome["patch_model_calls"] == 1
+    assert generator.calls == 1
+    rows = CandidateStore(store).list_candidates()
+    assert [row["artifact_type"] for row in rows] == ["code_patch"]
+
+
+def test_the_patch_step_skips_layer_mismatches_and_existing_candidates(tmp_path):
+    """层不一致、或已有补丁候选的观测一律跳过：不浪费调用，也不重复生成。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|unknown|mismatch", layer="code", suggested_layer="reranking")
+
+    generator = FakePatchGenerator()
+    outcome = _patch_step(store, generator)()
+
+    assert outcome["patches_created"] == 0
+    assert outcome["patch_model_calls"] == 0
+    assert generator.calls == 0
+
+    # 已有补丁候选的观测：第二次运行不再生成。
+    store2 = FailureTraceStore(tmp_path / "evolution2.db")
+    _confirmed_cluster(store2, "kb1|unknown|code_defect")
+    step = _patch_step(store2, FakePatchGenerator())
+    assert step()["patches_created"] == 1
+    assert step()["patches_created"] == 0  # 已有候选 ⇒ 跳过
+
+    assert CandidateStore(store2).list_candidates()
+
+
+def test_the_patch_step_respects_its_model_call_budget(tmp_path):
+    """预算限制：两条合格项、预算 1 ⇒ 只生成一条，另一条记为待处理且不烧调用。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|unknown|first")
+    _confirmed_cluster(store, "kb2|unknown|second", kb_id="kb2")
+    generator = FakePatchGenerator()
+
+    outcome = _patch_step(store, generator, budget=1)()
+
+    assert outcome["patches_created"] == 1
+    assert outcome["patch_pending"] == 1
+    assert outcome["patch_model_calls"] == 1
+    assert generator.calls == 1
+
+
+def test_a_patch_refusal_is_recorded_and_never_ends_the_round(tmp_path):
+    """契约/范围拒绝只记原因，不中断本轮，也不写候选。"""
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.patch_generator import PatchUnavailable
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|unknown|code_defect")
+    generator = FakePatchGenerator(refuse_with=PatchUnavailable("invalid", "diff names no file"))
+
+    outcome = _patch_step(store, generator)()
+
+    assert outcome["patches_created"] == 0
+    assert outcome["patch_failed"] == 1
+    assert CandidateStore(store).list_candidates() == []
+
+
+def test_the_patch_step_is_off_without_the_switch_or_a_budget(tmp_path):
+    """开关关闭、或预算为 0 时什么都不做：默认部署（候选关闭）不会偷偷花调用。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|unknown|code_defect")
+    generator = FakePatchGenerator()
+
+    assert _patch_step(store, generator, enabled=False)()["patch_model_calls"] == 0
+    assert _patch_step(store, generator, budget=0)()["patch_model_calls"] == 0
+    assert generator.calls == 0

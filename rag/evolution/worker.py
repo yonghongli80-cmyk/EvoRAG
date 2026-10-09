@@ -19,8 +19,10 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from config import settings
+from rag.evolution.models import EvolutionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,14 @@ _DIAGNOSIS_RECALL_TOP_K = 24
 #: 同一证据包换一次采样往往就合规（实测 ranking 族的截断属此类），而超时/限流是容量信号，
 #: 重试只会更快耗尽预算。重试计入每轮调用预算，所以这是成本上限而不是绕过它。
 _MAX_DIAGNOSIS_ATTEMPTS = 2
+
+#: A round without a patch step reports no patch work, exactly like a pre-phase-5 round.
+_NO_PATCH: dict = {
+    "patches_created": 0,
+    "patch_failed": 0,
+    "patch_pending": 0,
+    "patch_model_calls": 0,
+}
 
 #: A round without a diagnosis step (phase 2 builds, or a caller that wires only
 #: clustering) reports no diagnosis work at all.
@@ -365,8 +375,9 @@ def make_evolution_run_once(
     batch_limit: int = 200,
     purge_every_rounds: int = 1,
     diagnosis_step: Callable[[], dict] | None = None,
+    patch_step: Callable[[], dict] | None = None,
 ) -> Callable[[], dict]:
-    """Build the round function: one bounded clustering batch, then diagnosis, then retention.
+    """Build the round function: clustering, diagnosis, patch generation, then retention.
 
     Clustering runs first so the purge can never shrink a cluster mid-round;
     the next round recomputes member counts from the surviving rows anyway.
@@ -381,6 +392,8 @@ def make_evolution_run_once(
         rounds["n"] += 1
         outcome = clusterer.cluster_once(limit=batch_limit)
         diagnosis = diagnosis_step() if diagnosis_step is not None else dict(_NO_DIAGNOSIS)
+        # 补丁生成在诊断之后：它只处理"已批准 + 已确认层级"的聚类，与诊断互不依赖。
+        patch = patch_step() if patch_step is not None else dict(_NO_PATCH)
         purged = 0
         if purge_every_rounds > 0 and rounds["n"] % purge_every_rounds == 0:
             purged = purge_evolution_observations(store, retention_days=retention_days)
@@ -388,6 +401,10 @@ def make_evolution_run_once(
             "cluster_once": outcome,
             "diagnosed": diagnosis["diagnosed"],
             "diagnosis_failed": diagnosis["diagnosis_failed"],
+            "patches_created": patch["patches_created"],
+            "patch_failed": patch["patch_failed"],
+            "patch_pending": patch["patch_pending"],
+            "patch_model_calls": patch["patch_model_calls"],
             "model_calls": diagnosis["model_calls"],
             "purged": purged,
             "diagnosis_config": diagnosis["diagnosis_config"],
@@ -701,6 +718,144 @@ def make_evolution_diagnosis_step(
     return step
 
 
+def _eligible_patch_items(store, candidate_store) -> list[dict]:
+    """``{cluster, observation, draft}`` for clusters that may receive a code patch.
+
+    Narrow on purpose, because generation spends model calls and a patch is only meaningful
+    when an administrator has already confirmed the layer:
+
+    * the cluster is ``approved_for_candidate`` **and** carries ``confirmed_layer``;
+    * the newest stored draft for the member observation suggests that same layer (the
+      generator refuses a mismatch anyway, so asking would be a wasted call);
+    * the observation has no code-patch candidate yet (a regenerated patch is an explicit
+      administrator action, never a background retry).
+
+    Content gaps are absent by construction: an undetermined root cause never leaves the
+    observation queue (``clusterer`` design section 6), so it can never reach this list.
+    """
+    from rag.evolution.code_patches import ARTIFACT_TYPE as CODE_PATCH_ARTIFACT_TYPE
+
+    newest_draft: dict[int, dict] = {}
+    for draft in store.list_drafts():  # newest first
+        observation_id = draft.get("observation_id")
+        if observation_id is not None:
+            newest_draft.setdefault(int(observation_id), draft)
+    have_patch = {
+        (int(row["observation_id"]), row["artifact_type"])
+        for row in candidate_store.list_candidates()
+        if row.get("observation_id") is not None
+    }
+    items: list[dict] = []
+    for cluster in store.list_clusters():
+        layer = str(cluster.get("confirmed_layer") or "")
+        if not layer or cluster.get("status") != EvolutionStatus.APPROVED_FOR_CANDIDATE.value:
+            continue
+        for observation in store.list_observations(cluster_id=cluster["id"]):
+            observation_id = int(observation["id"])
+            draft = newest_draft.get(observation_id)
+            if draft is None:
+                continue
+            if str((draft.get("payload") or {}).get("suggested_layer") or "") != layer:
+                continue
+            if (observation_id, CODE_PATCH_ARTIFACT_TYPE) in have_patch:
+                continue
+            items.append({"cluster": cluster, "observation": observation, "draft": draft})
+    return items
+
+
+def make_evolution_patch_step(
+    store,
+    *,
+    settings_obj=None,
+    model_call_budget: int = 0,
+    repo_root: str | Path | None = None,
+    generator_factory: Callable[[], object] | None = None,
+    candidate_store=None,
+) -> Callable[[], dict]:
+    """Phase 5's generation step: eligible confirmed clusters become code-patch candidates.
+
+    Generation only. The sandbox (layers 2/3) is deliberately **not** run here: it needs a
+    clean main tree and it cannot measure a regression without credentials (option C,
+    ``docs/evolution-code-patches.md`` section 4), so it stays an administrator step — this
+    step's job is to stop requiring a human to run a script before anything exists to review.
+
+    One bounded model call per candidate, and every call counts against ``model_call_budget``;
+    refusals are recorded with their reason and never end the round. Without a budget, or with
+    ``evolution_candidate_enabled`` off, the step reports zero work.
+    """
+
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.diagnoser import DiagnosisUnavailable
+    from rag.evolution.patch_generator import PatchGenerator, PatchUnavailable
+
+    cfg = settings_obj or settings
+    budget = max(0, int(model_call_budget))
+    root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
+    enabled = bool(getattr(cfg, "evolution_candidate_enabled", False))
+
+    def step() -> dict:
+        outcome = {
+            "patches_created": 0,
+            "patch_failed": 0,
+            "patch_pending": 0,
+            "patch_model_calls": 0,
+        }
+        if not enabled or budget <= 0:
+            return outcome
+        candidates = candidate_store or CandidateStore(store)
+        generator = (generator_factory or PatchGenerator)()
+        items = _eligible_patch_items(store, candidates)
+        for item in items:
+            if outcome["patch_model_calls"] >= budget:
+                outcome["patch_pending"] += 1
+                continue
+            outcome["patch_model_calls"] += 1
+            observation_id = int(item["observation"]["id"])
+            cluster_id = int(item["cluster"]["id"])
+            try:
+                candidate = generator.generate(
+                    item["cluster"],
+                    [item["draft"].get("payload") or {}],
+                    layer=str(item["cluster"]["confirmed_layer"]),
+                    repo_root=root,
+                    observation_id=observation_id,
+                    cluster_id=cluster_id,
+                    trace_store=store,
+                )
+                candidates.add_candidate(
+                    observation_id,
+                    cluster_id,
+                    candidate,
+                    prompt_version=str(getattr(generator, "prompt_version", "")),
+                    model=str(getattr(generator, "model_name", "")),
+                )
+                outcome["patches_created"] += 1
+                logger.info(
+                    "evolution_patch_created cluster=%s observation=%s layer=%s",
+                    cluster_id,
+                    observation_id,
+                    item["cluster"]["confirmed_layer"],
+                )
+            except (PatchUnavailable, DiagnosisUnavailable) as error:
+                # 契约/范围拒绝：记原因，不烧整轮；下一次轮次会重新评估（观测仍无候选）。
+                outcome["patch_failed"] += 1
+                logger.warning(
+                    "evolution_patch_unavailable cluster=%s observation=%s reason=%s detail=%s",
+                    cluster_id,
+                    observation_id,
+                    getattr(error, "reason", ""),
+                    str(error)[:200],
+                )
+            except Exception:
+                outcome["patch_failed"] += 1
+                logger.exception(
+                    "evolution_patch_failed cluster=%s observation=%s", cluster_id, observation_id
+                )
+        return outcome
+
+    return step
+
+
 def build_evolution_worker(
     *,
     settings_obj=None,
@@ -758,6 +913,16 @@ def build_evolution_worker(
             tracker_factory=tracker_factory,
             retrieval_factory=retrieval_factory,
         ),
+        # 第 5 阶段：把"已批准 + 已确认层级"的聚类自动变成代码补丁候选。沙箱与回归 A/B
+        # 仍归管理员（沙箱需要干净主树，且无凭据时量不了回归——方案 C）。
+        patch_step=make_evolution_patch_step(
+            store,
+            settings_obj=cfg,
+            model_call_budget=int(getattr(cfg, "evolution_candidate_model_calls", 0)),
+            repo_root=Path(__file__).resolve().parents[2],
+        )
+        if getattr(cfg, "evolution_candidate_enabled", False)
+        else None,
     )
     worker = EvolutionWorker(
         run_once,

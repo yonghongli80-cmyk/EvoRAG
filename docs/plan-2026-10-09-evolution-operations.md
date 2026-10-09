@@ -142,7 +142,7 @@
 
 | 队列 | 状态 | 提交 / 证据 |
 | --- | --- | --- |
-| 1 Worker 运行化 | 待开始 | — |
+| 1 Worker 运行化 | **1a 已完成**（代码补丁步骤）；1b 待做（问题集候选，需 Jev 注册表接缝） | 见下 |
 | 2 Agent 路径加固 | 待开始（先审计） | — |
 | 3 标签覆盖 + 护栏 | 待开始 | — |
 | 4 AST 符号 + 靶心窗口 | 待开始 | — |
@@ -150,3 +150,22 @@
 | 6 沙箱 Golden Fixture | 待开始 | — |
 | 7 前端审查台 | 待开始 | — |
 | 前置：真实失败供给 | **等你的输入** | worker `scanned=0`（2026-10-09 实测） |
+
+### 队列 1a 记录（代码补丁步骤）
+
+**做了什么**：`worker.py` 新增 `make_evolution_patch_step`，并在 `build_evolution_worker` 里按
+`evolution_candidate_enabled` 门控接入；**接上了原先只有定义、没有读取点的
+`evolution_candidate_model_calls`** 作为每轮预算。每轮汇总新增
+`patches_created / patch_failed / patch_pending / patch_model_calls` 四个计数。
+
+**准入（刻意很窄）**：聚类 `approved_for_candidate` **且** 有 `confirmed_layer`；该成员观测**最新**
+草案的 `suggested_layer` 与之一致（生成器本来也会拒，先筛掉省一次调用）；该观测**尚无** code_patch
+候选（重新生成是管理员的显式动作，不是后台重试）。内容缺口天然进不来：undetermined 永不离开观察
+队列（`clusterer.py:125-126`，设计 §6）。
+
+**明确不在这一步**：**不跑沙箱**（需要干净主树；且无凭据时量不了回归——方案 C），沙箱与回归 A/B
+仍归管理员。这一步只解决"必须人工跑脚本才有东西可审"。
+
+**验收**：5 条用例钉住——合格即生成；层不一致/已有候选跳过（0 调用）；预算内只生成 1 条、其余记
+`patch_pending`；拒绝（`PatchUnavailable`）只记原因不中断、不落候选；开关关闭或预算 0 时**零调用**。
+worker 套件 54 passed。

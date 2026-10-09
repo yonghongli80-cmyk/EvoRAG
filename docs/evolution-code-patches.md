@@ -188,11 +188,13 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
 
 ## 8. 关闭与回退
 
-1. 关 `RAG_EVOLUTION_CANDIDATE_ENABLED`（代码补丁生成也受该开关与 `evolution_candidate_enabled` 语义管辖）；
-   或直接不调用生成器。**该能力默认不在 worker 轮次里自动跑**，且目前没有管理员触发端点：
-   `PatchGenerator`/`run_patch_sandbox` 的唯一调用者是未入库的
-   `real-case-handoff/e2e_code_patch.py`。接进 worker 需要先立两样现在没有的东西——预算维度
-   （`evolution_candidate_model_calls` 是只有定义、无读取点的死配置）与"已批准 + 已确认层级 +
-   无代码补丁候选"的批量查询契约。
+1. 关 `RAG_EVOLUTION_CANDIDATE_ENABLED`（代码补丁生成同样受该开关管辖）。
+   **2026-10-09 起，生成已接进 worker 轮次**：`make_evolution_patch_step` 每轮扫描"已批准 +
+   已确认层级 + 草案层级一致 + 尚无补丁候选"的成员观测，自动生成补丁候选并落库，预算来自
+   `RAG_EVOLUTION_CANDIDATE_MODEL_CALLS`（此前只有定义、没有读取点）。每轮汇总新增
+   `patches_created / patch_failed / patch_pending / patch_model_calls` 四个计数；开关关闭或预算 0
+   时**零调用**。**沙箱与回归 A/B 不在这一步**（需要干净主树；无凭据时量不了回归，见第 4 节第 5 步），
+   仍由管理员按第 5.1/5.2 节执行。`PatchGenerator`/`run_patch_sandbox` 的手工调用脚本
+   （`real-case-handoff/evolab/e2e_code_patch.py`、`sandbox_stored_patch.py`）仍然可用，用于实验。
 2. 删除候选：`evolution.db` 的 `candidates` 行（或整库）。
 3. 已导出的补丁文件在 `artifacts/patches/`，删除即撤销导出；**代码回退**按普通 git 流程（`git revert`）。
