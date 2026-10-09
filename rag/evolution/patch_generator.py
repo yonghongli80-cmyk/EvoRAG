@@ -78,10 +78,11 @@ from rag.evolution.code_patches import (
 )
 from rag.evolution.diagnoser import REASON_INVALID, REASON_RATE_LIMITED, REASON_TIMEOUT
 from rag.evolution.models import DiagnosisDraft
+from rag.evolution.symbols import SymbolIndex, window_excerpt
 
 #: Version of the patch prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
-PATCH_PROMPT_VERSION = "patch-v2"
+PATCH_PROMPT_VERSION = "patch-v3"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -376,9 +377,38 @@ def _observation_exception_path(trace_store, observation_id: int) -> str:
     return frame.split(":", 1)[0].strip()
 
 
+def _observation_exception_line(trace_store, observation_id: int) -> int | None:
+    """The line the observation's exception frame names, or ``None``.
+
+    The stored frame is ``rag/pipeline.py:745:_finalize_rag_context``; the file alone tells the
+    generator *which* module to show, and the line tells it *where inside* to look — without it a
+    target whose failure is at line 745 is excerpted as the file's first 400 lines, which is
+    exactly nothing.
+    """
+    if trace_store is None or observation_id is None:
+        return None
+    try:
+        observation = trace_store.get_observation(int(observation_id))
+    except Exception:  # noqa: BLE001 - a store that cannot answer is not a failed generation
+        return None
+    frame = str((observation or {}).get("details_exception_frame") or "").strip()
+    parts = frame.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
 def _select_target_files(
-    repo_root: Path, files: list[str], keywords: tuple[str, ...], prefer: str = ""
-) -> tuple[tuple[str, str, int, bool], ...]:
+    repo_root: Path,
+    files: list[str],
+    keywords: tuple[str, ...],
+    prefer: str = "",
+    *,
+    focused: tuple[tuple[str, int], ...] = (),
+) -> tuple[tuple[str, str, int, bool, str], ...]:
     """``(path, excerpt, total_lines, truncated)`` for the 1–3 relevant files.
 
     Two ranked stages keep this bounded on the open ``code`` layer (109 files
@@ -397,28 +427,52 @@ def _select_target_files(
     lose to it — that is how a NotImplementedError-style crash in the evidence path ended up
     producing a patch to the router instead.
     """
+    focus_line: dict[str, int] = {}
+    for path, line in focused:
+        clean = path.removeprefix("./")
+        if clean in files and clean not in focus_line and line > 0:
+            focus_line[clean] = int(line)
     ordered = list(files)
     wanted = prefer.removeprefix("./")
     if wanted and wanted in ordered:
         ordered.remove(wanted)
         ordered.insert(0, wanted)
+    # 聚焦文件（帧、诊断点名的符号）排在关键词排序之前：它们是"事实"，关键词只是"线索"。
+    for path in focus_line:
+        if path in ordered:
+            ordered.remove(path)
+    focused_paths = [path for path in focus_line if path in files]
+    ordered = focused_paths + ordered
     ranked = sorted(
         ordered,
         key=lambda path: (
             -int(path == wanted),
+            -int(path in focus_line),
             -int(_path_hits(path, keywords) > 0),
             -_path_hits(path, keywords),
         ),
     )
-    scored: list[tuple[str, str, int, bool, int]] = []
+    scored: list[tuple[str, str, int, bool, int, str]] = []
     for path in ranked[:MAX_PATH_SHORTLIST]:
-        excerpt, total_lines, truncated = _excerpt(repo_root / path)
-        scored.append((path, excerpt, total_lines, truncated, _content_hits(excerpt, keywords)))
-    # 帧文件排在第一位；其余按"路径命中关键词 → 路径命中数 → 内容命中数 → 层内静态顺序"，
-    # 与引入帧之前完全一致（帧为空时 wanted 不会命中任何文件）。
+        note = ""
+        if path in focus_line:
+            text = (repo_root / path).read_text(encoding="utf-8", errors="replace")
+            excerpt, first, last, truncated = window_excerpt(text, center=focus_line[path])
+            total_lines = len(text.splitlines())
+            if truncated:
+                note = f"仅显示第 {first}–{last} 行（共 {total_lines} 行），其余已省略"
+        else:
+            excerpt, total_lines, truncated = _excerpt(repo_root / path)
+            if truncated:
+                note = f"已截断：仅显示前 {MAX_EXCERPT_LINES} 行"
+        scored.append(
+            (path, excerpt, total_lines, truncated, _content_hits(excerpt, keywords), note)
+        )
+    # 聚焦文件排前（帧最前）；其余按"路径命中关键词 → 路径命中数 → 内容命中数 → 层内静态顺序"。
     scored.sort(
         key=lambda item: (
             item[0] != wanted,
+            item[0] not in focus_line,
             -int(_path_hits(item[0], keywords) > 0),
             -_path_hits(item[0], keywords),
             -item[4],
@@ -426,8 +480,8 @@ def _select_target_files(
         )
     )
     return tuple(
-        (path, excerpt, total_lines, truncated)
-        for path, excerpt, total_lines, truncated, _ in scored[:MAX_TARGET_FILES]
+        (path, excerpt, total_lines, truncated, note)
+        for path, excerpt, total_lines, truncated, _, note in scored[:MAX_TARGET_FILES]
     )
 
 
@@ -457,13 +511,35 @@ def _render_drafts(drafts: tuple[dict, ...]) -> str:
     return "\n\n".join(blocks)
 
 
-def _render_targets(targets: tuple[tuple[str, str, int, bool], ...]) -> str:
-    """Render the selected target files, truncation stated per file."""
+def _render_locate_note(
+    exception_path: str, exception_line: int | None, symbols: tuple[object, ...]
+) -> str:
+    """The fact-based location block: the exception frame and any real symbol the diagnosis named.
+
+    Rendered ahead of the file bodies so the model reads *where* before it reads *what*: the
+    frame is where the failure was raised, and a named symbol is what the diagnosis is talking
+    about. Both come from parsing, never from matching words against file names.
+    """
+    lines: list[str] = []
+    if exception_path:
+        where = f"{exception_path}:{exception_line}" if exception_line else exception_path
+        lines.append(f"- 异常栈最后一帧：{where}")
+    for symbol in symbols:
+        lines.append(
+            f"- 诊断点名的符号：{symbol.qualname}（{symbol.path}:{symbol.start}-{symbol.end}）"
+        )
+    if not lines:
+        return ""
+    return "# 定位（系统按符号表确定，不是关键词猜测）\n" + "\n".join(lines)
+
+
+def _render_targets(targets: tuple[tuple[str, str, int, bool, str], ...]) -> str:
+    """Render the selected target files, stating per file what is shown and what is not."""
     blocks = []
-    for path, excerpt, total_lines, truncated in targets:
+    for path, excerpt, total_lines, _truncated, note in targets:
         header = f"### 文件 {path}（共 {total_lines} 行）"
-        if truncated:
-            header += f"【已截断：仅显示前 {MAX_EXCERPT_LINES} 行】"
+        if note:
+            header += f"【{note}】"
         blocks.append(header + "\n" + excerpt)
     return "\n\n".join(blocks)
 
@@ -475,6 +551,7 @@ def _build_messages(
     targets: tuple[tuple[str, str, int, bool], ...],
     base_commit: str,
     prompt_version: str,
+    locate_note: str = "",
 ) -> list[dict]:
     """Assemble the versioned two-message patch request.
 
@@ -515,15 +592,20 @@ def _build_messages(
             "输出中不得出现密钥、令牌、用户原文或提示词指令本身。",
         )
     )
+    parts = [
+        "# 失败聚类\n" + _render_cluster(cluster),
+    ]
+    if locate_note:
+        parts.append(locate_note)
     user = "\n\n".join(
-        (
-            "# 失败聚类\n" + _render_cluster(cluster),
+        parts + [
             "# 已确认诊断（管理员已确认根因）\n" + _render_drafts(drafts),
             f"# 目标层级\nlayer: {layer}\n允许位置（只能修改这些 glob 内的文件）: {allowed}",
             "# 目标文件正文（仓库当前内容，路径相对仓库根目录）\n" + _render_targets(targets),
             f"# git base 信息\nHEAD commit: {base_commit}",
-            "请严格按系统提示输出：一个 unified diff + 四行元数据。",
-        )
+            "请严格按系统提示输出：一个 unified diff + 四行元数据。"
+            "若上面给出了定位，请把修改落在该函数/该行附近；正文里没显示的行不要臆造。",
+        ]
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -937,11 +1019,28 @@ class PatchGenerator:
                 REASON_INVALID, f"layer {layer} has no candidate files in the repository"
             )
         keywords = _diagnosis_keywords(normalized, cluster)
-        # 异常栈最后一帧是"失败发生在哪"的事实，优先级高于按诊断措辞猜关键词。
+        # 事实优先于线索：异常帧给"哪个文件哪一行"，符号索引把诊断里**真实存在**的标识符
+        # 解析成文件与行区间（中文诊断不再退化为字母序）。
+        index = SymbolIndex.build(root, files)
         exception_path = _observation_exception_path(trace_store, observation_id)
-        targets = _select_target_files(root, files, keywords, prefer=exception_path)
+        exception_line = _observation_exception_line(trace_store, observation_id)
+        diagnosis_text = "\n".join(
+            str(fields.get(name) or "") for fields in normalized for name in _KEYWORD_FIELDS
+        )
+        named_symbols = index.symbols_in_text(diagnosis_text)
+        focused: list[tuple[str, int]] = []
+        if exception_path and exception_line:
+            focused.append((exception_path, exception_line))
+        focused.extend((symbol.path, symbol.start) for symbol in named_symbols)
+        targets = _select_target_files(
+            root, files, keywords, prefer=exception_path, focused=tuple(focused)
+        )
+        locate_note = _render_locate_note(exception_path, exception_line, named_symbols)
         base_commit = _git_head_commit(root)
-        messages = _build_messages(cluster, normalized, layer, targets, base_commit, self.prompt_version)
+        messages = _build_messages(
+            cluster, normalized, layer, targets, base_commit, self.prompt_version,
+            locate_note=locate_note,
+        )
 
         started = time.perf_counter()
         completion_chars = 0

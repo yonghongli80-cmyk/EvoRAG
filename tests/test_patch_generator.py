@@ -293,7 +293,8 @@ def test_prompt_version_is_traceable_on_the_instance_and_in_the_request(tmp_path
 
     # patch-v2：把「测试只进元数据、不进 diff」与「不得新建文件」写死——2026-10-02 实测
     # 同一诊断 3/3 次因 diff 里新建 tests/ 文件被拒。
-    assert PATCH_PROMPT_VERSION == "patch-v2"
+    # patch-v3：定位块（异常帧 + 诊断点名的真实符号）与靶心窗口。
+    assert PATCH_PROMPT_VERSION == "patch-v3"
     assert generator.prompt_version == PATCH_PROMPT_VERSION
     assert PATCH_PROMPT_VERSION in _request_text(fake)
 
@@ -936,3 +937,67 @@ def test_a_store_that_cannot_answer_is_not_a_failed_generation():
             raise RuntimeError("store exploded")
 
     assert _observation_exception_path(Broken(), 1) == ""
+
+
+# ------------------------------------------------------------------
+# AST 符号索引 + 靶心窗口（队列 4）：事实优先于关键词线索。
+# ------------------------------------------------------------------
+
+
+def test_a_target_known_to_live_far_into_a_file_is_shown_around_that_line(tmp_path):
+    """靶心窗口：目标在第 901 行时，"前 400 行"什么也看不到——必须显示那一段。"""
+    from rag.evolution.patch_generator import _select_target_files
+
+    repo = tmp_path
+    (repo / "rag").mkdir()
+    body = [f"# filler {index}" for index in range(1, 1201)]
+    body[900] = "def _finalize_rag_context():  # the failure lives here"
+    (repo / "rag" / "pipeline.py").write_text("\n".join(body), encoding="utf-8")
+    (repo / "rag" / "agent.py").write_text("def route_question():\n    return 'rag'\n", encoding="utf-8")
+
+    targets = _select_target_files(
+        repo,
+        ["rag/agent.py", "rag/pipeline.py"],
+        ("agent", "router"),
+        prefer="rag/pipeline.py",
+        focused=(("rag/pipeline.py", 901),),
+    )
+
+    first = targets[0]
+    assert first[0] == "rag/pipeline.py"
+    assert "_finalize_rag_context" in first[1]  # 窗口覆盖第 901 行
+    assert "仅显示第" in first[4]  # 说明显示的是哪一段
+    assert "1201" in first[4] or "共" in first[4]
+
+
+def test_the_real_repository_index_resolves_the_symbols_a_diagnosis_names(tmp_path):
+    """用真实仓库验收：中文诊断里点名的**真实**符号被解析到正确文件（虚构的不产生噪声）。"""
+    from rag.evolution.symbols import SymbolIndex
+
+    index = SymbolIndex.build(
+        REPO_ROOT, ["rag/pipeline.py", "rag/retriever.py", "rag/agent.py"]
+    )
+
+    symbols = index.symbols_in_text(
+        "异常发生在 _finalize_rag_context，与 _rrf_fuse 的排序有关，zzz_not_a_symbol 无关"
+    )
+
+    assert [symbol.path for symbol in symbols] == ["rag/pipeline.py", "rag/retriever.py"]
+    assert symbols[1].qualname.endswith("_rrf_fuse")
+
+
+def test_the_locate_note_names_the_frame_and_the_named_symbol():
+    """定位块把"事实"放在文件正文之前：异常帧在哪、诊断在说哪个符号。"""
+    from rag.evolution.patch_generator import _render_locate_note
+    from rag.evolution.symbols import Symbol
+
+    note = _render_locate_note(
+        "rag/pipeline.py",
+        745,
+        (Symbol("rag/retriever.py", "Retriever._rrf_fuse", "method", 230, 266),),
+    )
+
+    assert "异常栈最后一帧：rag/pipeline.py:745" in note
+    assert "Retriever._rrf_fuse" in note
+    assert "rag/retriever.py:230-266" in note
+    assert _render_locate_note("", None, ()) == ""
