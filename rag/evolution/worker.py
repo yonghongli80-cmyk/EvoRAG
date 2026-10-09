@@ -38,7 +38,13 @@ _DIAGNOSIS_RECALL_TOP_K = 24
 _MAX_DIAGNOSIS_ATTEMPTS = 2
 
 #: A round without a gap-ticket step reports no ticket work (and costs nothing: it has no model).
-_NO_GAPS: dict = {"tickets_created": 0, "tickets_pending": 0, "ticket_questions_probed": 0}
+_NO_GAPS: dict = {
+    "tickets_created": 0,
+    "tickets_pending": 0,
+    "ticket_questions_probed": 0,
+    "tickets_rechecked": 0,
+    "tickets_updated": 0,
+}
 
 #: A round without a candidate step reports no candidate work.
 _NO_CANDIDATE: dict = {
@@ -427,6 +433,8 @@ def make_evolution_run_once(
             "tickets_created": gaps["tickets_created"],
             "tickets_pending": gaps["tickets_pending"],
             "ticket_questions_probed": gaps["ticket_questions_probed"],
+            "tickets_rechecked": gaps["tickets_rechecked"],
+            "tickets_updated": gaps["tickets_updated"],
             "model_calls": diagnosis["model_calls"],
             "purged": purged,
             "diagnosis_config": diagnosis["diagnosis_config"],
@@ -1053,6 +1061,7 @@ def make_evolution_gap_ticket_step(
     retrieval_factory: Callable[[], object] | None = None,
     probe_limit: int = 8,
     question_limit: int = 8,
+    recheck_limit: int = 5,
 ) -> Callable[[], dict]:
     """The content-gap artifact: an ``undetermined`` cluster becomes one reviewable ticket.
 
@@ -1071,6 +1080,7 @@ def make_evolution_gap_ticket_step(
         build_ticket,
         missing_terms_for,
         question_samples,
+        ticket_from_payload,
     )
     from rag.evolution.verdicts import is_not_a_defect
 
@@ -1078,10 +1088,48 @@ def make_evolution_gap_ticket_step(
     marked = _marked_not_a_defect(cfg)
 
     def step() -> dict:
-        outcome = {"tickets_created": 0, "tickets_pending": 0, "ticket_questions_probed": 0}
+        outcome = {
+            "tickets_created": 0,
+            "tickets_pending": 0,
+            "ticket_questions_probed": 0,
+            "tickets_rechecked": 0,
+            "tickets_updated": 0,
+        }
         have = store.gap_ticket_cluster_ids()
         # 惰性：没有可探测的聚类时连 reader 都不建（每轮都跑，绝大多数轮次无事可做）。
         reader = None
+
+        def ensure_reader():
+            nonlocal reader
+            if reader is None:
+                reader = (
+                    retrieval_factory
+                    or (
+                        lambda: AdminReadOnlyRetrievalReader(
+                            getattr(cfg, "users_db_path", settings.users_db_path)
+                        )
+                    )
+                )()
+            return reader
+
+        def probe(questions, kb_id):
+            """Deterministic re-retrieval: the missing terms of each question, and how many ran."""
+            probed = 0
+            per_question: list[tuple[str, ...]] = []
+            for question in questions[:probe_limit]:
+                try:
+                    chunks = ensure_reader().retrieve(question, kb_id=kb_id) or []
+                except Exception:
+                    logger.exception("evolution_gap_probe_failed kb=%s", kb_id)
+                    continue
+                probed += 1
+                per_question.append(
+                    missing_terms_for(
+                        question, [getattr(chunk, "text", "") or "" for chunk in chunks]
+                    )
+                )
+            return per_question, probed
+
         try:
             for cluster in store.list_clusters():
                 if str(cluster.get("root_cause_feature") or "") != "undetermined":
@@ -1096,29 +1144,9 @@ def make_evolution_gap_ticket_step(
                 if not members:
                     outcome["tickets_pending"] += 1
                     continue
-                if reader is None:
-                    reader = (
-                        retrieval_factory
-                        or (
-                            lambda: AdminReadOnlyRetrievalReader(
-                                getattr(cfg, "users_db_path", settings.users_db_path)
-                            )
-                        )
-                    )()
-                probed = 0
-                per_question: list[tuple[str, ...]] = []
-                for question in question_samples(members, limit=question_limit)[:probe_limit]:
-                    try:
-                        chunks = reader.retrieve(question, kb_id=cluster.get("kb_id")) or []
-                    except Exception:
-                        logger.exception(
-                            "evolution_gap_probe_failed cluster=%s", cluster.get("id")
-                        )
-                        continue
-                    probed += 1
-                    per_question.append(
-                        missing_terms_for(question, [getattr(chunk, "text", "") or "" for chunk in chunks])
-                    )
+                per_question, probed = probe(
+                    question_samples(members, limit=question_limit), cluster.get("kb_id")
+                )
                 ticket = build_ticket(
                     cluster,
                     members,
@@ -1135,6 +1163,33 @@ def make_evolution_gap_ticket_step(
                     cluster.get("kb_id"),
                     ticket.occurrences,
                     ",".join(ticket.missing_terms[:4]),
+                )
+
+            # 第二阶段：内容入库后的**复测**。缺的词被覆盖 ⇒ content_added；仍有缺 ⇒ 更新清单。
+            now = time.time()
+            for row in store.list_gap_tickets(status="open")[:recheck_limit]:
+                payload = row.get("payload") or {}
+                questions = [str(item) for item in (payload.get("question_samples") or ())]
+                if not questions:
+                    continue
+                ticket = ticket_from_payload(payload)
+                per_question, probed = probe(questions, row.get("kb_id"))
+                missing_now = aggregate_missing_terms(per_question)
+                outcome["tickets_rechecked"] += 1
+                if tuple(missing_now) == tuple(ticket.missing_terms):
+                    continue  # 没有变化就不写，避免无谓的行更新
+                covered = [term for term in ticket.missing_terms if term not in set(missing_now)]
+                updated = ticket.with_recheck(
+                    missing_terms=missing_now, covered_terms=covered, probed=probed, now=now
+                )
+                store.record_gap_recheck(int(row["id"]), updated, now=now)
+                outcome["tickets_updated"] += 1
+                logger.info(
+                    "evolution_gap_ticket_updated ticket=%s verdict=%s status=%s still_missing=%s",
+                    row.get("id"),
+                    (updated.recheck or {}).get("verdict"),
+                    updated.status,
+                    ",".join(updated.missing_terms[:4]),
                 )
         finally:
             _close_quietly(reader)

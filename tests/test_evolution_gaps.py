@@ -75,3 +75,28 @@ def test_a_ticket_without_probe_says_so_instead_of_inventing_terms():
 
     assert ticket.missing_terms == ()
     assert "未探测" in ticket.rationale
+
+
+def test_recheck_verdicts_cover_the_three_outcomes():
+    from rag.evolution.gaps import recheck_verdict
+
+    assert recheck_verdict(previous_missing=("发货",), missing_now=()) == "covered"
+    assert recheck_verdict(previous_missing=("发货", "价格"), missing_now=("价格",)) == "partial"
+    assert recheck_verdict(previous_missing=("发货",), missing_now=("发货",)) == "unchanged"
+    assert recheck_verdict(previous_missing=(), missing_now=()) == "covered"
+
+
+def test_with_recheck_moves_the_status_and_replaces_the_missing_list():
+    ticket = build_ticket({"id": 3, "kb_id": "kb1"}, [_observation("发货", 1.0)],
+                          missing_terms=("发货",), now=10.0)
+
+    covered = ticket.with_recheck(missing_terms=(), covered_terms=("发货",), probed=1, now=20.0)
+    assert covered.status == "content_added"
+    assert covered.missing_terms == ()
+    assert covered.recheck["verdict"] == "covered"
+    assert covered.recheck["covered_terms"] == ["发货"]
+
+    still = ticket.with_recheck(missing_terms=("价格",), covered_terms=("发货",), probed=1, now=21.0)
+    assert still.status == "open"
+    assert still.missing_terms == ("价格",)
+    assert still.recheck["still_missing"] == ["价格"]

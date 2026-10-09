@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Quoted from the evidence module on purpose: the term rules must be identical to the ones the
 # diagnosis already renders, and duplicating them is how two copies drift apart.
@@ -50,6 +50,11 @@ class KnowledgeGapTicket:
     probed_questions: int
     rationale: str
     created_at: float
+    #: ``open`` 直到复测证明内容已到位；``content_added`` 由复测写入（状态是自由文本，
+    #: 因为这张表没有 CHECK 约束，也不需要重建表来扩展）。
+    status: str = "open"
+    #: 最近一次复测：``{checked_at, probed, covered_terms, still_missing, verdict}``。
+    recheck: dict | None = None
 
     def to_payload(self) -> dict:
         """The JSON-safe form the store keeps and an endpoint would render."""
@@ -64,7 +69,37 @@ class KnowledgeGapTicket:
             "probed_questions": self.probed_questions,
             "rationale": self.rationale,
             "created_at": self.created_at,
+            "status": self.status,
+            "recheck": self.recheck,
         }
+
+    def with_recheck(
+        self,
+        *,
+        missing_terms: Sequence[str],
+        covered_terms: Sequence[str],
+        probed: int,
+        now: float,
+    ) -> KnowledgeGapTicket:
+        """A copy carrying one deterministic re-check, and the status that follows from it.
+
+        ``content_added`` when nothing from the previous list is still missing — the operator's
+        upload covered it — and ``open`` otherwise, with the still-missing terms replacing the
+        old list so the next round asks about what is actually left.
+        """
+        verdict = recheck_verdict(previous_missing=self.missing_terms, missing_now=missing_terms)
+        return replace(
+            self,
+            missing_terms=tuple(missing_terms),
+            status="content_added" if not missing_terms else "open",
+            recheck={
+                "checked_at": float(now),
+                "probed": int(probed),
+                "covered_terms": list(covered_terms),
+                "still_missing": list(missing_terms),
+                "verdict": verdict,
+            },
+        )
 
 
 def question_samples(observations: Sequence[Mapping], *, limit: int = DEFAULT_QUESTION_LIMIT) -> tuple[str, ...]:
@@ -107,6 +142,44 @@ def aggregate_missing_terms(
             order.setdefault(term, index)
     ranked = sorted(counts, key=lambda term: (-counts[term], order[term], term))
     return tuple(ranked[:limit])
+
+
+def ticket_from_payload(payload: Mapping) -> KnowledgeGapTicket:
+    """Rebuild a ticket from its stored payload (used by the re-check round)."""
+    return KnowledgeGapTicket(
+        cluster_id=int(payload.get("cluster_id") or 0),
+        kb_id=str(payload.get("kb_id") or ""),
+        question_samples=tuple(payload.get("question_samples") or ()),
+        occurrences=int(payload.get("occurrences") or 0),
+        first_seen=float(payload.get("first_seen") or 0.0),
+        last_seen=float(payload.get("last_seen") or 0.0),
+        missing_terms=tuple(payload.get("missing_terms") or ()),
+        probed_questions=int(payload.get("probed_questions") or 0),
+        rationale=str(payload.get("rationale") or ""),
+        created_at=float(payload.get("created_at") or 0.0),
+        status=str(payload.get("status") or "open"),
+        recheck=payload.get("recheck"),
+    )
+
+
+def recheck_verdict(*, previous_missing: Sequence[str], missing_now: Sequence[str]) -> str:
+    """``covered`` / ``partial`` / ``unchanged``: did the missing terms survive a re-retrieval?
+
+    The comparison is what makes the ticket actionable after an upload: a term that used to be
+    absent and now appears is content that arrived, and a term still absent is content still
+    owed. ``unchanged`` is a separate verdict on purpose — nothing moved, so a caller can skip
+    the write instead of recording the same numbers again.
+    """
+    previous = [term for term in previous_missing]
+    now = set(missing_now)
+    if not previous and not missing_now:
+        return "covered"
+    covered = [term for term in previous if term not in now]
+    if not missing_now:
+        return "covered"
+    if covered:
+        return "partial"
+    return "unchanged"
 
 
 def build_ticket(
@@ -159,4 +232,6 @@ __all__ = [
     "build_ticket",
     "missing_terms_for",
     "question_samples",
+    "recheck_verdict",
+    "ticket_from_payload",
 ]

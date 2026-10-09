@@ -322,6 +322,9 @@ class FakeStore:
     def gap_ticket_cluster_ids(self):
         return set()
 
+    def list_gap_tickets(self, cluster_id=None, *, status=None):
+        return []
+
 
 class FakeClusterer:
     def __init__(self):
@@ -1527,3 +1530,59 @@ def test_a_not_a_defect_member_never_becomes_a_gap_ticket(tmp_path):
     assert outcome["tickets_created"] == 0
     assert outcome["tickets_pending"] == 1
     assert store.list_gap_tickets() == []
+
+
+class SequencedReader:
+    """每次调用换一段语料：用来模拟"运营把补充材料上传进库"。"""
+
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls = 0
+        self.closed = False
+
+    def retrieve(self, question, *, kb_id):
+        self.calls += 1
+        text = self.texts[min(self.calls - 1, len(self.texts) - 1)]
+        return [Chunk(text=text)]
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_gap_step_does_not_rewrite_an_unchanged_ticket(tmp_path):
+    """同一轮里刚起草的工单会被复测一次；结果没变化就不写（避免无谓的行更新）。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _gap_cluster(store, "kb1|generation|gap", questions=("发货时效是多久",))
+
+    outcome = _gap_step(store, reader=SequencedReader(["完全无关的一段文档"]))()
+
+    assert outcome["tickets_created"] == 1
+    assert outcome["tickets_rechecked"] == 1
+    assert outcome["tickets_updated"] == 0  # 没变化 ⇒ 不写
+    assert store.list_gap_tickets(status="open")
+
+
+def test_an_upload_that_covers_the_missing_terms_closes_the_ticket(tmp_path):
+    """入库后复测：原先缺的词被覆盖 ⇒ 工单转 content_added 并留下复测记录。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _gap_cluster(store, "kb1|generation|gap", questions=("发货",))
+    # 首轮会探测两次（起草一次、复测一次），所以头两段都必须是"还没有这条内容"；
+    # 注意"无关文本"里也不能出现问题词，否则探测结果直接是"没有缺失"。
+    reader = SequencedReader(
+        ["完全无关的一段文档", "完全无关的一段文档", "发货时效：当日发出，次日到达"]
+    )
+
+    first = _gap_step(store, reader=reader)()
+    assert first["tickets_created"] == 1
+    ticket = store.list_gap_tickets()[0]
+    assert ticket["status"] == "open"
+    assert ticket["payload"]["missing_terms"]  # 首轮确实探测到缺失
+
+    second = _gap_step(store, reader=reader)()  # 语料换了 ⇒ 模拟入库完成
+
+    assert second["tickets_rechecked"] == 1
+    assert second["tickets_updated"] == 1
+    updated = store.list_gap_tickets()[0]
+    assert updated["status"] == "content_added"
+    assert updated["payload"]["missing_terms"] == []
+    assert updated["payload"]["recheck"]["verdict"] == "covered"

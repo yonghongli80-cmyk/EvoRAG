@@ -742,17 +742,45 @@ class FailureTraceStore:
             self._conn.commit()
             return int(cursor.lastrowid)
 
-    def list_gap_tickets(self, cluster_id: int | None = None) -> list[dict]:
-        """Stored tickets, newest first, optionally filtered to one cluster."""
+    def list_gap_tickets(
+        self, cluster_id: int | None = None, *, status: str | None = None
+    ) -> list[dict]:
+        """Stored tickets, newest first, optionally filtered by cluster and/or status."""
         sql = "SELECT * FROM knowledge_gap_tickets"
-        params: tuple = ()
+        params: list = []
+        clauses: list[str] = []
         if cluster_id is not None:
-            sql += " WHERE cluster_id = ?"
-            params = (int(cluster_id),)
+            clauses.append("cluster_id = ?")
+            params.append(int(cluster_id))
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(str(status))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC"
         with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [_decode_gap_ticket_row(row) for row in rows]
+
+    def record_gap_recheck(self, ticket_id: int, ticket, *, now: float) -> None:
+        """Write back one re-check: payload, occurrences and status only.
+
+        Still nothing here can move a cluster, a candidate or a gate — a ticket records what the
+        corpus holds, and the state machines do not read this table.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE knowledge_gap_tickets SET payload = ?, occurrences = ?, status = ?, "
+                "updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(ticket.to_payload(), ensure_ascii=False),
+                    int(ticket.occurrences),
+                    str(ticket.status),
+                    float(now),
+                    int(ticket_id),
+                ),
+            )
+            self._conn.commit()
 
     def gap_ticket_cluster_ids(self) -> set[int]:
         """Cluster ids that already have a ticket, so a round never drafts a second one."""
