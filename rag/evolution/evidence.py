@@ -111,10 +111,13 @@ def _term_coverage(terms: Sequence[str], texts: Sequence[str]) -> tuple[dict, ..
     contain is evidence about the corpus, not a gap in the pack.
     """
     records: list[dict] = []
+    # 术语里的 ASCII 词是小写的，而语料里的型号多是大写（R50、LP-E17）：逐字比对会把"已覆盖"
+    # 报成"未覆盖"，方向恰好最坏（把内容存在说成缺失）。统一按小写比对；CJK 不受影响。
+    lowered = [(text or "").lower() for text in texts]
     for term in terms:
         hits = 0
         best_rank = 0
-        for rank, text in enumerate(texts, start=1):
+        for rank, text in enumerate(lowered, start=1):
             if term in text:
                 hits += 1
                 if best_rank == 0:

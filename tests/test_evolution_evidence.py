@@ -677,3 +677,19 @@ def test_pack_carries_the_recorded_exception_frame(tmp_path):
     assert assemble_evidence(
         {**member, "details_exception_frame": None}, cluster, store=store
     ).exception_frame == ""
+
+
+def test_coverage_matches_uppercase_corpus_text_against_lowercase_terms():
+    """术语里的 ASCII 词是小写的，而语料里的型号多是大写（R50、LP-E17）。
+
+    逐字比对会把"已覆盖"报成"未覆盖"——方向恰好最坏（把内容存在说成缺失，推向内容缺口）。
+    """
+    from rag.evolution.evidence import _question_terms, _term_coverage
+
+    terms = _question_terms("R50 电池卖多少钱")
+    assert "r50" in terms  # ASCII 词按小写取
+
+    records = _term_coverage(terms, ["佳能 EOS R50 电池型号 LP-E17"])
+    by_term = {record["term"]: record for record in records}
+
+    assert by_term["r50"]["chunks"] == 1

@@ -138,6 +138,24 @@ CREATE TABLE IF NOT EXISTS diagnosis_drafts (
 )
 """
 
+#: Knowledge-gap tickets live in their own table on purpose: they are requests for content,
+#: never candidates. The candidate pool's invariant — an undetermined root cause never leaves the
+#: observation queue — is therefore untouched by their existence, and no state machine transition
+#: reads this table. ``status`` is free-form (``open`` today; ``content_added``/``closed`` when
+#: the ingestion round-trip lands) because there is no CHECK constraint to widen later.
+_GAP_TICKETS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS knowledge_gap_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id INTEGER NOT NULL,
+    kb_id TEXT NOT NULL,
+    payload JSON NOT NULL,
+    occurrences INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
+
 _EVOLUTION_AUDIT_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS evolution_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,6 +184,18 @@ def _decode_draft_row(row: sqlite3.Row) -> dict:
     return decoded
 
 
+def _decode_gap_ticket_row(row) -> dict:
+    """One stored ticket with its payload parsed back into the row."""
+    decoded = dict(row)
+    payload = decoded.get("payload")
+    if isinstance(payload, str):
+        try:
+            decoded["payload"] = json.loads(payload)
+        except ValueError:
+            decoded["payload"] = {}
+    return decoded
+
+
 class FailureTraceStore:
     """Persistence for the observation phase; content-free by construction."""
 
@@ -187,6 +217,7 @@ class FailureTraceStore:
             self._conn.execute(_CLUSTERS_TABLE_SQL)
             self._conn.execute(_SKIP_LOG_TABLE_SQL)
             self._conn.execute(_DIAGNOSIS_DRAFTS_TABLE_SQL)
+            self._conn.execute(_GAP_TICKETS_TABLE_SQL)
             self._conn.execute(_EVOLUTION_AUDIT_TABLE_SQL)
             # 迁移：异常栈最后一帧是后加的列，既有库（CREATE TABLE IF NOT EXISTS 不会补列）
             # 用 ADD COLUMN 补上，旧行读回 NULL。丢掉重建会删掉已审核的历史。
@@ -680,6 +711,56 @@ class FailureTraceStore:
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
         return [_decode_draft_row(row) for row in rows]
+
+    def add_gap_ticket(self, ticket) -> int:
+        """Persist one knowledge-gap ticket; returns its id.
+
+        Writes only this table: a ticket is a request for content, so nothing here can move a
+        cluster, a candidate or a gate. The cluster must exist, so a ticket can never point at
+        something the store does not have.
+        """
+        with self._lock:
+            cluster = self._conn.execute(
+                "SELECT id FROM failure_clusters WHERE id = ?", (int(ticket.cluster_id),)
+            ).fetchone()
+            if cluster is None:
+                raise KeyError("cluster not found")
+            now = float(ticket.created_at)
+            cursor = self._conn.execute(
+                "INSERT INTO knowledge_gap_tickets "
+                "(cluster_id, kb_id, payload, occurrences, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'open', ?, ?)",
+                (
+                    int(ticket.cluster_id),
+                    str(ticket.kb_id),
+                    json.dumps(ticket.to_payload(), ensure_ascii=False),
+                    int(ticket.occurrences),
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def list_gap_tickets(self, cluster_id: int | None = None) -> list[dict]:
+        """Stored tickets, newest first, optionally filtered to one cluster."""
+        sql = "SELECT * FROM knowledge_gap_tickets"
+        params: tuple = ()
+        if cluster_id is not None:
+            sql += " WHERE cluster_id = ?"
+            params = (int(cluster_id),)
+        sql += " ORDER BY id DESC"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [_decode_gap_ticket_row(row) for row in rows]
+
+    def gap_ticket_cluster_ids(self) -> set[int]:
+        """Cluster ids that already have a ticket, so a round never drafts a second one."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT cluster_id FROM knowledge_gap_tickets"
+            ).fetchall()
+        return {int(row[0]) for row in rows}
 
     def clusters_awaiting_diagnosis_without_draft(self, limit: int) -> list[dict]:
         """Clusters awaiting diagnosis review with no draft yet, oldest first.

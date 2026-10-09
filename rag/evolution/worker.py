@@ -37,6 +37,9 @@ _DIAGNOSIS_RECALL_TOP_K = 24
 #: 重试只会更快耗尽预算。重试计入每轮调用预算，所以这是成本上限而不是绕过它。
 _MAX_DIAGNOSIS_ATTEMPTS = 2
 
+#: A round without a gap-ticket step reports no ticket work (and costs nothing: it has no model).
+_NO_GAPS: dict = {"tickets_created": 0, "tickets_pending": 0, "ticket_questions_probed": 0}
+
 #: A round without a candidate step reports no candidate work.
 _NO_CANDIDATE: dict = {
     "candidates_created": 0,
@@ -385,6 +388,7 @@ def make_evolution_run_once(
     diagnosis_step: Callable[[], dict] | None = None,
     patch_step: Callable[[], dict] | None = None,
     candidate_step: Callable[[], dict] | None = None,
+    gap_ticket_step: Callable[[], dict] | None = None,
 ) -> Callable[[], dict]:
     """Build the round function: clustering, diagnosis, patch generation, then retention.
 
@@ -404,6 +408,7 @@ def make_evolution_run_once(
         # 补丁生成在诊断之后：它只处理"已批准 + 已确认层级"的聚类，与诊断互不依赖。
         patch = patch_step() if patch_step is not None else dict(_NO_PATCH)
         candidate = candidate_step() if candidate_step is not None else dict(_NO_CANDIDATE)
+        gaps = gap_ticket_step() if gap_ticket_step is not None else dict(_NO_GAPS)
         purged = 0
         if purge_every_rounds > 0 and rounds["n"] % purge_every_rounds == 0:
             purged = purge_evolution_observations(store, retention_days=retention_days)
@@ -419,6 +424,9 @@ def make_evolution_run_once(
             "candidate_failed": candidate["candidate_failed"],
             "candidate_pending": candidate["candidate_pending"],
             "candidate_model_calls": candidate["candidate_model_calls"],
+            "tickets_created": gaps["tickets_created"],
+            "tickets_pending": gaps["tickets_pending"],
+            "ticket_questions_probed": gaps["ticket_questions_probed"],
             "model_calls": diagnosis["model_calls"],
             "purged": purged,
             "diagnosis_config": diagnosis["diagnosis_config"],
@@ -1038,6 +1046,103 @@ def make_evolution_candidate_step(
     return step
 
 
+def make_evolution_gap_ticket_step(
+    store,
+    *,
+    settings_obj=None,
+    retrieval_factory: Callable[[], object] | None = None,
+    probe_limit: int = 8,
+    question_limit: int = 8,
+) -> Callable[[], dict]:
+    """The content-gap artifact: an ``undetermined`` cluster becomes one reviewable ticket.
+
+    **No model calls at all.** Everything an editor needs is already recorded or cheaply
+    derivable: which questions failed and how often, over what window, in which knowledge base,
+    and — after one deterministic re-retrieval per sampled question — which of their terms the
+    recall window never contains. That last part is what says *what to write*.
+
+    The ticket never touches the candidate pool: the cluster stays in the observation queue,
+    because "the corpus lacks this" is not something a prompt or a patch can fix. Members already
+    judged not-a-defect by an administrator are dropped, so a refusal that was correct never
+    becomes a request to add content that must not be handed over.
+    """
+    from rag.evolution.gaps import (
+        aggregate_missing_terms,
+        build_ticket,
+        missing_terms_for,
+        question_samples,
+    )
+    from rag.evolution.verdicts import is_not_a_defect
+
+    cfg = settings_obj or settings
+    marked = _marked_not_a_defect(cfg)
+
+    def step() -> dict:
+        outcome = {"tickets_created": 0, "tickets_pending": 0, "ticket_questions_probed": 0}
+        have = store.gap_ticket_cluster_ids()
+        # 惰性：没有可探测的聚类时连 reader 都不建（每轮都跑，绝大多数轮次无事可做）。
+        reader = None
+        try:
+            for cluster in store.list_clusters():
+                if str(cluster.get("root_cause_feature") or "") != "undetermined":
+                    continue
+                if int(cluster["id"]) in have:
+                    continue
+                members = [
+                    observation
+                    for observation in store.list_observations(cluster_id=cluster["id"])
+                    if not is_not_a_defect(str(observation.get("question") or ""), marked)
+                ]
+                if not members:
+                    outcome["tickets_pending"] += 1
+                    continue
+                if reader is None:
+                    reader = (
+                        retrieval_factory
+                        or (
+                            lambda: AdminReadOnlyRetrievalReader(
+                                getattr(cfg, "users_db_path", settings.users_db_path)
+                            )
+                        )
+                    )()
+                probed = 0
+                per_question: list[tuple[str, ...]] = []
+                for question in question_samples(members, limit=question_limit)[:probe_limit]:
+                    try:
+                        chunks = reader.retrieve(question, kb_id=cluster.get("kb_id")) or []
+                    except Exception:
+                        logger.exception(
+                            "evolution_gap_probe_failed cluster=%s", cluster.get("id")
+                        )
+                        continue
+                    probed += 1
+                    per_question.append(
+                        missing_terms_for(question, [getattr(chunk, "text", "") or "" for chunk in chunks])
+                    )
+                ticket = build_ticket(
+                    cluster,
+                    members,
+                    missing_terms=aggregate_missing_terms(per_question),
+                    probed_questions=probed,
+                    question_limit=question_limit,
+                )
+                store.add_gap_ticket(ticket)
+                outcome["tickets_created"] += 1
+                outcome["ticket_questions_probed"] += probed
+                logger.info(
+                    "evolution_gap_ticket_created cluster=%s kb=%s occurrences=%s terms=%s",
+                    cluster.get("id"),
+                    cluster.get("kb_id"),
+                    ticket.occurrences,
+                    ",".join(ticket.missing_terms[:4]),
+                )
+        finally:
+            _close_quietly(reader)
+        return outcome
+
+    return step
+
+
 def build_evolution_worker(
     *,
     settings_obj=None,
@@ -1114,6 +1219,8 @@ def build_evolution_worker(
         )
         if getattr(cfg, "evolution_candidate_enabled", False)
         else None,
+        # 第三种制品：内容缺口工单。**不需要候选开关**（它不是候选），也不花模型调用。
+        gap_ticket_step=make_evolution_gap_ticket_step(store, settings_obj=cfg),
     )
     worker = EvolutionWorker(
         run_once,

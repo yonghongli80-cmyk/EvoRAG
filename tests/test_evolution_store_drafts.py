@@ -518,3 +518,38 @@ def test_observations_awaiting_diagnosis_respects_the_limit(tmp_path):
     result = store.observations_awaiting_diagnosis_without_draft(limit=2)
 
     assert [item["observation"]["id"] for item in result] == [members[0]["id"], members[1]["id"]]
+
+
+def test_a_gap_ticket_round_trips_and_never_touches_the_candidate_tables(tmp_path):
+    """工单存自己的表：候选池的不变量（undetermined 不离开观察队列）不受它影响。"""
+    import time
+
+    from rag.evolution.gaps import build_ticket
+    from rag.evolution.models import FailureObservation
+
+    store = FailureTraceStore(tmp_path / "e.db")
+    now = time.time()
+    cluster = store.upsert_cluster(
+        cluster_key="kb1|generation|gap", kb_id="kb1", failure_stage="generation",
+        root_cause_feature="undetermined", seen_at=now,
+    )
+    row = store.add_observation(
+        FailureObservation(kb_id="kb1", failure_stage="generation", question="R50 电池卖多少钱",
+                           route="fixed", answerability_kind="insufficient_evidence")
+    )
+    store.attach_cluster_member(row["id"], cluster["id"], failure_stage="generation",
+                                root_cause_feature="undetermined", now=now)
+    ticket = build_ticket(cluster, [store.get_observation(row["id"])], missing_terms=("电池",), now=now)
+
+    ticket_id = store.add_gap_ticket(ticket)
+
+    assert ticket_id > 0
+    stored = store.list_gap_tickets(cluster_id=cluster["id"])
+    assert len(stored) == 1
+    assert stored[0]["payload"]["missing_terms"] == ["电池"]
+    assert stored[0]["status"] == "open"
+    assert store.gap_ticket_cluster_ids() == {cluster["id"]}
+    # 不变量：聚类仍在观察队列，没有草稿、没有候选
+    assert store.list_clusters()[0]["pool"] == "observation_queue"
+    assert store.list_drafts() == []
+    store.close()
