@@ -215,12 +215,15 @@ class RAGAgent:
         user: dict = None,
         kb_id: str = None,
         tool_calls: list | None = None,
+        failure_reporter=None,
     ) -> str:
         """Run the agent on a question with answer quality reflection.
 
         权限上下文按 invocation 捕获在线程局部（``self._run_ctx``），不写入共享实例，
         彻底消除并发请求跨请求串写（A 的 user 被 B 清空）导致的过滤失效。
         ``user``/``kb_id`` 未显式传入时回退到构造时的默认值（向后兼容）。
+        ``failure_reporter`` 是可选回调：agent 子路径失败并降级时以异常对象调用它，让进化回路
+        看见这次失败（pipeline 用与流式失败相同的路径提交观测）。回调自身抛错绝不影响降级答复。
         """
         import os
 
@@ -236,6 +239,12 @@ class RAGAgent:
             # 这里降级成可解释的答复（请求完成、失败可见），异常类进日志，异常消息与用户
             # 文本都不进答复文本。
             logger.warning("agent_run_failed exception=%s", type(error).__name__)
+            if failure_reporter is not None:
+                # 上报本身绝不能影响已经决定好的降级答复。
+                try:
+                    failure_reporter(error)
+                except Exception:
+                    logger.exception("agent_failure_report_failed")
             answer = f"Agent 模式执行失败（{type(error).__name__}），请改用知识库问答重试。"
             chart_paths = []
         finally:

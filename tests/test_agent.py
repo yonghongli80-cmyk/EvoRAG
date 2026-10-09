@@ -179,3 +179,32 @@ def test_the_quality_check_failure_does_not_kill_the_answer():
     assert result["verdict"] == "pass"
     assert result["missing"] == []
     assert result["check_failed"] == "TimeoutError"
+
+
+def test_the_agent_reports_the_failure_that_caused_the_degradation():
+    """降级时必须把异常交给上报回调：否则 Agent 失败对进化回路完全不可见。"""
+    from rag.agent import RAGAgent
+
+    agent = RAGAgent(retriever=MagicMock(), db_path=":memory:")
+    reported = []
+
+    with patch.object(RAGAgent, "_run_reflection", side_effect=RuntimeError("model exploded")):
+        answer = agent.run("帮我算一下同比", failure_reporter=reported.append)
+
+    assert "Agent 模式执行失败" in answer
+    assert [type(error).__name__ for error in reported] == ["RuntimeError"]
+
+
+def test_a_broken_failure_reporter_never_breaks_the_answer():
+    """上报回调自身抛错绝不能影响已经决定好的降级答复。"""
+    from rag.agent import RAGAgent
+
+    agent = RAGAgent(retriever=MagicMock(), db_path=":memory:")
+
+    def broken(_error):
+        raise OSError("reporter exploded")
+
+    with patch.object(RAGAgent, "_run_reflection", side_effect=RuntimeError("boom")):
+        answer = agent.run("帮我算一下同比", failure_reporter=broken)
+
+    assert "Agent 模式执行失败（RuntimeError）" in answer

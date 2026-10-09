@@ -153,7 +153,10 @@ def test_pipeline_uses_agent_for_complex_question(
         mock_agent_run.assert_called_once()
         args, kwargs = mock_agent_run.call_args
         assert args == ("计算增长率",)
-        assert kwargs == {"tool_calls": []}
+        # 无权限 kwargs（该断言的原意）；failure_reporter 自 2b 起总是接上，用于把 Agent
+        # 子路径的失败变成观测——否则这条路径对进化回路完全不可见。
+        assert "user" not in kwargs and "kb_id" not in kwargs
+        assert set(kwargs) == {"tool_calls", "failure_reporter"}
         mock_route.assert_called_once()
 
 

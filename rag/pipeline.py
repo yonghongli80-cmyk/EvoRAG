@@ -86,17 +86,22 @@ def _bundle_top_score(prepared: dict) -> float | None:
     return getattr(metrics, "top_score", None)
 
 
-def _agent_run_kwargs(prepared: dict) -> dict:
-    """从 prepared 中提取需要透传给 agent.run 的 user/kb_id。
+def _agent_run_kwargs(prepared: dict, *, pipeline=None, start_time: float = None) -> dict:
+    """从 prepared 中提取需要透传给 agent.run 的 user/kb_id，并接上失败上报。
 
-    只在调用方显式提供时才传递，避免改变旧的无权限调用签名
-    ``run(question)``（向后兼容）。
+    权限参数只在调用方显式提供时才传递，保持旧的无权限调用签名 ``run(question)``（向后兼容）。
+    ``failure_reporter`` 则总是接上（只要给了 pipeline）：agent 子路径失败并降级时，由它走
+    **与流式失败相同的那条路径**提交观测——否则 Agent 路径的失败对进化回路完全不可见。
     """
     kwargs = {}
     if prepared.get("user") is not None:
         kwargs["user"] = prepared["user"]
     if prepared.get("kb_id") is not None:
         kwargs["kb_id"] = prepared["kb_id"]
+    if pipeline is not None and start_time is not None:
+        kwargs["failure_reporter"] = lambda error: pipeline._record_stream_failure(
+            str(prepared.get("question") or ""), start_time, prepared, error
+        )
     return kwargs
 
 
@@ -318,7 +323,7 @@ class RAGPipeline:
         prepared: dict | None,
         error: BaseException,
     ) -> None:
-        """一次死掉的流式请求：先留痕，再分类。
+        """一次失败：流式请求死掉，或 Agent 子路径失败后降级——先留痕，再分类。
 
         传输/供应商侧故障（超时、连接、限流）是设计第 5 节明确排除的类别，记为跳过；
         **其余异常是内部缺陷**（例如证据缺少版本元数据），记为观测并带上 exception_class
@@ -903,7 +908,7 @@ class RAGPipeline:
             answer = self.agent.run(
                 prepared["question"],
                 tool_calls=captured_calls,
-                **_agent_run_kwargs(prepared),
+                **_agent_run_kwargs(prepared, pipeline=self, start_time=start_time),
             )
             context = []
             sources = []
@@ -1008,7 +1013,7 @@ class RAGPipeline:
                 self.agent.run,
                 prepared["question"],
                 tool_calls=captured_calls,
-                **_agent_run_kwargs(prepared),
+                **_agent_run_kwargs(prepared, pipeline=self, start_time=start_time),
             )
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
             sources = []

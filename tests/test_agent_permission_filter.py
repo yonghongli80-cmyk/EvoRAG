@@ -141,7 +141,7 @@ def test_route_question_strip_whitespace(mock_generate):
 # ---------------------------------------------------------------------------
 
 
-def _make_pipeline(user_db=None, kb_id="test_kb"):
+def _make_pipeline(user_db=None, kb_id="test_kb", **kwargs):
     from rag.pipeline import RAGPipeline
 
     with patch("rag.pipeline.Reranker"), \
@@ -152,7 +152,9 @@ def _make_pipeline(user_db=None, kb_id="test_kb"):
          patch("rag.pipeline.chunk"), \
          patch("rag.pipeline.load"):
         mock_ret.return_value = MagicMock()
-        return RAGPipeline("test.txt", kb_id=kb_id, memory_db_path=":memory:", user_db=user_db)
+        return RAGPipeline(
+            "test.txt", kb_id=kb_id, memory_db_path=":memory:", user_db=user_db, **kwargs
+        )
 
 
 @patch("rag.agent.route_question", return_value="agent")
@@ -177,7 +179,9 @@ def test_pipeline_agent_route_without_user_backward_compat(mock_route):
     mock_run.assert_called_once()
     args, kwargs = mock_run.call_args
     assert args == ("算一下增长率",)
-    assert kwargs == {"tool_calls": []}
+    # 权限参数不得出现（该用例的意图）；failure_reporter 是 2b 起总是接上的失败上报。
+    assert "user" not in kwargs and "kb_id" not in kwargs
+    assert set(kwargs) == {"tool_calls", "failure_reporter"}
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +351,35 @@ def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, t
         invoke.assert_not_called()
     finally:
         db.close()
+
+
+@patch("rag.agent.route_question", return_value="agent")
+def test_pipeline_agent_failure_becomes_an_observation(mock_route):
+    """Agent 子路径失败必须落成**观测**（route=error + exception_class + exception_frame）。
+
+    否则 Agent 路径的失败只在日志里——进化回路看不到它，"让回路去修 Agent 路径"就不可能。
+    """
+    recorder = MagicMock()
+    # 复用本文件的夹具（它打桩了构造期的 load/embed/Retriever），kb_id=None 走本地文件模式。
+    p = _make_pipeline(kb_id=None, failure_recorder=recorder)
+    try:
+        with patch.object(p.agent, "run", return_value="agent answer") as mock_run:
+            p.query("算一下增长率")
+        # pipeline 总是把上报回调交给 agent（无论路由结果如何，kwargs 里都在）。
+        reporter = mock_run.call_args.kwargs["failure_reporter"]
+
+        def raiser():
+            raise ValueError("agent tool exploded")
+
+        try:
+            raiser()
+        except ValueError as error:
+            reporter(error)
+
+        trace, detail = recorder.submit.call_args[0]
+        assert trace.route == "error"
+        assert detail.exception_class == "ValueError"
+        assert detail.exception_frame and detail.exception_frame.endswith(":raiser")
+        assert detail.non_evolvable_reason is None
+    finally:
+        p.close()

@@ -143,7 +143,7 @@
 | 队列 | 状态 | 提交 / 证据 |
 | --- | --- | --- |
 | 1 Worker 运行化 | **1a 已完成**（代码补丁步骤）；1b 待做（问题集候选，需 Jev 注册表接缝） | 见下 |
-| 2 Agent 路径加固 | **审计完成，2 处缺陷已修**；2b 待做（把 Agent 失败纳入观测） | 见下 |
+| 2 Agent 路径加固 | **已完成**（审计 + 2 处修复 + 失败纳入观测） | 见下 |
 | 3 标签覆盖 + 护栏 | 待开始 | — |
 | 4 AST 符号 + 靶心窗口 | 待开始 | — |
 | 5 知识缺口工单 | 待开始 | — |
@@ -167,6 +167,23 @@
 **验收**：2 条新用例钉住修复——`run` 在 `_run_reflection` 抛异常时返回降级答复（含类名、不含异常
 消息、上下文仍清理）；`_check_answer_quality` 在 `generate` 抛异常时返回 `pass` + `check_failed`。
 Agent 套件 14 passed。
+
+#### 2b：把 Agent 路径的失败纳入观测（已完成）
+
+**问题**（发现 3）：agent 分支在检索前返回，既不产生 `insufficient_evidence` 决策，也不经过
+`_record_stream_failure` ⇒ **零观测**，回路对这条路径完全盲。
+
+**做法**：`RAGAgent.run(..., failure_reporter=None)`——降级时以异常对象调用回调；回调自带
+try/except，**上报失败绝不影响答复**。`pipeline._agent_run_kwargs(prepared, *, pipeline, start_time)`
+**总是**接上回调（两处调用点共用它：同步 911、流式 1016），回调内容就是
+`pipeline._record_stream_failure(question, start_time, prepared, error)`——**复用与流式失败完全相同的
+那条路径**：写 `ExecutionTrace(route="error")`，再按既有分类提交观测（内部缺陷 → 观测，带
+`exception_class` + `exception_frame`；超时/限流 → `TRANSIENT_EXTERNAL` 跳过 ✓ 不污染观测池）。
+
+**验收**：3 条新用例——降级时回调被调用（拿到异常对象）；回调自身抛错时答复仍然正常；pipeline
+的回调确实提交观测（`route="error"` + `exception_class` + `exception_frame` 指向真实帧、无 transient
+标记）。另适配了"向后兼容"那条断言：它的意图是**不出现权限 kwargs**，现在断言 `user`/`kb_id` 缺席
+而 `failure_reporter` 在场。Agent 相关套件 15 passed。
 
 ### 队列 1a 记录（代码补丁步骤）
 
