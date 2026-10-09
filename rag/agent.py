@@ -349,12 +349,18 @@ def _check_answer_quality(question: str, answer: str) -> dict:
 
 def route_question(question: str) -> str:
     """Classify whether a question should use RAG or Agent. Returns 'rag' or 'agent'."""
-    prompt = _pm.render("router", question=question)
-    messages = [
-        {"role": "system", "content": "你是一个问题分类器。"},
-        {"role": "user", "content": prompt},
-    ]
-    result = generate(messages)
+    try:
+        prompt = _pm.render("router", question=question)
+        messages = [
+            {"role": "system", "content": "你是一个问题分类器。"},
+            {"role": "user", "content": prompt},
+        ]
+        result = generate(messages)
+    except Exception:
+        # 路由阶段的模板渲染/模型调用异常一律 fail-closed 走 rag——与下面那条"其余（含空/异常）
+        # 默认走 rag"的注释保持一致：没有这段捕获时，异常会直接终止整条请求。
+        # （候选 #10 的补丁语义；导出补丁针对旧 base 已无法直接 apply，此处按同一语义重放。）
+        return "rag"
     normalized = (result or "").strip().lower()
     # 精确白名单判定：仅 "agent" 走 agent，"rag" 走 rag，
     # 其余（含空/异常/误命中词如 agency）默认 fail-closed 走 rag。

@@ -124,3 +124,27 @@ def test_check_answer_quality_fail():
         result = _check_answer_quality("什么是 Raft？", "Raft 是一种协议")
         assert result["verdict"] == "fail"
         assert "选举机制" in result["missing"]
+
+
+@patch("rag.agent.generate")
+def test_router_fails_closed_when_the_model_call_raises(mock_generate):
+    """路由阶段的异常必须 fail-closed 走 rag——否则一条抖动会终止整条请求。
+
+    这段是候选 #10 的补丁语义：原来的注释已经写着"其余（含空/异常）默认走 rag"，
+    但代码没有捕获异常，注释与实现不一致。
+    """
+    mock_generate.side_effect = ValueError("router exploded")
+
+    from rag.agent import route_question
+
+    assert route_question("What is RAG?") == "rag"
+
+
+@patch("rag.agent.generate")
+def test_router_fails_closed_when_the_prompt_render_raises(mock_generate):
+    """模板渲染失败同样 fail-closed：异常来自哪一步都要保住请求。"""
+    from rag.agent import route_question
+
+    with patch("rag.agent._pm.render", side_effect=KeyError("router")):
+        assert route_question("What is RAG?") == "rag"
+    mock_generate.assert_not_called()
