@@ -1084,3 +1084,34 @@ def test_two_rejections_raise_after_exactly_two_calls(tmp_path):
         )
 
     assert generator.model_calls == 2
+
+def test_a_context_override_widens_the_window_and_says_so(tmp_path):
+    """加大上下文这一档实验：只调「上限」是扩不出窗口的（窗宽 = min(上限, 半径*2+1)），
+
+    所以 N>0 时半径取 N//2。默认 0 必须**完全保持**既有行为（既有用例覆盖了那一条）。
+    """
+    from rag.evolution.patch_generator import _select_target_files
+
+    repo = tmp_path
+    (repo / "rag").mkdir()
+    body = [f"# filler {index}" for index in range(1, 3001)]
+    body[2400] = "def _finalize_rag_context():  # the failure lives here"
+    (repo / "rag" / "pipeline.py").write_text("\n".join(body), encoding="utf-8")
+
+    narrow = _select_target_files(
+        repo, ["rag/pipeline.py"], (), prefer="rag/pipeline.py", focused=(("rag/pipeline.py", 2401),)
+    )[0]
+    wide = _select_target_files(
+        repo,
+        ["rag/pipeline.py"],
+        (),
+        prefer="rag/pipeline.py",
+        focused=(("rag/pipeline.py", 2401),),
+        context_lines=1600,
+    )[0]
+
+    assert "_finalize_rag_context" in narrow[1] and "_finalize_rag_context" in wide[1]
+    assert len(wide[1].splitlines()) > len(narrow[1].splitlines())
+    assert len(wide[1].splitlines()) == 1600  # 上限即是窗宽（半径 800）
+    # 聚焦目标的说明是**窗口**措辞（「仅显示第 A–B 行（共 N 行）」），不是「已截断：仅显示前 N 行」。
+    assert "仅显示第" in wide[4] and "共 3000 行" in wide[4]

@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     #: 补丁生成的单次模型调用超时。实测单次生成 42–350s，而生成器默认 90s ⇒ 会截断慢但
     #: 可能成功的调用（基线里 5 个失败有 2 个是 timeout）。取 600s；整轮仍由 run_seconds 兜住。
     evolution_patch_timeout_seconds: float = 600.0
+    #: 补丁生成的上下文行数覆盖。**0 = 保持既有行为**（头 400 行、靶心窗半径 120）。
+    #: 设成 N 时：每文件上限 N 行，且靶心窗半径取 N//2 —— 只调上限是扩不出窗口的，
+    #: 因为窗宽是 min(N, 半径*2+1)。用于「加大上下文」这一档实验，默认不改。
+    evolution_patch_context_lines: int = 0
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录

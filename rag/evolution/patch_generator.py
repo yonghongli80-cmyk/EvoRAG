@@ -343,7 +343,7 @@ def _content_hits(excerpt: str, keywords: tuple[str, ...]) -> int:
     return sum(1 for keyword in keywords if keyword in lowered)
 
 
-def _excerpt(path: Path) -> tuple[str, int, bool]:
+def _excerpt(path: Path, max_lines: int = MAX_EXCERPT_LINES) -> tuple[str, int, bool]:
     """``(text, total_lines, truncated)`` for one target file.
 
     The full text is read and only the first :data:`MAX_EXCERPT_LINES` lines
@@ -353,8 +353,8 @@ def _excerpt(path: Path) -> tuple[str, int, bool]:
     """
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
-    truncated = len(lines) > MAX_EXCERPT_LINES
-    excerpt = "\n".join(lines[:MAX_EXCERPT_LINES])
+    truncated = len(lines) > max_lines
+    excerpt = "\n".join(lines[:max_lines])
     return excerpt, len(lines), truncated
 
 
@@ -408,6 +408,7 @@ def _select_target_files(
     prefer: str = "",
     *,
     focused: tuple[tuple[str, int], ...] = (),
+    context_lines: int = 0,
 ) -> tuple[tuple[str, str, int, bool, str], ...]:
     """``(path, excerpt, total_lines, truncated)`` for the 1–3 relevant files.
 
@@ -452,19 +453,28 @@ def _select_target_files(
             -_path_hits(path, keywords),
         ),
     )
+    # 0 = 保持既有行为（头 400 行 / 靶心半径 120）；N>0 时上限与半径一起放大，否则窗宽扩不出来。
+    limit = int(context_lines) if int(context_lines) > 0 else MAX_EXCERPT_LINES
+    radius = limit // 2 if int(context_lines) > 0 else None
     scored: list[tuple[str, str, int, bool, int, str]] = []
     for path in ranked[:MAX_PATH_SHORTLIST]:
         note = ""
         if path in focus_line:
             text = (repo_root / path).read_text(encoding="utf-8", errors="replace")
-            excerpt, first, last, truncated = window_excerpt(text, center=focus_line[path])
+            excerpt, first, last, truncated = (
+                window_excerpt(text, center=focus_line[path], max_lines=limit)
+                if radius is None
+                else window_excerpt(
+                    text, center=focus_line[path], radius=radius, max_lines=limit
+                )
+            )
             total_lines = len(text.splitlines())
             if truncated:
                 note = f"仅显示第 {first}–{last} 行（共 {total_lines} 行），其余已省略"
         else:
-            excerpt, total_lines, truncated = _excerpt(repo_root / path)
+            excerpt, total_lines, truncated = _excerpt(repo_root / path, max_lines=limit)
             if truncated:
-                note = f"已截断：仅显示前 {MAX_EXCERPT_LINES} 行"
+                note = f"已截断：仅显示前 {limit} 行"
         scored.append(
             (path, excerpt, total_lines, truncated, _content_hits(excerpt, keywords), note)
         )
@@ -1170,7 +1180,12 @@ class PatchGenerator:
             focused.append((exception_path, exception_line))
         focused.extend((symbol.path, symbol.start) for symbol in named_symbols)
         targets = _select_target_files(
-            root, files, keywords, prefer=exception_path, focused=tuple(focused)
+            root,
+            files,
+            keywords,
+            prefer=exception_path,
+            focused=tuple(focused),
+            context_lines=int(getattr(settings, "evolution_patch_context_lines", 0) or 0),
         )
         locate_note = _render_locate_note(exception_path, exception_line, named_symbols)
         base_commit = _git_head_commit(root)
