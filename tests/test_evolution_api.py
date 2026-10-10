@@ -987,3 +987,21 @@ def settings_path() -> str:
     from config import settings
 
     return str(settings.evolution_db_path)
+
+
+def test_gate_entry_serialisation_passes_metrics_through_but_only_when_present():
+    """结构化指标只在存在时透出（老条目没有这个键 ⇒ 前端据此不画对照表）。"""
+    entry = {
+        "gate": "sandbox",
+        "result": "passed",
+        "detail": "沙箱结论",
+        "created_at": 1.0,
+        "metrics": {"applied": True, "verdict": {"passed": True}},
+    }
+
+    payload = evolution_api._serialize_gate_entry(entry)
+    assert payload["metrics"]["verdict"]["passed"] is True
+
+    legacy = dict(entry)
+    legacy.pop("metrics")
+    assert "metrics" not in evolution_api._serialize_gate_entry(legacy)

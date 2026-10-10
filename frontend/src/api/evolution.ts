@@ -253,6 +253,37 @@ export interface EvolutionGateEntry {
   result: string
   detail: string
   created_at: number
+  /** 沙箱写回的结构化指标；老条目没有这个键，读取端据此决定要不要画对照表。 */
+  metrics?: SandboxGateMetrics
+}
+
+/** 沙箱一次运行的数字：做了什么 + 干净侧与打补丁侧逐项对照。 */
+export interface SandboxGateMetrics {
+  applied: boolean
+  tests_passed: boolean | null
+  failed_tests: string[]
+  verdict?: {
+    sides: Record<
+      string,
+      {
+        baseline: SandboxSideMetrics
+        patched: SandboxSideMetrics
+      }
+    >
+    route_delta_pp: number
+    top5_delta_pp: number
+    failed_calls_delta: number
+    passed: boolean
+  }
+  /** 没有可比的对照（例如回放不可用）：显式标出来，别让"没有数字"看起来像"没变差"。 */
+  verdict_unavailable?: boolean
+}
+
+export interface SandboxSideMetrics {
+  route_accuracy: number
+  top5_hit_rate: number
+  failed_calls: number
+  prep_p50_ms: number | null
 }
 
 /** One row of the candidate lifecycle audit trail. */

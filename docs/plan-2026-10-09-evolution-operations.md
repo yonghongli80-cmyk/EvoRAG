@@ -510,3 +510,38 @@ gate_detail: sandbox passed; passed: Jev side route delta +0.0pp (limit -0.0pp),
 **残留（如实列）**：A/B 指标目前以**后端写好的沙箱门禁结论文本**呈现（如 "route delta +0.0pp … over
 20 cases"），**没有**数字化的对照面板；要做成结构化面板需要把沙箱报告落成新字段（今天只落文本），
 列为后续项。工单只有列表、无详情页；材料上传仍走既有的 `/materials/upload`。
+
+### 残留修复记录（① ② ③ 已修；④ 属外部输入）
+
+**① 结构化 A/B —— 根因比"没画面板"深**：`sandbox_gate_outcome` 在**生产代码里没有任何调用者**
+（只有测试与文档字符串）⇒ 沙箱结论**从来没写回候选**，门禁轨迹里根本没有真实沙箱条目。修法分四步：
+
+* `advance_candidate(..., gate_metrics=...)`：结构化指标随门禁条目落库（JSON 列，**无需迁移**；
+  老条目没有该键 ⇒ 读取端只在存在时透出 ✓）；
+* `sandbox_gate_metrics(report)`：`applied` / `tests_passed` / `failed_tests` + 完整 verdict（两侧
+  route / top-5 / 失败调用 / 预处理 P50 + 三个差值 + `passed`）；**有报告但不可比时显式写
+  `verdict_unavailable`** —— 不让"没有数字"看起来像"没有变差" ✓；
+* `record_sandbox_outcome(store, candidate_id, report, ...)`：**受支持的写回**（状态 + 详情 + 数字）；
+* `scripts/run_patch_sandbox.py`：管理员手动运行器（可 `--dry-run`；状态机不允许该迁移时**如实说
+  "轨迹未写入"** ✓）。API 透出 `metrics`，前端把它画成**并排对照表**（复用既有的 `formatRate` /
+  `formatLatency`，并注明回放模式下 P50 取自录制、绝对值不是生产时延）。
+
+**② 工单详情**：**不需要新端点**——列表接口本就带 `rationale` / `question_samples` / `missing_terms` /
+`recheck` ✓，所以改成行内第二行显示完整理由与"仍缺哪些词" ✓。
+
+**③ fixture 对 seam 补丁不可用**：这是**设计如此**（录制里的答案描述的是另一份代码），**不能靠放宽来
+"修"** —— 那会给出空洞结论。改为**点名出路**：过期消息现在直接指向
+`scripts/measure_patch_regression_ab.py`（带凭据的宿主 A/B）。
+
+**④ worker 空转**：属**外部输入**（真实失败流量），不是代码缺陷。可做的一次**全链路彩排**（在 DB
+副本上注入合成失败 → 观察观测/聚类/诊断/候选/工单的推进）列为待办。
+
+**验收**：后端新增用例——指标随条目落库且不带指标时条目形状与从前一致（向前兼容）、沙箱指标给出两侧
+数字、无可比时显式标注、写回助手把状态/详情/数字交给状态机、序列化器只在存在时透出；
+前端两处扩展——A/B 表并排显示两侧数字、工单行显示完整理由。
+
+**我自己的失误又是两类**（都写下来）：① 把工单详情行写成 `v-for` 行的**兄弟** ⇒ `ticket` 为
+undefined（Vue 里 `v-for` 只覆盖它所在的那个元素 ⇒ 已改 `<template v-for>`）；② 用"生命周期审计"这种
+**不唯一**的锚点插块 ⇒ 插进了另一个面板（已改用唯一锚点 `code-candidate-sandbox` 重定位）；另外我还
+重复造了 `formatRate` / `formatMs`（视图里早有）⇒ 已删并改为复用。教训升级版：**锚点必须唯一，
+助手先查有没有**。

@@ -661,12 +661,18 @@ def _serialize_candidate(row: dict, *, canary_percent: int = 0) -> dict:
 
 def _serialize_gate_entry(entry: dict) -> dict:
     """One entry of the five-layer trail: which layer, what it concluded, when."""
-    return {
+    payload = {
         "gate": str(entry.get("gate", "")),
         "result": str(entry.get("result", "")),
         "detail": str(entry.get("detail", "")),
         "created_at": float(entry.get("created_at") or 0.0),
     }
+    # 沙箱写回的结构化指标（两侧 route/top-5/失败调用/时延）。老条目没有这个键，
+    # 所以只在存在时透出，前端据此决定要不要画对照表。
+    metrics = entry.get("metrics")
+    if isinstance(metrics, dict):
+        payload["metrics"] = metrics
+    return payload
 
 
 def _serialize_candidate_audit(row: dict) -> dict:

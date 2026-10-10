@@ -1302,3 +1302,69 @@ def test_a_stale_fixture_makes_the_replay_unavailable_rather_than_passing(
     status, detail = sandbox_gate_outcome(report)
     assert status == "awaiting_verification"
     assert "replay unavailable" in detail
+
+
+# ------------------------------------------------------------------
+# 结构化 A/B 指标与受支持的写回（此前结论没有生产写回者）。
+# ------------------------------------------------------------------
+
+
+class _RecordingStore:
+    """只记录 advance_candidate 的调用，用来断言写回把什么交给了状态机。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def advance_candidate(self, candidate_id, new_status, **kwargs):
+        self.calls.append({"candidate_id": candidate_id, "status": new_status, **kwargs})
+        return {"status": new_status, "gate_log": [{"gate": kwargs.get("gate")}]}
+
+
+def test_sandbox_metrics_carry_the_side_by_side_numbers():
+    from rag.evolution.sandbox import sandbox_gate_metrics
+
+    report = SandboxReport(
+        applied=True,
+        tests_passed=True,
+        benchmark=_benchmark_payload(),
+        failed_tests=(),
+        error="",
+    )
+
+    metrics = sandbox_gate_metrics(report)
+
+    assert metrics["applied"] is True
+    assert metrics["tests_passed"] is True
+    verdict = metrics["verdict"]
+    assert verdict["passed"] is True
+    assert set(verdict["sides"])
+    assert "route_delta_pp" in verdict and "top5_delta_pp" in verdict
+
+
+def test_sandbox_metrics_say_when_there_is_no_comparison():
+    """有报告但不可比 ⇒ 显式标出来，别让"没有数字"看起来像"没有变差"。"""
+    from rag.evolution.sandbox import sandbox_gate_metrics
+
+    metrics = sandbox_gate_metrics(
+        SandboxReport(applied=True, tests_passed=True, benchmark={"note": "不可比"}, failed_tests=())
+    )
+
+    assert "verdict" not in metrics
+    assert metrics["verdict_unavailable"] is True
+
+
+def test_record_sandbox_outcome_writes_status_detail_and_numbers():
+    from rag.evolution.sandbox import GATE_NAME, record_sandbox_outcome
+
+    store = _RecordingStore()
+    report = SandboxReport(
+        applied=True, tests_passed=True, benchmark=_benchmark_payload(), failed_tests=(), error=""
+    )
+
+    record_sandbox_outcome(store, 7, report, actor_id="admin:cli", note="跑过沙箱")
+
+    call = store.calls[0]
+    assert call["candidate_id"] == 7
+    assert call["gate"] == GATE_NAME
+    assert call["gate_detail"]
+    assert call["gate_metrics"]["verdict"]["passed"] is True

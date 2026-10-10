@@ -510,6 +510,25 @@ async function loadGapTickets() {
   }
 }
 
+/** 最近一次带结构化指标的沙箱条目（没有就返回 null，让面板如实说不显示对照）。 */
+const sandboxMetrics = computed(() => {
+  const entries = selectedCodePatch.value?.gate_log || []
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const metrics = entries[index].metrics
+    if (metrics?.verdict) return { entry: entries[index], verdict: metrics.verdict }
+  }
+  return null
+})
+
+const sandboxMetricsUnavailable = computed(() => {
+  const entries = selectedCodePatch.value?.gate_log || []
+  return entries.some((entry) => entry.metrics?.verdict_unavailable)
+})
+
+function formatDelta(value: number): string {
+  return value > 0 ? `+${value.toFixed(1)}` : value.toFixed(1)
+}
+
 function showGapTickets() {
   activeTab.value = 'gap-tickets'
   if (!gapTicketsLoaded.value) void loadGapTickets()
@@ -1022,6 +1041,7 @@ onMounted(async () => {
             </span>
           </p>
 
+
           <h4 class="panel-subtitle">生命周期审计</h4>
           <ul v-if="selectedCandidate.audit.length > 0" class="audit-list" data-test="candidate-audit">
             <li v-for="row in selectedCandidate.audit" :key="row.id">
@@ -1236,6 +1256,52 @@ onMounted(async () => {
             </li>
           </ul>
           <p v-else class="muted">暂无门禁记录</p>
+          <div
+            v-if="sandboxMetrics"
+            class="ab-table"
+            data-test="sandbox-metrics"
+          >
+            <p class="cluster-meta">
+              对照：{{ sandboxMetrics.verdict.passed ? '通过' : '未通过' }} ·
+              route {{ formatDelta(sandboxMetrics.verdict.route_delta_pp) }}pp ·
+              top-5 {{ formatDelta(sandboxMetrics.verdict.top5_delta_pp) }}pp ·
+              失败调用 {{ formatDelta(sandboxMetrics.verdict.failed_calls_delta) }}
+            </p>
+            <table v-for="(side, name) in sandboxMetrics.verdict.sides" :key="name">
+              <thead>
+                <tr>
+                  <th>{{ name }}</th><th>route 准确率</th><th>Top-5 命中</th>
+                  <th>失败调用</th><th>预处理 P50</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>干净侧</td>
+                  <td>{{ formatRate(side.baseline.route_accuracy) }}</td>
+                  <td>{{ formatRate(side.baseline.top5_hit_rate) }}</td>
+                  <td>{{ side.baseline.failed_calls }}</td>
+                  <td>{{ formatLatency(side.baseline.prep_p50_ms) }}</td>
+                </tr>
+                <tr>
+                  <td>打补丁侧</td>
+                  <td>{{ formatRate(side.patched.route_accuracy) }}</td>
+                  <td>{{ formatRate(side.patched.top5_hit_rate) }}</td>
+                  <td>{{ side.patched.failed_calls }}</td>
+                  <td>{{ formatLatency(side.patched.prep_p50_ms) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="cluster-meta">
+              注：P50 在回放模式下取自录制（两侧相减时抵消，绝对值不是生产时延）。
+            </p>
+          </div>
+          <p
+            v-else-if="sandboxMetricsUnavailable"
+            class="cluster-meta"
+            data-test="sandbox-metrics-unavailable"
+          >
+            这次沙箱运行没有可比的对照（回放不可用或未产出报告）——"没有数字"不等于"没有变差"。
+          </p>
 
           <h4 class="panel-subtitle">生命周期审计</h4>
           <ul
@@ -1310,7 +1376,8 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="ticket in gapTickets" :key="ticket.id" data-test="gap-ticket-row">
+              <template v-for="ticket in gapTickets" :key="ticket.id">
+                <tr data-test="gap-ticket-row">
                 <td>{{ ticket.id }}</td>
                 <td>{{ ticket.kb_id }}</td>
                 <td>{{ ticket.status }}</td>
@@ -1330,6 +1397,19 @@ onMounted(async () => {
                 </td>
                 <td>{{ formatTime(ticket.created_at) }}</td>
               </tr>
+              <tr class="ticket-detail">
+                <td colspan="8" data-test="gap-ticket-rationale">
+                  <span class="cluster-meta">{{ ticket.rationale }}</span>
+                  <span v-if="ticket.recheck" class="cluster-meta">
+                    · 最近复测：仍缺
+                    <code v-for="term in ticket.recheck.still_missing" :key="term" class="term-chip">
+                      {{ term }}
+                    </code>
+                    <span v-if="ticket.recheck.still_missing.length === 0">（无，内容已到位）</span>
+                  </span>
+              </td>
+              </tr>
+            </template>
             </tbody>
           </table>
         </div>
@@ -1591,5 +1671,14 @@ tbody tr:hover { background: #f8fbff; }
   padding: 1px 6px;
   background: rgba(0, 0, 0, 0.06);
   border-radius: 10px;
+}
+
+.ab-table {
+  margin: 8px 0 12px;
+}
+
+.ab-table table {
+  width: 100%;
+  margin-top: 4px;
 }
 </style>

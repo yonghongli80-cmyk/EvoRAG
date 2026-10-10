@@ -724,3 +724,32 @@ def test_a_question_set_candidate_leaves_the_code_patch_queue_untouched(tmp_path
     queue = store.observations_awaiting_code_patch(limit=50)
 
     assert [row["observation_id"] for row in queue] == [member["id"]]
+
+
+def test_gate_metrics_ride_along_with_the_gate_entry(tmp_path):
+    """结构化指标随门禁条目一起落库；不带指标时条目形状与从前完全一致（向前兼容）。"""
+    _, store, cluster, member = seeded(tmp_path)
+    candidate_id = store.add_candidate(
+        member["id"], cluster["id"], sample_candidate(), prompt_version="candidate-v1"
+    )
+
+    row = store.advance_candidate(
+        candidate_id,
+        "awaiting_verification",
+        actor_id="admin:cli",
+        note="沙箱跑完",
+        gate="sandbox",
+        gate_detail="沙箱结论",
+        gate_metrics={"applied": True, "tests_passed": True, "failed_tests": []},
+    )
+
+    entry = row["gate_log"][-1]
+    assert entry["gate"] == "sandbox"
+    assert entry["metrics"]["applied"] is True
+    assert entry["metrics"]["failed_tests"] == []
+
+    # 不带指标的门禁条目不加这个键（老条目/其它层保持原样）。
+    plain = store.record_inconclusive_gate(
+        candidate_id, actor_id="system", note="超时", gate="sandbox", gate_detail="不可用"
+    )
+    assert "metrics" not in plain["gate_log"][-1]

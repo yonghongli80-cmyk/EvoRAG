@@ -903,7 +903,12 @@ def _execute(
         )
         replay_error = baseline_error or patched_error
         if not replay_error and stale:
-            replay_error = f"benchmark replay fixture unusable: {stale}"
+            # 触及 seam 的补丁在无凭据沙箱里**量不了**（录制里的答案描述的是另一份代码）。
+            # 与其给一个空洞的结论，不如点名正确的出路：带凭据的宿主 A/B。
+            replay_error = (
+                f"benchmark replay fixture unusable: {stale}"
+                "；触及 seam 模块的补丁请改用 scripts/measure_patch_regression_ab.py 在宿主做带凭据 A/B"
+            )
         if replay_error:
             return report(
                 applied=True,
@@ -1050,6 +1055,54 @@ def run_patch_sandbox(
 #: endpoints and the frontend summary read exactly this string, so it is a
 #: constant here rather than a caller's choice.
 GATE_NAME = "sandbox"
+
+
+def sandbox_gate_metrics(report: SandboxReport) -> dict:
+    """The numbers behind a sandbox outcome, for the review panel to compare side by side.
+
+    ``applied``/``tests_passed`` say what ran; ``verdict`` carries the clean-versus-patched
+    comparison when there was one, which is the part a reviewer reads as "did it get worse". A run
+    with a report but no comparable verdict says so explicitly, so an absence is visible rather
+    than implied.
+    """
+    metrics: dict = {
+        "applied": bool(report.applied),
+        "tests_passed": report.tests_passed,
+        "failed_tests": list(report.failed_tests or ()),
+    }
+    verdict = patch_verdict(report.benchmark or {}, report.benchmark or {})
+    if verdict is not None:
+        metrics["verdict"] = verdict
+    elif report.benchmark is not None:
+        metrics["verdict_unavailable"] = True
+    return metrics
+
+
+def record_sandbox_outcome(
+    store,
+    candidate_id: int,
+    report: SandboxReport,
+    *,
+    actor_id: str,
+    note: str = "",
+) -> dict:
+    """Write one sandbox run back onto its candidate: status, detail **and** the numbers.
+
+    This is the supported write-back, and it exists because the sandbox conclusion previously had
+    no production writer at all: the trail the review panel renders was only ever written by tests.
+    Callers are administrator-facing runners, never the worker — a sandbox needs a clean main tree
+    and isolates itself in worktrees, which is not something a background round should start.
+    """
+    status, detail = sandbox_gate_outcome(report)
+    return store.advance_candidate(
+        int(candidate_id),
+        status,
+        actor_id=str(actor_id),
+        note=str(note),
+        gate=GATE_NAME,
+        gate_detail=detail,
+        gate_metrics=sandbox_gate_metrics(report),
+    )
 
 
 def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str]:

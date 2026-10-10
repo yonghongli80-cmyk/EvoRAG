@@ -219,6 +219,8 @@ describe('EvolutionCenterView', () => {
     expect(row.text()).toContain('R50 电池卖多少钱')
     expect(row.text()).toContain('电池')
     expect(row.text()).toContain('未复测')
+    // 完整理由与"该写什么"都在行里（列表接口已带这些字段，不需要详情端点）
+    expect(wrapper.get('[data-test="gap-ticket-rationale"]').text()).toContain('证据不足')
     // 恒常渲染的说明（空态那句只在没工单时出现）
     expect(wrapper.text()).toContain('自动起草')
     expect(wrapper.text()).toContain('材料入库上传补充资料')
@@ -274,7 +276,41 @@ describe('EvolutionCenterView', () => {
       created_at: 1_700_000_000,
       updated_at: 1_700_000_000,
       diff: 'diff --git a/rag/pipeline.py b/rag/pipeline.py',
-      gate_log: [],
+      gate_log: [
+        {
+          gate: 'sandbox',
+          result: 'passed',
+          detail: 'sandbox passed; Jev side route delta +0.0pp, top-5 delta +0.0pp over 20 cases',
+          created_at: 1_700_000_000,
+          metrics: {
+            applied: true,
+            tests_passed: true,
+            failed_tests: [],
+            verdict: {
+              sides: {
+                jev: {
+                  baseline: {
+                    route_accuracy: 1,
+                    top5_hit_rate: 0.98,
+                    failed_calls: 0,
+                    prep_p50_ms: 900
+                  },
+                  patched: {
+                    route_accuracy: 1,
+                    top5_hit_rate: 0.98,
+                    failed_calls: 0,
+                    prep_p50_ms: 850
+                  }
+                }
+              },
+              route_delta_pp: 0,
+              top5_delta_pp: 0,
+              failed_calls_delta: 0,
+              passed: true
+            }
+          }
+        }
+      ],
       audit: [],
       apply_command: 'git -C /repo apply --3way artifacts/patches/candidate-12.patch',
       revert_command: 'git -C /repo apply -R artifacts/patches/candidate-12.patch',
@@ -292,6 +328,13 @@ describe('EvolutionCenterView', () => {
     expect(wrapper.get('[data-test="apply-command"]').text()).toContain('apply --3way')
     expect(wrapper.get('[data-test="revert-command"]').text()).toContain('apply -R')
     expect(wrapper.get('[data-test="export-state"]').text()).toContain('尚未导出')
+
+    // 结构化 A/B：两侧数字并排，而不是只有一句结论文本
+    const metrics = wrapper.get('[data-test="sandbox-metrics"]')
+    expect(metrics.text()).toContain('干净侧')
+    expect(metrics.text()).toContain('打补丁侧')
+    expect(metrics.text()).toContain('98.0%')
+    expect(metrics.text()).toContain('850')
 
     await wrapper.get('[data-test="copy-apply-command"]').trigger('click')
     await flushPromises()

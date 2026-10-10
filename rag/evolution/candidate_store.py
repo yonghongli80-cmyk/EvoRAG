@@ -424,6 +424,7 @@ class CandidateStore:
         note: str,
         gate: str | None = None,
         gate_detail: str | None = None,
+        gate_metrics: dict | None = None,
     ) -> dict:
         """Move one candidate through ``EVOLUTION_TRANSITIONS`` and return the new row.
 
@@ -434,7 +435,9 @@ class CandidateStore:
         gate entry can never be missing from a move that did.
 
         ``gate``/``gate_detail`` record which of the five layers this move
-        represents; ``result`` is derived from the target status (``failed`` for
+        represents, and ``gate_metrics`` carries the numbers behind that conclusion (the sandbox's
+        clean-versus-patched comparison, for instance) so a review panel can compare instead of
+        parsing prose; ``result`` is derived from the target status (``failed`` for
         a rejection, ``blocked``/``inconclusive`` otherwise, ``passed`` for every
         advance). Without a ``gate`` name no gate entry is appended, so a plain
         administrative move leaves ``gate_log`` untouched.
@@ -461,14 +464,16 @@ class CandidateStore:
             if not isinstance(gate_log, list):
                 gate_log = []
             if gate is not None:
-                gate_log.append(
-                    {
-                        "gate": str(gate),
-                        "result": _GATE_RESULT_BY_STATUS.get(new_status, _DEFAULT_GATE_RESULT),
-                        "detail": "" if gate_detail is None else str(gate_detail),
-                        "created_at": now,
-                    }
-                )
+                entry = {
+                    "gate": str(gate),
+                    "result": _GATE_RESULT_BY_STATUS.get(new_status, _DEFAULT_GATE_RESULT),
+                    "detail": "" if gate_detail is None else str(gate_detail),
+                    "created_at": now,
+                }
+                # 结构化指标随条目一起落库（JSON 列，老条目没有这个键 ⇒ 向前兼容）。
+                if gate_metrics:
+                    entry["metrics"] = gate_metrics
+                gate_log.append(entry)
             self._conn.execute(
                 "UPDATE candidates SET status = ?, gate_log = ?, updated_at = ? WHERE id = ?",
                 (
