@@ -6,6 +6,8 @@
 设计依据 `docs/superpowers/specs/2026-09-21-assisted-self-evolution-design.md` 第 12–15 节，
 实施计划 `docs/superpowers/plans/2026-09-24-assisted-self-evolution-candidates.md`。
 
+> 第三种制品（**知识缺口工单**）**不是候选**：不进候选池、没有门禁、不服务流量，见 [`docs/evolution-gap-tickets.md`](evolution-gap-tickets.md)。
+
 ## 1. 开关与默认（全部默认关闭）
 
 | 设置 | 默认 | 语义 |

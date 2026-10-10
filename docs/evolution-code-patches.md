@@ -131,6 +131,36 @@ legacy 侧 route Δ+2.5pp、Top-5 Δ0.0pp、失败 0 ⇒ **`passed: true`**。
 应用后人工检查、跑全量测试、重启服务；回退同样由人执行 `# revert` 那条命令。
 测试在真实仓库的一次隔离 worktree 上验证过 apply 与 revert 互为逆操作，且导出前后主工作树字节不变。
 
+### 5.3 沙箱运行器与"过期 fixture"规则（2026-10-09 起）
+
+**沙箱结论以前没有生产写回者**：`sandbox_gate_outcome` 只被测试调用过，所以 `candidates.gate_log`
+里从来没有真实的沙箱条目，审查台上也看不到任何数字。现在由管理员手动跑：
+
+```powershell
+# 不带 fixture：回放会因无凭据而报"不可用"（方案 C 的原有行为，门禁结论照旧待人工）
+python scripts/run_patch_sandbox.py --candidate-id 13 --data-snapshot <只读副本目录>
+# 带 fixture：四个（实为五个）出网 seam 从录制重放，跑完给出干净侧 vs 打补丁侧的对照
+python scripts/run_patch_sandbox.py --candidate-id 13 --data-snapshot <副本> `
+  --fixture real-case-handoff/evolab/replay-fixture.json --runs 2
+```
+
+脚本把 `(状态, 详情, 结构化指标)` 一并写回（`gate="sandbox"`），所以审查台的"应用与回滚命令"旁边会
+显示 route / Top-5 / 失败调用 / 预处理 P50 的两侧对照；`--dry-run` 只跑不写，状态机不允许这次迁移时
+它会**如实打印"轨迹未写入"**而不是假装写成功。
+
+**过期规则（要紧，不要绕过）**：fixture 记录的是**录制时那份代码**给出的答案，所以补丁只要碰到
+`rag/embedder.py`、`rag/reranker.py`、`rag/agent.py`、`rag/query_rewriter.py`、`rag/jev/client.py`
+中的任一个，fixture 就**判过期并被拒绝注入**，门禁结论落到 `awaiting_verification` + "replay unavailable"
+——**绝不会给出"通过"**。实测：库里现有的 5 份代码补丁**全部**触及 seam（`agent.py` ×3、`reranker.py` ×2），
+因为路由/排序逻辑本来就住在那里；对这类补丁，正确做法是回到 **§5.2 的宿主 A/B（带凭据）**，而不是放宽
+这里的判定（放宽就等于拿"另一份代码的答案"当证据）。
+
+**录制**（有凭据处跑一次即可，`kb_accessories` 实测约 136s）：
+`python scripts/record_replay_fixture.py --kb-id kb_accessories --out real-case-handoff/evolab/replay-fixture.json --runs 1`
+—— 实测会记下 `reranks / routes / rewrites / jev_preflights / jev_passages` 五类答案（`embeddings` 为 0：
+Jev 路径把检索交给外部服务，不经过本地嵌入器）。
+
+
 ## 6. 端到端留痕（2026-09-28 首跑，真实模型调用）
 
 输入：聚类 3（kb_accessories，已批准）由管理员确认 `confirmed_layer=reranking`，
