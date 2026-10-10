@@ -459,3 +459,22 @@ Jev 数据。已改为交给 `Fixture.save()` 单独定义格式，并在输出�
 喂给 seam 的输入"的补丁（下游逻辑/格式化/输出等）。机制本身用一份**合成补丁**（在 `rag/pipeline.py`
 加一行注释，不改行为）走完真实沙箱回放来证明，脚本见
 `real-case-handoff/evolab/sandbox_replay_with_fixture.py`（`--diff-file`）。
+
+**机制验收（已通过）**：干净主树 + 合成补丁 + 无凭据子进程 ⇒
+
+```
+applied: true   tests_passed: true   benchmark_present: true   error: ""
+gate_status: awaiting_verification
+gate_detail: sandbox passed; passed: Jev side route delta +0.0pp (limit -0.0pp),
+             top-5 delta +0.0pp (limit -2.0pp) over 20 cases
+```
+
+即**在没有凭据的沙箱里产出了真实的 clean vs patched 对照**（20 例，route/top-5 差值）。合成补丁零行为
+变化 ⇒ Δ 全 0，这本身是一次合理性自检；门禁状态停在 `awaiting_verification` ✓ 正确（沙箱只是其中一层）。
+另外：**p95 不是本层的门禁判据**（沙箱结论只看 route/top-5），而基准报告里那行 p95 在回放模式下
+其绝对值**不是生产时延**（录制耗时被复用、两侧相减时抵消）——这一条已在文档里写明。
+
+**顺带一个反面教材**：合成补丁在跑通前被沙箱的边界规则**连续驳回 4 次**，每次都是真规则、都很快：
+① `test_paths is empty`（补丁必须点名验证测试）；② `rollback_ref base_commit must be 40 hex`；
+③ `main tree dirty`（主树有未提交改动就不开工）；④ 之前还有一次我脚本自己的导入写错模块。
+这四次都不是"门禁坏了"，而是**边界照设计工作**。
