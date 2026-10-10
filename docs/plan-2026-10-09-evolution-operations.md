@@ -147,7 +147,7 @@
 | 3 标签覆盖 + 护栏 | **3a 进行中**（标签 4 → 7 条 + 12 条待查定性）；3b 待做（无证据护栏） | 见下 |
 | 4 AST 符号 + 靶心窗口 | **已完成**（`patch-v3`） | 见下 |
 | 5 知识缺口工单 | **已完成**（5a 制品 + 独立表 + 零调用步骤；5b 入库后复测） | 见下 |
-| 6 沙箱 Golden Fixture | **6a + 6b 已完成**（fixture 模块 + 录制脚本 + 沙箱接线 + 过期判定）；6c 待做（**第五 seam**：Jev/TypeSafe 服务） | 见下 |
+| 6 沙箱 Golden Fixture | **6a + 6b + 6c 已完成**（含第五 seam；机制已证明，但**对当前补丁总体不可用**） | 见下 |
 | 7 前端审查台 | 待开始 | — |
 | 前置：真实失败供给 | **等你的输入** | worker `scanned=0`（2026-10-09 实测） |
 
@@ -430,3 +430,32 @@ seam 并返回"还原到安装时那份"的函数；`install_from_env()` 由**�
 **因此 6c 待做**（如实列，不假装 6b 已闭环）：把 Jev 客户端的 `preflight` / `judge_passages` 结果也纳入
 录制（按 stage + 问题集 + 状态做键），之后才能给出"**无凭据沙箱里产出 benchmark 结论**"的验收。
 在那之前，6b 交付的是：模块、录制脚本、接线、**过期即不可用**的门禁语义（都已用例钉住）。
+
+### 队列 6c 记录（第五 seam 已录，以及一个关于"我们实际产出的补丁"的结论）
+
+**实现**：`ReplayFixture` 增加 `jev_preflights` / `jev_passages`（键 = `stage` + `state` + `chunk_ids`
+的确定性序列化），`dump_jev` / `_rebuild_jev` 负责 `JevBatchResult[T]` 的往返（用**真实字段**重建
+`PreflightDecision` / `PassageJudgment`——我第一版按记忆猜字段，被 pydantic 的 8 条校验错误当场抓住，
+已改为照 `rag/jev/models.py` 写）；`install()` 也替换 `JevClient.preflight` / `judge_passages`；
+`SEAM_MODULES` 增加 `rag.jev.client`（⇒ 改到 Jev 客户端的补丁会让 fixture 判过期）。
+
+**重新录制（有凭据，runs=1，136s）**：`reranks 13 / routes 20 / rewrites 13 / **jev_preflights 20 /
+jev_passages 15**`（embeddings 仍为 0）⇒ **第五 seam 确实是必需的**：Jev 生产路径对每次请求都调
+`preflight`，对候选判定调 `passages`，而这两次调用都带 `typesafe_api_key`。
+（过程中还自己踩了一个坑并修掉：录制脚本**手写了字段清单**，漏掉两个新表 ⇒ 第一版 fixture 里根本没有
+Jev 数据。已改为交给 `Fixture.save()` 单独定义格式，并在输出里打印五个 seam 的计数。）
+
+**关于"回放能给出什么结论"——先把边界说清**（我一开始的判断过强，已更正）：
+* 冻结的是 seam 的**答案**，不是整条链 ⇒ 在 seam **下游**改变逻辑的补丁（选中/截断/格式化/prompt 等），
+  Δroute / Δtop5 **仍是真实信号**；
+* 改到 seam **输入**的补丁（例如改检索融合 ⇒ 候选清单变了）会 `FixtureMiss` ⇒ 回放**响亮失败**，
+  不会给通过；
+* 时延：录制里的 seam 耗时被复用，在两侧**相减时抵消** ⇒ Δ 有意义，但**绝对值不是生产时延**，
+  报告与文档都按这个口径写。
+
+**结论（要紧）**：库里现存 **5 份代码补丁全部触及 seam 模块**（`rag/agent.py` ×3、`rag/reranker.py` ×2）
+——路由与排序逻辑本来就住在那里，也正是回路一直在诊断的那类缺陷。⇒ **对回路实际产出的补丁总体，
+黄金 fixture 按设计就是不可用的**（过期判定——正确地——拒绝）。它的可用面是"既不碰 seam、也不改变
+喂给 seam 的输入"的补丁（下游逻辑/格式化/输出等）。机制本身用一份**合成补丁**（在 `rag/pipeline.py`
+加一行注释，不改行为）走完真实沙箱回放来证明，脚本见
+`real-case-handoff/evolab/sandbox_replay_with_fixture.py`（`--diff-file`）。

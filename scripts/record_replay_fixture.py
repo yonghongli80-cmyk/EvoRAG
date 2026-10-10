@@ -78,17 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             ]
         )
     fixture = session.fixture(corpus=fingerprint, base_commit=_head_commit())
-    Path(args.out).write_text(json.dumps(json.loads(json.dumps({
-        "version": fixture.version,
-        "created_at": fixture.created_at,
-        "corpus": fixture.corpus,
-        "base_commit": fixture.base_commit,
-        "seams": fixture.seams,
-        "embeddings": fixture.embeddings,
-        "reranks": fixture.reranks,
-        "routes": fixture.routes,
-        "rewrites": fixture.rewrites,
-    })), ensure_ascii=False), encoding="utf-8")
+    # 交给 Fixture.save() 自己写：手写字段清单漏过一次新表（Jev 的两个映射），不能让格式定义有第二份。
+    fixture.save(args.out)
     print(
         json.dumps(
             {
@@ -99,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                 "reranks": len(fixture.reranks),
                 "routes": len(fixture.routes),
                 "rewrites": len(fixture.rewrites),
+                "jev_preflights": len(fixture.jev_preflights),
+                "jev_passages": len(fixture.jev_passages),
                 "base_commit": fixture.base_commit[:8],
             },
             ensure_ascii=False,

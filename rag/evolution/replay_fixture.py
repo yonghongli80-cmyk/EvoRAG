@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -42,7 +43,13 @@ SEAM_MODULES = (
     "rag.reranker",
     "rag.agent",
     "rag.query_rewriter",
+    # 第五个 seam：Jev 生产路径把检索交给外部 TypeSafe 服务，客户端带 typesafe_api_key。
+    # 录制实测（embeddings 0）证明这条路径连本地嵌入器都不经过，所以缺了它就无法无凭据重放。
+    "rag.jev.client",
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class FixtureMiss(RuntimeError):
@@ -55,6 +62,22 @@ def _key(text: str) -> str:
 
 def _rerank_key(query: str, texts: Sequence[str]) -> str:
     return _key("\x00".join([str(query), *[str(text) for text in texts]]))
+
+
+def jev_key(stage: str, state: object, chunk_ids: Sequence[str] | None = None) -> str:
+    """Deterministic key for one Jev call: stage, state and candidate ids.
+
+    ``default=str`` keeps a state that carries something exotic from breaking the recording while
+    staying deterministic for the dicts the pipeline actually passes.
+    """
+    return _key(
+        json.dumps(
+            {"stage": stage, "state": state, "chunk_ids": list(chunk_ids or ())},
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
 
 
 def normalize(question: str) -> str:
@@ -103,6 +126,8 @@ class ReplayFixture:
 
     embeddings: dict[str, list[float]] = field(default_factory=dict)
     reranks: dict[str, list] = field(default_factory=dict)
+    jev_preflights: dict[str, dict] = field(default_factory=dict)
+    jev_passages: dict[str, dict] = field(default_factory=dict)
     routes: dict[str, str] = field(default_factory=dict)
     rewrites: dict[str, str] = field(default_factory=dict)
     corpus: str = ""
@@ -129,6 +154,20 @@ class ReplayFixture:
         if key not in self.reranks:
             raise FixtureMiss(f"no recorded rerank for query hash {key[:12]}")
         return json.loads(json.dumps(self.reranks[key]))
+
+    def lookup_preflight(self, state: object):
+        """The recorded preflight outcome for exactly this state."""
+        key = jev_key("preflight", state)
+        if key not in self.jev_preflights:
+            raise FixtureMiss(f"no recorded Jev preflight for state hash {key[:12]}")
+        return _rebuild_jev(self.jev_preflights[key], "preflight")
+
+    def lookup_passages(self, state: object, chunk_ids: Sequence[str]):
+        """The recorded passage judgment for exactly this state and candidate list."""
+        key = jev_key("passages", state, chunk_ids)
+        if key not in self.jev_passages:
+            raise FixtureMiss(f"no recorded Jev passages for state hash {key[:12]}")
+        return _rebuild_jev(self.jev_passages[key], "passages")
 
     def route(self, question: str) -> str:
         key = normalize(question)
@@ -177,6 +216,8 @@ class ReplayFixture:
             "reranks": self.reranks,
             "routes": self.routes,
             "rewrites": self.rewrites,
+            "jev_preflights": self.jev_preflights,
+            "jev_passages": self.jev_passages,
         }
         Path(path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -188,12 +229,49 @@ class ReplayFixture:
             reranks=payload.get("reranks") or {},
             routes=payload.get("routes") or {},
             rewrites=payload.get("rewrites") or {},
+            jev_preflights=payload.get("jev_preflights") or {},
+            jev_passages=payload.get("jev_passages") or {},
             corpus=str(payload.get("corpus") or ""),
             base_commit=str(payload.get("base_commit") or ""),
             seams=payload.get("seams") or {},
             created_at=float(payload.get("created_at") or 0.0),
             version=int(payload.get("version") or 0),
         )
+
+
+def dump_jev(result, *, stage: str) -> dict:
+    """JSON-safe form of one ``JevBatchResult`` (its mapped value plus the outcome fields)."""
+    value = getattr(result, "value", None)
+    dumped_value = None
+    if value is not None:
+        items = value if isinstance(value, tuple | list) else (value,)
+        dumped_value = [item.model_dump(mode="json") for item in items]
+    return {
+        "stage": stage,
+        "available": bool(getattr(result, "available", False)),
+        "failure_kind": getattr(result, "failure_kind", None),
+        "duration_ms": float(getattr(result, "duration_ms", 0.0) or 0.0),
+        "value": dumped_value,
+    }
+
+
+def _rebuild_jev(payload: Mapping, stage: str):
+    """Rebuild the recorded ``JevBatchResult`` so the caller sees the same shape it recorded."""
+    from rag.jev.client import JevBatchResult
+    from rag.jev.models import PassageJudgment, PreflightDecision
+
+    available = bool(payload.get("available"))
+    duration = float(payload.get("duration_ms") or 0.0)
+    if not available:
+        return JevBatchResult(
+            available=False, failure_kind=payload.get("failure_kind"), duration_ms=duration
+        )
+    raw = payload.get("value") or []
+    if stage == "preflight":
+        decision = PreflightDecision.model_validate(raw[0]) if raw else None
+        return JevBatchResult(value=decision, available=True, duration_ms=duration)
+    judgments = tuple(PassageJudgment.model_validate(item) for item in raw)
+    return JevBatchResult(value=judgments, available=True, duration_ms=duration)
 
 
 def install(fixture: ReplayFixture, *, strict: bool = True) -> Callable[[], None]:
@@ -209,11 +287,14 @@ def install(fixture: ReplayFixture, *, strict: bool = True) -> Callable[[], None
     import rag.embedder as embedder_module
     import rag.query_rewriter as rewriter_module
     import rag.reranker as reranker_module
+    from rag.jev.client import JevClient
 
     original_embed = embedder_module.embed
     original_route = agent_module.route_question
     original_rewrite = rewriter_module.rewrite_query
     original_rerank = reranker_module.Reranker._call_rerank_api
+    original_preflight = JevClient.preflight
+    original_passages = JevClient.judge_passages
 
     def embed(texts: list[str]) -> list[list[float]]:
         try:
@@ -247,16 +328,36 @@ def install(fixture: ReplayFixture, *, strict: bool = True) -> Callable[[], None
                 raise
             return original_rerank(self, query, texts, top_n)
 
+    def preflight(self, state: dict):
+        try:
+            return fixture.lookup_preflight(state)
+        except FixtureMiss:
+            if strict:
+                raise
+            return original_preflight(self, state)
+
+    def judge_passages(self, state: dict, chunk_ids: list[str]):
+        try:
+            return fixture.lookup_passages(state, chunk_ids)
+        except FixtureMiss:
+            if strict:
+                raise
+            return original_passages(self, state, chunk_ids)
+
     embedder_module.embed = embed
     agent_module.route_question = route_question
     rewriter_module.rewrite_query = rewrite_query
     reranker_module.Reranker._call_rerank_api = call_rerank_api
+    JevClient.preflight = preflight
+    JevClient.judge_passages = judge_passages
 
     def uninstall() -> None:
         embedder_module.embed = original_embed
         agent_module.route_question = original_route
         rewriter_module.rewrite_query = original_rewrite
         reranker_module.Reranker._call_rerank_api = original_rerank
+        JevClient.preflight = original_preflight
+        JevClient.judge_passages = original_passages
 
     return uninstall
 
@@ -274,7 +375,8 @@ class RecordingSession:
         self.reranks: dict[str, list] = {}
         self.routes: dict[str, str] = {}
         self.rewrites: dict[str, str] = {}
-        self.misses: dict[str, int] = {"embed": 0, "rerank": 0, "route": 0, "rewrite": 0}
+        self.jev_preflights: dict[str, dict] = {}
+        self.jev_passages: dict[str, dict] = {}
 
     def fixture(self, *, corpus: str, base_commit: str, now: float | None = None) -> ReplayFixture:
         import time as _time
@@ -284,6 +386,8 @@ class RecordingSession:
             reranks=dict(self.reranks),
             routes=dict(self.routes),
             rewrites=dict(self.rewrites),
+            jev_preflights=dict(self.jev_preflights),
+            jev_passages=dict(self.jev_passages),
             corpus=corpus,
             base_commit=base_commit,
             seams=seam_hashes(),
@@ -296,12 +400,15 @@ class RecordingSession:
         import rag.embedder as embedder_module
         import rag.query_rewriter as rewriter_module
         import rag.reranker as reranker_module
+        from rag.jev.client import JevClient
 
         self._original = (
             embedder_module.embed,
             agent_module.route_question,
             rewriter_module.rewrite_query,
             reranker_module.Reranker._call_rerank_api,
+            JevClient.preflight,
+            JevClient.judge_passages,
         )
         session = self
 
@@ -326,10 +433,32 @@ class RecordingSession:
             session.reranks[_rerank_key(query, texts)] = json.loads(json.dumps(result))
             return result
 
+        def preflight(self, state: dict):
+            result = session._original[4](self, state)
+            try:
+                session.jev_preflights[jev_key("preflight", state)] = dump_jev(
+                    result, stage="preflight"
+                )
+            except Exception:  # noqa: BLE001 - 录制失败不能影响在线调用
+                logger.warning("replay fixture: could not record a Jev preflight")
+            return result
+
+        def judge_passages(self, state: dict, chunk_ids: list[str]):
+            result = session._original[5](self, state, chunk_ids)
+            try:
+                session.jev_passages[jev_key("passages", state, chunk_ids)] = dump_jev(
+                    result, stage="passages"
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("replay fixture: could not record Jev passages")
+            return result
+
         embedder_module.embed = embed
         agent_module.route_question = route_question
         rewriter_module.rewrite_query = rewrite_query
         reranker_module.Reranker._call_rerank_api = call_rerank_api
+        JevClient.preflight = preflight
+        JevClient.judge_passages = judge_passages
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -337,12 +466,15 @@ class RecordingSession:
         import rag.embedder as embedder_module
         import rag.query_rewriter as rewriter_module
         import rag.reranker as reranker_module
+        from rag.jev.client import JevClient
 
         (
             embedder_module.embed,
             agent_module.route_question,
             rewriter_module.rewrite_query,
             reranker_module.Reranker._call_rerank_api,
+            JevClient.preflight,
+            JevClient.judge_passages,
         ) = self._original
 
 

@@ -150,5 +150,137 @@ def test_corpus_fingerprint_notices_a_changed_snapshot():
 def test_seam_hashes_describe_the_code_that_is_running():
     hashes = seam_hashes()
 
-    assert set(hashes) == {"rag.embedder", "rag.reranker", "rag.agent", "rag.query_rewriter"}
+    # 第五个 seam（Jev/TypeSafe 客户端）也在内：录制实测 embeddings 0 证明生产路径把检索交给
+    # 外部服务，缺了它就无法无凭据重放；也因此，改到它的补丁会让 fixture 判过期。
+    assert set(hashes) == {
+        "rag.embedder",
+        "rag.reranker",
+        "rag.agent",
+        "rag.query_rewriter",
+        "rag.jev.client",
+    }
     assert all(len(digest) == 64 for digest in hashes.values())
+
+
+def _preflight_decision(**overrides):
+    """按 models.py 的真实字段构造（literal 取值来自 IntentKind/ComplexityKind）。"""
+    from rag.jev.models import PreflightDecision
+
+    base = dict(
+        intent="retrieval_qa",
+        intent_confidence=0.9,
+        complexity="simple",
+        complexity_confidence=0.8,
+        rewrite_probability=0.1,
+        model="scripted",
+        question_set_version="preflight-v1",
+        duration_ms=12.0,
+    )
+    base.update(overrides)
+    return PreflightDecision(**base)
+
+
+def _judgment(chunk_id, relevance, **overrides):
+    from rag.jev.models import PassageJudgment
+
+    base = dict(
+        chunk_id=chunk_id,
+        relevance=relevance,
+        answer_evidence=relevance,
+        contradiction=0.0,
+        prompt_injection=0.0,
+        question_set_version="passages-v1",
+    )
+    base.update(overrides)
+    return PassageJudgment(**base)
+
+
+def test_the_jev_seam_round_trips_through_the_fixture(tmp_path):
+    """第五 seam：Jev 的 preflight / judge_passages 的映射结果要能原样重放。"""
+    from rag.evolution.replay_fixture import dump_jev, jev_key
+    from rag.jev.client import JevBatchResult
+
+    decision = _preflight_decision()
+    judgments = (_judgment("c1", 0.9), _judgment("c2", 0.2))
+    state = {"question": "年假是多少", "kb_id": "kb_hr"}
+    fixture = _fixture(
+        jev_preflights={
+            jev_key("preflight", state): dump_jev(
+                JevBatchResult(value=decision, available=True, duration_ms=12.0), stage="preflight"
+            )
+        },
+        jev_passages={
+            jev_key("passages", state, ["c1", "c2"]): dump_jev(
+                JevBatchResult(value=judgments, available=True, duration_ms=34.0), stage="passages"
+            )
+        },
+    )
+    path = tmp_path / "f.json"
+    fixture.save(path)
+    loaded = ReplayFixture.load(path)
+
+    replayed_decision = loaded.lookup_preflight(state)
+    replayed_judgments = loaded.lookup_passages(state, ["c1", "c2"])
+
+    assert replayed_decision.available is True
+    assert replayed_decision.value == decision
+    assert replayed_decision.duration_ms == 12.0  # 录制的耗时被复用：Δ 里抵消，绝对值不是生产时延
+    assert replayed_judgments.value == judgments
+    assert replayed_judgments.duration_ms == 34.0
+
+
+def test_a_failed_jev_outcome_is_replayed_as_a_failure():
+    from rag.evolution.replay_fixture import dump_jev, jev_key
+    from rag.jev.client import JevBatchResult
+
+    state = {"q": 1}
+    fixture = _fixture(
+        jev_preflights={
+            jev_key("preflight", state): dump_jev(
+                JevBatchResult(available=False, failure_kind="timeout", duration_ms=150.0),
+                stage="preflight",
+            )
+        }
+    )
+
+    replayed = fixture.lookup_preflight(state)
+
+    assert replayed.available is False
+    assert replayed.failure_kind == "timeout"
+    assert replayed.value is None
+
+
+def test_a_jev_call_with_no_recording_is_a_miss():
+    fixture = _fixture()
+
+    with pytest.raises(FixtureMiss):
+        fixture.lookup_preflight({"never": "recorded"})
+    with pytest.raises(FixtureMiss):
+        fixture.lookup_passages({"never": "recorded"}, ["c1"])
+
+
+def test_install_also_points_the_jev_client_at_the_fixture():
+    from rag.evolution.replay_fixture import dump_jev, jev_key
+    from rag.jev.client import JevBatchResult, JevClient
+
+    state = {"question": "q"}
+    fixture = _fixture(
+        jev_preflights={
+            jev_key("preflight", state): dump_jev(
+                JevBatchResult(value=_preflight_decision(), available=True, duration_ms=1.0),
+                stage="preflight",
+            )
+        }
+    )
+    before = JevClient.preflight
+
+    uninstall = install(fixture)
+    try:
+        client = JevClient.__new__(JevClient)  # 不构造真实客户端（那需要凭据）
+        assert client.preflight(state).available is True
+        with pytest.raises(FixtureMiss):
+            client.preflight({"other": "state"})
+    finally:
+        uninstall()
+
+    assert JevClient.preflight is before
