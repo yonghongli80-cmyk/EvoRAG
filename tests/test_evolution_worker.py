@@ -1618,3 +1618,41 @@ def test_a_diagnosis_saying_undetermined_is_what_makes_a_gap_cluster(tmp_path):
 
     assert outcome["tickets_created"] == 1
     assert store.list_gap_tickets()[0]["cluster_id"] == cluster["id"]
+
+def test_the_patch_step_builds_the_generator_with_the_configured_timeout(tmp_path, monkeypatch):
+    """实测动机：单次生成 42–350s，而生成器默认超时 90s ⇒ 基线里 5 个失败有 2 个是 timeout。
+
+    `PatchGenerator` 是在步骤内部从**源模块**导入的，所以要打 `patch_generator` 的属性。
+    """
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.patch_generator import PatchUnavailable
+
+    recorded: dict = {}
+
+    class _Recorder:
+        model_calls = 0
+
+        def __init__(self, **kwargs):
+            recorded.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            raise PatchUnavailable("invalid", "stop here")
+
+    monkeypatch.setattr("rag.evolution.patch_generator.PatchGenerator", _Recorder)
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|code")
+    cfg = _fake_settings(
+        evolution_candidate_enabled=True, evolution_patch_timeout_seconds=612.0
+    )
+
+    from rag.evolution.worker import make_evolution_patch_step
+
+    step = make_evolution_patch_step(
+        store, settings_obj=cfg, model_call_budget=2, candidate_store=CandidateStore(store)
+    )
+    outcome = step()
+
+    assert recorded.get("timeout_seconds") == 612.0
+    assert outcome["patch_model_calls"] == 1
+    assert outcome["patch_failed"] == 1

@@ -854,7 +854,16 @@ def make_evolution_patch_step(
         if not enabled or budget <= 0:
             return outcome
         candidates = candidate_store or CandidateStore(store)
-        generator = (generator_factory or PatchGenerator)()
+        generator = (
+            generator_factory
+            or (
+                lambda: PatchGenerator(
+                    timeout_seconds=float(
+                        getattr(cfg, "evolution_patch_timeout_seconds", 600.0)
+                    )
+                )
+            )
+        )()
         items = _keep_defects(_eligible_patch_items(store, candidates),
                               _marked_not_a_defect(cfg))
         for item in items:

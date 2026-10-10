@@ -606,3 +606,49 @@ worker 按**真实调用数**记账（内部重试不漏账）。**对照测量�
 打印真实异常才发现 `_parse_answer` 抛的是 `"response carries no unified diff"`，与我以为的措辞不同 ✗；
 ② 一开始**对所有拒绝都重试** ⇒ **24 条既有用例挂掉** ✓，才收窄到可重试类别；③ 又凭记忆用了不存在的
 夹具/助手（`generator_repo`、`_draft`）✗ ⇒ 改为文件里真实的 `seeded` / `FakeModel` / `model_reply`。
+
+### 补丁生成成功率基线（队列 D 的测量台）
+
+**为什么先做测量台**：残余的补丁失败是**模型输出质量**问题（实测约每 4 次生成就有 1~3 次被边界拒绝：
+`does_not_apply` / `corrupt_patch` / 编造不存在的测试名）。任何"加大上下文 / 逐文件结构化输出 /
+两阶段生成"的改动都需要一条**可比较的基线**，否则无法区分"改进"与"噪声"。
+
+**判据（先定线，再动手）**：在已确认 `code` / `reranking` 层级的真实聚类上，
+**生成成功率 ≥ 80%** —— 成功率 = 过了边界（`git apply --check` 通过且 `test_paths` 真实存在）。
+
+**工具**：`scripts/measure_patch_generation.py`（本仓库跟踪，便于复查）：
+
+```powershell
+python scripts/measure_patch_generation.py --label <名字> --limit 6 --repeats 2 --top-up `
+  --json-out real-case-handoff/evolab/patch-gen-baseline.json `
+  --markdown-out real-case-handoff/evolab/patch-gen-baseline.md
+```
+
+**方法（只为测量，不改判定）**：
+* 合格项复用 worker 的 `_eligible_patch_items`（同一套准入：聚类已批准 + 已确认层级 + 最新草稿层一致）；
+* `--top-up`：合格项不足时，用**同一套层级判据**从"已确认层级"的观测里补样本，但**去掉"该观测尚无候选"**
+  这一条 —— 那是 **worker 的调度条件**，与"生成质量"无关，不该限制测量（脚本与文档都写明这一点）；
+* 每次生成都**包住模型调用**以捕获补全的结构（长度、有无 `diff --git`/hunk 头、`+++ b/` 行数），
+  失败类别用生成器自己的 `_failure_category`（与重试判定同源）；记录真实 `model_calls`（含重试）；
+* **只读**：不写候选、不写观测；**不需要语料**（只用仓库与模型）⇒ 不与运行中的服务抢 Qdrant 锁。
+
+**样本局限（如实记录）**：当前合格项集中在 cluster 3（`reranking` 层，6 对）；cluster 30（`code`）的
+成员**不合格**——其**最新**草稿的 `suggested_layer` 不是 `code`（生成器要求最新草稿层与已确认层一致），
+所以这条基线量的是 `reranking` 层的生成质量，不能外推到全部层级。
+
+**基线实测（2026-10-10，`--label patch-v4-baseline`，cluster 3 = `reranking` 层，6 对 × 2 次 = 12 次）**：
+
+| 指标 | 值 |
+| --- | --- |
+| **成功率（过边界）** | **7/12 = 58.3%** ⇒ **未达 80% 判据** |
+| 首试成功率 | 5/12 = 41.7% |
+| 失败类别 | `timeout` ×2、`diff_names_no_file` ×1、`does_not_apply` ×1、`corrupt_patch` ×1 |
+| 平均模型调用 | 1.5 次/次生成（重试约一半时候触发） |
+| 单次耗时 | **42 – 350 秒**（均值 ≈200s） |
+
+**基线直接给出一个此前不知道的失败模式**：**5 个失败里有 2 个是 `timeout`**，而补丁生成器的超时是
+**默认 90s**、**worker 又没传**（诊断步骤有 `evolution_diagnosis_timeout_seconds`，补丁步骤没有）
+⇒ 等于**在截断一个慢但可能成功的调用**。这是**配置级**修法（不动输出契约）：新增
+`RAG_EVOLUTION_PATCH_TIMEOUT_SECONDS`（默认 **600s**）并接进 worker 的默认工厂；测量台也改为**与 worker
+同源**读取该设置（否则测量台自己仍用 90s，复测就什么都测不到 —— 这是我在做复测前发现并修掉的）。
+定点复测（obs 156，基线里两次都 `timeout`）见 `real-case-handoff/evolab/patch-gen-timeout-retest.json`。

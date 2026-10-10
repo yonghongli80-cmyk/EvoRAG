@@ -153,6 +153,9 @@ class Settings(BaseSettings):
     # 动机是实测的**方差**：同一观测、同一证据包、同一提示词，两次给出不同类别
     # （obs#8 一次 chunking_structure_damage、一次 recall_miss），单次采样在那些行上等于抛硬币。
     # 代价是模型调用数 ×samples，**按调用计入每轮预算**（工人侧 `diagnosis_unstable` 记录票不一致）。
+    #: 补丁生成的单次模型调用超时。实测单次生成 42–350s，而生成器默认 90s ⇒ 会截断慢但
+    #: 可能成功的调用（基线里 5 个失败有 2 个是 timeout）。取 600s；整轮仍由 run_seconds 兜住。
+    evolution_patch_timeout_seconds: float = 600.0
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录
