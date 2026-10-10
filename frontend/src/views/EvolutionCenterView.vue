@@ -234,6 +234,35 @@ async function loadDiagnosis(clusterId: number) {
   }
 }
 
+const confirmLayerValue = ref('')
+
+/** 确认根因层级：不动状态，只记录管理员判断（补丁生成器以它为准）。 */
+async function confirmLayer() {
+  if (!selectedCluster.value || !confirmLayerValue.value || deciding.value) return
+  deciding.value = true
+  try {
+    const updated = await submitDecision(
+      selectedCluster.value.id,
+      'confirm_layer',
+      decisionNote.value,
+      confirmLayerValue.value
+    )
+    selectedCluster.value = updated
+    decisionNote.value = ''
+    confirmLayerValue.value = ''
+    error.value = ''
+    await loadDiagnosis(updated.id)
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '根因层级确认失败'
+  } finally {
+    deciding.value = false
+  }
+}
+
 async function decide(action: EvolutionDecisionAction) {
   if (!selectedCluster.value || deciding.value) return
   deciding.value = true
@@ -839,6 +868,51 @@ onMounted(async () => {
           </li>
         </ul>
         <p v-else class="muted">暂无决策记录</p>
+
+        <div class="layer-confirm" data-test="layer-confirm">
+
+          <label>确认根因层级（补丁生成器以它为准）</label>
+
+          <select v-model="confirmLayerValue" data-test="layer-confirm-select">
+
+            <option value="">— 未确认 —</option>
+
+            <option
+
+              v-for="layer in stateMachine?.confirmable_layers || []"
+
+              :key="layer"
+
+              :value="layer"
+
+            >
+
+              {{ layer }}
+
+            </option>
+
+          </select>
+
+          <button
+
+            type="button"
+
+            class="query-button"
+
+            data-test="layer-confirm-submit"
+
+            :disabled="!confirmLayerValue || deciding"
+
+            @click="confirmLayer"
+
+          >
+
+            确认层级
+
+          </button>
+
+        </div>
+
 
         <div class="decision-bar">
           <textarea

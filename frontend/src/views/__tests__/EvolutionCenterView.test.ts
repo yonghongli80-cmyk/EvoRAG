@@ -8,7 +8,7 @@ vi.mock('../../api/evolution', () => ({
   fetchEvolutionStateMachine: vi.fn(),
   fetchGapTickets: vi.fn(),
   fetchCodePatches: vi.fn(),
-  fetchCodePatch: vi.fn()
+  fetchCodePatch: vi.fn(),
 }))
 
 import {
@@ -65,6 +65,7 @@ const candidateCluster = {
 }
 
 const stateMachine = {
+  confirmable_layers: ['prompt', 'query_rewrite', 'reranking', 'code', 'none'],
   statuses: ['observed', 'clustered', 'awaiting_diagnosis_review', 'rejected'],
   pools: ['observation_queue', 'candidate_pool'],
   transitions: {
@@ -344,4 +345,6 @@ describe('EvolutionCenterView', () => {
     )
     expect(wrapper.get('[data-test="copy-hint"]').text()).toContain('已复制')
   })
+
+
 })

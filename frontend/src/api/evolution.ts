@@ -59,6 +59,8 @@ export interface EvolutionEndpoint {
 
 /** Design section 7 transitions plus the phase-2 read-only endpoint inventory. */
 export interface EvolutionStateMachine {
+  /** 可确认的根因层级（后端由草稿模型派生，前端不另写一份清单）。 */
+  confirmable_layers?: string[]
   statuses: string[]
   pools: string[]
   transitions: Record<string, string[]>
@@ -133,6 +135,8 @@ export type EvolutionDecisionAction =
   | 'approve_for_candidate'
   | 'reject'
   | 'needs_more_evidence'
+  /** 只记录管理员的根因层级判断，不动状态（补丁生成器以它为准）。 */
+  | 'confirm_layer'
 
 /** One metric definition with the phase it becomes available in. */
 export interface EvolutionMetricDefinition {
@@ -238,11 +242,14 @@ export async function fetchDiagnosis(clusterId: number): Promise<EvolutionDiagno
 export async function submitDecision(
   clusterId: number,
   action: EvolutionDecisionAction,
-  note: string
+  note: string,
+  /** 仅 confirm_layer 动作使用：管理员确认的根因层级。 */
+  confirmedLayer?: string
 ): Promise<EvolutionCluster> {
   const res = await api.post(`/knowledge-operations/evolution/clusters/${clusterId}/decision`, {
     action,
-    note
+    note,
+    ...(confirmedLayer ? { confirmed_layer: confirmedLayer } : {})
   })
   return res.data
 }

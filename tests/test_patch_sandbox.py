@@ -1352,6 +1352,13 @@ def test_sandbox_metrics_say_when_there_is_no_comparison():
     assert "verdict" not in metrics
     assert metrics["verdict_unavailable"] is True
 
+    # 回放**根本没跑完**（benchmark=None）也要显式标注：否则审查台上"没有数字"看起来像"没有变差"。
+    none_report = sandbox_gate_metrics(
+        SandboxReport(applied=True, tests_passed=True, benchmark=None, failed_tests=())
+    )
+    assert "verdict" not in none_report
+    assert none_report["verdict_unavailable"] is True
+
 
 def test_record_sandbox_outcome_writes_status_detail_and_numbers():
     from rag.evolution.sandbox import GATE_NAME, record_sandbox_outcome

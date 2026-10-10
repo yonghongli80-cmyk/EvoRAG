@@ -1005,3 +1005,10 @@ def test_gate_entry_serialisation_passes_metrics_through_but_only_when_present()
     legacy = dict(entry)
     legacy.pop("metrics")
     assert "metrics" not in evolution_api._serialize_gate_entry(legacy)
+
+def test_state_machine_exposes_the_confirmable_layers(evolution_client, admin_headers):
+    """可确认层级由后端**派生**并透出，前端据此渲染下拉框（不各写一份清单）。"""
+    body = evolution_client.get(f"{PREFIX}/state-machine", headers=admin_headers).json()
+
+    assert body["confirmable_layers"] == list(evolution_api.CONFIRMABLE_LAYERS)
+    assert "prompt" in body["confirmable_layers"]

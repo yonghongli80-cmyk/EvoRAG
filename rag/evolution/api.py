@@ -564,6 +564,9 @@ def state_machine(user: dict = Depends(_admin_user)) -> dict:
     return {
         "statuses": list(_STATUSES),
         "pools": list(_POOLS),
+        # 可确认的根因层级：由草稿模型的 Literal **派生**，前端据此渲染下拉框，
+        # 避免两边各写一份清单而漂移。
+        "confirmable_layers": list(CONFIRMABLE_LAYERS),
         "transitions": EVOLUTION_TRANSITIONS,
         "endpoints": [
             {"path": endpoint["path"], "methods": list(endpoint["methods"])}

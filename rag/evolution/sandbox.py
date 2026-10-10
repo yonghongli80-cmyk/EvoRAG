@@ -1073,7 +1073,9 @@ def sandbox_gate_metrics(report: SandboxReport) -> dict:
     verdict = patch_verdict(report.benchmark or {}, report.benchmark or {})
     if verdict is not None:
         metrics["verdict"] = verdict
-    elif report.benchmark is not None:
+    else:
+        # 只要**没拿到可比对照**就显式标注（回放根本没跑完也算），
+        # 否则审查台上"没有数字"会看起来像"没有变差"。
         metrics["verdict_unavailable"] = True
     return metrics
 

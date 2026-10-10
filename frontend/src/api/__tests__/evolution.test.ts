@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   fetchDiagnosis,
+  submitDecision,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
   fetchEvolutionObservations,
@@ -8,7 +9,7 @@ import {
   fetchGapTickets
 } from '../evolution'
 
-vi.mock('../../utils/api', () => ({ default: { get: vi.fn() } }))
+vi.mock('../../utils/api', () => ({ default: { get: vi.fn(), post: vi.fn() } }))
 
 import api from '../../utils/api'
 
@@ -116,5 +117,29 @@ describe('fetchGapTickets', () => {
     expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/gap-tickets', {
       params: { page: 1, page_size: 20 }
     })
+  })
+})
+
+describe('submitDecision with a confirmed layer', () => {
+  it('posts confirmed_layer only when one is given', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { id: 7 } } as any)
+
+    await submitDecision(7, 'confirm_layer', '确认层级', 'prompt')
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/knowledge-operations/evolution/clusters/7/decision',
+      { action: 'confirm_layer', note: '确认层级', confirmed_layer: 'prompt' }
+    )
+  })
+
+  it('omits the key for the ordinary decisions', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { id: 7 } } as any)
+
+    await submitDecision(7, 'reject', '证据不足')
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/knowledge-operations/evolution/clusters/7/decision',
+      { action: 'reject', note: '证据不足' }
+    )
   })
 })
