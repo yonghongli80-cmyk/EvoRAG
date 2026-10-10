@@ -82,7 +82,7 @@ from rag.evolution.symbols import SymbolIndex, window_excerpt
 
 #: Version of the patch prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
-PATCH_PROMPT_VERSION = "patch-v3"
+PATCH_PROMPT_VERSION = "patch-v4"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -533,6 +533,137 @@ def _render_locate_note(
     return "# 定位（系统按符号表确定，不是关键词猜测）\n" + "\n".join(lines)
 
 
+def _available_tests(repo_root: Path, paths: tuple[str, ...], *, limit: int = 12) -> tuple[str, ...]:
+    """Existing test files that actually relate to the files this patch touches.
+
+    Why this exists (measured): for cluster 30 the model named ``tests/test_jev_service.py`` in two
+    of two attempts and the boundary refused both, because the file does not exist. The prompt showed
+    the source files but never said which tests exist, so the only available strategy was guessing.
+    This lists real names — never content — and it prefers tests that *import* the module being
+    patched, falling back to name matching, so the list is small and relevant rather than a dump of
+    the whole directory.
+    """
+    root = Path(repo_root)
+    tests_dir = root / "tests"
+    if not tests_dir.is_dir():
+        return ()
+    modules = {
+        path[: -len(".py")].replace("/", ".")
+        for path in paths
+        if path.endswith(".py")
+    }
+    stems = {Path(path).stem.lower() for path in paths}
+    importers: list[str] = []
+    by_name: list[str] = []
+    for candidate in sorted(tests_dir.glob("test_*.py")):
+        relative = f"tests/{candidate.name}"
+        if any(stem and stem in candidate.name.lower() for stem in stems):
+            by_name.append(relative)
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(f"from {module}" in text or f"import {module}" in text for module in modules):
+            importers.append(relative)
+    ordered = list(dict.fromkeys(importers + by_name))
+    return tuple(ordered[:limit])
+
+
+#: 一次重试时给模型的说明：**只带我们自己枚举出来的失败类别**，绝不带 diff、git 原文或任何
+#: 用户/语料内容（git 的 stderr 会包含文件正文，所以它永远不进这条路径）。
+_REPAIR_NOTES: dict[str, str] = {
+    "corrupt_patch": (
+        "上一版的 diff 结构不合法（hunk 头声明的行数与正文不符，或 hunk 不完整）。"
+        "请重发一个完整自洽的 unified diff，并确保每个 @@ 头声明的行数与正文行数一致。"
+    ),
+    "does_not_apply": (
+        "上一版的上下文行与仓库当前内容对不上（补丁套用失败）。"
+        "请严格照上面给出的文件正文重写上下文行，不要凭记忆填写。"
+    ),
+    "unrecognized_input": (
+        "上一版不是 git 能识别的 unified diff。只输出 diff 本身：不要围栏、解释或多余文字。"
+    ),
+    "missing_target": "上一版点到了仓库里不存在的文件。只允许修改上面列出的目标文件。",
+    "already_exists": "上一版试图新建一个已存在的文件。请改为修改现有文件。",
+}
+
+
+#: 只有"diff 本身写坏了"这一类才值得重试：重发一次可能修好。策略/范围类拒绝（越界路径、
+#: 禁止文件、删除文件、测试文件不存在、配额超限）重试也一定失败，白花一次调用。
+_RETRYABLE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "corrupt_patch",
+        "does_not_apply",
+        "unrecognized_input",
+        "no_valid_patch",
+        # "压根没给出 diff"与"回复无法解析"都是格式失败（提示词里写明了要什么），重发一次值得。
+        "diff_names_no_file",
+        "unparseable_reply",
+    }
+)
+
+#: 识别我们**自己**写进 reason/detail 的类别（不读 git 的原始 stderr——它带文件正文）。
+#: 左侧是机器类别名（边界映射出来的），右侧是我们自己的英文措辞：两处都要认，否则
+#: "diff names no file" 这种自有措辞会识别不出来，重试就不会触发。
+_CATEGORY_HINTS: tuple[tuple[str, str], ...] = (
+    # 回复压根解析不出契约（pydantic / 结构化输出 / JSON）：也是格式失败，值得重发一次。
+    ("StructuredOutputError", "unparseable_reply"),
+    ("structured_output_invalid", "unparseable_reply"),
+    ("ValidationError", "unparseable_reply"),
+    ("JSONDecodeError", "unparseable_reply"),
+    ("diff names no file", "diff_names_no_file"),
+    ("response carries no unified diff", "diff_names_no_file"),
+    ("corrupt_patch", "corrupt_patch"),
+    ("corrupt patch", "corrupt_patch"),
+    ("does_not_apply", "does_not_apply"),
+    ("does not apply", "does_not_apply"),
+    ("unrecognized_input", "unrecognized_input"),
+    ("unrecognized input", "unrecognized_input"),
+    ("no_valid_patch", "no_valid_patch"),
+    ("no valid patches", "no_valid_patch"),
+    ("missing_target", "missing_target"),
+    ("no such file", "missing_target"),
+    ("already_exists", "already_exists"),
+    ("already exists", "already_exists"),
+)
+
+
+def _failure_category(reason: str, detail: str) -> str:
+    """The failure category, read from our own reason/detail rather than from git's output."""
+    text = f"{reason} {detail}"
+    for needle, category in _CATEGORY_HINTS:
+        if needle in text:
+            return category
+    return str(reason)
+
+
+def _repair_note(reason: str, detail: str) -> str:
+    """The one retry's instruction: our own category, never the rejected output."""
+    hint = _REPAIR_NOTES.get(str(reason), "请重新生成一个满足全部约束的 unified diff。")
+    return (
+        "# 上一次尝试被拒绝\n"
+        f"失败类别：{reason}（{str(detail)[:80]}）\n"
+        f"{hint}\n"
+        "请重新输出：一个完整的 unified diff + 四行元数据。"
+    )
+
+
+def _render_available_tests(tests: tuple[str, ...]) -> str:
+    """The verification-target block: real file names, or an explicit "none matched"."""
+    if not tests:
+        return (
+            "# 可用的验证测试（仓库里实际存在的文件名）\n"
+            "（没有匹配到你改动的测试文件：请**自己确认**后点名一个确实存在的 tests/ 文件，"
+            "绝不编造文件名——沙箱会逐个核对存在性。）"
+        )
+    listed = "\n".join(f"- {name}" for name in tests)
+    return (
+        "# 可用的验证测试（仓库里实际存在的文件名，**只能从中选择**）\n"
+        f"{listed}\n"
+        "元数据的 test_paths 必须来自上面这个列表：编造一个不存在的文件名会被边界直接拒绝。"
+    )
+
+
 def _render_targets(targets: tuple[tuple[str, str, int, bool, str], ...]) -> str:
     """Render the selected target files, stating per file what is shown and what is not."""
     blocks = []
@@ -552,6 +683,7 @@ def _build_messages(
     base_commit: str,
     prompt_version: str,
     locate_note: str = "",
+    repo_root: str | Path = ".",
 ) -> list[dict]:
     """Assemble the versioned two-message patch request.
 
@@ -602,6 +734,9 @@ def _build_messages(
             "# 已确认诊断（管理员已确认根因）\n" + _render_drafts(drafts),
             f"# 目标层级\nlayer: {layer}\n允许位置（只能修改这些 glob 内的文件）: {allowed}",
             "# 目标文件正文（仓库当前内容，路径相对仓库根目录）\n" + _render_targets(targets),
+            _render_available_tests(
+                _available_tests(Path(repo_root), tuple(entry[0] for entry in targets))
+            ),
             f"# git base 信息\nHEAD commit: {base_commit}",
             "请严格按系统提示输出：一个 unified diff + 四行元数据。"
             "若上面给出了定位，请把修改落在该函数/该行附近；正文里没显示的行不要臆造。",
@@ -979,6 +1114,8 @@ class PatchGenerator:
         timeout_seconds: float = 90.0,
         max_tokens: int = PATCH_MAX_TOKENS,
     ) -> None:
+        #: 本次生成实际发生的模型调用次数（含重试），供预算记账。
+        self.model_calls = 0
         self._model_call: ModelCall = model_call or _default_model_call(
             timeout_seconds, max_tokens
         )
@@ -1039,14 +1176,22 @@ class PatchGenerator:
         base_commit = _git_head_commit(root)
         messages = _build_messages(
             cluster, normalized, layer, targets, base_commit, self.prompt_version,
-            locate_note=locate_note,
+            locate_note=locate_note, repo_root=root,
         )
 
         started = time.perf_counter()
         completion_chars = 0
         target_count = len(targets)
-        try:
-            completion = self._model_call(messages)
+        # 一次生成 + 至多一次"带失败类别"的重试。实测动机：约每五次生成就有一次被边界拒绝
+        # （上下文对不上 / hunk 不合法 / 编造测试文件名），而重试只需要把我们自己的类别说清楚。
+        self.model_calls = 0
+
+        def attempt_once(note: str):
+            nonlocal completion_chars
+            messages_for_attempt = (
+                messages if not note else [*messages, {"role": "user", "content": note}]
+            )
+            completion = self._model_call(messages_for_attempt)
             completion_chars = len(completion or "")
             diff, answer = _parse_answer(completion)
             paths = _diff_paths(diff)
@@ -1056,15 +1201,26 @@ class PatchGenerator:
             candidate = _build_candidate(answer, paths, layer=layer, base_commit=base_commit)
             _enforce_patch_rules(candidate, layer=layer, repo_root=root, diff=diff)
             _enforce_diagnosis_scope(normalized, cluster, observation_id, trace_store, layer)
-        except PatchUnavailable:
-            self._record(started, completion_chars, target_count, 0, 0)
-            raise
-        except Exception as exc:
-            reason, detail = _classify_failure(exc)
-            self._record(started, completion_chars, target_count, 0, 0)
-            raise PatchUnavailable(reason, detail) from exc
-        self._record(started, completion_chars, target_count, len(paths), changed)
-        return candidate
+            return candidate, len(paths), changed
+
+        repair_note = ""
+        for attempt in (1, 2):
+            self.model_calls += 1
+            try:
+                candidate, patch_files, changed = attempt_once(repair_note)
+            except Exception as exc:
+                reason, detail = _classify_failure(exc)
+                category = _failure_category(reason, detail)
+                if attempt == 2 or category not in _RETRYABLE_CATEGORIES:
+                    self._record(started, completion_chars, target_count, 0, 0)
+                    if isinstance(exc, PatchUnavailable):
+                        raise
+                    raise PatchUnavailable(reason, detail) from exc
+                repair_note = _repair_note(category, detail)
+                continue
+            self._record(started, completion_chars, target_count, patch_files, changed)
+            return candidate
+        raise PatchUnavailable(REASON_INVALID, "patch generation produced nothing")
 
     def _record(
         self,

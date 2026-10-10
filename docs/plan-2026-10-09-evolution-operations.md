@@ -577,3 +577,30 @@ not-a-defect 的问题 ✓。判据已改成按内容。
 对确认层级为 `none` 的聚类报 `unknown patch layer: 'none'` ✓（这是**正确拒绝**）；③ 候选生成的两类拒绝
 （`response is not a JSON object`、`criteria['true'] changed 47%, limit 40%`）说明边界校验在工作 ✓；
 ④ 第 1/3 轮以 `budget_exhausted`（run-seconds）收尾 ⇒ 回路是**可续跑**的，不是坏了 ✓。
+
+### corrupt_patch 调查（真因、修复与测量，2026-10-09）
+
+**先按红线排除一个诱人的做法**：`corrupt_patch` 的 detail 只给**类别**、丢弃 git 原文——这是**刻意的**
+（git 的 stderr 会带文件正文，落库就越过"不存内容"的红线）。所以"把报错打出来"不能做，改为**从 diff
+自身算结构事实**（文件头数、hunk 数、每个 hunk 头声明的行数与实际 body 是否相符、是否截断、有无围栏），
+全部**内容无关**。探针：`real-case-handoff/evolab/probe_corrupt_patch.py`（只读副本、只调模型）。
+
+**结构取证**：cluster 3（`reranking` 层）**2/2 合法** ⇒ `corrupt_patch` 不是该路径的必然结果；cluster 30
+（`code` 层）**4 次里 3 次被拒**（`does_not_apply` / `corrupt_patch`，其中一次回复带 ``` 围栏）⇒ 这是
+**真实的、复发的模型输出质量**问题，而**管线行为正确**（拒绝而非落库）。
+
+**修掉的那一类（系统性）**：cluster 30 上模型 **2/2 次点名了不存在的测试文件**
+`tests/test_jev_service.py` —— 提示词只给源文件、不说存在哪些测试 ⇒ 只能猜。新增 `_available_tests`
+（**只给文件名**，优先列出真的 import 了被改模块的测试）+ 明确的"只能从中选择、绝不编造"规则 ⇒
+`patch-v4`。**对照测量：0/2 → 2/3 合法** ✓。
+
+**加的一次有界重试**：只对"diff 写坏了"的类别重试（`corrupt_patch` / `does_not_apply` /
+`unrecognized_input` / `no_valid_patch` / 无 diff / 无法解析），**策略与范围类拒绝不重试**（重试也一定
+失败，白花一次调用）；重试提示**只带我们自己的类别**、绝不回灌被拒输出；生成器暴露 `model_calls`，
+worker 按**真实调用数**记账（内部重试不漏账）。**对照测量：1/4 → 2/4** ✓（n=4 ⚠ 不作强论断；价值在于
+"可修复的失败多一次机会，且账目诚实"）。
+
+**我在这条路上犯的三类错（都被测试或实测抓住）**：① 先按 `_classify_failure` 的类名**猜**类别 ⇒ 实测
+打印真实异常才发现 `_parse_answer` 抛的是 `"response carries no unified diff"`，与我以为的措辞不同 ✗；
+② 一开始**对所有拒绝都重试** ⇒ **24 条既有用例挂掉** ✓，才收窄到可重试类别；③ 又凭记忆用了不存在的
+夹具/助手（`generator_repo`、`_draft`）✗ ⇒ 改为文件里真实的 `seeded` / `FakeModel` / `model_reply`。

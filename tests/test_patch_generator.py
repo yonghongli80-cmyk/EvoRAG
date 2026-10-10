@@ -293,8 +293,8 @@ def test_prompt_version_is_traceable_on_the_instance_and_in_the_request(tmp_path
 
     # patch-v2：把「测试只进元数据、不进 diff」与「不得新建文件」写死——2026-10-02 实测
     # 同一诊断 3/3 次因 diff 里新建 tests/ 文件被拒。
-    # patch-v3：定位块（异常帧 + 诊断点名的真实符号）与靶心窗口。
-    assert PATCH_PROMPT_VERSION == "patch-v3"
+    # patch-v4：定位块 + 靶心窗口，并列出**实际存在**的验证测试文件名。
+    assert PATCH_PROMPT_VERSION == "patch-v4"
     assert generator.prompt_version == PATCH_PROMPT_VERSION
     assert PATCH_PROMPT_VERSION in _request_text(fake)
 
@@ -495,11 +495,16 @@ def test_a_diff_with_more_than_five_files_is_refused(tmp_path):
 
 def test_a_diff_that_does_not_apply_is_refused(tmp_path):
     trace, cluster, member = seeded(tmp_path)
-    fake = FakeModel(model_reply(non_applying_diff(TARGET_FILE)))
+    # 两段同样的回复：第一段触发一次"带类别的重试"，第二段证明重试后仍然被拒绝。
+    fake = FakeModel(
+        model_reply(non_applying_diff(TARGET_FILE)),
+        model_reply(non_applying_diff(TARGET_FILE)),
+    )
 
     with pytest.raises(PatchUnavailable) as excinfo:
         _generate(fake, cluster, member, trace)
 
+    assert len(fake.requests) == 2  # 确实重试过一次
     assert excinfo.value.reason == "invalid"
     assert "git apply --check failed" in excinfo.value.detail
     assert "preimage line" not in excinfo.value.detail
@@ -517,13 +522,14 @@ def test_a_diff_that_does_not_apply_is_refused(tmp_path):
 )
 def test_an_empty_or_unparseable_diff_is_refused(tmp_path, reply):
     trace, cluster, member = seeded(tmp_path)
-    fake = FakeModel(reply)
+    # 空/无法解析的回复属于**格式**失败 ⇒ 会带类别重试一次；两次都拿不到 diff 才拒绝。
+    fake = FakeModel(reply, reply)
 
     with pytest.raises(PatchUnavailable) as excinfo:
         _generate(fake, cluster, member, trace)
 
     assert excinfo.value.reason == "invalid"
-    assert len(fake.requests) == 1
+    assert len(fake.requests) == 2
 
 
 def test_a_reply_without_the_metadata_lines_is_refused(tmp_path):
@@ -1001,3 +1007,80 @@ def test_the_locate_note_names_the_frame_and_the_named_symbol():
     assert "Retriever._rrf_fuse" in note
     assert "rag/retriever.py:230-266" in note
     assert _render_locate_note("", None, ()) == ""
+
+def test_the_prompt_lists_only_tests_that_really_exist(tmp_path):
+    """实测动机：cluster 30 上模型 2/2 次点名了不存在的测试文件，被边界正确拒绝。
+
+    提示词只给源文件、不说有哪些测试 ⇒ 只能猜。这里改为列出**真实存在**的文件名（只给名字，
+    不含内容），且优先列出真的 import 了被改模块的测试。
+    """
+    from rag.evolution.patch_generator import _available_tests, _render_available_tests
+
+    tests = _available_tests(Path(REPO_ROOT), ("rag/reranker.py",))
+
+    assert "tests/test_reranker.py" in tests
+    assert all((Path(REPO_ROOT) / name).is_file() for name in tests)
+    rendered = _render_available_tests(tests)
+    assert "只能从中选择" in rendered
+    assert "tests/test_reranker.py" in rendered
+
+
+def test_the_prompt_says_what_to_do_when_no_test_matches():
+    from rag.evolution.patch_generator import _render_available_tests
+
+    rendered = _render_available_tests(())
+
+    assert "绝不编造" in rendered
+    assert "不存在" in rendered or "确实存在" in rendered
+
+# ------------------------------------------------------------------
+# 带失败类别的一次重试（含真实调用计数）。
+# ------------------------------------------------------------------
+
+
+def test_a_rejected_diff_is_retried_once_with_the_failure_category(tmp_path):
+    """实测动机：约每五次生成就有一次被边界拒绝；重试只带我们自己的类别，绝不回灌被拒输出。"""
+    trace, cluster, member = seeded(tmp_path)
+    bad = "这不是一个 diff"
+    fake = FakeModel(bad, model_reply(edit_file_diff(TARGET_FILE)))
+    generator = PatchGenerator(model_call=fake)
+
+    candidate = generator.generate(
+        cluster,
+        [_draft()],
+        layer="reranking",
+        repo_root=REPO_ROOT,
+        observation_id=member["id"],
+        cluster_id=cluster["id"],
+        trace_store=trace,
+    )
+
+    # 既有夹具产出的 diff 以 `--- a/` 开头（不带 diff --git 头），断言据此写。
+    assert candidate.diff.startswith("--- a/")
+    assert generator.model_calls == 2
+    assert len(fake.requests) == 2
+    note = fake.requests[1][-1]["content"]
+    assert "上一次尝试被拒绝" in note
+    assert "失败类别" in note
+    assert bad not in note  # 被拒的输出绝不回灌
+
+
+def test_two_rejections_raise_after_exactly_two_calls(tmp_path):
+    from rag.evolution.patch_generator import PatchUnavailable
+
+    trace, cluster, member = seeded(tmp_path)
+    fake = FakeModel("还是不是 diff", "依然不是 diff")
+    generator = PatchGenerator(model_call=fake)
+
+    with pytest.raises(PatchUnavailable):
+        generator.generate(
+            cluster,
+            [_draft()],
+            layer="reranking",
+            repo_root=REPO_ROOT,
+            observation_id=member["id"],
+            cluster_id=cluster["id"],
+            trace_store=trace,
+        )
+
+    assert generator.model_calls == 2

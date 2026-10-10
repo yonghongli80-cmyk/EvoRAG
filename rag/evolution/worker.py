@@ -903,6 +903,11 @@ def make_evolution_patch_step(
                 logger.exception(
                     "evolution_patch_failed cluster=%s observation=%s", cluster_id, observation_id
                 )
+            finally:
+                # 生成器内部至多重试一次：把它实际发生的**额外**调用也计入预算（否则会漏账）。
+                outcome["patch_model_calls"] += max(
+                    0, int(getattr(generator, "model_calls", 0) or 0) - 1
+                )
         return outcome
 
     return step
