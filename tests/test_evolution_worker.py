@@ -325,6 +325,9 @@ class FakeStore:
     def list_gap_tickets(self, cluster_id=None, *, status=None):
         return []
 
+    def list_drafts(self, cluster_id=None):
+        return []
+
 
 class FakeClusterer:
     def __init__(self):
@@ -1442,14 +1445,18 @@ def test_a_not_a_defect_verdict_skips_generation_without_calls(tmp_path):
 # ------------------------------------------------------------------
 
 
-def _gap_cluster(store, key, *, questions, kb_id="kb1"):
-    """一个 root_cause_feature=undetermined 的聚类——**不**升入候选池（设计 §6）。"""
+def _gap_cluster(store, key, *, questions, kb_id="kb1", feature="undetermined"):
+    """一个内容缺口聚类——**不**升入候选池（设计 §6）。
+
+    ``feature`` 默认是旧形态；新用例会传聚类器真正会写的值（``recall_miss``），因为
+    "内容缺口"其实是**诊断草稿**的结论。
+    """
     now = time.time()
     cluster = store.upsert_cluster(
         cluster_key=key,
         kb_id=kb_id,
         failure_stage="generation",
-        root_cause_feature="undetermined",
+        root_cause_feature=feature,
         seen_at=now,
     )
     for question in questions:
@@ -1586,3 +1593,28 @@ def test_an_upload_that_covers_the_missing_terms_closes_the_ticket(tmp_path):
     assert updated["status"] == "content_added"
     assert updated["payload"]["missing_terms"] == []
     assert updated["payload"]["recheck"]["verdict"] == "covered"
+
+def test_a_diagnosis_saying_undetermined_is_what_makes_a_gap_cluster(tmp_path):
+    """真实形态：聚类字段是聚类器写的 ``recall_miss``，**草稿**才说 undetermined。
+
+    彩排实测（2026-10-09，DB 副本全链路）：只按 ``cluster.root_cause_feature`` 判准入 ⇒ 工单
+    **永远不产出**——草稿写着缺口、聚类字段却是召回缺失。所以准入必须以诊断为准；这条用例按真实
+    形态钉住它，避免再被"我以为"的夹具掩盖。
+    """
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster = _gap_cluster(
+        store, "kb1|generation|gap", questions=("门店盘点周期是多久",), feature="recall_miss"
+    )
+    store.add_draft(
+        int(cluster["id"]),
+        sample_draft(
+            failure_category="undetermined",
+            suggested_layer="none",
+            root_cause="假设（待复核）：库内可能没有该内容，需管理员标签确认。",
+        ),
+    )
+
+    outcome = _gap_step(store, reader=SequencedReader(["完全无关的一段文档"]))()
+
+    assert outcome["tickets_created"] == 1
+    assert store.list_gap_tickets()[0]["cluster_id"] == cluster["id"]

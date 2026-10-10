@@ -1096,6 +1096,23 @@ def make_evolution_gap_ticket_step(
             "tickets_updated": 0,
         }
         have = store.gap_ticket_cluster_ids()
+        # 准入以**诊断草稿**为准：内容缺口是诊断的结论（failure_category=undetermined），
+        # 而 cluster.root_cause_feature 是**聚类器**写的（recall_miss 之类）。彩排实测：只按后者
+        # 判准入会导致工单永远不产出（草稿说 undetermined、聚类字段却是 recall_miss）。旧形态
+        # （聚类字段就是 undetermined）仍然接受，两条路都留。
+        newest_draft: dict[int, dict] = {}
+        for draft in store.list_drafts():  # newest first
+            cluster_id = draft.get("cluster_id")
+            if cluster_id is not None:
+                newest_draft.setdefault(int(cluster_id), draft)
+
+        def is_gap_cluster(cluster) -> bool:
+            if str(cluster.get("root_cause_feature") or "") == "undetermined":
+                return True
+            draft = newest_draft.get(int(cluster["id"]))
+            payload = (draft or {}).get("payload") or {}
+            return str(payload.get("failure_category") or "") == "undetermined"
+
         # 惰性：没有可探测的聚类时连 reader 都不建（每轮都跑，绝大多数轮次无事可做）。
         reader = None
 
@@ -1132,7 +1149,7 @@ def make_evolution_gap_ticket_step(
 
         try:
             for cluster in store.list_clusters():
-                if str(cluster.get("root_cause_feature") or "") != "undetermined":
+                if not is_gap_cluster(cluster):
                     continue
                 if int(cluster["id"]) in have:
                     continue

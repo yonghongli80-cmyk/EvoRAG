@@ -545,3 +545,35 @@ undefined（Vue 里 `v-for` 只覆盖它所在的那个元素 ⇒ 已改 `<templ
 **不唯一**的锚点插块 ⇒ 插进了另一个面板（已改用唯一锚点 `code-candidate-sandbox` 重定位）；另外我还
 重复造了 `formatRate` / `formatMs`（视图里早有）⇒ 已删并改为复用。教训升级版：**锚点必须唯一，
 助手先查有没有**。
+
+### ④ 全链路彩排（DB 副本，2026-10-09）——并因此找到一个真实缺陷
+
+**做法**（`real-case-handoff/evolab/rehearse_loop.py`，只动副本）：两个 SQLite 库都用 **backup API**
+取一致副本（服务在写时直接拷文件可能拷到半写状态）、Qdrant 用目录副本、路径全部改指副本；注入三族合成
+失败；跑 worker 轮次；以管理员身份做决策（**复用 API 的 `DECISION_TARGETS`**，不自己拼三元组；层级确认
+用 `set_confirmed_layer`，它不移动状态）；打印每一步的计数与状态；最后核对不变量。
+
+**彩排先给出了一个否定结论**：第一次跑完全程，`gap_tickets` 始终是 **0** ✗ —— 尽管草稿明确写着
+`undetermined`。根因是**我队列 5 的准入判据写错了**：它按 `cluster.root_cause_feature == "undetermined"`
+判准入，而那是**聚类器**写的字段（`recall_miss` 之类）；"内容缺口"是**诊断草稿**的结论
+（`failure_category`）。我的单元测试之所以通过，是因为夹具**按我的错误假设**给聚类塞了
+`root_cause_feature="undetermined"` —— 典型的"测试固化了错误假设"。
+
+**修复**：准入改为**以最新诊断草稿为准**（`failure_category == "undetermined"`），旧形态仍接受；并新增
+一条**真实形态**用例（聚类字段 `recall_miss` + 草稿说 undetermined）钉住它，使这个错误假设不能再复现。
+
+**修复后重跑（新副本）**：**产出 4 张工单** ✓（kb_after_sales / kb_hr / kb_evolab / kb_accessories，
+每张带 8 条问法样本与缺失词 ✓ —— 注意它们来自**既有真实聚类**，不是我的合成族：合成观测并入了聚类 3）、
+**新增候选 3 份**（问题集 ×2 + 代码补丁 ×1 ✓）；不变量
+`no_refused_question_appears_in_a_ticket` ✓、`undetermined_clusters_stay_in_observation_queue` ✓、
+`no_undetermined_cluster_has_a_candidate` ✓。
+
+**顺带证实我自己的断言写粗了**：第一版不变量检查"被拒观测所属聚类有没有工单" ⇒ 报 false ✗，但工单是给
+**聚类**开的、被拒成员在起草时已被过滤 ✓；在保留副本上按**内容**复核：4 张工单里**没有任何一条**被判为
+not-a-defect 的问题 ✓。判据已改成按内容。
+
+**彩排顺手暴露的其它真实信号**（如实记录，未修）：① 有一份已存补丁在沙箱里
+`git apply --check failed: corrupt_patch` —— 生成的 diff 本身有问题（生成质量缺陷，值得单列）；② 补丁步骤
+对确认层级为 `none` 的聚类报 `unknown patch layer: 'none'` ✓（这是**正确拒绝**）；③ 候选生成的两类拒绝
+（`response is not a JSON object`、`criteria['true'] changed 47%, limit 40%`）说明边界校验在工作 ✓；
+④ 第 1/3 轮以 `budget_exhausted`（run-seconds）收尾 ⇒ 回路是**可续跑**的，不是坏了 ✓。
