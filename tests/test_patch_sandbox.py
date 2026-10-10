@@ -1223,3 +1223,82 @@ def test_the_replay_command_can_bound_its_repetitions():
     bounded = _benchmark_command(kb_id="kb1", json_out=Path("x.json"), runs=2, warmups=0)
     assert bounded[bounded.index("--runs") + 1] == "2"
     assert bounded[bounded.index("--warmups") + 1] == "0"
+
+
+# ------------------------------------------------------------------
+# 黄金回放 fixture：只给回放注入，且过期一律判为不可用（绝不给出通过的结论）。
+# ------------------------------------------------------------------
+
+
+def _fresh_fixture(tmp_path, worktree: Path) -> Path:
+    from rag.evolution.replay_fixture import ReplayFixture, seam_hashes
+
+    path = tmp_path / "fixture.json"
+    ReplayFixture(
+        embeddings={}, reranks={}, routes={}, rewrites={},
+        corpus="corpus", base_commit="a" * 40, seams=seam_hashes(worktree), created_at=1.0,
+    ).save(path)
+    return path
+
+
+def test_the_replay_env_carries_the_fixture_and_the_staleness_check_accepts_it(tmp_path):
+    from rag.evolution.sandbox import _replay_env, fixture_staleness
+
+    worktree = tmp_path / "wt"
+    (worktree / "rag").mkdir(parents=True)
+    for name in ("embedder", "reranker", "agent", "query_rewriter"):
+        (worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
+    fixture = _fresh_fixture(tmp_path, worktree)
+
+    assert fixture_staleness(str(fixture), worktree) == ""
+    env = _replay_env(worktree, None, str(fixture))
+    assert env["RAG_EVOLUTION_REPLAY_FIXTURE"] == str(fixture)
+    # 不配置时不注入：默认部署的回放行为（方案 C）不变。
+    assert "RAG_EVOLUTION_REPLAY_FIXTURE" not in _replay_env(worktree, None)
+
+
+def test_a_patched_seam_makes_the_fixture_stale(tmp_path):
+    """改过 seam 模块的补丁 ⇒ 录下的答案描述的是**另一份代码**，必须判过期。"""
+    from rag.evolution.sandbox import fixture_staleness
+
+    worktree = tmp_path / "wt"
+    (worktree / "rag").mkdir(parents=True)
+    for name in ("embedder", "reranker", "agent", "query_rewriter"):
+        (worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
+    fixture = _fresh_fixture(tmp_path, worktree)
+
+    (worktree / "rag" / "reranker.py").write_text("x = 2  # patched\n", encoding="utf-8")
+
+    reason = fixture_staleness(str(fixture), worktree)
+    assert "seam modules changed" in reason and "reranker" in reason
+    assert fixture_staleness(str(tmp_path / "absent.json"), worktree) == "fixture file not found"
+
+
+def test_a_stale_fixture_makes_the_replay_unavailable_rather_than_passing(
+    sandbox_repo: Path, make_runner, tmp_path
+):
+    """过期 fixture 不得让门禁通过：报告 benchmark=None + 明确原因，状态仍待人工。"""
+    from rag.evolution.sandbox import sandbox_gate_outcome
+
+    run_worktree = sandbox_repo  # fixture 的 seam 哈希取自这里，随后故意改一个模块
+    (run_worktree / "rag").mkdir(exist_ok=True)
+    for name in ("embedder", "reranker", "agent", "query_rewriter"):
+        (run_worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
+    fixture = _fresh_fixture(tmp_path, run_worktree)
+    (run_worktree / "rag" / "reranker.py").write_text("x = 2\n", encoding="utf-8")
+
+    make_runner(benchmark=_benchmark_payload())
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        replay_fixture=str(fixture),
+    )
+
+    assert report.applied is True
+    assert report.tests_passed is True
+    assert report.benchmark is None
+    assert "fixture unusable" in report.error
+    status, detail = sandbox_gate_outcome(report)
+    assert status == "awaiting_verification"
+    assert "replay unavailable" in detail

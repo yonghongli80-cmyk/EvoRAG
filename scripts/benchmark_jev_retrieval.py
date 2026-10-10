@@ -749,6 +749,10 @@ def _routing_domain(prepared: dict) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _ensure_project_root_on_path()
+    # 沙箱回放：环境里给了黄金 fixture 就从它重放四个出网 seam（缺答案会响亮失败，不连网络）。
+    from rag.evolution.replay_fixture import install_from_env
+
+    install_from_env()
     parser = argparse.ArgumentParser(description="Benchmark legacy versus Jev preparation paths.")
     parser.add_argument("--cases", default="benchmarks/jev_retrieval_cases.json")
     parser.add_argument("--runs", type=int, default=5)

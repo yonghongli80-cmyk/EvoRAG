@@ -55,6 +55,7 @@ is the gate name the review endpoints and the frontend summary read.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -74,6 +75,8 @@ from rag.evolution.code_patches import (
     validate_patch,
 )
 from rag.evolution.models import EvolutionStatus
+
+logger = logging.getLogger(__name__)
 
 #: Prefix of the sandbox temp directory; the worktree always lives inside it.
 SANDBOX_ROOT_PREFIX = "rag-patch-sandbox-"
@@ -313,7 +316,30 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     return env
 
 
-def _replay_env(worktree: Path, data_snapshot: str | None) -> dict[str, str]:
+def fixture_staleness(fixture_path: str, worktree: Path) -> str:
+    """Why the recorded fixture must not be replayed in ``worktree``, or ``""``.
+
+    A fixture records the answers four seams gave, so it is evidence about the code that was
+    running when they were recorded. A patch to one of those modules (the reranker is the usual
+    one) makes the recording describe the wrong code, and a replay that used it anyway would report
+    a verdict about behaviour nobody measured. The check reads the worktree's own files, so it
+    never imports anything from the tree under test.
+    """
+    from rag.evolution.replay_fixture import ReplayFixture, seam_hashes
+
+    path = str(fixture_path or "").strip()
+    if not path or not Path(path).is_file():
+        return "fixture file not found"
+    try:
+        fixture = ReplayFixture.load(path)
+    except (OSError, ValueError) as error:
+        return f"fixture unreadable: {type(error).__name__}"
+    return fixture.stale_reason(corpus=fixture.corpus, seams=seam_hashes(worktree))
+
+
+def _replay_env(
+    worktree: Path, data_snapshot: str | None, replay_fixture: str = ""
+) -> dict[str, str]:
     """The environment for the benchmark replay alone.
 
     Identical to :func:`_sandbox_env` except for the read-only copies a replay needs: every
@@ -328,6 +354,10 @@ def _replay_env(worktree: Path, data_snapshot: str | None) -> dict[str, str]:
     """
 
     env = _sandbox_env(worktree)
+    fixture = str(replay_fixture or "").strip()
+    if fixture:
+        # 回放进程据此把四个 seam 指向录制；缺失的调用会抛 FixtureMiss，不会去连网络。
+        env["RAG_EVOLUTION_REPLAY_FIXTURE"] = fixture
     snapshot = str(data_snapshot or "").strip()
     if not snapshot or not Path(snapshot).is_dir():
         return env
@@ -748,6 +778,7 @@ def _execute(
     benchmark_timeout: float,
     data_snapshot: str | None = None,
     replay_user_id: int | None = None,
+    replay_fixture: str | None = None,
 ) -> SandboxReport:
     """One sandbox run; the caller still owns cleanup, whatever happens here."""
 
@@ -844,9 +875,16 @@ def _execute(
             )
         # Each run imports its own tree: PYTHONPATH decides what ``import rag`` resolves to,
         # so the clean run must point at the clean worktree.
+        stale = ""
+        if replay_fixture:
+            stale = fixture_staleness(replay_fixture, baseline_worktree)
+            if stale:
+                logger.warning("sandbox replay fixture unusable: %s", stale)
         baseline_payload, baseline_error = _run_benchmark(
             worktree=baseline_worktree,
-            env=_replay_env(baseline_worktree, data_snapshot),
+            env=_replay_env(
+                baseline_worktree, data_snapshot, "" if stale else (replay_fixture or "")
+            ),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
@@ -855,13 +893,17 @@ def _execute(
         )
         patched_payload, patched_error = _run_benchmark(
             worktree=worktree,
-            env=_replay_env(worktree, data_snapshot),
+            env=_replay_env(
+                worktree, data_snapshot, "" if stale else (replay_fixture or "")
+            ),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
             user_id=replay_user_id,
         )
         replay_error = baseline_error or patched_error
+        if not replay_error and stale:
+            replay_error = f"benchmark replay fixture unusable: {stale}"
         if replay_error:
             return report(
                 applied=True,
@@ -921,6 +963,7 @@ def run_patch_sandbox(
     benchmark_timeout: float = BENCHMARK_TIMEOUT_S,
     data_snapshot: str | None = None,
     replay_user_id: int | None = None,
+    replay_fixture: str | None = None,
 ) -> SandboxReport:
     """Validate one code-patch candidate in an isolated worktree.
 
@@ -959,6 +1002,9 @@ def run_patch_sandbox(
     user_id = (
         settings.evolution_sandbox_replay_user_id if replay_user_id is None else replay_user_id
     )
+    fixture = (
+        settings.evolution_sandbox_replay_fixture if replay_fixture is None else replay_fixture
+    )
 
     sandbox_root = Path(tempfile.mkdtemp(prefix=SANDBOX_ROOT_PREFIX))
     worktree = sandbox_root / WORKTREE_DIRNAME
@@ -976,6 +1022,7 @@ def run_patch_sandbox(
             benchmark_timeout=benchmark_timeout,
             data_snapshot=snapshot,
             replay_user_id=user_id,
+            replay_fixture=fixture,
         )
     finally:
         # Whatever happened above — a report, a refusal, or an exception — the

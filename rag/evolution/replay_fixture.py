@@ -72,19 +72,24 @@ def corpus_fingerprint(chunks: Sequence[object]) -> str:
     return _key("\x00".join([str(len(chunks)), *names]))
 
 
-def seam_hashes() -> dict[str, str]:
-    """Source hash per seam module, imported rather than read from disk.
+def seam_hashes(root: str | Path | None = None) -> dict[str, str]:
+    """Source hash per seam module.
 
-    Imported so the hash describes the code that is actually running — the whole point is to
-    notice when a patch changes one of these modules.
+    With ``root`` the files are read from that checkout — a sandbox parent uses this to ask "does
+    this worktree still match what the fixture recorded?" without importing anything from it.
+    Without it the modules are imported, so the hash describes the code that is actually running.
     """
-    import importlib
-
     hashes: dict[str, str] = {}
     for name in SEAM_MODULES:
+        relative = Path(*name.split(".")).with_suffix(".py")
         try:
-            module = importlib.import_module(name)
-            source = Path(module.__file__ or "").read_text(encoding="utf-8", errors="replace")
+            if root is not None:
+                source = (Path(root) / relative).read_text(encoding="utf-8", errors="replace")
+            else:
+                import importlib
+
+                module = importlib.import_module(name)
+                source = Path(module.__file__ or "").read_text(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001 - a missing module is recorded as such, never fatal
             hashes[name] = "unavailable"
             continue
@@ -256,6 +261,91 @@ def install(fixture: ReplayFixture, *, strict: bool = True) -> Callable[[], None
     return uninstall
 
 
+class RecordingSession:
+    """Calls through to the real seams while remembering every answer.
+
+    Recording has to happen where credentials exist, because the whole point is that the replay
+    runs without them. The session keeps the answers in memory and the caller writes them once,
+    together with the corpus fingerprint and the seam hashes that make the recording verifiable.
+    """
+
+    def __init__(self) -> None:
+        self.embeddings: dict[str, list[float]] = {}
+        self.reranks: dict[str, list] = {}
+        self.routes: dict[str, str] = {}
+        self.rewrites: dict[str, str] = {}
+        self.misses: dict[str, int] = {"embed": 0, "rerank": 0, "route": 0, "rewrite": 0}
+
+    def fixture(self, *, corpus: str, base_commit: str, now: float | None = None) -> ReplayFixture:
+        import time as _time
+
+        return ReplayFixture(
+            embeddings=dict(self.embeddings),
+            reranks=dict(self.reranks),
+            routes=dict(self.routes),
+            rewrites=dict(self.rewrites),
+            corpus=corpus,
+            base_commit=base_commit,
+            seams=seam_hashes(),
+            created_at=float(_time.time() if now is None else now),
+            version=FIXTURE_VERSION,
+        )
+
+    def __enter__(self) -> RecordingSession:
+        import rag.agent as agent_module
+        import rag.embedder as embedder_module
+        import rag.query_rewriter as rewriter_module
+        import rag.reranker as reranker_module
+
+        self._original = (
+            embedder_module.embed,
+            agent_module.route_question,
+            rewriter_module.rewrite_query,
+            reranker_module.Reranker._call_rerank_api,
+        )
+        session = self
+
+        def embed(texts: list[str]) -> list[list[float]]:
+            vectors = session._original[0](texts)
+            for text, vector in zip(texts, vectors, strict=False):
+                session.embeddings[_key(text)] = list(vector)
+            return vectors
+
+        def route_question(question: str) -> str:
+            route = session._original[1](question)
+            session.routes[normalize(question)] = str(route)
+            return route
+
+        def rewrite_query(question: str) -> str:
+            rewritten = session._original[2](question)
+            session.rewrites[normalize(question)] = str(rewritten)
+            return rewritten
+
+        def call_rerank_api(self, query: str, texts: list[str], top_k: int):
+            result = session._original[3](self, query, texts, top_k)
+            session.reranks[_rerank_key(query, texts)] = json.loads(json.dumps(result))
+            return result
+
+        embedder_module.embed = embed
+        agent_module.route_question = route_question
+        rewriter_module.rewrite_query = rewrite_query
+        reranker_module.Reranker._call_rerank_api = call_rerank_api
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        import rag.agent as agent_module
+        import rag.embedder as embedder_module
+        import rag.query_rewriter as rewriter_module
+        import rag.reranker as reranker_module
+
+        (
+            embedder_module.embed,
+            agent_module.route_question,
+            rewriter_module.rewrite_query,
+            reranker_module.Reranker._call_rerank_api,
+        ) = self._original
+
+
 def install_from_env() -> Callable[[], None] | None:
     """Install the fixture named by :data:`FIXTURE_ENV`, if any.
 
@@ -273,6 +363,7 @@ __all__ = [
     "FIXTURE_VERSION",
     "SEAM_MODULES",
     "FixtureMiss",
+    "RecordingSession",
     "ReplayFixture",
     "corpus_fingerprint",
     "install",

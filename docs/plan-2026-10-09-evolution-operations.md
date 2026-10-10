@@ -147,7 +147,7 @@
 | 3 标签覆盖 + 护栏 | **3a 进行中**（标签 4 → 7 条 + 12 条待查定性）；3b 待做（无证据护栏） | 见下 |
 | 4 AST 符号 + 靶心窗口 | **已完成**（`patch-v3`） | 见下 |
 | 5 知识缺口工单 | **已完成**（5a 制品 + 独立表 + 零调用步骤；5b 入库后复测） | 见下 |
-| 6 沙箱 Golden Fixture | **6a 已完成**（fixture 模块本体）；6b 待做（录制脚本 + 沙箱接线 + 无凭据验收） | 见下 |
+| 6 沙箱 Golden Fixture | **6a + 6b 已完成**（fixture 模块 + 录制脚本 + 沙箱接线 + 过期判定）；6c 待做（**第五 seam**：Jev/TypeSafe 服务） | 见下 |
 | 7 前端审查台 | 待开始 | — |
 | 前置：真实失败供给 | **等你的输入** | worker `scanned=0`（2026-10-09 实测） |
 
@@ -407,3 +407,26 @@ obs#79–83）⇒ **任何基于路由/可答性/分数/哈希的过滤器都分
 **诚实残留**：① 复测是"每轮重探所有 open 工单（上限 5）"，而不是"检测到该库变了才探"——便宜但不是
 零成本，且没有版本信号；② **观测本身的状态不变**（CHECK 约束不允许扩枚举），所以联动记在工单的
 `recheck` 里，而不是移动观测；③ 工单**还没有端点/界面**（今天只能读库），属队列 7。
+
+### 队列 6a/6b 记录（黄金 fixture：模块 + 录制 + 接线）
+
+**6a**：`rag/evolution/replay_fixture.py`——四个出网 seam（嵌入/重排/路由/改写）的录制与重放。
+两条性质：**缺答案抛 `FixtureMiss`**（strict，绝不静默回退到网络或编值——会静默降级的门禁等于说谎）；
+**过期一律拒绝**（记录语料指纹 + 四个 seam 模块源码哈希，`stale_reason` 报出差异）。`install()` 换掉活
+seam 并返回"还原到安装时那份"的函数；`install_from_env()` 由**重放入口**调用（不在 import 时挂钩）。
+
+**6b**：`RecordingSession`（调用真实 seam 的同时把答案记下来，含 `fixture(...)` 落盘）；
+`scripts/record_replay_fixture.py`（在**有凭据**处跑基准并录制）；沙箱接线：新增
+`RAG_EVOLUTION_SANDBOX_REPLAY_FIXTURE`，**只注入给回放那一条命令**，且注入前做**父进程侧的过期判定**
+（读工作树自己的 seam 文件，不 import 被测树）；过期则不注入并把原因作为回放错误 ⇒ 门禁结论是
+`awaiting_verification` + "replay unavailable"，**绝不会是"通过"**。回放入口
+（`scripts/benchmark_jev_retrieval.py`）在 `main()` 开头安装 fixture。
+
+**录制实测（`kb_accessories`，runs=1，133.7s，有凭据）**：`reranks 13 / routes 20 / rewrites 13` ✓，
+但 **`embeddings 0`** ✗ —— 这条数据本身就是结论：**Jev 生产路径根本不调用本地嵌入器**，它把检索交给
+**外部 Jev/TypeSafe 服务**（`rag/jev/client.py` 用 `typesafe_api_key` 建客户端）。也就是说这条路径上
+**还有第五个出网 seam**，四 seam 的 fixture 不足以让它在无凭据沙箱里跑完。
+
+**因此 6c 待做**（如实列，不假装 6b 已闭环）：把 Jev 客户端的 `preflight` / `judge_passages` 结果也纳入
+录制（按 stage + 问题集 + 状态做键），之后才能给出"**无凭据沙箱里产出 benchmark 结论**"的验收。
+在那之前，6b 交付的是：模块、录制脚本、接线、**过期即不可用**的门禁语义（都已用例钉住）。

@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     # 里按需放：`qdrant_data/`（语料副本）、`users.db`（ACL/主体）、`memory.db`。
     # 只注入给**回放**这一条命令：目标测试仍跑在剥离后的真空环境里。
     evolution_sandbox_data_snapshot: str = ""
+    # 代码补丁沙箱回放用的**黄金 fixture**（四个出网 seam 的录制）。为空 = 不注入：回放仍会
+    # 因无凭据而不可用（方案 C 的行为）。设置后只注入给**回放**这一条命令，且注入前会做
+    # 过期判定（语料指纹 + seam 模块源码哈希）：过期就不注入并报"不可用"，绝不给出通过的结论。
+    evolution_sandbox_replay_fixture: str = ""
     # 回放用的主体 id（0 = 不传 --user-id）。实测：不传主体时每条请求都在检索前被回答，
     # prep P50=0.0ms、route accuracy 0.15，回放"跑了但什么都没量到"——这类空转必须避免，
     # 否则层 2/3 的"无回归"是假的。
