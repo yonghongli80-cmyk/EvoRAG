@@ -652,3 +652,21 @@ python scripts/measure_patch_generation.py --label <名字> --limit 6 --repeats 
 `RAG_EVOLUTION_PATCH_TIMEOUT_SECONDS`（默认 **600s**）并接进 worker 的默认工厂；测量台也改为**与 worker
 同源**读取该设置（否则测量台自己仍用 90s，复测就什么都测不到 —— 这是我在做复测前发现并修掉的）。
 定点复测（obs 156，基线里两次都 `timeout`）见 `real-case-handoff/evolab/patch-gen-timeout-retest.json`。
+
+**「加大上下文」实验结果（2026-10-10，`RAG_EVOLUTION_PATCH_CONTEXT_LINES=1600`）**：
+
+| 测量 | 样本 | 成功率 | 失败类别 |
+| --- | --- | --- | --- |
+| 基线（默认 400/120） | cluster 3（`reranking`）×6 对 ×2 | **7/12 = 58.3%** | timeout×2、无 diff、does_not_apply、corrupt_patch |
+| 加大上下文 1600 | cluster 30（`code`）×5 对 + cluster 3 ×1 对，各 ×2 | **2/12 = 16.7%** | does_not_apply×3、invalid×4(无 diff)、corrupt_patch×2 |
+
+**方法学更正（我自己的错，写下来防复发）**：这两轮**样本不是同一批** ✗ —— top-up 在第二轮选中了
+cluster 30 的成员（它的草稿层此时匹配上了），所以 **16.7% 不能归因于"加大上下文"**；它只是
+**cluster 30（`code` 层）自己的一个基线**。已给测量台加 `--observation-ids`（固定样本）并在帮助里
+写明"做 A/B 必须用它"。
+
+**但结论不依赖那次对照**：两轮里失败都以 `does_not_apply` / `corrupt_patch` / 无 diff 为主，
+在**两种上下文规模下都存在** ⇒ **上下文不是约束**。结合"模型在手写 `@@ -a,b +c,d @@` 与精确
+上下文，本质上是在做并核对行数算术"这一点，D1 的结论是：**该走 §5.4 的结构化编辑契约**，而不是
+继续调上下文或加重试。（再跑一次"同样本、400 vs 1600"的严格对照**已被判定为低价值**，故不做；
+如需可随时用 `--observation-ids` 复现。）

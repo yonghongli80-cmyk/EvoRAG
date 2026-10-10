@@ -66,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
         "--observation-id", type=int, default=0, help="只测某个观测（0 = 全部），用于定点复测"
     )
     parser.add_argument(
+        "--observation-ids",
+        default="",
+        help="固定样本：逗号分隔的观测 id 列表。**做 A/B 对照时必须用它**——否则 top-up 可能选中"
+        "另一批样本，两轮就不可比（我第一版就踩了这个坑）",
+    )
+    parser.add_argument(
         "--top-up",
         action="store_true",
         help="合格项不足时，从「已确认层级」的观测里补足样本（基线测的是**生成质量**，"
@@ -119,6 +125,27 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 if extra[cluster_id]:
                     items.append(extra[cluster_id].pop(0))
+    if args.observation_ids:
+        wanted = [int(x) for x in str(args.observation_ids).split(",") if x.strip()]
+        fixed: list[dict] = []
+        for cluster in store.list_clusters():
+            for observation in store.list_observations(cluster_id=cluster["id"]):
+                if int(observation["id"]) not in wanted:
+                    continue
+                draft = next(
+                    (
+                        row
+                        for row in store.list_drafts()
+                        if int(row.get("observation_id") or 0) == int(observation["id"])
+                    ),
+                    None,
+                )
+                fixed.append(
+                    {"cluster": cluster, "observation": observation, "draft": draft or {"payload": {}}}
+                )
+        order = {value: index for index, value in enumerate(wanted)}
+        fixed.sort(key=lambda item: order.get(int(item["observation"]["id"]), 999))
+        items = fixed
     if args.observation_id:
         # 定点复测：绕过"尚无候选"的调度条件，直接在合格层级上复测该观测。
         target = next(
