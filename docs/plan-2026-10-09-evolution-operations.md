@@ -148,7 +148,7 @@
 | 4 AST 符号 + 靶心窗口 | **已完成**（`patch-v3`） | 见下 |
 | 5 知识缺口工单 | **已完成**（5a 制品 + 独立表 + 零调用步骤；5b 入库后复测） | 见下 |
 | 6 沙箱 Golden Fixture | **6a + 6b + 6c 已完成**（含第五 seam；机制已证明，但**对当前补丁总体不可用**） | 见下 |
-| 7 前端审查台 | 待开始 | — |
+| 7 前端审查台 | **已完成**（复制即用命令 + 工单只读面；diff 视图与 A/B 文字结论原本就有） | 见下 |
 | 前置：真实失败供给 | **等你的输入** | worker `scanned=0`（2026-10-09 实测） |
 
 ### 开发集复测：v10（含覆盖度大小写修正）
@@ -478,3 +478,35 @@ gate_detail: sandbox passed; passed: Jev side route delta +0.0pp (limit -0.0pp),
 ① `test_paths is empty`（补丁必须点名验证测试）；② `rollback_ref base_commit must be 40 hex`；
 ③ `main tree dirty`（主树有未提交改动就不开工）；④ 之前还有一次我脚本自己的导入写错模块。
 这四次都不是"门禁坏了"，而是**边界照设计工作**。
+
+### 队列 7 记录（审查台：复制即用命令 + 工单只读面）
+
+**先查再写**（准则 #1/#4）：后端**早就有** `/code-candidates`（含 diff 全文与五层门禁轨迹）、
+`/{id}/decision`（批准即导出，并**把 apply 命令写进审计备注**），前端也**早有** `EvolutionCenterView.vue`
+的代码补丁面板（diff 全文、沙箱结论、生命周期审计、决策条）⇒ 所以这一步没有新造轮子，只补真正缺的：
+
+* **后端**：`_serialize_code_candidate_detail` 现在把 **`apply_command` / `revert_command` /
+  `export_path` / `exported`** 结构化给出——直接复用既有的 `_apply_command` / `_revert_command`
+  （此前它们只被写进审计备注，前端拿不到）。**端点从不执行命令**；`exported` 如实告诉前端
+  "还没批准导出，命令届时才可用"。
+* **后端**：新增只读 `GET /gap-tickets`（第三种制品此前**没有任何**读取面），沿用既有的
+  `_page` / `_filter_value` 约定；状态白名单 `("open", "content_added")`，未知值 400。
+  端点清单同步登记，`test_evolution_state_machine` 的断言扩到它。
+* **前端**：`src/api/evolution.ts` 加工单类型与 `fetchGapTickets`；`EvolutionCenterView.vue` 加
+  **「内容缺口工单」页签与面板**（问法样本、缺失词、复测结论、"怎么用"的操作提示），并在补丁详情里加
+  **「应用与回滚命令（只复制，不执行）」** 区块（两个复制按钮 + 复制提示，命令来自后端结构化字段）。
+  这个界面**从不执行** apply / revert——那是管理员在终端做的事。
+
+**验收**：后端 2 条新用例（详情里的命令结构化且标出未导出；工单端点返回 worker 起草的内容、
+未知状态 400）⇒ 后端 **1987 passed**；前端在既有 mock 约定下加 2 条视图用例 + 2 条 API 用例
+（含"点复制 → `navigator.clipboard.writeText` 被以完整命令调用"）⇒ 前端 **208 passed（32 文件）**，
+`vue-tsc -b` 类型检查通过。
+
+**如实记下三处我自己的失误**（都被工具当场抓住）：① 视图里我按猜的缩进写锚点，断言失败（幸好写盘在
+最后，文件未被改坏）；② 我给 TypeScript 文件写了一句 Python 的 `#` 注释 ⇒ 该测试文件加载失败；
+③ 新增页签没同步 `type Tab` 联合类型 ⇒ `vue-tsc` 报 `'"gap-tickets"' is not assignable to type 'Tab'`。
+教训与前面一致：**锚点/类型/语法都要以文件为准，不能凭记忆**。
+
+**残留（如实列）**：A/B 指标目前以**后端写好的沙箱门禁结论文本**呈现（如 "route delta +0.0pp … over
+20 cases"），**没有**数字化的对照面板；要做成结构化面板需要把沙箱报告落成新字段（今天只落文本），
+列为后续项。工单只有列表、无详情页；材料上传仍走既有的 `/materials/upload`。

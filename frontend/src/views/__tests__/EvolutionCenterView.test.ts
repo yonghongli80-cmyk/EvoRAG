@@ -5,14 +5,20 @@ vi.mock('../../api/evolution', () => ({
   fetchEvolutionObservations: vi.fn(),
   fetchEvolutionClusters: vi.fn(),
   fetchEvolutionCluster: vi.fn(),
-  fetchEvolutionStateMachine: vi.fn()
+  fetchEvolutionStateMachine: vi.fn(),
+  fetchGapTickets: vi.fn(),
+  fetchCodePatches: vi.fn(),
+  fetchCodePatch: vi.fn()
 }))
 
 import {
+  fetchCodePatch,
+  fetchCodePatches,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
   fetchEvolutionObservations,
-  fetchEvolutionStateMachine
+  fetchEvolutionStateMachine,
+  fetchGapTickets
 } from '../../api/evolution'
 import EvolutionCenterView from '../EvolutionCenterView.vue'
 
@@ -87,6 +93,8 @@ beforeEach(() => {
   vi.mocked(fetchEvolutionCluster).mockResolvedValue({
     ...candidateCluster, members: [observation]
   })
+  vi.mocked(fetchGapTickets).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+  vi.mocked(fetchCodePatches).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
 })
 
 describe('EvolutionCenterView', () => {
@@ -177,5 +185,120 @@ describe('EvolutionCenterView', () => {
     await wrapper.get('[data-test="tab-metrics"]').trigger('click')
 
     expect(wrapper.get('[data-test="metrics-placeholder"]').text()).toContain('指标')
+  })
+
+  it('shows gap tickets with their samples and missing terms, and never as candidates', async () => {
+    vi.mocked(fetchGapTickets).mockResolvedValue({
+      items: [
+        {
+          id: 4,
+          cluster_id: 9,
+          kb_id: 'kb_accessories',
+          status: 'open',
+          occurrences: 3,
+          created_at: 1_700_000_000,
+          updated_at: 1_700_000_100,
+          question_samples: ['R50 电池卖多少钱'],
+          missing_terms: ['电池', '价格'],
+          rationale: '3 次提问全部因证据不足被拒',
+          recheck: null
+        }
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-gap-tickets"]').trigger('click')
+    await flushPromises()
+
+    const row = wrapper.get('[data-test="gap-ticket-row"]')
+    expect(row.text()).toContain('kb_accessories')
+    expect(row.text()).toContain('R50 电池卖多少钱')
+    expect(row.text()).toContain('电池')
+    expect(row.text()).toContain('未复测')
+    // 恒常渲染的说明（空态那句只在没工单时出现）
+    expect(wrapper.text()).toContain('自动起草')
+    expect(wrapper.text()).toContain('材料入库上传补充资料')
+  })
+
+  it('offers the apply and revert commands as copy-only, and says the patch is not exported yet', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    vi.mocked(fetchCodePatches).mockResolvedValue({
+      items: [
+        {
+          id: 12,
+          observation_id: null,
+          cluster_id: 9,
+          artifact_type: 'code_patch',
+          layer: 'code',
+          paths: ['rag/pipeline.py'],
+          test_paths: ['tests/test_pipeline.py'],
+          status: 'awaiting_verification',
+          pool: 'code_pool',
+          confidence: 'low',
+          prompt_version: 'patch-v3',
+          model: 'scripted',
+          rationale: '理由',
+          expected_effect: '效果',
+          rollback_ref: { base_commit: 'a'.repeat(40) },
+          sandbox_summary: [],
+          created_at: 1_700_000_000,
+          updated_at: 1_700_000_000
+        }
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20
+    })
+    vi.mocked(fetchCodePatch).mockResolvedValue({
+      id: 12,
+      observation_id: null,
+      cluster_id: 9,
+      artifact_type: 'code_patch',
+      layer: 'code',
+      paths: ['rag/pipeline.py'],
+      test_paths: ['tests/test_pipeline.py'],
+      status: 'awaiting_verification',
+      pool: 'code_pool',
+      confidence: 'low',
+      prompt_version: 'patch-v3',
+      model: 'scripted',
+      rationale: '理由',
+      expected_effect: '效果',
+      rollback_ref: { base_commit: 'a'.repeat(40) },
+      sandbox_summary: [],
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000,
+      diff: 'diff --git a/rag/pipeline.py b/rag/pipeline.py',
+      gate_log: [],
+      audit: [],
+      apply_command: 'git -C /repo apply --3way artifacts/patches/candidate-12.patch',
+      revert_command: 'git -C /repo apply -R artifacts/patches/candidate-12.patch',
+      export_path: '/repo/artifacts/patches/candidate-12.patch',
+      exported: false
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="apply-command"]').text()).toContain('apply --3way')
+    expect(wrapper.get('[data-test="revert-command"]').text()).toContain('apply -R')
+    expect(wrapper.get('[data-test="export-state"]').text()).toContain('尚未导出')
+
+    await wrapper.get('[data-test="copy-apply-command"]').trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith(
+      'git -C /repo apply --3way artifacts/patches/candidate-12.patch'
+    )
+    expect(wrapper.get('[data-test="copy-hint"]').text()).toContain('已复制')
   })
 })

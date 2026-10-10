@@ -11,6 +11,7 @@ import {
   fetchEvolutionMetrics,
   fetchEvolutionObservations,
   fetchEvolutionStateMachine,
+  fetchGapTickets,
   rollbackCandidate,
   submitCanary,
   submitCodePatchDecision,
@@ -28,10 +29,17 @@ import type {
   EvolutionEndpoint,
   EvolutionMetrics,
   EvolutionObservation,
-  EvolutionStateMachine
+  EvolutionStateMachine,
+  GapTicket
 } from '../api/evolution'
 
-type Tab = 'observations' | 'clusters' | 'metrics' | 'candidates' | 'code-patches'
+type Tab =
+  | 'observations'
+  | 'clusters'
+  | 'metrics'
+  | 'candidates'
+  | 'code-patches'
+  | 'gap-tickets'
 
 const PAGE_SIZE = 20
 
@@ -482,6 +490,41 @@ function showCodePatches() {
   if (!codePatchesLoaded.value) void loadCodePatches()
 }
 
+// ---- 内容缺口工单（队列 5 的第三种制品：请求补内容，不是候选）----
+const gapTickets = ref<GapTicket[]>([])
+const gapTicketsLoaded = ref(false)
+const copyHint = ref('')
+
+async function loadGapTickets() {
+  try {
+    const data = await fetchGapTickets({ pageSize: 100 })
+    gapTickets.value = data.items
+    gapTicketsLoaded.value = true
+    error.value = ''
+  } catch (err) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = '无法加载内容缺口工单'
+  }
+}
+
+function showGapTickets() {
+  activeTab.value = 'gap-tickets'
+  if (!gapTicketsLoaded.value) void loadGapTickets()
+}
+
+/** 只读地给出命令供复制：这个界面从不执行 apply / revert（那是管理员在终端做的事）。 */
+async function copyCommand(text: string, what: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    copyHint.value = `已复制${what}`
+  } catch {
+    copyHint.value = `复制失败，请手动选中${what}`
+  }
+}
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -560,6 +603,15 @@ onMounted(async () => {
         @click="showCodePatches"
       >
         代码补丁
+      </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: activeTab === 'gap-tickets' }"
+        data-test="tab-gap-tickets"
+        @click="showGapTickets"
+      >
+        内容缺口工单
       </button>
     </nav>
 
@@ -1111,6 +1163,42 @@ onMounted(async () => {
           <h4 class="panel-subtitle">diff 全文（只读；应用由管理员手动执行）</h4>
           <pre class="patch-diff" data-test="patch-diff">{{ selectedCodePatch.diff }}</pre>
 
+          <h4 class="panel-subtitle">应用与回滚命令（只复制，不执行）</h4>
+          <p class="cluster-meta" data-test="export-state">
+            {{
+              selectedCodePatch.exported
+                ? `已导出：${selectedCodePatch.export_path}`
+                : '尚未导出：先“批准并导出”才会写出补丁文件，命令届时才可用'
+            }}
+          </p>
+          <div class="command-row">
+            <code class="command-text" data-test="apply-command">{{
+              selectedCodePatch.apply_command
+            }}</code>
+            <button
+              type="button"
+              class="query-button"
+              data-test="copy-apply-command"
+              @click="copyCommand(selectedCodePatch.apply_command, '应用命令')"
+            >
+              复制应用命令
+            </button>
+          </div>
+          <div class="command-row">
+            <code class="command-text" data-test="revert-command">{{
+              selectedCodePatch.revert_command
+            }}</code>
+            <button
+              type="button"
+              class="query-button"
+              data-test="copy-revert-command"
+              @click="copyCommand(selectedCodePatch.revert_command, '回滚命令')"
+            >
+              复制回滚命令
+            </button>
+          </div>
+          <p v-if="copyHint" class="cluster-meta" data-test="copy-hint">{{ copyHint }}</p>
+
           <h4 class="panel-subtitle">沙箱结论（层 2/3：隔离 worktree 内 apply + 目标测试 + 基准回放）</h4>
           <ul
             v-if="selectedCodePatch.sandbox_summary.length > 0"
@@ -1206,6 +1294,51 @@ onMounted(async () => {
         </template>
       </div>
     </div>
+      <div v-else-if="activeTab === 'gap-tickets'" class="tab-panel">
+        <h3 class="panel-title">
+          内容缺口工单（由 undetermined 聚类自动起草；补充材料入库后自动复测）
+        </h3>
+        <p v-if="gapTickets.length === 0" class="muted" data-test="gap-tickets-empty">
+          暂无工单：只有“库里确实没有”的失败才会成为工单，且它永远不进候选池。
+        </p>
+        <div v-else class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>知识库</th><th>状态</th><th>出现次数</th><th>问法样本</th>
+                <th>召回窗口里没有的词</th><th>最近复测</th><th>创建时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="ticket in gapTickets" :key="ticket.id" data-test="gap-ticket-row">
+                <td>{{ ticket.id }}</td>
+                <td>{{ ticket.kb_id }}</td>
+                <td>{{ ticket.status }}</td>
+                <td>{{ ticket.occurrences }}</td>
+                <td>
+                  <div v-for="q in ticket.question_samples" :key="q" class="cluster-meta">{{ q }}</div>
+                </td>
+                <td>
+                  <code v-for="term in ticket.missing_terms" :key="term" class="term-chip">{{ term }}</code>
+                  <span v-if="ticket.missing_terms.length === 0" class="muted">（已无缺失）</span>
+                </td>
+                <td>
+                  <span v-if="ticket.recheck" class="cluster-meta" data-test="gap-ticket-recheck">
+                    {{ ticket.recheck.verdict }} · 覆盖 {{ ticket.recheck.covered_terms.length }} 词
+                  </span>
+                  <span v-else class="muted">未复测</span>
+                </td>
+                <td>{{ formatTime(ticket.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="cluster-meta">
+          怎么用：把缺失词当作“该写什么”的线索 → 到该知识库用材料入库上传补充资料 →
+          下一个 worker 轮次自动复测，覆盖后工单转 content_added。
+        </p>
+      </div>
+
   </section>
 </template>
 
@@ -1434,5 +1567,29 @@ tbody tr:hover { background: #f8fbff; }
   .page-header { align-items: flex-start; flex-direction: column; }
   .filters { justify-content: flex-start; }
   .table-card { overflow: auto; }
+}
+
+.command-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.command-text {
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+}
+
+.term-chip {
+  display: inline-block;
+  margin: 2px 4px 2px 0;
+  padding: 1px 6px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
 }
 </style>

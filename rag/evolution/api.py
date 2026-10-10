@@ -101,7 +101,11 @@ _ENDPOINTS = (
     {"path": "/knowledge-operations/evolution/candidates", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/code-candidates", "methods": ("GET",)},
     {"path": "/knowledge-operations/evolution/code-generation-queue", "methods": ("GET",)},
+    {"path": "/knowledge-operations/evolution/gap-tickets", "methods": ("GET",)},
 )
+
+#: 工单状态（表里是自由文本，但读取端只认这两个已知值，未知值由 `_filter_value` 拒掉）。
+GAP_TICKET_STATUSES: tuple[str, ...] = ("open", "content_added")
 
 _STATE_MACHINE_NOTE = (
     "进入候选池由聚类准入规则自动完成；管理员审核诊断草案后显式决策"
@@ -997,6 +1001,14 @@ def _serialize_code_candidate_detail(row: dict, store: CandidateStore) -> dict:
     payload["audit"] = [
         _serialize_candidate_audit(entry) for entry in store.list_audit(row["id"])
     ]
+    # 命令是给管理员**复制**的，端点从不执行它们（批准只导出文件）。命令只有导出后才可用，
+    # 所以连导出与否一起给出来，前端才能如实呈现"先批准、再复制"。
+    test_paths = [str(path) for path in (row.get("test_paths") or [])]
+    export_path = _patch_export_path(int(row["id"]))
+    payload["apply_command"] = _apply_command(int(row["id"]), test_paths)
+    payload["revert_command"] = _revert_command(int(row["id"]))
+    payload["export_path"] = str(export_path)
+    payload["exported"] = export_path.is_file()
     return payload
 
 
@@ -1263,6 +1275,39 @@ def get_code_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> 
         raise HTTPException(status_code=404, detail="观测数据库不存在")
     row = _require_candidate(store, candidate_id)
     return _serialize_code_candidate_detail(row, store)
+
+
+@router.get("/gap-tickets", summary="内容缺口工单列表")
+def list_gap_tickets(
+    status: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    user: dict = Depends(_admin_user),
+) -> dict:
+    """Knowledge-gap tickets newest first, read-only.
+
+    A ticket is a request for content, not a candidate: it never enters the candidate pool and no
+    gate reads it, which is why this surface has no write method at all. The only thing that moves
+    a ticket is the worker's deterministic re-check after material has been ingested into that
+    knowledge base — the administrator adds content through the materials pipeline, not here.
+    """
+    status = _filter_value(status, GAP_TICKET_STATUSES, "状态")
+    store = _open_store()
+    rows = [] if store is None else store.list_gap_tickets(status=status)
+    items = [
+        {
+            "id": int(row["id"]),
+            "cluster_id": int(row["cluster_id"]),
+            "kb_id": str(row["kb_id"]),
+            "status": str(row["status"]),
+            "occurrences": int(row["occurrences"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+            **(row.get("payload") or {}),
+        }
+        for row in rows
+    ]
+    return _page(items, page, page_size)
 
 
 @router.post("/code-candidates/{candidate_id}/decision", summary="提交代码补丁审核决策")

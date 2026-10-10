@@ -394,6 +394,11 @@ export interface EvolutionCodePatchDetail extends EvolutionCodePatch {
   diff: string
   gate_log: EvolutionGateEntry[]
   audit: EvolutionCandidateAudit[]
+  /** 批准后导出的补丁文件；命令只有导出后可用（端点从不执行命令）。 */
+  apply_command: string
+  revert_command: string
+  export_path: string
+  exported: boolean
 }
 
 /** The three administrator decisions of the code-patch review. */
@@ -441,5 +446,50 @@ export async function submitCodePatchDecision(
     `/knowledge-operations/evolution/code-candidates/${patchId}/decision`,
     { action, note }
   )
+  return res.data
+}
+
+
+/**
+ * One knowledge-gap ticket: a request for content, not a candidate.
+ *
+ * It never enters the candidate pool and no gate reads it; the worker drafts it from an
+ * ``undetermined`` cluster, and its deterministic re-check moves it to ``content_added`` once
+ * material has been ingested into that knowledge base.
+ */
+export interface GapTicket {
+  id: number
+  cluster_id: number
+  kb_id: string
+  status: string
+  occurrences: number
+  created_at: number
+  updated_at: number
+  /** 触发它的问法样本（去重、上限 8），给内容编辑看"到底缺什么问法"。 */
+  question_samples: string[]
+  /** 召回窗口里没出现的问法词，按出现次数排序——它说的是"该写什么"。 */
+  missing_terms: string[]
+  rationale: string
+  /** 最近一次复测：覆盖了哪些词、还缺哪些、结论。 */
+  recheck: {
+    checked_at: number
+    probed: number
+    covered_terms: string[]
+    still_missing: string[]
+    verdict: string
+  } | null
+}
+
+export interface GapTicketQuery {
+  status?: string
+  page?: number
+  pageSize?: number
+}
+
+/** Return one page of knowledge-gap tickets (administrator only, read-only). */
+export async function fetchGapTickets(query: GapTicketQuery = {}): Promise<Paged<GapTicket>> {
+  const res = await api.get('/knowledge-operations/evolution/gap-tickets', {
+    params: pageParams(query)
+  })
   return res.data
 }

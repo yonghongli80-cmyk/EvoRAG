@@ -4,7 +4,8 @@ import {
   fetchEvolutionCluster,
   fetchEvolutionClusters,
   fetchEvolutionObservations,
-  fetchEvolutionStateMachine
+  fetchEvolutionStateMachine,
+  fetchGapTickets
 } from '../evolution'
 
 vi.mock('../../utils/api', () => ({ default: { get: vi.fn() } }))
@@ -89,5 +90,31 @@ describe('fetchDiagnosis', () => {
 
     expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/clusters/7/diagnosis')
     expect(diagnosis.member_drafts).toEqual([])
+  })
+})
+
+describe('fetchGapTickets', () => {
+  it('requests the ticket page and maps the query to snake_case', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: { items: [], total: 0, page: 3, page_size: 10 }
+    } as any)
+
+    await fetchGapTickets({ status: 'open', page: 3, pageSize: 10 })
+
+    expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/gap-tickets', {
+      params: { status: 'open', page: 3, page_size: 10 }
+    })
+  })
+
+  it('omits an unset status instead of sending an empty filter', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: { items: [], total: 0, page: 1, page_size: 20 }
+    } as any)
+
+    await fetchGapTickets()
+
+    expect(api.get).toHaveBeenCalledWith('/knowledge-operations/evolution/gap-tickets', {
+      params: { page: 1, page_size: 20 }
+    })
   })
 })

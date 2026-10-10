@@ -179,6 +179,7 @@ def test_state_machine_matches_design_section_seven(evolution_client, admin_head
         f"{PREFIX}/candidates",
         f"{PREFIX}/code-candidates",
         f"{PREFIX}/code-generation-queue",
+        f"{PREFIX}/gap-tickets",  # 第三种制品（内容缺口工单）的只读面
     } <= read_paths
     assert body["transitions"] == {
         status: list(targets) for status, targets in evolution_api.EVOLUTION_TRANSITIONS.items()
@@ -864,3 +865,125 @@ def test_confirming_a_layer_needs_a_layer_and_a_reviewable_cluster(
         headers=admin_headers,
     )
     assert after_reject.status_code == 409
+
+
+# ------------------------------------------------------------------
+# 队列 7：审查台需要的两样东西——**可复制的命令**与**工单只读面**。
+# ------------------------------------------------------------------
+
+
+def _seed_code_patch_candidate(store) -> int:
+    """一份最小但合法的代码补丁候选（diff/测试路径/base_commit 都过边界校验）。"""
+    import subprocess
+    from pathlib import Path
+
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    diff = (
+        "diff --git a/rag/pipeline.py b/rag/pipeline.py\n"
+        "--- a/rag/pipeline.py\n"
+        "+++ b/rag/pipeline.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " import asyncio\n"
+        "+# 审查台测试用的注释行\n"
+        " import json\n"
+        " import logging\n"
+    )
+    candidate = CodePatchCandidate(
+        artifact_type="code_patch",
+        layer="code",
+        paths=("rag/pipeline.py",),
+        diff=diff,
+        test_paths=("tests/test_pipeline.py",),
+        rationale="审查台用例",
+        expected_effect="无行为变化",
+        rollback_ref={"base_commit": head},
+        confidence="low",
+    )
+    return CandidateStore(store).add_candidate(
+        None, 1, candidate, prompt_version="patch-v3", model="scripted"
+    )
+
+
+def test_code_candidate_detail_exposes_copy_only_commands(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """命令必须**结构化**给出并可复制；端点从不执行它，且如实标出"还没导出"。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)
+
+    detail = evolution_client.get(
+        f"{PREFIX}/code-candidates/{candidate_id}", headers=admin_headers
+    ).json()
+
+    assert f"candidate-{candidate_id}.patch" in detail["apply_command"]
+    assert detail["apply_command"].startswith("git -C ")
+    assert "pytest tests/test_pipeline.py" in detail["apply_command"]
+    assert detail["revert_command"].endswith(f"apply -R artifacts/patches/candidate-{candidate_id}.patch")
+    assert detail["export_path"].endswith(f"candidate-{candidate_id}.patch")
+    assert detail["exported"] is False  # 还没批准 ⇒ 文件不存在，前端据此提示"先批准"
+    store.close()
+
+
+def test_gap_tickets_endpoint_lists_what_the_worker_drafted(
+    evolution_client, admin_headers
+):
+    """工单只读面：把 worker 起草的工单（含缺失词与复测）如实读出来。"""
+    import time
+
+    from rag.evolution.gaps import build_ticket
+
+    store = FailureTraceStore(settings_path())
+    now = time.time()
+    cluster = store.upsert_cluster(
+        cluster_key="kb1|generation|gap",
+        kb_id="kb1",
+        failure_stage="generation",
+        root_cause_feature="undetermined",
+        seen_at=now,
+    )
+    observations = [
+        store.get_observation(
+            store.add_observation(
+                FailureObservation(
+                    kb_id="kb1",
+                    failure_stage="generation",
+                    question="R50 电池卖多少钱",
+                    route="fixed",
+                    answerability_kind="insufficient_evidence",
+                )
+            )["id"]
+        )
+    ]
+    ticket_id = store.add_gap_ticket(
+        build_ticket(cluster, observations, missing_terms=("电池", "价格"), probed_questions=1, now=now)
+    )
+
+    body = evolution_client.get(f"{PREFIX}/gap-tickets", headers=admin_headers).json()
+
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["id"] == ticket_id
+    assert item["kb_id"] == "kb1"
+    assert item["status"] == "open"
+    assert item["question_samples"] == ["R50 电池卖多少钱"]
+    assert item["missing_terms"] == ["电池", "价格"]
+    assert item["recheck"] is None
+    # 状态筛选按白名单校验：未知值 400（读取端不猜自由文本）
+    assert evolution_client.get(
+        f"{PREFIX}/gap-tickets", params={"status": "whatever"}, headers=admin_headers
+    ).status_code == 400
+    store.close()
+
+
+def settings_path() -> str:
+    from config import settings
+
+    return str(settings.evolution_db_path)
