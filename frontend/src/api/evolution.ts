@@ -531,3 +531,20 @@ export async function fetchGapTickets(query: GapTicketQuery = {}): Promise<Paged
   })
   return res.data
 }
+
+/**
+ * Apply an approved patch behind the backend's guards and optionally restart the service.
+ *
+ * Guards run in order — the patch must apply cleanly, the app must still import, the patch's own
+ * target tests must pass — and any failure reverts the patch and leaves the service untouched.
+ */
+export async function applyCodePatch(
+  candidateId: number,
+  restart = true
+): Promise<{ applied: boolean; applied_now: boolean; steps: Record<string, unknown>; restart_helper: string }> {
+  const res = await api.post(
+    `/knowledge-operations/evolution/code-candidates/${candidateId}/apply`,
+    { restart }
+  )
+  return res.data
+}

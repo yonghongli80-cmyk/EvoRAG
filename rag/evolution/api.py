@@ -1035,8 +1035,10 @@ def _apply_command(candidate_id: int, test_paths: list[str]) -> str:
     note, so the trail names the exact steps a human performed afterwards.
     """
     verification = " ".join(path for path in test_paths if path)
+    # **不要**加 ``--3way``：导出的补丁不带 ``index`` 行（difflib 不产生），而 3-way 需要 blob
+    # 哈希，实测会直接失败（"repository lacks the necessary blob"）⇒ 那条命令照着跑会坑人。
     command = (
-        f"git -C {REPO_ROOT} apply --3way {_PATCH_EXPORT_SUBDIR}/candidate-{int(candidate_id)}.patch"
+        f"git -C {REPO_ROOT} apply {_PATCH_EXPORT_SUBDIR}/candidate-{int(candidate_id)}.patch"
     )
     return f"{command} && python -m pytest {verification}" if verification else command
 
@@ -1317,6 +1319,122 @@ def list_gap_tickets(
         for row in rows
     ]
     return _page(items, page, page_size)
+
+
+class ApplyRequest(BaseModel):
+    """One administrative action on an already-approved patch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Restart the service once the guards pass (the helper waits for the port, starts it, polls
+    #: /health and rolls the patch back if it never comes up).
+    restart: bool = True
+    note: str = ""
+
+
+@router.post("/code-candidates/{candidate_id}/apply", summary="应用已批准的补丁，可选一键重启")
+def apply_code_candidate(
+    candidate_id: int, payload: ApplyRequest, user: dict = Depends(_admin_user)
+) -> dict:
+    """Apply an approved patch behind guards, then optionally restart the service.
+
+    This does not soften "the system never merges on its own": it acts only on a candidate an
+    administrator already approved, and only when a human clicks. What it adds is the safety the
+    manual sequence lacks — the patch must apply cleanly, the application must still import, and the
+    patch's own target tests must pass **before** anything is restarted. Any failure reverts the
+    patch and leaves the running service untouched.
+
+    The outcome is returned in the response and appended to ``artifacts/service-control.log``. The
+    evolution audit table is deliberately not used: its action column is CHECK-constrained to the
+    three diagnosis decisions, and rebuilding a table to record an operational event is not worth it.
+    """
+    from rag.evolution.models import EvolutionStatus
+    from rag.evolution.service_control import (
+        LOG_NAME,
+        apply_patch,
+        import_smoke,
+        log_line,
+        patch_state,
+        revert_patch,
+        run_target_tests,
+        spawn_restart_helper,
+    )
+
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="候选数据库不存在")
+    row = _require_candidate(store, candidate_id)
+    if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
+        raise HTTPException(status_code=404, detail="候选不存在")
+    if row["status"] != EvolutionStatus.APPROVED_FOR_CANARY.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"只有已批准的补丁才能应用（当前状态：{row['status']}）",
+        )
+    diff = str(row.get("diff") or "")
+    if not diff:
+        raise HTTPException(status_code=409, detail="该候选没有存储的 diff")
+
+    state = patch_state(REPO_ROOT, diff)
+    if state == "conflict":
+        raise HTTPException(status_code=409, detail="补丁与当前代码不再匹配（conflict）")
+
+    steps: dict = {"patch_state": state}
+    applied_now = state == "not_applied"
+    if applied_now:
+        try:
+            apply_patch(REPO_ROOT, diff)
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    def _revert_and_refuse(reason: str, detail: str, status_code: int = 409) -> None:
+        if applied_now:
+            try:
+                revert_patch(REPO_ROOT, diff)
+                log_line(REPO_ROOT / "artifacts" / LOG_NAME, f"candidate {candidate_id}: reverted ({reason})")
+            except RuntimeError as revert_error:  # pragma: no cover - needs a broken tree
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"{reason}；且回滚也失败：{revert_error}（需要人工处理）",
+                ) from revert_error
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    steps["import_smoke"] = smoke_ok
+    if not smoke_ok:
+        _revert_and_refuse("import_smoke", f"应然后无法导入：{smoke_why}")
+
+    tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    steps["target_tests"] = tests_ok
+    if not tests_ok:
+        _revert_and_refuse("target_tests", f"目标测试未通过：{tests_why}")
+
+    restart_path = ""
+    if payload.restart:
+        restart_path = str(
+            spawn_restart_helper(
+                repo_root=REPO_ROOT,
+                patch_file=_patch_export_path(int(row["id"])),
+                candidate_id=int(row["id"]),
+            )
+        )
+        steps["restart_requested"] = True
+    else:
+        steps["restart_requested"] = False
+
+    log_line(
+        REPO_ROOT / "artifacts" / LOG_NAME,
+        f"candidate {candidate_id} applied by {user.get('username')} "
+        f"(applied_now={applied_now}, restart={payload.restart}, note={payload.note[:60]!r})",
+    )
+    return {
+        "applied": True,
+        "applied_now": applied_now,
+        "steps": steps,
+        "restart_helper": restart_path,
+        "apply_command": _apply_command(int(row["id"]), list(row.get("test_paths") or ())),
+        "revert_command": _revert_command(int(row["id"])),
+    }
 
 
 @router.post("/code-candidates/{candidate_id}/decision", summary="提交代码补丁审核决策")

@@ -925,6 +925,8 @@ def test_code_candidate_detail_exposes_copy_only_commands(
 
     assert f"candidate-{candidate_id}.patch" in detail["apply_command"]
     assert detail["apply_command"].startswith("git -C ")
+    # 刻意不带 --3way：导出的补丁没有 index 行，三路合并必然失败（2026-10-11 实测）。
+    assert "--3way" not in detail["apply_command"]
     assert "pytest tests/test_pipeline.py" in detail["apply_command"]
     assert detail["revert_command"].endswith(f"apply -R artifacts/patches/candidate-{candidate_id}.patch")
     assert detail["export_path"].endswith(f"candidate-{candidate_id}.patch")
@@ -1012,3 +1014,92 @@ def test_state_machine_exposes_the_confirmable_layers(evolution_client, admin_he
 
     assert body["confirmable_layers"] == list(evolution_api.CONFIRMABLE_LAYERS)
     assert "prompt" in body["confirmable_layers"]
+
+# ------------------------------------------------------------------
+# 一键应用（可选重启）：门禁更严，不是更松。
+# ------------------------------------------------------------------
+
+
+def _approved_patch(store) -> int:
+    """把一份种子补丁推进到"已批准"（应用端点只接受这个状态）。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    candidate_id = _seed_code_patch_candidate(store)
+    candidates = CandidateStore(store)
+    for status in ("awaiting_verification", "approved_for_canary"):
+        candidates.advance_candidate(candidate_id, status, actor_id="test", note="seed")
+    return candidate_id
+
+
+def _fake_control(monkeypatch, **overrides):
+    """把 service_control 的几个动作换成替身（测试**绝不**动真树、绝不重启）。"""
+    import rag.evolution.service_control as control
+
+    calls: dict = {"apply": 0, "revert": 0, "restart": 0}
+    state = overrides.get("state", "not_applied")
+    smoke = overrides.get("smoke", (True, ""))
+    tests = overrides.get("tests", (True, ""))
+
+    monkeypatch.setattr(control, "patch_state", lambda *a, **k: state)
+    monkeypatch.setattr(control, "apply_patch", lambda *a, **k: calls.__setitem__("apply", calls["apply"] + 1))
+    monkeypatch.setattr(control, "revert_patch", lambda *a, **k: calls.__setitem__("revert", calls["revert"] + 1))
+    monkeypatch.setattr(control, "import_smoke", lambda *a, **k: smoke)
+    monkeypatch.setattr(control, "run_target_tests", lambda *a, **k: tests)
+    monkeypatch.setattr(
+        control, "spawn_restart_helper", lambda **k: calls.__setitem__("restart", calls["restart"] + 1) or "helper.py"
+    )
+    return calls
+
+
+def test_apply_refuses_a_patch_that_is_not_approved(
+    evolution_client, admin_headers, store_with_cluster
+):
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)  # 停在 candidate_testing
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply", headers=admin_headers, json={"restart": False}
+    )
+
+    assert response.status_code == 409
+    assert "只有已批准" in response.json()["detail"]
+    store.close()
+
+
+def test_apply_reverts_and_does_not_restart_when_the_app_cannot_import(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """最关键的一条：冒烟失败 ⇒ **还原补丁**且**不重启**（服务保持原样）。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch, smoke=(False, "ImportError: boom"))
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply", headers=admin_headers, json={"restart": True}
+    )
+
+    assert response.status_code == 409
+    assert "无法导入" in response.json()["detail"]
+    assert calls["apply"] == 1 and calls["revert"] == 1
+    assert calls["restart"] == 0  # 绝不重启一个起不来的服务
+    store.close()
+
+
+def test_apply_restarts_only_after_every_guard_passes(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch)
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply", headers=admin_headers, json={"restart": True}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["applied"] is True and body["applied_now"] is True
+    assert body["steps"]["import_smoke"] is True and body["steps"]["target_tests"] is True
+    assert calls["apply"] == 1 and calls["revert"] == 0 and calls["restart"] == 1
+    assert "--3way" not in body["apply_command"]
+    store.close()

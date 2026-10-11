@@ -405,7 +405,9 @@ def test_approve_exports_the_patch_and_advances_without_touching_the_work_tree(
     assert content.startswith("#")
     assert BASE_COMMIT in content
     assert f"candidate-{patch_ready}.patch" in content
-    assert "git" in content and "apply --3way" in content
+    # 刻意**不带** ``--3way``：导出的补丁没有 ``index`` 行（difflib 不产生），
+    # 三路合并会以 "repository lacks the necessary blob" 失败（2026-10-11 实测）。
+    assert "git" in content and "apply " in content and "--3way" not in content
     assert "python -m pytest tests/test_reranker.py" in content
     assert content.endswith(PATCH_DIFF)
 
@@ -415,7 +417,7 @@ def test_approve_exports_the_patch_and_advances_without_touching_the_work_tree(
     # The audit note names the export path and the apply command the administrator
     # runs by hand, plus the note they typed.
     assert str(exported) in audit[-1]["note"]
-    assert "apply --3way" in audit[-1]["note"]
+    assert "apply " in audit[-1]["note"]
     assert "基准回放已复核" in audit[-1]["note"]
 
     trail = _candidate(patch_ready)["gate_log"]

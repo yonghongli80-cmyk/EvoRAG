@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import {
   fetchCandidate,
   fetchCandidates,
+  applyCodePatch,
   fetchCodePatch,
   fetchCodePatches,
   fetchDiagnosis,
@@ -268,6 +269,32 @@ async function confirmLayer() {
 
 /** 只有"待审"状态的聚类才接受诊断决策（与后端转移表一致，避免点了必然 409）。 */
 const clusterDecidable = computed(() => selectedCluster.value?.status === 'awaiting_diagnosis_review')
+
+/** 已批准的补丁可以一键应用（后端会先跑前置检查，失败就回滚且不重启）。 */
+async function runApply() {
+  if (!selectedCodePatch.value || codePatchActing.value) return
+  codePatchActing.value = true
+  try {
+    const result = await applyCodePatch(selectedCodePatch.value.id, true)
+    const steps = result.steps || {}
+    decisionHint.value =
+      `已应用（${result.applied_now ? '本次应用' : '此前已应用'}）` +
+      `，导入冒烟 ${steps.import_smoke ? '通过' : '未通过'}` +
+      `，目标测试 ${steps.target_tests ? '通过' : '未通过'}` +
+      `${steps.restart_requested ? '，重启已排队（助手会等端口释放、拉起服务并轮询 /health，起不来会自动回滚）' : ''}`
+    error.value = ''
+    await reloadCodePatch()
+    await loadCodePatches()
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '应用失败'
+  } finally {
+    codePatchActing.value = false
+  }
+}
 
 /** 只有"待验证"的补丁才接受审核决策（同上）。 */
 const codePatchDecidable = computed(
@@ -928,6 +955,49 @@ onMounted(async () => {
           </button>
 
         </div>
+
+
+        <div class="apply-bar" data-test="code-candidate-apply-bar">
+
+
+          <button
+
+
+            type="button"
+
+
+            class="query-button"
+
+
+            data-test="code-candidate-apply"
+
+
+            :disabled="codePatchActing || selectedCodePatch?.status !== 'approved_for_canary'"
+
+
+            @click="runApply"
+
+
+          >
+
+
+            应用并重启（先跑前置检查；失败会回滚且不重启）
+
+
+          </button>
+
+
+          <span class="cluster-meta">
+
+
+            只有「已批准（approved_for_canary）」的补丁可用；已应用的补丁再点即为"校验 + 重启"。
+
+
+          </span>
+
+
+        </div>
+
 
 
         <div class="decision-bar">

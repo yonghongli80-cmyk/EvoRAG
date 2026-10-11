@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  applyCodePatch,
   fetchDiagnosis,
   submitDecision,
   fetchEvolutionCluster,
@@ -141,5 +142,22 @@ describe('submitDecision with a confirmed layer', () => {
       '/knowledge-operations/evolution/clusters/7/decision',
       { action: 'reject', note: '证据不足' }
     )
+  })
+})
+
+describe('applyCodePatch', () => {
+  it('posts the apply request and returns the guard steps', async () => {
+    vi.mocked(api.post).mockResolvedValue({
+      data: { applied: true, applied_now: true, steps: { import_smoke: true }, restart_helper: 'h.py' }
+    } as any)
+
+    const result = await applyCodePatch(20, true)
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/knowledge-operations/evolution/code-candidates/20/apply',
+      { restart: true }
+    )
+    expect(result.applied).toBe(true)
+    expect(result.steps.import_smoke).toBe(true)
   })
 })
