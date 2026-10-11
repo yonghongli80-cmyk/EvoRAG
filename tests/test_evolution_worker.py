@@ -1656,3 +1656,55 @@ def test_the_patch_step_builds_the_generator_with_the_configured_timeout(tmp_pat
     assert recorded.get("timeout_seconds") == 612.0
     assert outcome["patch_model_calls"] == 1
     assert outcome["patch_failed"] == 1
+
+def test_a_cluster_with_an_open_patch_never_gets_a_second_variant(tmp_path):
+    """堆放闸（2026-10-11 实测动机：rag/reranker.py 上堆了 11 条、其中 5 条同一想法）。
+
+    按**观测**去重不够——cluster 3 有 112 个成员，理论上能一口气产出 112 条。所以改按**聚类**：
+    只要该聚类还有一条未决补丁，就不再为它的任何成员生成。这里用**两个聚类**把两种语义分开钉住：
+    轮内每个聚类各得一条（闸不是全局的）、再跑一轮则一条都不新增（闸按聚类生效）。
+    """
+    from rag.evolution.models import EvolutionStatus
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|code-a")
+    _confirmed_cluster(store, "kb2|retrieval|code-b")
+    generator = FakePatchGenerator()
+    step = _patch_step(store, generator, budget=5)
+
+    first = step()
+    assert first["patches_created"] == 2  # 两个聚类各一条；闸是按聚类的，不是全局的
+    assert generator.calls == 2
+
+    second = step()
+    assert second["patches_created"] == 0  # 两个聚类都已有未决补丁 ⇒ 零新增
+    assert second["patch_model_calls"] == 0
+    assert generator.calls == 2
+
+    # 澄清一条容易误解的语义：驳回释放的是**聚类级**闸，不会让**同一个观测**自动重试
+    #（按观测的那条规则是有意为之：重新生成是管理员的显式动作，不是后台重试）。
+    from rag.evolution.candidate_store import CandidateStore
+
+    candidates = CandidateStore(store)
+    for row in candidates.list_candidates():
+        candidates.advance_candidate(
+            int(row["id"]), EvolutionStatus.REJECTED.value, actor_id="admin", note="驳回"
+        )
+    assert CandidateStore(store).list_candidates(), "驳回记录仍在（只是不再是未决状态）"
+    third = step()
+    assert third["patches_created"] == 0, "同一观测不会因驳回而自动重试"
+    assert "patch_model_calls" in third
+
+
+def test_a_cluster_with_an_open_question_set_candidate_is_skipped_too(tmp_path):
+    """问题集那条路径同样只留一条未决候选。"""
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    _confirmed_cluster(store, "kb1|retrieval|prompt", layer="prompt", suggested_layer="prompt")
+    generator = FakeCandidateGenerator()
+    step = _candidate_step(store, generator, budget=5)
+
+    assert step()["candidates_created"] == 1
+    again = step()
+    assert again["candidates_created"] == 0
+    assert again["candidate_model_calls"] == 0
+    assert generator.calls == 1

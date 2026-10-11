@@ -166,6 +166,9 @@ class Settings(BaseSettings):
     #: edits = 模型只给「路径 + 精确 old_text + new_text」，由**我们**用 difflib 拼 diff
     #: （hunk 头与上下文天然自洽 ⇒ corrupt_patch / does_not_apply 构造上不可能）。
     evolution_patch_format: str = "edits"
+    #: 一键应用前跑什么测试。**full = 全量套件**（默认：补丁自带的 test_paths 是**模型自己挑的**，
+    #: 拦不住"改坏别处"，这正是屎山的主要来源）；target = 只跑目标测试（快，但风险自负）。
+    evolution_apply_test_scope: str = "full"
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录

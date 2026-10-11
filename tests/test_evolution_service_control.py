@@ -10,6 +10,7 @@ from rag.evolution.service_control import (
     import_smoke,
     patch_state,
     revert_patch,
+    run_full_suite,
 )
 
 
@@ -58,3 +59,18 @@ def test_import_smoke_reports_a_missing_interpreter(tmp_path):
 
     assert ok is False
     assert "could not start" in why
+
+def test_full_suite_gate_passes_and_fails_on_a_tiny_repo(tmp_path):
+    """应用前的全量测试闸：补丁自带的 test_paths 是模型自己挑的，拦不住改坏别处。"""
+    repo = tmp_path / "suite"
+    repo.mkdir()
+    test_file = repo / "test_ok.py"
+    test_file.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    ok, why = run_full_suite(repo)
+    assert ok is True and why == ""
+
+    test_file.write_text("def test_ok():\n    assert False\n", encoding="utf-8")
+    ok, why = run_full_suite(repo)
+    assert ok is False
+    assert "failed" in why.lower() or "assert" in why.lower()

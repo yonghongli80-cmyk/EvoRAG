@@ -769,6 +769,37 @@ def _keep_defects(items: list[dict], marked: frozenset[str]) -> list[dict]:
     ]
 
 
+#: 候选状态里"仍然未决"的那些：只要一个聚类还有这种状态的候选，就**不再**为它生成新的变体。
+#: 实测动机（2026-10-11）：`rag/reranker.py` 上堆了 11 条候选，其中 5 条是同一个"同义对齐"想法的
+#: 不同写法；根因是准入此前**按观测**判（该观测尚无候选），而 cluster 3 有 112 个成员 ⇒ 理论上
+#: 一个聚类能一口气产出 112 条。人被驳回（rejected）之后重新放开 ⇒ 管理员驳回即"可以再试"。
+_OPEN_CANDIDATE_STATUSES: frozenset[str] = frozenset(
+    {
+        EvolutionStatus.CANDIDATE_TESTING.value,
+        EvolutionStatus.AWAITING_VERIFICATION.value,
+        EvolutionStatus.APPROVED_FOR_CANARY.value,
+        EvolutionStatus.CANARY.value,
+        EvolutionStatus.STABLE.value,
+    }
+)
+
+
+def _clusters_with_open_candidates(candidate_store, artifact_type: str) -> set[int]:
+    """Cluster ids that already carry an **open** candidate of this kind.
+
+    This is the pile guard. Per-observation deduplication is not enough: a cluster with a hundred
+    members would otherwise yield a hundred variants of the same idea, which is how a review queue
+    turns into a heap nobody can choose from.
+    """
+    return {
+        int(row["cluster_id"])
+        for row in candidate_store.list_candidates()
+        if row.get("cluster_id") is not None
+        and row.get("artifact_type") == artifact_type
+        and str(row.get("status") or "") in _OPEN_CANDIDATE_STATUSES
+    }
+
+
 def _eligible_patch_items(store, candidate_store) -> list[dict]:
     """``{cluster, observation, draft}`` for clusters that may receive a code patch.
 
@@ -778,8 +809,8 @@ def _eligible_patch_items(store, candidate_store) -> list[dict]:
     * the cluster is ``approved_for_candidate`` **and** carries ``confirmed_layer``;
     * the newest stored draft for the member observation suggests that same layer (the
       generator refuses a mismatch anyway, so asking would be a wasted call);
-    * the observation has no code-patch candidate yet (a regenerated patch is an explicit
-      administrator action, never a background retry).
+    * the observation has no code-patch candidate yet, **and neither does its cluster** (a
+      regenerated patch is an explicit administrator action, never a background retry);
 
     Content gaps are absent by construction: an undetermined root cause never leaves the
     observation queue (``clusterer`` design section 6), so it can never reach this list.
@@ -796,10 +827,14 @@ def _eligible_patch_items(store, candidate_store) -> list[dict]:
         for row in candidate_store.list_candidates()
         if row.get("observation_id") is not None
     }
+    open_clusters = _clusters_with_open_candidates(candidate_store, CODE_PATCH_ARTIFACT_TYPE)
     items: list[dict] = []
     for cluster in store.list_clusters():
         layer = str(cluster.get("confirmed_layer") or "")
         if not layer or cluster.get("status") != EvolutionStatus.APPROVED_FOR_CANDIDATE.value:
+            continue
+        if int(cluster["id"]) in open_clusters:
+            # 这个聚类已经有一条未决补丁：再生成只会并排放上同一想法的另一个写法。
             continue
         for observation in store.list_observations(cluster_id=cluster["id"]):
             observation_id = int(observation["id"])
@@ -867,7 +902,14 @@ def make_evolution_patch_step(
         )()
         items = _keep_defects(_eligible_patch_items(store, candidates),
                               _marked_not_a_defect(cfg))
+        # 轮初快照：这个聚类已经有未决补丁就不再生成；轮内再用它做增量挡（见下）。
+        from rag.evolution.code_patches import ARTIFACT_TYPE as CODE_PATCH_ARTIFACT_TYPE
+
+        open_clusters = _clusters_with_open_candidates(candidates, CODE_PATCH_ARTIFACT_TYPE)
         for item in items:
+            # 轮内也要挡：轮初快照挡不住同一轮里同聚类的其他成员。
+            if int(item["cluster"]["id"]) in open_clusters:
+                continue
             if outcome["patch_model_calls"] >= budget:
                 outcome["patch_pending"] += 1
                 continue
@@ -892,6 +934,8 @@ def make_evolution_patch_step(
                     model=str(getattr(generator, "model_name", "")),
                 )
                 outcome["patches_created"] += 1
+                # 轮内也要挡：否则同一轮里同一聚类的多个成员会各产一条（本轮算出的集合是轮初快照）。
+                open_clusters.add(cluster_id)
                 logger.info(
                     "evolution_patch_created cluster=%s observation=%s layer=%s",
                     cluster_id,
@@ -944,9 +988,13 @@ def _eligible_question_set_items(store, candidate_store) -> list[dict]:
         for row in candidate_store.list_candidates()
         if row.get("observation_id") is not None
     }
+    open_clusters = _clusters_with_open_candidates(candidate_store, QUESTION_SET_ARTIFACT_TYPE)
     items: list[dict] = []
     for cluster in store.list_clusters():
         if cluster.get("status") != EvolutionStatus.APPROVED_FOR_CANDIDATE.value:
+            continue
+        if int(cluster["id"]) in open_clusters:
+            # 同一个聚类的未决候选只留一条，理由与补丁步骤相同。
             continue
         for observation in store.list_observations(cluster_id=cluster["id"]):
             observation_id = int(observation["id"])
@@ -1009,7 +1057,16 @@ def make_evolution_candidate_step(
         try:
             items = _keep_defects(_eligible_question_set_items(store, candidates),
                               _marked_not_a_defect(cfg))
+            # 同上：同一聚类只留一条未决候选，轮内也要挡。
+            from rag.evolution.candidates import ARTIFACT_TYPE as QUESTION_SET_ARTIFACT_TYPE
+
+            open_clusters = _clusters_with_open_candidates(
+                candidates, QUESTION_SET_ARTIFACT_TYPE
+            )
             for item in items:
+                # 同上：同一轮里同一聚类只留一条未决候选。
+                if int(item["cluster"]["id"]) in open_clusters:
+                    continue
                 if outcome["candidate_model_calls"] >= budget:
                     outcome["candidate_pending"] += 1
                     continue
@@ -1040,6 +1097,7 @@ def make_evolution_candidate_step(
                         model=str(getattr(generator, "model_name", "")),
                     )
                     outcome["candidates_created"] += 1
+                    open_clusters.add(cluster_id)
                     logger.info(
                         "evolution_candidate_created cluster=%s observation=%s target=%s",
                         cluster_id,

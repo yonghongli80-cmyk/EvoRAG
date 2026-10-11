@@ -1416,11 +1416,13 @@ def apply_code_candidate(
                 repo_root=REPO_ROOT,
                 patch_file=_patch_export_path(int(row["id"])),
                 candidate_id=int(row["id"]),
+                test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
             )
         )
         steps["restart_requested"] = True
     else:
         steps["restart_requested"] = False
+        steps["warning"] = "未请求重启 ⇒ 全量测试没有跑；请自行确认后再上线"
 
     log_line(
         REPO_ROOT / "artifacts" / LOG_NAME,

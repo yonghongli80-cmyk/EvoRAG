@@ -153,6 +153,25 @@ def run_target_tests(
     return False, tail[0][:200]
 
 
+def run_full_suite(repo_root: str | Path, python: str | None = None) -> tuple[bool, str]:
+    """The full suite, for a caller that wants the verdict synchronously (the helper runs its own)."""
+    interpreter = python or sys.executable
+    try:
+        result = subprocess.run(
+            [interpreter, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=2400,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "full suite timed out"
+    if result.returncode == 0:
+        return True, ""
+    tail = (result.stdout or "").strip().splitlines()[-1:] or [""]
+    return False, tail[0][:200]
+
+
 def _port_free(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
@@ -238,8 +257,31 @@ def revert():
     log(f"rolled back: exit {result.returncode}")
 
 
+def full_suite_passes():
+    """应用后、重启前跑全量套件。补丁自带的 test_paths 是模型自己挑的，拦不住"改坏别处"。"""
+    log("running the full test suite before restarting")
+    try:
+        result = subprocess.run(
+            [COMMAND["python"], "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            cwd=COMMAND["root"],
+            capture_output=True,
+            text=True,
+            timeout=int(COMMAND["suite_timeout"]),
+        )
+    except subprocess.TimeoutExpired:
+        log("full suite timed out")
+        return False
+    tail = (result.stdout or "").strip().splitlines()[-1:] or [""]
+    log(f"full suite exit {result.returncode}: {tail[0][:120]}")
+    return result.returncode == 0
+
+
 def main():
     log(f"restart helper started for candidate {COMMAND['candidate_id']}")
+    if COMMAND.get("test_scope") == "full" and not full_suite_passes():
+        log("full suite failed; reverting the patch and NOT restarting")
+        revert()
+        return
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
         time.sleep(1)
@@ -282,6 +324,8 @@ def spawn_restart_helper(
     port: int = 8080,
     url: str = "http://127.0.0.1:8080",
     timeout_s: int = RESTART_TIMEOUT_S,
+    test_scope: str = "full",
+    suite_timeout_s: int = 2400,
 ) -> Path:
     """Write the helper to disk and start it detached; returns the helper's path."""
     root = Path(repo_root)
@@ -297,6 +341,8 @@ def spawn_restart_helper(
         "port": int(port),
         "url": url,
         "timeout": int(timeout_s),
+        "test_scope": str(test_scope),
+        "suite_timeout": int(suite_timeout_s),
         "log": str(root / "artifacts" / LOG_NAME),
     }
     flags = 0
@@ -324,6 +370,7 @@ __all__ = [
     "log_line",
     "patch_state",
     "revert_patch",
+    "run_full_suite",
     "run_target_tests",
     "spawn_restart_helper",
 ]
