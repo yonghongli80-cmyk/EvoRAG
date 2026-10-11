@@ -56,6 +56,20 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=0)
     args = parser.parse_args()
 
+    from rag.evolution.host_lock import HostLocked, host_measurement_lock
+
+    # 独占宿主：两次并发对照（或与全量测试重叠）会让一侧出现大量失败调用，而"失败调用"看起来
+    # 像候选的问题。实测过一次 26 次调用失败，单独跑则两次都是 0。所以宁可拒绝启动第二次。
+    try:
+        with host_measurement_lock(ROOT / "artifacts" / "host-ab.lock"):
+            return _measure(args)
+    except HostLocked as busy:
+        report = {"candidate_id": args.candidate_id, "kb_id": args.kb_id, "error": str(busy)}
+        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        return 1
+
+
+def _measure(args) -> int:
     from rag.evolution.candidate_store import CandidateStore
     from rag.evolution.code_patches import CodePatchCandidate
     from rag.evolution.sandbox import _replay_env, _run_benchmark, patch_verdict
