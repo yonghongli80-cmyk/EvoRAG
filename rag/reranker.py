@@ -59,9 +59,12 @@ class Reranker:
             return []
         if top_k is None:
             top_k = settings.rerank_top_k
+        # Fallback paths must not truncate the recalled candidate set: dropping
+        # the tail is what keeps alias-query chunks (brand rows answering
+        # "第三方/副厂配件") out of judging and generation.
         if not _breaker.allow_request():
             logger.warning("Circuit breaker open — falling back to original document order")
-            return [replace(document, rerank_score=None, score_source="unavailable") for document in documents[:top_k]]
+            return [replace(document, rerank_score=None, score_source="unavailable") for document in documents]
         texts = [c.text for c in documents]
         try:
             results = self._call_rerank_api(query, texts, min(top_k, len(documents)))
@@ -71,9 +74,11 @@ class Reranker:
                 if not math.isfinite(score) or not 0.0 <= score <= 1.0:
                     raise ValueError("reranker relevance_score must be finite and within [0, 1]")
                 ranked.append(replace(documents[result["index"]], rerank_score=score, score_source="reranker"))
+            if not ranked:
+                raise RuntimeError("Reranker returned no usable results")
             _breaker.record_success()
             return sorted(ranked, key=lambda document: -document.rerank_score)[:top_k]
         except Exception:
             _breaker.record_failure()
             logger.warning("Rerank failed — falling back to original document order", exc_info=True)
-            return [replace(document, rerank_score=None, score_source="unavailable") for document in documents[:top_k]]
+            return [replace(document, rerank_score=None, score_source="unavailable") for document in documents]
