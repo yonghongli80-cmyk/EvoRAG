@@ -1045,9 +1045,12 @@ def _fake_control(monkeypatch, **overrides):
     monkeypatch.setattr(control, "revert_patch", lambda *a, **k: calls.__setitem__("revert", calls["revert"] + 1))
     monkeypatch.setattr(control, "import_smoke", lambda *a, **k: smoke)
     monkeypatch.setattr(control, "run_target_tests", lambda *a, **k: tests)
-    monkeypatch.setattr(
-        control, "spawn_restart_helper", lambda **k: calls.__setitem__("restart", calls["restart"] + 1) or "helper.py"
-    )
+    def _spawn(**kwargs):
+        calls["restart"] += 1
+        calls["spawn_kwargs"] = kwargs
+        return "helper.py"
+
+    monkeypatch.setattr(control, "spawn_restart_helper", _spawn)
     return calls
 
 
@@ -1101,5 +1104,8 @@ def test_apply_restarts_only_after_every_guard_passes(
     assert body["applied"] is True and body["applied_now"] is True
     assert body["steps"]["import_smoke"] is True and body["steps"]["target_tests"] is True
     assert calls["apply"] == 1 and calls["revert"] == 0 and calls["restart"] == 1
+    # 助手必须拿到"该停哪个进程"，否则它只会干等端口、新代码永远起不来。
+    assert int(calls["spawn_kwargs"]["service_pid"]) > 0
+    assert calls["spawn_kwargs"]["test_scope"] in {"full", "target"}
     assert "--3way" not in body["apply_command"]
     store.close()

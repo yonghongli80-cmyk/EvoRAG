@@ -204,6 +204,8 @@ def log_line(log_path: str | Path, message: str) -> None:
 HELPER_SOURCE = '''\
 """Restart the service after an approved patch, and undo it if the service does not come back."""
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -238,14 +240,40 @@ def healthy():
         return False
 
 
+STARTED = {"process": None}
+
+
 def start():
-    subprocess.Popen(  # noqa: S603 - the operator's own launcher, by absolute path
+    STARTED["process"] = subprocess.Popen(  # noqa: S603 - the operator's own launcher
         [COMMAND["python"], str(Path(COMMAND["root"]) / "start.py")],
         cwd=COMMAND["root"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    return STARTED["process"]
+
+
+def stop_service():
+    """Stop the service that spawned this helper.
+
+    A restart that cannot stop the running service is not a restart: the port stays busy and the new
+    code never comes up. The helper is told which pid to stop, waits a few seconds first so the HTTP
+    response that asked for this has time to reach the browser, then terminates it.
+    """
+    pid = int(COMMAND.get("service_pid") or 0)
+    if not pid or pid == os.getpid():
+        return
+    time.sleep(int(COMMAND.get("grace", 3)))
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as error:
+        log(f"could not stop pid {pid}: {type(error).__name__}")
+        return
+    deadline = time.time() + 30
+    while time.time() < deadline and not port_free():
+        time.sleep(1)
+    log(f"stopped service pid {pid}")
 
 
 def revert():
@@ -282,6 +310,7 @@ def main():
         log("full suite failed; reverting the patch and NOT restarting")
         revert()
         return
+    stop_service()
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
         time.sleep(1)
@@ -296,6 +325,14 @@ def main():
             return
         time.sleep(2)
     log("service did not become healthy; rolling the patch back and restarting")
+    # 先结束**自己刚拉起**的那个进程（否则端口被它占着，回滚后的新实例起不来）。
+    started = STARTED.get("process")
+    if started is not None and started.poll() is None:
+        started.terminate()
+        try:
+            started.wait(timeout=20)
+        except Exception:
+            pass
     revert()
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
@@ -326,6 +363,8 @@ def spawn_restart_helper(
     timeout_s: int = RESTART_TIMEOUT_S,
     test_scope: str = "full",
     suite_timeout_s: int = 2400,
+    service_pid: int | None = None,
+    grace_s: int = 3,
 ) -> Path:
     """Write the helper to disk and start it detached; returns the helper's path."""
     root = Path(repo_root)
@@ -343,6 +382,8 @@ def spawn_restart_helper(
         "timeout": int(timeout_s),
         "test_scope": str(test_scope),
         "suite_timeout": int(suite_timeout_s),
+        "service_pid": int(service_pid if service_pid is not None else os.getpid()),
+        "grace": int(grace_s),
         "log": str(root / "artifacts" / LOG_NAME),
     }
     flags = 0

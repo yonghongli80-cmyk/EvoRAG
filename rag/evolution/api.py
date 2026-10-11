@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from collections.abc import Mapping
@@ -1268,7 +1269,24 @@ def list_code_candidates(
             if row["artifact_type"] == CODE_PATCH_ARTIFACT_TYPE
         ]
     )
-    items = [_serialize_code_candidate(row) for row in rows]
+    # 近重复提示（确定性、只做提示从不拦截）：同一条改动的多个变体并排留在队列里，正是
+    # "补丁堆成屎山"的来源，而队列本身不告诉评审这件事。
+    from rag.evolution.overlap import group_by_overlap
+    from rag.evolution.patch_generator import _layer_files
+
+    keys, groups = group_by_overlap(
+        rows, repo_root=REPO_ROOT, files=_layer_files(REPO_ROOT, "code")
+    )
+    items = []
+    for row in rows:
+        item = _serialize_code_candidate(row)
+        key = keys.get(int(row["id"]), "")
+        if key:
+            item["overlap_key"] = key
+            others = [other for other in groups.get(key, []) if other != int(row["id"])]
+            if others:
+                item["overlap_ids"] = others
+        items.append(item)
     return _page(items, page, page_size)
 
 
@@ -1417,6 +1435,8 @@ def apply_code_candidate(
                 patch_file=_patch_export_path(int(row["id"])),
                 candidate_id=int(row["id"]),
                 test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
+                # 助手必须能停掉**当前**服务（否则端口一直被占，新代码永远起不来）。
+                service_pid=os.getpid(),
             )
         )
         steps["restart_requested"] = True

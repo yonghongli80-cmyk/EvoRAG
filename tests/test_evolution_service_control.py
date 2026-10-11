@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from rag.evolution.service_control import (
+    HELPER_SOURCE,
     apply_patch,
     import_smoke,
     patch_state,
@@ -74,3 +75,9 @@ def test_full_suite_gate_passes_and_fails_on_a_tiny_repo(tmp_path):
     ok, why = run_full_suite(repo)
     assert ok is False
     assert "failed" in why.lower() or "assert" in why.lower()
+
+def test_the_helper_source_compiles(tmp_path):
+    """助手是写进磁盘再运行的**字符串**：语法错只会在运行时炸，所以这里显式编译一次。"""
+    compile(HELPER_SOURCE, "restart-helper", "exec")
+    assert "stop_service" in HELPER_SOURCE  # 不会停服务就不是"重启"
+    assert "full_suite_passes" in HELPER_SOURCE

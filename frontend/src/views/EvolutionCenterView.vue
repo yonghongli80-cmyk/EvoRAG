@@ -1263,7 +1263,7 @@ onMounted(async () => {
         <table v-else data-test="code-candidate-list">
           <thead>
             <tr>
-              <th>ID</th><th>层级</th><th>状态</th><th>置信度</th><th>文件数</th>
+              <th>ID</th><th>层级</th><th>状态</th><th>置信度</th><th>文件数</th><th>同类</th>
               <th>基线提交</th><th>沙箱</th><th>创建时间</th>
             </tr>
           </thead>
@@ -1288,6 +1288,13 @@ onMounted(async () => {
                 </span>
               </td>
               <td>{{ patch.confidence }}</td>
+              <td class="cluster-meta" data-test="code-candidate-overlap">
+                <span v-if="patch.overlap_ids && patch.overlap_ids.length" class="badge badge-warn">
+                  同类 { patch.overlap_ids.length } 条
+                </span>
+                <span v-else>—</span>
+              </td>
+
               <td data-test="code-candidate-row-files">{{ patch.paths.length }}</td>
               <td><code>{{ shortCommit(patch.rollback_ref.base_commit || '') || '—' }}</code></td>
               <td>
@@ -1343,6 +1350,18 @@ onMounted(async () => {
           <h4 class="panel-subtitle">diff 全文（只读；应用由管理员手动执行）</h4>
           <pre class="patch-diff" data-test="patch-diff">{{ selectedCodePatch.diff }}</pre>
 
+          <p
+            v-if="selectedCodePatch.overlap_ids && selectedCodePatch.overlap_ids.length"
+            class="cluster-meta"
+            data-test="code-candidate-overlap-note"
+          >
+            与
+            <code v-for="other in selectedCodePatch.overlap_ids" :key="other" class="term-chip">
+              #{{ other }}
+            </code>
+            改的是同一个函数（{{ selectedCodePatch.overlap_key }}）——它们是同一条改动的变体，
+            建议只留一条：并排应用两条会留下两套实现。
+          </p>
           <h4 class="panel-subtitle">应用与回滚命令（只复制，不执行）</h4>
           <p class="cluster-meta" data-test="export-state">
             {{

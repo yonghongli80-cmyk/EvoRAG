@@ -421,6 +421,10 @@ export interface EvolutionCodePatch {
   rationale: string
   expected_effect: string
   rollback_ref: Record<string, string>
+  /** 同一条改动的「家族键」（文件:函数）；后端只做提示，从不拦截。 */
+  overlap_key?: string
+  /** 与它同类（改同一个函数）的其他候选 id；两个以上才会出现。 */
+  overlap_ids?: number[]
   /** The sandbox conclusion of layers 2/3, lifted out of the gate trail. */
   sandbox_summary: EvolutionGateEntry[]
   created_at: number
