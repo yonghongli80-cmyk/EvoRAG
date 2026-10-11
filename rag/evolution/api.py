@@ -1459,6 +1459,184 @@ def apply_code_candidate(
     }
 
 
+def _git_last_commit_for(paths: tuple[str, ...]) -> str:
+    """The short sha of the last commit touching ``paths``, or ``""`` when git cannot say.
+
+    Only used to make a refusal actionable: a patch that is already committed is undone with
+    ``git revert``, and naming the commit is the difference between "somewhere in history" and one
+    command someone can paste.
+    """
+    if not paths:
+        return ""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "log", "-1", "--format=%h", "--", *paths],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+class RollbackRequest(BaseModel):
+    """One administrative action on a patch that is already applied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Restart the service once the guards pass. The helper runs the full suite first and, if the
+    #: suite fails or the service never comes up, puts the patch back — the mirror of apply.
+    restart: bool = True
+    note: str = ""
+
+
+@router.post("/code-candidates/{candidate_id}/rollback", summary="回滚已应用的补丁，可选一键重启")
+def rollback_code_candidate(
+    candidate_id: int, payload: RollbackRequest, user: dict = Depends(_admin_user)
+) -> dict:
+    """Undo an applied patch behind the same guards apply uses.
+
+    The asymmetry this closes: a code patch has a one-click apply but no one-click rollback. Layer 5
+    for a code patch is "reverse the change and restart", and the existing rollback endpoint only
+    unregisters question-set rollouts, so the way back was a hand-typed command — the one step of the
+    five layers with no supported path. The guards are symmetric on purpose: if the reverted tree does
+    not import, or the patch's own target tests fail, the patch is **put back** and the service is left
+    alone, so a rollback that would leave the code worse than before cannot land either.
+
+    A patch whose change is already in a commit is refused rather than reversed: ``git apply -R`` would
+    leave the working tree holding the inverse of a commit, and the honest way to undo a commit is
+    ``git revert``. The refusal names the commit that last touched those paths.
+    """
+    from rag.evolution.models import EvolutionStatus
+    from rag.evolution.service_control import (
+        LOG_NAME,
+        apply_patch,
+        import_smoke,
+        log_line,
+        patch_is_committed,
+        patch_paths,
+        patch_state,
+        revert_patch,
+        run_target_tests,
+        spawn_restart_helper,
+    )
+
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="候选数据库不存在")
+    row = _require_candidate(store, candidate_id)
+    if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
+        raise HTTPException(status_code=404, detail="候选不存在")
+    allowed = {EvolutionStatus.APPROVED_FOR_CANARY.value, EvolutionStatus.CANARY.value}
+    if row["status"] not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"只有已应用的补丁才能回滚（当前状态：{row['status']}）",
+        )
+    diff = str(row.get("diff") or "")
+    if not diff:
+        raise HTTPException(status_code=409, detail="该候选没有存储的 diff")
+
+    state = patch_state(REPO_ROOT, diff)
+    if state == "not_applied":
+        raise HTTPException(status_code=409, detail="补丁当前并未应用，无需回滚")
+    if state == "conflict":
+        raise HTTPException(status_code=409, detail="补丁与当前代码不再匹配（conflict）")
+
+    paths = patch_paths(diff)
+    if patch_is_committed(REPO_ROOT, paths):
+        last = _git_last_commit_for(paths)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "该补丁的改动已经在提交里：请用 git revert "
+                f"{last or '<sha>'} 回滚那次提交，而不是在工作树里反向应用"
+            ),
+        )
+
+    steps: dict = {"patch_state": state}
+    # 状态先与事实对齐：补丁是**已应用**的，那就是"已上线、在观察"。这一步也让 canary → rolled_back
+    # 成为合法转移（approved_for_canary 不能直接到 rolled_back）。
+    if row["status"] != EvolutionStatus.CANARY.value:
+        store.advance_candidate(
+            candidate_id,
+            EvolutionStatus.CANARY.value,
+            actor_id=str(user["id"]),
+            note=f"回滚前置：确认补丁已应用，进入观察｜{payload.note}".strip("｜"),
+        )
+
+    try:
+        revert_patch(REPO_ROOT, diff)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    def _restore_and_refuse(reason: str, detail: str, status_code: int = 409) -> None:
+        try:
+            apply_patch(REPO_ROOT, diff)
+            log_line(
+                REPO_ROOT / "artifacts" / LOG_NAME,
+                f"candidate {candidate_id}: rollback refused, patch put back ({reason})",
+            )
+        except RuntimeError as restore_error:  # pragma: no cover - needs a broken tree
+            raise HTTPException(
+                status_code=500,
+                detail=f"{reason}；且恢复补丁也失败：{restore_error}（需要人工处理）",
+            ) from restore_error
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    steps["import_smoke"] = smoke_ok
+    if not smoke_ok:
+        _restore_and_refuse("import_smoke", f"回滚之后无法导入：{smoke_why}；已把补丁放回")
+
+    tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    steps["target_tests"] = tests_ok
+    if not tests_ok:
+        _restore_and_refuse("target_tests", f"回滚之后目标测试未通过：{tests_why}；已把补丁放回")
+
+    updated = store.advance_candidate(
+        candidate_id,
+        EvolutionStatus.ROLLED_BACK.value,
+        actor_id=str(user["id"]),
+        note=f"回滚：反向应用 + 目标测试通过｜{payload.note}".strip("｜"),
+    )
+
+    restart_path = ""
+    if payload.restart:
+        restart_path = str(
+            spawn_restart_helper(
+                repo_root=REPO_ROOT,
+                patch_file=_patch_export_path(int(row["id"])),
+                candidate_id=int(row["id"]),
+                test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
+                service_pid=os.getpid(),
+                direction="revert",
+            )
+        )
+        steps["restart_requested"] = True
+    else:
+        steps["restart_requested"] = False
+        steps["warning"] = "未请求重启 ⇒ 全量测试没有跑，运行中的服务仍是旧代码"
+
+    log_line(
+        REPO_ROOT / "artifacts" / LOG_NAME,
+        f"candidate {candidate_id} rolled back by {user.get('username')} "
+        f"(restart={payload.restart}, note={payload.note[:60]!r})",
+    )
+    return {
+        "reverted": True,
+        "status": updated["status"] if isinstance(updated, dict) else EvolutionStatus.ROLLED_BACK.value,
+        "steps": steps,
+        "restart_helper": restart_path,
+        "revert_command": _revert_command(int(row["id"])),
+        "apply_command": _apply_command(int(row["id"]), list(row.get("test_paths") or ())),
+    }
+
+
 @router.post("/code-candidates/{candidate_id}/decision", summary="提交代码补丁审核决策")
 def decide_code_candidate(
     candidate_id: int, payload: CodePatchDecision, user: dict = Depends(_admin_user)

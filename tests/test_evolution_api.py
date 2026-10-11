@@ -1041,6 +1041,10 @@ def _fake_control(monkeypatch, **overrides):
     tests = overrides.get("tests", (True, ""))
 
     monkeypatch.setattr(control, "patch_state", lambda *a, **k: state)
+    monkeypatch.setattr(control, "patch_paths", lambda diff: ("rag/reranker.py",))
+    monkeypatch.setattr(
+        control, "patch_is_committed", lambda *a, **k: overrides.get("committed", False)
+    )
     monkeypatch.setattr(control, "apply_patch", lambda *a, **k: calls.__setitem__("apply", calls["apply"] + 1))
     monkeypatch.setattr(control, "revert_patch", lambda *a, **k: calls.__setitem__("revert", calls["revert"] + 1))
     monkeypatch.setattr(control, "import_smoke", lambda *a, **k: smoke)
@@ -1108,4 +1112,83 @@ def test_apply_restarts_only_after_every_guard_passes(
     assert int(calls["spawn_kwargs"]["service_pid"]) > 0
     assert calls["spawn_kwargs"]["test_scope"] in {"full", "target"}
     assert "--3way" not in body["apply_command"]
+    store.close()
+
+# ------------------------------------------------------------------
+# 一键回滚：apply 的镜像，守卫是对称的。
+# ------------------------------------------------------------------
+
+
+def test_rollback_refuses_a_patch_that_is_not_applied(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_control(monkeypatch, state="not_applied")
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/rollback", headers=admin_headers, json={"restart": False}
+    )
+
+    assert response.status_code == 409
+    assert "并未应用" in response.json()["detail"]
+    store.close()
+
+
+def test_rollback_refuses_a_patch_whose_change_is_committed(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """已提交的补丁要用 git revert：反向应用会留下"某次提交的逆"，谁看都糊涂。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_control(monkeypatch, state="applied", committed=True)
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/rollback", headers=admin_headers, json={"restart": False}
+    )
+
+    assert response.status_code == 409
+    assert "git revert" in response.json()["detail"]
+    store.close()
+
+
+def test_rollback_puts_the_patch_back_when_the_reverted_tree_cannot_import(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """守卫是对称的：回滚之后导入不了 ⇒ **把补丁放回**并拒绝，绝不留下更坏的状态。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch, state="applied", smoke=(False, "ImportError: boom"))
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/rollback", headers=admin_headers, json={"restart": False}
+    )
+
+    assert response.status_code == 409
+    assert "已把补丁放回" in response.json()["detail"]
+    assert calls["revert"] == 1 and calls["apply"] == 1, "必须反向一次再放回一次"
+    assert calls["restart"] == 0
+    store.close()
+
+
+def test_rollback_reverts_restarts_and_records_the_status(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch, state="applied")
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/rollback", headers=admin_headers, json={"restart": True}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reverted"] is True
+    assert body["status"] == "rolled_back"
+    assert body["steps"]["import_smoke"] is True and body["steps"]["target_tests"] is True
+    assert calls["revert"] == 1 and calls["apply"] == 0
+    assert calls["restart"] == 1
+    # 助手必须知道这是"回滚"，失败时才应当把补丁**重新应用**而不是再反向一次。
+    assert calls["spawn_kwargs"]["direction"] == "revert"
     store.close()

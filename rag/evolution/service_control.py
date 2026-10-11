@@ -107,6 +107,31 @@ def revert_patch(repo_root: str | Path, diff: str) -> None:
         raise RuntimeError(f"git apply -R failed (exit {result.returncode})")
 
 
+def patch_paths(diff: str) -> tuple[str, ...]:
+    """The paths a diff touches, in order, from its ``+++`` headers."""
+    return tuple(
+        dict.fromkeys(
+            line[6:].strip().removeprefix("b/")
+            for line in str(diff or "").splitlines()
+            if line.startswith("+++ ") and "/dev/null" not in line
+        )
+    )
+
+
+def patch_is_committed(repo_root: str | Path, paths: tuple[str, ...]) -> bool:
+    """Are the patch's changes already in a commit rather than sitting in the working tree?
+
+    Only meaningful once the patch is known to be applied: if its content is present and those paths
+    are clean relative to HEAD, that content arrived through a commit. Rolling it back with
+    ``git apply -R`` would leave the working tree holding the inverse of a commit — a modification
+    nobody asked for, and a confusing state to hand anyone. Such a patch is undone with ``git revert``.
+    """
+    if not paths:
+        return False
+    result = _git(repo_root, ("status", "--porcelain", "--untracked-files=no", "--", *paths))
+    return result.returncode == 0 and not result.stdout.strip()
+
+
 def import_smoke(repo_root: str | Path, python: str | None = None) -> tuple[bool, str]:
     """Does the application still import? The cheapest way to catch a patch that cannot start."""
     interpreter = python or sys.executable
@@ -276,13 +301,19 @@ def stop_service():
     log(f"stopped service pid {pid}")
 
 
-def revert():
-    result = subprocess.run(
-        ["git", "-C", COMMAND["root"], "apply", "-R", COMMAND["patch_file"]],
-        capture_output=True,
-        text=True,
-    )
-    log(f"rolled back: exit {result.returncode}")
+def undo():
+    """Undo what this run did — the mirror of its direction.
+
+    应用流程失败时要**反向**补丁；回滚流程失败时要**重新应用**补丁（回到那个已知能跑的状态）。
+    两者都是"把系统退回这次动作之前"，只是方向相反。
+    """
+    reapply = COMMAND.get("direction") == "revert"
+    args = ["git", "-C", COMMAND["root"], "apply"]
+    if not reapply:
+        args.append("-R")
+    args.append(COMMAND["patch_file"])
+    result = subprocess.run(args, capture_output=True, text=True)
+    log(f"undo ({'re-applied' if reapply else 'reverted'}): exit {result.returncode}")
 
 
 def full_suite_passes():
@@ -307,8 +338,8 @@ def full_suite_passes():
 def main():
     log(f"restart helper started for candidate {COMMAND['candidate_id']}")
     if COMMAND.get("test_scope") == "full" and not full_suite_passes():
-        log("full suite failed; reverting the patch and NOT restarting")
-        revert()
+        log("full suite failed; undoing this run's change and NOT restarting")
+        undo()
         return
     stop_service()
     deadline = time.time() + 60
@@ -324,7 +355,7 @@ def main():
             log("service healthy after restart")
             return
         time.sleep(2)
-    log("service did not become healthy; rolling the patch back and restarting")
+    log("service did not become healthy; undoing this run's change and restarting")
     # 先结束**自己刚拉起**的那个进程（否则端口被它占着，回滚后的新实例起不来）。
     started = STARTED.get("process")
     if started is not None and started.poll() is None:
@@ -333,7 +364,7 @@ def main():
             started.wait(timeout=20)
         except Exception:
             pass
-    revert()
+    undo()
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
         time.sleep(1)
@@ -365,6 +396,7 @@ def spawn_restart_helper(
     suite_timeout_s: int = 2400,
     service_pid: int | None = None,
     grace_s: int = 3,
+    direction: str = "apply",
 ) -> Path:
     """Write the helper to disk and start it detached; returns the helper's path."""
     root = Path(repo_root)
@@ -383,6 +415,8 @@ def spawn_restart_helper(
         "test_scope": str(test_scope),
         "suite_timeout": int(suite_timeout_s),
         "service_pid": int(service_pid if service_pid is not None else os.getpid()),
+        # 这份助手是替哪一次动作善后的：apply ⇒ 失败时反向；revert ⇒ 失败时重新应用。
+        "direction": "revert" if str(direction) == "revert" else "apply",
         "grace": int(grace_s),
         "log": str(root / "artifacts" / LOG_NAME),
     }
