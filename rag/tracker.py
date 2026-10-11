@@ -12,6 +12,8 @@ from config import settings
 # confidence, failure kind, attempt count, and durations. Never question text, chunk text, or keys.
 _DECISION_METADATA_KEYS = frozenset(
     {
+        # 用户点踩那条观测的溯源与去重键（实测：不在白名单里会被静默丢掉，去重就形同虚设）。
+        "feedback_message_id",
         "jev_mode",
         "jev_model",
         "question_set_version",

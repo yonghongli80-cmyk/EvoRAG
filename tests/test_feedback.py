@@ -97,3 +97,55 @@ def test_submit_feedback(client):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_a_negative_rating_reaches_the_evolution_recorder(client, monkeypatch):
+    """接线测试：点踩必须**真的**调用观测助手。
+
+    教训（2026-10-11，同一个失败模式的第二次）：我漏接了处理器里的那一行，助手成了死代码 ——
+    而单测**直接调助手**所以全绿，线上点踩却毫无效果。所以这条**走端点**断言调用。
+    """
+    import rag.api as api_mod
+
+    token = _register_and_login(client, "feedback_neg", "Pass12345")
+    headers = {"Authorization": f"Bearer {token}"}
+    cid = api_mod.user_db.create_conversation(1)
+    msg_id = api_mod.user_db.add_message(cid, "assistant", "some answer")
+
+    calls = []
+    monkeypatch.setattr(
+        api_mod,
+        "_submit_feedback_observation",
+        lambda user_db, req, user_id: calls.append((req.message_id, user_id)) or True,
+    )
+
+    resp = client.post(
+        "/feedback", json={"message_id": msg_id, "value": "negative"}, headers=headers
+    )
+
+    assert resp.status_code == 200
+    assert calls == [(msg_id, 1)], "点踩必须走到观测助手；接线断了就是这条失败"
+
+
+def test_a_positive_rating_does_not_reach_the_recorder(client, monkeypatch):
+    """正向反馈不是失败，不该进观测池。"""
+    import rag.api as api_mod
+
+    token = _register_and_login(client, "feedback_pos", "Pass12345")
+    headers = {"Authorization": f"Bearer {token}"}
+    cid = api_mod.user_db.create_conversation(1)
+    msg_id = api_mod.user_db.add_message(cid, "assistant", "some answer")
+
+    calls = []
+    monkeypatch.setattr(
+        api_mod,
+        "_submit_feedback_observation",
+        lambda user_db, req, user_id: calls.append(req.message_id) or True,
+    )
+
+    resp = client.post(
+        "/feedback", json={"message_id": msg_id, "value": "positive"}, headers=headers
+    )
+
+    assert resp.status_code == 200
+    assert calls == []

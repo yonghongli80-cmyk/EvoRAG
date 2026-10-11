@@ -19,7 +19,10 @@ class _FakeUserDB:
     def get_message_question(self, message_id):
         return self._question
 
-    def get_message_reliability(self, message_id):
+    def get_message_reliability(self, message_id, user_id):
+        """签名必须与真实 UserDB 一致：我当初漏传 user_id，TypeError 被 except 吞掉、观测没落库。"""
+        assert isinstance(user_id, int), "调用方必须把 user_id 传进来"
+        self.last_user_id = user_id
         return self._reliability
 
 
@@ -42,7 +45,7 @@ def test_a_thumbs_down_becomes_an_observation(monkeypatch):
     recorder = _FakeRecorder()
     monkeypatch.setattr(api, "get_failure_recorder", lambda: recorder, raising=True)
 
-    ok = api._submit_feedback_observation(_FakeUserDB(), _request(comment="答错了"))
+    ok = api._submit_feedback_observation(_FakeUserDB(), _request(comment="答错了"), 2)
 
     assert ok is True
     trace, detail = recorder.submitted[0]
@@ -58,7 +61,7 @@ def test_an_empty_question_is_skipped(monkeypatch):
     recorder = _FakeRecorder()
     monkeypatch.setattr(api, "get_failure_recorder", lambda: recorder, raising=True)
 
-    assert api._submit_feedback_observation(_FakeUserDB(question=""), _request()) is False
+    assert api._submit_feedback_observation(_FakeUserDB(question=""), _request(), 2) is False
     assert recorder.submitted == []
 
 
@@ -70,4 +73,33 @@ def test_a_recorder_failure_never_breaks_feedback(monkeypatch):
 
     monkeypatch.setattr(api, "get_failure_recorder", lambda: _Boom(), raising=True)
 
-    assert api._submit_feedback_observation(_FakeUserDB(), _request()) is False
+    assert api._submit_feedback_observation(_FakeUserDB(), _request(), 2) is False
+
+
+def test_the_same_message_is_not_recorded_twice(monkeypatch, tmp_path):
+    """去重：同一条消息重复点踩不重复入库。
+
+    这里刻意用**真实列名**（`details_decision_metadata`）造行 —— 我此前读 `decision_metadata`，
+    永远是 None，去重**静默失效**：单测照样绿、线上却重复入库。
+    """
+    import types
+
+    import rag.evolution.store as store_mod
+
+    recorded = []
+    fake_store = types.SimpleNamespace(
+        list_observations=lambda: [
+            {"details_decision_metadata": {"feedback_message_id": 7}, "route": "feedback"}
+        ],
+        close=lambda: recorded.append("closed"),
+    )
+    monkeypatch.setattr(store_mod, "FailureTraceStore", lambda path: fake_store, raising=True)
+
+    recorder = _FakeRecorder()
+    monkeypatch.setattr(api, "get_failure_recorder", lambda: recorder, raising=True)
+
+    ok = api._submit_feedback_observation(_FakeUserDB(), _request(message_id=7), 2)
+
+    assert ok is False, "同一条消息已经记过，不该再记"
+    assert recorder.submitted == []
+    assert recorded == ["closed"], "去重路径也要关掉临时打开的存储"

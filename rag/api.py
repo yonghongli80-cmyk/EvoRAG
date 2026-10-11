@@ -1080,7 +1080,7 @@ async def get_conversation_messages(cid: int, authorization: str = Header(defaul
     return await asyncio.to_thread(user_db.get_messages, cid, user["id"])
 
 
-def _submit_feedback_observation(user_db, req) -> bool:
+def _submit_feedback_observation(user_db, req, user_id: int) -> bool:
     """把一条**点踩**变成一条观测 —— 用户在替你标注失败，此前这份信号根本没进回路。
 
     设计要点（每条都有理由）：
@@ -1110,12 +1110,13 @@ def _submit_feedback_observation(user_db, req) -> bool:
         store = FailureTraceStore(settings.evolution_db_path)
         try:
             for row in store.list_observations():
-                meta = row.get("decision_metadata") or {}
+                # 真实键名带 details_ 前缀（实测：读 decision_metadata 永远是 None ⇒ 去重形同虚设）。
+                meta = row.get("details_decision_metadata") or row.get("decision_metadata") or {}
                 if isinstance(meta, dict) and int(meta.get("feedback_message_id") or 0) == int(req.message_id):
                     return False
         finally:
             store.close()
-        reliability = user_db.get_message_reliability(req.message_id) or {}
+        reliability = user_db.get_message_reliability(req.message_id, user_id) or {}
         kb_id = str(reliability.get("kb_id") or "unknown")
         trace = ExecutionTrace(
             question=question,
@@ -1134,8 +1135,19 @@ def _submit_feedback_observation(user_db, req) -> bool:
             feedback_kind="negative_with_comment" if req.comment else "negative",
         )
         return bool(recorder.submit(trace, detail))
-    except Exception:  # noqa: BLE001 - 记录失败绝不能影响反馈本身
+    except Exception as error:  # noqa: BLE001 - 记录失败绝不能影响反馈本身
         logger.exception("feedback observation failed")
+        # 静默失败最难查（实测：我漏传 user_id 导致 TypeError，被这里吞掉，观测根本没落库而接口照常 200）。
+        # 因此失败也写一份可查的日志，与 ops 的 service-control.log 同一套做法。
+        try:
+            from rag.evolution.service_control import log_line
+
+            log_line(
+                Path(__file__).resolve().parent.parent / "artifacts" / "feedback-observation.log",
+                f"message {getattr(req, 'message_id', '?')} NOT recorded: {type(error).__name__}: {error}",
+            )
+        except Exception:  # noqa: BLE001 - 连日志都写不了也不能影响反馈
+            pass
         return False
 
 
@@ -1152,6 +1164,11 @@ async def submit_feedback(req: FeedbackRequest, authorization: str = Header(defa
     if not owned:
         raise HTTPException(status_code=404, detail="消息不存在或无权操作")
     await asyncio.to_thread(user_db.add_feedback, req.message_id, user["id"], value_int, req.comment or "")
+    if value_int < 0:
+        # 负向反馈是**带人工标注**的最高信号失败源；此前只写进用户库、从不进进化队列。
+        # 注意：这里必须**真的调用**——我曾漏接这一行，助手成了死代码，而单测直接调助手所以全绿，
+        # 线上却毫无效果（同一个失败模式的第二次）。端点级用例钉住它。
+        await asyncio.to_thread(_submit_feedback_observation, user_db, req, int(user["id"]))
     return {"status": "ok"}
 
 
