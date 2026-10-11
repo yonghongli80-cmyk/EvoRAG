@@ -102,6 +102,8 @@ const selectedCodePatch = ref<EvolutionCodePatchDetail | null>(null)
 const selectedCodePatchId = ref<number | null>(null)
 const codePatchLoading = ref(false)
 const codePatchNote = ref('')
+/** 决策成功后的可见提示：成功时界面此前**什么都不显示**，看起来像"点了没用"。 */
+const decisionHint = ref('')
 const codePatchActing = ref(false)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(observationsTotal.value / PAGE_SIZE)))
@@ -251,6 +253,7 @@ async function confirmLayer() {
     decisionNote.value = ''
     confirmLayerValue.value = ''
     error.value = ''
+    decisionHint.value = '已确认根因层级'
     await loadDiagnosis(updated.id)
   } catch (err: any) {
     if (isForbidden(err)) {
@@ -262,6 +265,14 @@ async function confirmLayer() {
     deciding.value = false
   }
 }
+
+/** 只有"待审"状态的聚类才接受诊断决策（与后端转移表一致，避免点了必然 409）。 */
+const clusterDecidable = computed(() => selectedCluster.value?.status === 'awaiting_diagnosis_review')
+
+/** 只有"待验证"的补丁才接受审核决策（同上）。 */
+const codePatchDecidable = computed(
+  () => selectedCodePatch.value?.status === 'awaiting_verification'
+)
 
 async function decide(action: EvolutionDecisionAction) {
   if (!selectedCluster.value || deciding.value) return
@@ -500,6 +511,7 @@ async function decideCodePatch(action: CodePatchDecisionAction) {
   try {
     await submitCodePatchDecision(selectedCodePatch.value.id, action, codePatchNote.value)
     error.value = ''
+    decisionHint.value = `已提交：${action}`
     codePatchNote.value = ''
     await reloadCodePatch()
     await loadCodePatches()
@@ -869,6 +881,10 @@ onMounted(async () => {
         </ul>
         <p v-else class="muted">暂无决策记录</p>
 
+        <p v-if="decisionHint" class="cluster-meta" data-test="decision-hint">
+        {{ decisionHint }}（轨迹见下方门禁与审计）
+      </p>
+
         <div class="layer-confirm" data-test="layer-confirm">
 
           <label>确认根因层级（补丁生成器以它为准）</label>
@@ -928,7 +944,7 @@ onMounted(async () => {
               type="button"
               class="query-button"
               data-test="decision-approve"
-              :disabled="deciding"
+              :disabled="deciding || !clusterDecidable"
               @click="decide('approve_for_candidate')"
             >
               确认进入候选
@@ -937,7 +953,7 @@ onMounted(async () => {
               type="button"
               class="decision-button"
               data-test="decision-reject"
-              :disabled="deciding"
+              :disabled="deciding || !clusterDecidable"
               @click="decide('reject')"
             >
               拒绝
@@ -946,7 +962,7 @@ onMounted(async () => {
               type="button"
               class="decision-button"
               data-test="decision-needs-more-evidence"
-              :disabled="deciding"
+              :disabled="deciding || !clusterDecidable"
               @click="decide('needs_more_evidence')"
             >
               证据不足
@@ -1406,7 +1422,7 @@ onMounted(async () => {
                 type="button"
                 class="query-button"
                 data-test="code-candidate-approve"
-                :disabled="codePatchActing"
+                :disabled="codePatchActing || !codePatchDecidable"
                 @click="decideCodePatch('approve_for_apply')"
               >
                 批准并导出
@@ -1415,7 +1431,7 @@ onMounted(async () => {
                 type="button"
                 class="decision-button"
                 data-test="code-candidate-reject"
-                :disabled="codePatchActing"
+                :disabled="codePatchActing || !codePatchDecidable"
                 @click="decideCodePatch('reject')"
               >
                 拒绝
@@ -1424,7 +1440,7 @@ onMounted(async () => {
                 type="button"
                 class="decision-button"
                 data-test="code-candidate-needs-revision"
-                :disabled="codePatchActing"
+                :disabled="codePatchActing || !codePatchDecidable"
                 @click="decideCodePatch('needs_revision')"
               >
                 需修订
