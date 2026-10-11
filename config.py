@@ -169,6 +169,9 @@ class Settings(BaseSettings):
     #: 一键应用前跑什么测试。**full = 全量套件**（默认：补丁自带的 test_paths 是**模型自己挑的**，
     #: 拦不住"改坏别处"，这正是屎山的主要来源）；target = 只跑目标测试（快，但风险自负）。
     evolution_apply_test_scope: str = "full"
+    #: 检索前改写时带上最近几轮对话（补全"它呢？/那这个多少钱"这类指代）。
+    #: **默认 0 = 关闭**，与既有行为逐字节一致；开启后必须先测检索质量再谈提升。
+    query_rewrite_history_turns: int = 0
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录

@@ -361,6 +361,26 @@ class RAGPipeline:
             ),
         )
 
+
+    def _rewrite_for_retrieval(self, question: str, session_id: str) -> str:
+        """检索前改写：按配置带上最近几轮对话。
+
+        **默认 0 轮 ⇒ 与既有行为逐字节一致**（`rewrite_query(question)` 原样调用）。
+        指代补全只在多轮里才有意义（"它呢？"当轮没有先行词），而回答生成那条路**本来**就带上下文
+        （`self.memory.build_messages`）—— 缺口只在检索前的改写这一处。
+        """
+        turns = int(getattr(settings, "query_rewrite_history_turns", 0) or 0)
+        if turns <= 0:
+            return rewrite_query(question)
+        try:
+            messages = self.memory.get_recent_messages(session_id, n=turns * 2)
+            summary = self.memory.get_summary(session_id)
+        except Exception:  # noqa: BLE001 - 记忆读不到就退回既有行为，绝不让改写失败
+            return rewrite_query(question)
+        return rewrite_query(
+            question, history=[(m.role, m.content) for m in messages], summary=summary
+        )
+
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
         question = sanitize_input(question)
@@ -452,7 +472,7 @@ class RAGPipeline:
                 prepared["kb_id"] = kb_id
             return prepared, None
 
-        rewritten = rewrite_query(question)
+        rewritten = self._rewrite_for_retrieval(question, session_id)
         candidates = self._retrieve_visible_candidates(
             rewritten,
             top_k=top_k * _RETRIEVAL_OVERSAMPLE,
@@ -585,7 +605,7 @@ class RAGPipeline:
         initial_rewrite = retrieval_route and route_decision.should_rewrite
         # 状态机：attempts=[(检索查询, 是否已改写)]；最多追加一次改写重试，之后必须停止。
         attempts = [
-            (rewrite_query(question) if initial_rewrite else question, initial_rewrite)
+            (self._rewrite_for_retrieval(question, session_id) if initial_rewrite else question, initial_rewrite)
         ]
         stage["attempts"] = len(attempts)
         stage["rewrites"] = 1 if initial_rewrite else 0
@@ -628,7 +648,7 @@ class RAGPipeline:
                 break
             if not rewrite_used and retrieval_route:
                 # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
-                attempts.append((rewrite_query(question), True))
+                attempts.append((self._rewrite_for_retrieval(question, session_id), True))
                 stage["attempts"] = len(attempts)
                 stage["rewrites"] = 1
             index += 1
