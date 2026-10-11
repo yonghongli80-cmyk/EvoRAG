@@ -290,3 +290,15 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
    （`real-case-handoff/evolab/e2e_code_patch.py`、`sandbox_stored_patch.py`）仍然可用，用于实验。
 2. 删除候选：`evolution.db` 的 `candidates` 行（或整库）。
 3. 已导出的补丁文件在 `artifacts/patches/`，删除即撤销导出；**代码回退**按普通 git 流程（`git revert`）。
+
+**实测对照（2026-10-10，严格同一样本：`--observation-ids 131,151,153,154,155,156 --repeats 2`，串行）**：
+
+| 格式 | 成功率 | 首试成功率 | 失败类别 | 单次耗时 |
+| --- | --- | --- | --- | --- |
+| `diff`（对照） | **8/12 = 66.7%** | 6/12 = 50% | `corrupt_patch`×2、无 diff×1、`does_not_apply`×1 | 39–251s（均值≈110s） |
+| **`edits`（新，现为默认）** | **12/12 = 100%** | **12/12 = 100%** | **无** | **19–168s（均值≈59s）** |
+
+⇒ **达标（判据 ≥80%）** ✓，且**零重试、耗时约减半**（此前的慢主要来自重试与失败的生成）。默认因此取
+`edits`；要回到旧行为只需把 `RAG_EVOLUTION_PATCH_FORMAT` 设成 `diff`（可随时回退）。
+**样本局限**：6 个观测 ×2 次、都在 cluster 3（`reranking` 层）⇒ 结论强但不外推；边界未放宽，
+所以风险与旧路径相同。

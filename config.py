@@ -160,10 +160,12 @@ class Settings(BaseSettings):
     #: 设成 N 时：每文件上限 N 行，且靶心窗半径取 N//2 —— 只调上限是扩不出窗口的，
     #: 因为窗宽是 min(N, 半径*2+1)。用于「加大上下文」这一档实验，默认不改。
     evolution_patch_context_lines: int = 0
-    #: 补丁输出格式。**diff = 既有行为**（模型直接写 unified diff）；
+    #: 补丁输出格式。**实测（严格同样本 6 对 × 2 次）：edits 12/12 = 100%、零重试；diff 8/12 = 66.7%。**
+    #: 因此默认取 edits；要回到旧行为只需设成 diff（一个环境变量，随时可回退）。
+    #: diff = 模型直接写 unified diff；
     #: edits = 模型只给「路径 + 精确 old_text + new_text」，由**我们**用 difflib 拼 diff
     #: （hunk 头与上下文天然自洽 ⇒ corrupt_patch / does_not_apply 构造上不可能）。
-    evolution_patch_format: str = "diff"
+    evolution_patch_format: str = "edits"
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录
