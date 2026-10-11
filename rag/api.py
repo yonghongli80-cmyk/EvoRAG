@@ -1080,6 +1080,65 @@ async def get_conversation_messages(cid: int, authorization: str = Header(defaul
     return await asyncio.to_thread(user_db.get_messages, cid, user["id"])
 
 
+def _submit_feedback_observation(user_db, req) -> bool:
+    """把一条**点踩**变成一条观测 —— 用户在替你标注失败，此前这份信号根本没进回路。
+
+    设计要点（每条都有理由）：
+
+    * 走与 pipeline **同一个** ``FailureRecorder`` ⇒ 存储、跳过规则、阻断语义与线上完全一致，
+      不另造一条旁路；
+    * ``route="feedback"``：这是**用户报告**的失败，不是路由判定出来的，来源如实区分（也让聚类
+      能把"用户说不满意"和"检索没召回"分开看）；
+    * 观测只存**结构化信号**（可答性/置信度/kb/有无留言），**绝不存用户留言的文字**——那是用户内容，
+      落在红线之外；
+    * 同一条消息**重复点踩不重复入库**（同一失败被记两次是噪声，不是信号）；
+    * 整段包在 try/except 里：**记录失败绝不影响反馈本身**（用户点了踩就该成功返回）。
+    """
+    try:
+        from rag.evolution.models import DiagnosticDetail, FailureStage
+        from rag.tracker import ExecutionTrace
+
+        recorder = get_failure_recorder()
+        if recorder is None:
+            return False
+        question = user_db.get_message_question(req.message_id)
+        if not question:
+            return False
+        # 去重：这条消息已经因反馈入过库就不再记（同一失败记两次是噪声）。
+        from rag.evolution.store import FailureTraceStore
+
+        store = FailureTraceStore(settings.evolution_db_path)
+        try:
+            for row in store.list_observations():
+                meta = row.get("decision_metadata") or {}
+                if isinstance(meta, dict) and int(meta.get("feedback_message_id") or 0) == int(req.message_id):
+                    return False
+        finally:
+            store.close()
+        reliability = user_db.get_message_reliability(req.message_id) or {}
+        kb_id = str(reliability.get("kb_id") or "unknown")
+        trace = ExecutionTrace(
+            question=question,
+            route="feedback",
+            decision_metadata={
+                "feedback_message_id": int(req.message_id),
+                "source": "feedback",
+            },
+        )
+        detail = DiagnosticDetail(
+            kb_id=kb_id,
+            failure_stage=FailureStage.UNKNOWN,
+            answerability_kind=reliability.get("answerability_kind"),
+            confidence_level=reliability.get("confidence_level"),
+            # 只记"有没有留言"，不记留言本身。
+            feedback_kind="negative_with_comment" if req.comment else "negative",
+        )
+        return bool(recorder.submit(trace, detail))
+    except Exception:  # noqa: BLE001 - 记录失败绝不能影响反馈本身
+        logger.exception("feedback observation failed")
+        return False
+
+
 @app.post("/feedback", summary="提交反馈")
 async def submit_feedback(req: FeedbackRequest, authorization: str = Header(default="")):
     if not authorization:
