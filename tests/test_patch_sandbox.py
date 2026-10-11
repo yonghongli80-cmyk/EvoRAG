@@ -1375,3 +1375,65 @@ def test_record_sandbox_outcome_writes_status_detail_and_numbers():
     assert call["gate"] == GATE_NAME
     assert call["gate_detail"]
     assert call["gate_metrics"]["verdict"]["passed"] is True
+
+
+def test_a_replay_that_died_on_a_missing_collection_says_so(tmp_path, monkeypatch):
+    """实测形状：语料副本里没有回放要的集合 ⇒ 类别应当是 corpus_missing，而不是光秃秃的 exit_1。
+
+    2026-10-11 我为此手工挖了三层才看清（快照是空的）。类别只出 slug，不含任何文本。
+    """
+    from rag.evolution import sandbox as sandbox_module
+
+    def fake_run_command(command, *, cwd=None, env=None, timeout=None, stdin_text=None):
+        return sandbox_module.CommandOutcome(
+            returncode=1,
+            stderr="ValueError: Collection rag_docs not found\n",
+        )
+
+    monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
+
+    payload, error = sandbox_module._run_benchmark(
+        worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="rag_docs", timeout=10.0, user_id=1
+    )
+
+    assert payload is None
+    assert error == "benchmark replay did not complete: exit_1 (corpus_missing)"
+
+
+def test_the_replay_category_never_carries_the_childs_text(tmp_path, monkeypatch):
+    """类别可以指出方向，但绝不能把子进程输出（可能含语料内容）带进报告、门禁轨迹或审计。"""
+    from rag.evolution import sandbox as sandbox_module
+
+    secret = "LH878-01 适马 ￥1280"
+
+    def fake_run_command(command, *, cwd=None, env=None, timeout=None, stdin_text=None):
+        return sandbox_module.CommandOutcome(
+            returncode=1,
+            stderr=f"{secret}\nValueError: Collection rag_docs not found\n",
+        )
+
+    monkeypatch.setattr(sandbox_module, "_run_command", fake_run_command)
+
+    _, error = sandbox_module._run_benchmark(
+        worktree=tmp_path, env={}, sandbox_root=tmp_path, kb_id="rag_docs", timeout=10.0
+    )
+
+    assert "(corpus_missing)" in error
+    for fragment in ("LH878-01", "适马", "1280"):
+        assert fragment not in error
+
+
+def test_the_replay_category_maps_the_shapes_we_can_act_on():
+    """归类的边界：认得出给出短类别，认不出给空串（让消息保持原样）。"""
+    from rag.evolution.sandbox import _replay_category
+
+    assert _replay_category("ValueError: Collection kb1 not found") == "corpus_missing"
+    assert _replay_category("rag.evolution.fixture.FixtureMiss: no recording") == "fixture_miss"
+    assert _replay_category("sqlite3.OperationalError: unable to open database file") == "database_unavailable"
+    assert _replay_category("httpx.HTTPStatusError: 401 Unauthorized") == "unauthorized"
+    assert _replay_category("Error code: 429 - too many requests") == "upstream_rate_limited"
+    assert _replay_category("requests.exceptions.ConnectionError: refused") == "network_error"
+
+    # 认不出的：空串 ⇒ 调用方保持既有措辞，不凭空造类别
+    assert _replay_category("") == ""
+    assert _replay_category("boom") == ""

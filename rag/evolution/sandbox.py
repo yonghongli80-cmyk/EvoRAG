@@ -196,6 +196,37 @@ _GIT_ERROR_CATEGORIES = (
 #: The git invocation that applies a candidate diff, on stdin, UTF-8, bounded.
 _GIT_APPLY_COMMAND = ("git", "apply", "--whitespace=nowarn", "-")
 
+#: Child output → one short category for a benchmark replay that died before writing a report.
+#: Only the slug ever leaves :func:`_replay_category`; the matched text never does, for the same
+#: reason as the git mapping above — a replay's output can quote corpus content. The categories are
+#: the shapes actually seen or plausible in this environment: an empty corpus copy (the one measured
+#: on 2026-10-11, which used to surface as a bare ``exit_1`` and cost a manual dig), a missing
+#: principal, an unreachable database, a stale replay fixture, and an upstream that refuses or
+#: times out.
+_REPLAY_ERROR_CATEGORIES = (
+    ("fixturemiss", "fixture_miss"),
+    ("fixture miss", "fixture_miss"),
+    ("unable to open database file", "database_unavailable"),
+    ("database is locked", "database_locked"),
+    ("no such table", "database_schema"),
+    ("no such column", "database_schema"),
+    ("too many requests", "upstream_rate_limited"),
+    ("rate limit", "upstream_rate_limited"),
+    ("timed out", "upstream_timeout"),
+    ("timeout", "upstream_timeout"),
+    ("unauthorized", "unauthorized"),
+    ("invalid token", "unauthorized"),
+    ("forbidden", "unauthorized"),
+    ("api key", "credential_missing"),
+    ("modulenotfounderror", "missing_dependency"),
+    ("importerror", "missing_dependency"),
+    ("connection", "network_error"),
+)
+
+#: How much of the tail to read when deriving a category: the informative line of a traceback is the
+#: last one, and reading the tail also keeps a noisy child from matching on stray early output.
+_REPLAY_CATEGORY_WINDOW = 4000
+
 
 @dataclass(frozen=True)
 class SandboxReport:
@@ -388,6 +419,27 @@ def _git_category(stderr: str) -> str:
         if needle in first:
             return category
     return "git_error"
+
+
+def _replay_category(text: str) -> str:
+    """A short category for a replay that produced no report, or ``""`` when nothing matches.
+
+    Read from the **tail** (a traceback's informative line is its last) and returned as a slug only:
+    the child's output is never carried anywhere near the report, the gate log or the audit note.
+    A recognised category is what turns ``exit_1`` into something a person can act on, without
+    trading away the rule that observations and trails hold signals rather than content.
+    """
+    tail = (text or "")[-_REPLAY_CATEGORY_WINDOW:].lower()
+    if not tail.strip():
+        return ""
+    # 实测形状：回放要一个语料副本里不存在的集合（"Collection rag_docs not found"）。
+    # 单独拎出来，是因为 "collection" 单字太宽、而 "not found" 单字太泛，两个同时出现才说明问题。
+    if "collection" in tail and "not found" in tail:
+        return "corpus_missing"
+    for needle, category in _REPLAY_ERROR_CATEGORIES:
+        if needle in tail:
+            return category
+    return ""
 
 
 def _failure_kind(outcome: CommandOutcome, timeout: float) -> str:
@@ -745,9 +797,12 @@ def _run_benchmark(
     if outcome.unavailable:
         return None, "benchmark replay unavailable: the interpreter could not be started"
     if not json_out.is_file():
+        # 分类只加在"认得出"的时候：认不出就保持与既有完全相同的措辞，不让一条无类别的消息变样。
+        category = _replay_category(f"{outcome.stderr}\n{outcome.stdout}")
+        suffix = f" ({category})" if category else ""
         if outcome.returncode != 0:
-            return None, f"benchmark replay did not complete: exit_{outcome.returncode}"
-        return None, "benchmark replay produced no report"
+            return None, f"benchmark replay did not complete: exit_{outcome.returncode}{suffix}"
+        return None, f"benchmark replay produced no report{suffix}"
     try:
         payload = json.loads(json_out.read_text(encoding="utf-8"))
     except (OSError, ValueError):
