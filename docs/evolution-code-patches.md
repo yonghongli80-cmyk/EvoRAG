@@ -188,6 +188,31 @@ Jev 路径把检索交给外部服务，不经过本地嵌入器）。
    "不唯一"），且改后仍过层 1 的路径/配额边界；
 4. 人类可读性由**我们的 diff 生成器**保证（满足 §5.3 的审查要求），而不是靠模型排版。
 
+### 5.5 edits 输出格式：让模型别再算行数（2026-10-10，`patch-v5`）
+
+**为什么**：基线测量（§5.4）显示失败集中在 `does_not_apply` / `corrupt_patch` / 压根没给 diff ——
+两类上下文规模下都存在，所以问题不是"看得不够多"，而是**模型在手写 `@@ -a,b +c,d @@` 与精确上下文，
+本质是在做并核对行数算术**。
+
+**怎么做**：`RAG_EVOLUTION_PATCH_FORMAT=edits`（默认仍 `diff`，零行为变化）时，提示词改问**精确替换块**：
+
+```json
+{"edits": [{"path": "rag/reranker.py", "old_text": "逐字原文（恰好出现一次）", "new_text": "替换后"}],
+ "test_paths": ["tests/test_reranker.py"], "rationale": "…", "expected_effect": "…", "confidence": "low"}
+```
+
+然后由 :func:`edits_to_diff` **自己拼 diff**（`difflib.unified_diff`）⇒ **hunk 头与上下文构造上自洽**
+⇒ `corrupt_patch` 与 `does_not_apply` 在这条路径上**不可能发生**。边界仍然照跑（`git apply --check`、
+路径白名单、黑名单、配额），所以是**双重保证**而不是放宽。
+
+**拒绝语义（都不含内容）**：`old_text` 找不到 ⇒ `old_text not found`；出现多次 ⇒
+`old_text is ambiguous (N)`；路径越层/命中黑名单 ⇒ `path outside the layer` / `forbidden path`；
+JSON 结构不对 ⇒ `invalid_json`。
+
+**两档如何对照**：`scripts/measure_patch_generation.py --observation-ids <固定列表> --repeats 2`
+配合上面那个环境变量，**同一批样本**跑两轮（**必须串行**：并行会触发服务商限流，实测让一次基线侧
+26 次调用失败）。验收线仍是 **≥80%**。
+
 ## 6. 端到端留痕（2026-09-28 首跑，真实模型调用）
 
 输入：聚类 3（kb_accessories，已批准）由管理员确认 `confirmed_layer=reranking`，

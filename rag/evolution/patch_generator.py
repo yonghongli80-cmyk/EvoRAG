@@ -51,6 +51,7 @@ answer. Persistence is the caller's job: :meth:`generate` writes nothing.
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import json
 import re
@@ -82,7 +83,7 @@ from rag.evolution.symbols import SymbolIndex, window_excerpt
 
 #: Version of the patch prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
-PATCH_PROMPT_VERSION = "patch-v4"
+PATCH_PROMPT_VERSION = "patch-v5"
 
 type ModelCall = Callable[[list[dict]], str]
 
@@ -658,6 +659,67 @@ def _repair_note(reason: str, detail: str) -> str:
     )
 
 
+def _edits_messages(
+    *,
+    cluster: Mapping,
+    drafts: tuple[dict, ...],
+    layer: str,
+    targets: tuple[tuple[str, str, int, bool, str], ...],
+    base_commit: str,
+    prompt_version: str,
+    locate_note: str,
+    allowed: str,
+    forbidden: str,
+    repo_root: Path,
+) -> list[dict]:
+    """The ``edits``-format request: exact replacement blocks instead of a hand-written diff.
+
+    Rationale is measured, not stylistic: with the diff format the model kept producing hunks whose
+    declared line counts did not match their bodies, or contexts that no longer applied. Asking for
+    ``old_text``/``new_text`` removes the arithmetic — and the diff is then assembled by
+    :func:`edits_to_diff`, so it cannot be malformed.
+    """
+    system = "\n".join(
+        (
+            f"你是知识库自进化系统的代码补丁生成助手（提示词版本：{prompt_version}，输出格式：edits）。",
+            "你的唯一任务：为一条已由管理员确认根因的失败诊断，给出**精确的文本替换块**，",
+            "由一个统一的 JSON 对象承载。补丁只是候选：还要经过沙箱验证与管理员审核；系统永不自动合入。",
+            "",
+            "【硬性规则】",
+            "1. 只输出**一个 JSON 对象**（可带 Markdown 围栏，对象外不要有解释文字）。结构：",
+            '   {"edits": [{"path": "相对仓库路径", "old_text": "要替换的原文", "new_text": "替换后的文本"}],',
+            '    "test_paths": ["tests/xxx.py"], "rationale": "…", "expected_effect": "…",',
+            '    "confidence": "low|medium|high"}',
+            "2. `old_text` 必须是**从上面给出的文件正文里逐字复制**的一段（含缩进），",
+            "   并且在文件里**恰好出现一次**：找不到会被拒（not found），出现多次也会被拒（ambiguous）。",
+            "3. `new_text` 是与 `old_text` 等价的替换文本；改动越小越好，不要顺手重排无关代码。",
+            f"4. 只能改本层允许位置内的文件（本次 layer={layer}，允许 {allowed}）；",
+            f"禁止位置（{forbidden}）。不得删除文件、不得含二进制内容、最多 {MAX_PATCH_FILES} 个文件、",
+            f"改动合计不超过 {MAX_PATCH_CHANGED_LINES} 行。",
+            "5. **绝不要**在 edits 里包含 tests/** 下的任何文件；验证测试只写在 `test_paths` 里，",
+            "   且必须是上面列出的、**实际存在**的文件名。",
+            "6. 只依据证据包与给出的文件正文，不要臆造未显示的代码。",
+        )
+    )
+    parts = ["# 失败聚类\n" + _render_cluster(cluster)]
+    if locate_note:
+        parts.append(locate_note)
+    parts.extend(
+        (
+            "# 已确认诊断（管理员已确认根因）\n" + _render_drafts(drafts),
+            f"# 目标层级\nlayer: {layer}\n允许位置（只能修改这些 glob 内的文件）: {allowed}",
+            "# 目标文件正文（仓库当前内容，路径相对仓库根目录）\n" + _render_targets(targets),
+            _render_available_tests(
+                _available_tests(repo_root, tuple(entry[0] for entry in targets))
+            ),
+            f"# git base 信息\nHEAD commit: {base_commit}",
+            "请只输出一个 JSON 对象（结构见系统提示规则 1）。",
+        )
+    )
+    user = "\n\n".join(part for part in parts if part)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def _render_available_tests(tests: tuple[str, ...]) -> str:
     """The verification-target block: real file names, or an explicit "none matched"."""
     if not tests:
@@ -694,6 +756,7 @@ def _build_messages(
     prompt_version: str,
     locate_note: str = "",
     repo_root: str | Path = ".",
+    patch_format: str = "diff",
 ) -> list[dict]:
     """Assemble the versioned two-message patch request.
 
@@ -703,6 +766,19 @@ def _build_messages(
     """
     allowed = "、".join(LAYER_PATH_GLOBS[layer])
     forbidden = "、".join(FORBIDDEN_GLOBS)
+    if patch_format == "edits":
+        return _edits_messages(
+            cluster=cluster,
+            drafts=drafts,
+            layer=layer,
+            targets=targets,
+            base_commit=base_commit,
+            prompt_version=prompt_version,
+            locate_note=locate_note,
+            allowed=allowed,
+            forbidden=forbidden,
+            repo_root=Path(repo_root),
+        )
     system = "\n".join(
         (
             f"你是知识库自进化系统的代码补丁生成助手（诊断提示词/候选提示词版本：{prompt_version}）。",
@@ -1092,6 +1168,134 @@ def _enforce_patch_rules(candidate: CodePatchCandidate, *, layer: str, repo_root
         raise PatchUnavailable(REASON_INVALID, error.reason) from None
 
 
+#: The two output formats the generator can ask for. ``diff`` is what it has always asked for;
+#: ``edits`` asks for exact old/new text blocks instead and lets :func:`edits_to_diff` assemble
+#: the diff, which is the point: measured failures (corrupt_patch, does_not_apply, replies with no
+#: diff at all) are all the model mishandling line arithmetic it cannot check, and difflib cannot
+#: produce a malformed hunk.
+PATCH_FORMATS: tuple[str, ...] = ("diff", "edits")
+
+
+def _extract_json_object(reply: str) -> dict:
+    """The first JSON object in ``reply``, tolerating fences and surrounding prose."""
+    text = str(reply or "")
+    start = text.find("{")
+    if start < 0:
+        raise PatchUnavailable(REASON_INVALID, "response carries no JSON object")
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    payload = json.loads(text[start : index + 1])
+                except ValueError:
+                    raise PatchUnavailable(REASON_INVALID, "invalid_json") from None
+                if not isinstance(payload, dict):
+                    raise PatchUnavailable(REASON_INVALID, "invalid_json")
+                return payload
+    raise PatchUnavailable(REASON_INVALID, "invalid_json")
+
+
+def edits_to_diff(edits, *, repo_root: Path, layer: str) -> str:
+    """Turn structured edits into a unified diff **we** assemble.
+
+    Each edit names a path, the exact ``old_text`` to replace and its ``new_text``. The text must
+    occur exactly once — zero is "not found", more than one is "ambiguous" — so an edit can only be
+    applied where the model actually looked. The diff then comes from :mod:`difflib` over the whole
+    file, which means hunk headers and context lines are consistent by construction: the failure
+    modes the diff format kept producing (a malformed hunk, a context that does not apply) cannot
+    be expressed here. Every message stays content-free: a path, a count, an index.
+    """
+    root = Path(repo_root)
+    updated: dict[str, str] = {}
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, Mapping):
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: not an object")
+        path = str(edit.get("path") or "").replace("\\", "/").removeprefix("./")
+        old = edit.get("old_text")
+        new = edit.get("new_text")
+        if not path or not isinstance(old, str) or not old or not isinstance(new, str):
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: needs path, old_text, new_text")
+        if _forbidden_glob(path) is not None:
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: forbidden path")
+        if _matched_glob(path, LAYER_PATH_GLOBS[layer]) is None:
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: path outside the layer")
+        target = root / path
+        if not target.is_file():
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: file not found")
+        text = updated.get(path)
+        if text is None:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        occurrences = text.count(old)
+        if occurrences == 0:
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: old_text not found")
+        if occurrences > 1:
+            raise PatchUnavailable(REASON_INVALID, f"edit {index}: old_text is ambiguous ({occurrences})")
+        updated[path] = text.replace(old, new, 1)
+    if not updated:
+        raise PatchUnavailable(REASON_INVALID, "edits is empty")
+    blocks: list[str] = []
+    for path in sorted(updated):
+        before = (root / path).read_text(encoding="utf-8", errors="replace")
+        body = "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                updated[path].splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                n=3,
+            )
+        )
+        if not body:
+            raise PatchUnavailable(REASON_INVALID, f"{path}: edit changes nothing")
+        blocks.append(f"diff --git a/{path} b/{path}\n{body}")
+    return "".join(blocks)
+
+
+def _parse_edits(reply: str, *, repo_root: Path, layer: str) -> tuple[str, dict]:
+    """``(diff, answer fields)`` from one edits-format reply, or refuse it whole."""
+    payload = _extract_json_object(reply)
+    edits = payload.get("edits")
+    if not isinstance(edits, list) or not edits:
+        raise PatchUnavailable(REASON_INVALID, "edits is empty")
+    diff = edits_to_diff(edits, repo_root=repo_root, layer=layer)
+    test_paths = tuple(
+        str(path).strip() for path in (payload.get("test_paths") or ()) if str(path).strip()
+    )
+    if not test_paths:
+        raise PatchUnavailable(REASON_INVALID, "test_paths is empty")
+    confidence = str(payload.get("confidence") or "")
+    if confidence not in _CONFIDENCES:
+        raise PatchUnavailable(REASON_INVALID, "confidence must be one of low/medium/high")
+    answer = {
+        "diff": diff,
+        "test_paths": test_paths,
+        "rationale": str(payload.get("rationale") or ""),
+        "expected_effect": str(payload.get("expected_effect") or ""),
+        "confidence": confidence,
+    }
+    missing = [name for name in ("rationale", "expected_effect") if not answer[name]]
+    if missing:
+        raise PatchUnavailable(REASON_INVALID, f"missing fields: {', '.join(missing)}")
+    return diff, answer
+
+
 def _build_candidate(
     answer: Mapping, paths: tuple[str, ...], *, layer: str, base_commit: str
 ) -> CodePatchCandidate:
@@ -1123,7 +1327,12 @@ class PatchGenerator:
         prompt_version: str = PATCH_PROMPT_VERSION,
         timeout_seconds: float = 90.0,
         max_tokens: int = PATCH_MAX_TOKENS,
+        patch_format: str = "diff",
     ) -> None:
+        if patch_format not in PATCH_FORMATS:
+            raise ValueError(f"unknown patch format: {patch_format!r}")
+        #: ``diff`` = 模型直接写 unified diff；``edits`` = 模型给精确替换块，由我们用 difflib 拼 diff。
+        self.patch_format = patch_format
         #: 本次生成实际发生的模型调用次数（含重试），供预算记账。
         self.model_calls = 0
         self._model_call: ModelCall = model_call or _default_model_call(
@@ -1191,7 +1400,7 @@ class PatchGenerator:
         base_commit = _git_head_commit(root)
         messages = _build_messages(
             cluster, normalized, layer, targets, base_commit, self.prompt_version,
-            locate_note=locate_note, repo_root=root,
+            locate_note=locate_note, repo_root=root, patch_format=self.patch_format,
         )
 
         started = time.perf_counter()
@@ -1208,7 +1417,10 @@ class PatchGenerator:
             )
             completion = self._model_call(messages_for_attempt)
             completion_chars = len(completion or "")
-            diff, answer = _parse_answer(completion)
+            if self.patch_format == "edits":
+                diff, answer = _parse_edits(completion, repo_root=root, layer=layer)
+            else:
+                diff, answer = _parse_answer(completion)
             paths = _diff_paths(diff)
             if not paths:
                 raise PatchUnavailable(REASON_INVALID, "diff names no file")
@@ -1260,9 +1472,11 @@ class PatchGenerator:
 __all__ = [
     "MAX_EXCERPT_LINES",
     "MAX_TARGET_FILES",
+    "PATCH_FORMATS",
     "PATCH_MAX_TOKENS",
     "PATCH_PROMPT_VERSION",
     "PATCH_TEMPERATURE",
     "PatchGenerator",
+    "edits_to_diff",
     "PatchUnavailable",
 ]

@@ -293,8 +293,9 @@ def test_prompt_version_is_traceable_on_the_instance_and_in_the_request(tmp_path
 
     # patch-v2：把「测试只进元数据、不进 diff」与「不得新建文件」写死——2026-10-02 实测
     # 同一诊断 3/3 次因 diff 里新建 tests/ 文件被拒。
-    # patch-v4：定位块 + 靶心窗口，并列出**实际存在**的验证测试文件名。
-    assert PATCH_PROMPT_VERSION == "patch-v4"
+    # patch-v5：定位块 + 靶心窗口 + 实际存在的测试文件名，并新增 edits 输出格式
+    #（模型给精确替换块，我们用 difflib 拼 diff ⇒ hunk 头构造上自洽）。
+    assert PATCH_PROMPT_VERSION == "patch-v5"
     assert generator.prompt_version == PATCH_PROMPT_VERSION
     assert PATCH_PROMPT_VERSION in _request_text(fake)
 
@@ -1115,3 +1116,90 @@ def test_a_context_override_widens_the_window_and_says_so(tmp_path):
     assert len(wide[1].splitlines()) == 1600  # 上限即是窗宽（半径 800）
     # 聚焦目标的说明是**窗口**措辞（「仅显示第 A–B 行（共 N 行）」），不是「已截断：仅显示前 N 行」。
     assert "仅显示第" in wide[4] and "共 3000 行" in wide[4]
+
+# ------------------------------------------------------------------
+# edits 格式（patch-v5）：模型给精确替换块，我们用 difflib 拼 diff。
+# ------------------------------------------------------------------
+
+
+def test_structured_edits_assemble_a_diff_that_git_accepts():
+    """核心主张：difflib 拼出来的 diff，hunk 头与上下文**构造上**自洽 ⇒ git 一定认。"""
+    import subprocess
+
+    from rag.evolution.patch_generator import edits_to_diff
+
+    target = REPO_ROOT / "rag" / "reranker.py"
+    first = target.read_text(encoding="utf-8").splitlines()[0]
+
+    diff = edits_to_diff(
+        [{"path": "rag/reranker.py", "old_text": first, "new_text": first + "  # 结构化编辑"}],
+        repo_root=REPO_ROOT,
+        layer="reranking",
+    )
+
+    assert diff.startswith("diff --git a/rag/reranker.py b/rag/reranker.py")
+    assert "@@" in diff
+    check = subprocess.run(
+        ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+        cwd=str(REPO_ROOT),
+        input=diff,
+        capture_output=True,
+        text=True,
+    )
+    assert check.returncode == 0, check.stderr
+
+
+def test_structured_edits_refuse_with_content_free_reasons():
+    from rag.evolution.patch_generator import PatchUnavailable, edits_to_diff
+
+    with pytest.raises(PatchUnavailable) as missing:
+        edits_to_diff(
+            [{"path": "rag/reranker.py", "old_text": "绝不存在的字符串zzz", "new_text": "x"}],
+            repo_root=REPO_ROOT,
+            layer="reranking",
+        )
+    assert missing.value.detail.endswith("old_text not found")
+
+    with pytest.raises(PatchUnavailable) as outside:
+        edits_to_diff(
+            [{"path": "rag/pipeline.py", "old_text": "import", "new_text": "x"}],
+            repo_root=REPO_ROOT,
+            layer="reranking",
+        )
+    assert outside.value.detail.endswith("path outside the layer")
+
+
+def test_structured_edits_reply_becomes_a_candidate(tmp_path):
+    """整条路径：edits 格式的 JSON 回复 ⇒ 我们自己拼 diff ⇒ 过的还是同一个边界。"""
+    import json as _json
+
+    trace, cluster, member = seeded(tmp_path)
+    target = REPO_ROOT / "rag" / "reranker.py"
+    first = target.read_text(encoding="utf-8").splitlines()[0]
+    reply = _json.dumps(
+        {
+            "edits": [
+                {"path": "rag/reranker.py", "old_text": first, "new_text": first + "  # 结构化编辑"}
+            ],
+            "test_paths": [TARGET_TEST],
+            "rationale": "同义对齐",
+            "expected_effect": "Top-5 命中回升",
+            "confidence": "low",
+        },
+        ensure_ascii=False,
+    )
+    fake = FakeModel(reply)
+    generator = PatchGenerator(model_call=fake, patch_format="edits")
+
+    candidate = generator.generate(
+        cluster,
+        [_draft()],
+        layer="reranking",
+        repo_root=REPO_ROOT,
+        observation_id=member["id"],
+        cluster_id=cluster["id"],
+        trace_store=trace,
+    )
+
+    assert candidate.diff.startswith("diff --git a/rag/reranker.py")
+    assert "# 结构化编辑" in candidate.diff

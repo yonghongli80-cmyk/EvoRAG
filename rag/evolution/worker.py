@@ -860,7 +860,8 @@ def make_evolution_patch_step(
                 lambda: PatchGenerator(
                     timeout_seconds=float(
                         getattr(cfg, "evolution_patch_timeout_seconds", 600.0)
-                    )
+                    ),
+                    patch_format=str(getattr(cfg, "evolution_patch_format", "diff") or "diff"),
                 )
             )
         )()

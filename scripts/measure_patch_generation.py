@@ -182,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "label": args.label,
                 "prompt_version": PATCH_PROMPT_VERSION,
+                "patch_format": str(getattr(settings, "evolution_patch_format", "diff") or "diff"),
                 "timeout_seconds": float(
                     getattr(settings, "evolution_patch_timeout_seconds", 600.0)
                 ),
@@ -220,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
 
             generator = PatchGenerator(
                 model_call=model_call,
+                patch_format=str(getattr(settings, "evolution_patch_format", "diff") or "diff"),
                 # 与 worker 同源：用配置里的超时（实测单次 42–350s，默认 90s 会截断慢调用）。
                 timeout_seconds=float(getattr(settings, "evolution_patch_timeout_seconds", 600.0)),
             )
