@@ -997,6 +997,23 @@ def test_a_replay_regression_writes_back_rejected(sandbox_repo: Path, make_runne
     assert "route accuracy dropped 25.0pp" in detail
 
 
+def test_the_metrics_surface_a_verdict_when_there_is_one():
+    """metrics 里的 verdict 是 run_patch_sandbox 已经比好的那份，不该被再比一次而判成"不可用"。"""
+    from rag.evolution.sandbox import sandbox_gate_metrics
+
+    verdict = {"passed": True, "verdict": "passed: route delta +0.0pp"}
+    with_verdict = SandboxReport(applied=True, tests_passed=True, benchmark=verdict)
+
+    metrics = sandbox_gate_metrics(with_verdict)
+
+    assert metrics["verdict"] == verdict
+    assert "verdict_unavailable" not in metrics
+
+    without = sandbox_gate_metrics(SandboxReport(applied=True, tests_passed=True, benchmark=None))
+    assert without["verdict_unavailable"] is True
+    assert "verdict" not in without
+
+
 def test_a_report_is_the_only_thing_the_seam_needs():
     """The write-back works on a hand-built report, so Task 4 can unit-test it."""
     refused = SandboxReport(applied=False, tests_passed=None, error="git apply failed: does_not_apply")
@@ -1384,12 +1401,17 @@ class _RecordingStore:
 
 
 def test_sandbox_metrics_carry_the_side_by_side_numbers():
-    from rag.evolution.sandbox import sandbox_gate_metrics
+    """metrics 里的 verdict 就是生产那份（patch_verdict 的产物），不再被二次比较。"""
+    from rag.evolution.sandbox import patch_verdict, sandbox_gate_metrics
+
+    payload = _benchmark_payload()
+    verdict = patch_verdict(payload, payload)
+    assert verdict is not None
 
     report = SandboxReport(
         applied=True,
         tests_passed=True,
-        benchmark=_benchmark_payload(),
+        benchmark=verdict,
         failed_tests=(),
         error="",
     )
@@ -1398,10 +1420,10 @@ def test_sandbox_metrics_carry_the_side_by_side_numbers():
 
     assert metrics["applied"] is True
     assert metrics["tests_passed"] is True
-    verdict = metrics["verdict"]
-    assert verdict["passed"] is True
-    assert set(verdict["sides"])
-    assert "route_delta_pp" in verdict and "top5_delta_pp" in verdict
+    assert metrics["verdict"] == verdict
+    assert "verdict_unavailable" not in metrics
+    assert set(metrics["verdict"]["sides"])
+    assert "route_delta_pp" in metrics["verdict"] and "top5_delta_pp" in metrics["verdict"]
 
 
 def test_sandbox_metrics_say_when_there_is_no_comparison():
@@ -1424,11 +1446,16 @@ def test_sandbox_metrics_say_when_there_is_no_comparison():
 
 
 def test_record_sandbox_outcome_writes_status_detail_and_numbers():
-    from rag.evolution.sandbox import GATE_NAME, record_sandbox_outcome
+    from rag.evolution.sandbox import GATE_NAME, patch_verdict, record_sandbox_outcome
 
     store = _RecordingStore()
+    payload = _benchmark_payload()
     report = SandboxReport(
-        applied=True, tests_passed=True, benchmark=_benchmark_payload(), failed_tests=(), error=""
+        applied=True,
+        tests_passed=True,
+        benchmark=patch_verdict(payload, payload),
+        failed_tests=(),
+        error="",
     )
 
     record_sandbox_outcome(store, 7, report, actor_id="admin:cli", note="跑过沙箱")

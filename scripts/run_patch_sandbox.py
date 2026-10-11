@@ -10,9 +10,15 @@ metrics through :func:`record_sandbox_outcome`.
     python scripts/run_patch_sandbox.py --candidate-id 3 \
         --data-snapshot D:/tmp/corpus-copy --fixture real-case-handoff/evolab/replay-fixture.json
 
-Without ``--fixture`` the replay runs with the sandbox's normal credential-free environment and
-reports "replay unavailable"; with a fixture it replays the recorded seams, and a patch that
-touches one of those modules is refused as stale rather than measured against the wrong code.
+Without ``--fixture`` the layer-2 replay is **not run at all**, and the gate records the comparison as
+not measured. That is deliberate and was measured: the sandbox strips every ``RAG_*`` setting, so it
+carries no credentials, and a credential-free replay still produces plausible numbers — retrieval runs
+locally, every generation fails and is caught, so ``failed_calls`` stays zero — which is enough for the
+evidence guard to let a comparison through. Two equally broken sides then compare as "no regression", a
+verdict about nothing, rendered in the review panel as a number. With a fixture the replay uses the
+recorded seams (no credentials needed), and a patch that touches one of those modules is refused as
+stale rather than measured against the wrong code. The real layer-2 comparison needs credentials and
+belongs to the administrator, on the host, after applying.
 """
 
 from __future__ import annotations
@@ -95,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     report = run_patch_sandbox(
         candidate,
         repo_root=ROOT,
-        run_benchmark=True,
+        run_benchmark=bool(args.fixture),
         data_snapshot=args.data_snapshot or None,
         replay_user_id=args.user_id,
         replay_fixture=args.fixture or None,

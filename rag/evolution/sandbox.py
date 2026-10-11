@@ -933,6 +933,14 @@ def _execute(
     # (6) The patch's own effect: the same replay, once in a clean worktree at HEAD and
     # once here. The runner's own old/new pair is legacy-versus-Jev, so one report says
     # nothing about the diff; the difference between the two runs does.
+    #
+    # **The supported caller asks for this only when it holds a fixture** (see
+    # ``scripts/run_patch_sandbox.py``). The reason is measured: the sandbox strips every ``RAG_*``
+    # setting, so it carries no credentials, and a credential-free replay still produces plausible
+    # numbers — retrieval runs locally, every generation fails and is caught, so ``failed_calls``
+    # stays zero — which is enough for the evidence guard to let a comparison through. Two equally
+    # broken sides then compare as "no regression", a verdict about nothing, shown as a number.
+    # A fixture replays recorded seams and needs no credentials, so that is the case worth running.
     if run_benchmark and tests_passed is True:
         baseline_worktree = sandbox_root / BASELINE_WORKTREE_DIRNAME
         added_baseline = _run_command(
@@ -1148,12 +1156,16 @@ def sandbox_gate_metrics(report: SandboxReport) -> dict:
         "tests_passed": report.tests_passed,
         "failed_tests": list(report.failed_tests or ()),
     }
-    verdict = patch_verdict(report.benchmark or {}, report.benchmark or {})
+    # ``report.benchmark`` **已经是一份 verdict**（run_patch_sandbox 用 patch_verdict 比过两侧），
+    # 不是原始回放载荷。早先这里又把它当载荷送进 patch_verdict ⇒ 形状不对 ⇒ 永远判 None，
+    # 于是有结论的运行也被标成"没有数字"（实测 2026-10-11：#26/#27 的详情里有完整结论，
+    # metrics 却写着 verdict_unavailable）。判据是 ``passed`` 这个键：patch_verdict 一定会写它，
+    # 而"有报告但不可比"的映射没有它 —— 后者仍要显式标注，别让"没有数字"看起来像"没有变差"。
+    benchmark = report.benchmark
+    verdict = benchmark if isinstance(benchmark, Mapping) and "passed" in benchmark else None
     if verdict is not None:
         metrics["verdict"] = verdict
     else:
-        # 只要**没拿到可比对照**就显式标注（回放根本没跑完也算），
-        # 否则审查台上"没有数字"会看起来像"没有变差"。
         metrics["verdict_unavailable"] = True
     return metrics
 
