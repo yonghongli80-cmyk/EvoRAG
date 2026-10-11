@@ -510,7 +510,9 @@ def test_a_diff_that_does_not_apply_is_refused_without_touching_the_tree(
 
 
 def test_a_dirty_main_tree_refuses_to_run(sandbox_repo: Path):
-    (sandbox_repo / "uncommitted_probe.txt").write_text("dirty\n", encoding="utf-8")
+    """已跟踪文件被改动 ⇒ 拒绝（此时"被测的代码"与操作者以为看到的不一致）。"""
+    target = sandbox_repo / PROBE_TARGET
+    target.write_text(target.read_text(encoding="utf-8") + "# 未提交的追踪改动\n", encoding="utf-8")
     before = worktree_list(sandbox_repo)
 
     report = run_patch_sandbox(
@@ -525,11 +527,30 @@ def test_a_dirty_main_tree_refuses_to_run(sandbox_repo: Path):
     assert worktree_list(sandbox_repo) == before
 
 
+def test_an_untracked_file_does_not_refuse_the_run(sandbox_repo: Path):
+    """未跟踪文件不该挡住沙箱：worktree 由 HEAD 检出，未进任何提交的文件到不了那里。
+
+    实测动机：三份别的工具写下的文档以未跟踪状态躺在仓库里，结果每一次沙箱运行都被判成
+    "main tree dirty" 而拒绝 —— 一个与测量无关的文件，挡住了整条验证路径。
+    """
+    (sandbox_repo / "scratch-note.txt").write_text("not committed\n", encoding="utf-8")
+    (sandbox_repo / "docs").mkdir(exist_ok=True)
+    (sandbox_repo / "docs" / "another-tool.md").write_text("untracked\n", encoding="utf-8")
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=False
+    )
+
+    assert report.error != "main tree dirty", "未跟踪文件不应触发拒跑"
+    assert report.applied is True
+    assert report.tests_passed is True
+
+
 def test_a_dirty_main_tree_refuses_before_any_worktree_is_created(
     sandbox_repo: Path, make_runner
 ):
     """A refusal is a refusal: the seam never saw a ``worktree add``."""
-    runner = make_runner(status_stdout="?? uncommitted_probe.txt\n")
+    runner = make_runner(status_stdout=" M rag/reranker.py\n")
 
     report = run_patch_sandbox(
         make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=False
@@ -538,7 +559,9 @@ def test_a_dirty_main_tree_refuses_before_any_worktree_is_created(
     assert report.error == "main tree dirty"
     # No worktree was ever added; the release step is a no-op either way.
     assert [call.command[2] for call in runner.of("worktree")] == ["remove", "prune"]
-    assert [call.command for call in runner.of("status")] == [("git", "status", "--porcelain")]
+    assert [call.command for call in runner.of("status")] == [
+        ("git", "status", "--porcelain", "--untracked-files=no")
+    ]
 
 
 def test_an_out_of_boundary_candidate_never_reaches_git(sandbox_repo: Path, make_runner):
@@ -976,8 +999,48 @@ def test_a_replay_regression_writes_back_rejected(sandbox_repo: Path, make_runne
 
 def test_a_report_is_the_only_thing_the_seam_needs():
     """The write-back works on a hand-built report, so Task 4 can unit-test it."""
-    refused = SandboxReport(applied=False, tests_passed=None, error="main tree dirty")
-    assert sandbox_gate_outcome(refused) == ("rejected", "sandbox refused the patch: main tree dirty")
+    refused = SandboxReport(applied=False, tests_passed=None, error="git apply failed: does_not_apply")
+    assert sandbox_gate_outcome(refused) == (
+        "rejected",
+        "sandbox refused the patch: git apply failed: does_not_apply",
+    )
+
+
+def test_an_environmental_refusal_writes_no_status():
+    """环境问题不许移动候选：它能到达的状态全是终态，写下去就让"主树脏"吃掉一条候选。
+
+    实测（2026-10-11）：三份别的工具留下的未跟踪文档让每次运行都判"主树脏"，
+    候选 #26 被一次**什么都没应用**的运行写成了 rejected。
+    """
+    dirty = SandboxReport(applied=False, tests_passed=None, error="main tree dirty", environment=True)
+    assert sandbox_gate_outcome(dirty) is None
+
+    status_failed = SandboxReport(
+        applied=False, tests_passed=None, error="git status failed: exit_128", environment=True
+    )
+    assert sandbox_gate_outcome(status_failed) is None
+
+    timed_out = SandboxReport(
+        applied=False, tests_passed=None, error="git apply failed: timeout_after_60s", environment=True
+    )
+    assert sandbox_gate_outcome(timed_out) is None
+
+
+def test_the_write_back_refuses_an_environmental_report():
+    """写回函数在环境类报告上也必须拒绝写入，并说清为什么。"""
+    from rag.evolution.sandbox import record_sandbox_outcome
+
+    store = _RecordingStore()
+    report = SandboxReport(
+        applied=False, tests_passed=None, error="main tree dirty", environment=True
+    )
+
+    with pytest.raises(ValueError) as refused:
+        record_sandbox_outcome(store, 7, report, actor_id="admin:cli")
+
+    assert "could not run" in str(refused.value)
+    assert "状态保持不变" in str(refused.value)
+    assert store.calls == [], "环境问题不许写任何状态"
 
 
 # ------------------------------------------------------------------

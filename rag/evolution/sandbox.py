@@ -246,6 +246,11 @@ class SandboxReport:
     benchmark: dict | None = None
     duration_s: float = 0.0
     error: str = ""
+    #: 这次运行**根本没跑起来**，且原因与候选无关（主树脏、git 问不动、worktree 建不出来、超时）。
+    #: 这种报告不许移动候选：它能到达的状态（``blocked`` / ``needs_more_evidence`` / ``rejected``）
+    #: 全是终态，于是一个环境问题就会**吃掉一条候选** —— 实测（2026-10-11）：三份别的工具留下的
+    #: 未跟踪文档让每次运行都判"主树脏"，候选 #26 被一次什么都没应用的运行写成了 rejected。
+    environment: bool = False
 
     def to_dict(self) -> dict:
         """The JSON-safe form a gate log, an audit note or an API stores."""
@@ -256,6 +261,7 @@ class SandboxReport:
             "benchmark": self.benchmark,
             "duration_s": self.duration_s,
             "error": self.error,
+            "environment": self.environment,
         }
 
 
@@ -844,6 +850,7 @@ def _execute(
         failed_tests: Sequence[str] = (),
         benchmark: dict | None = None,
         error: str = "",
+        environment: bool = False,
     ) -> SandboxReport:
         return SandboxReport(
             applied=applied,
@@ -852,6 +859,7 @@ def _execute(
             benchmark=benchmark,
             duration_s=round(time.perf_counter() - started, 3),
             error=error,
+            environment=environment,
         )
 
     env = _sandbox_env(worktree)
@@ -863,17 +871,28 @@ def _execute(
         return report(applied=False, tests_passed=None, error=f"boundary: {boundary_error}")
 
     # (2) The main working tree must be clean, or the run is refused outright.
+    #
+    # Untracked files are deliberately excluded from that judgement. The worktree below is created
+    # detached at HEAD, so a file that exists in no commit cannot reach it and cannot change what is
+    # measured; meanwhile a scratch file, an export or a document dropped in the tree would otherwise
+    # refuse every sandbox run, which is what happened when three documents written by another tool
+    # sat untracked in this repository. A *tracked* modification still refuses: then the code being
+    # measured stops matching what the operator believes they are looking at.
     status = _run_command(
-        ("git", "status", "--porcelain"), cwd=root, env=env, timeout=GIT_STATUS_TIMEOUT_S
+        ("git", "status", "--porcelain", "--untracked-files=no"),
+        cwd=root,
+        env=env,
+        timeout=GIT_STATUS_TIMEOUT_S,
     )
     if not status.ok:
         return report(
             applied=False,
             tests_passed=None,
             error=f"git status failed: {_failure_kind(status, GIT_STATUS_TIMEOUT_S)}",
+            environment=True,
         )
     if status.stdout.strip():
-        return report(applied=False, tests_passed=None, error="main tree dirty")
+        return report(applied=False, tests_passed=None, error="main tree dirty", environment=True)
 
     # (3) A second working tree, detached at HEAD, inside the sandbox root.
     if not _is_within(worktree, sandbox_root):
@@ -889,6 +908,7 @@ def _execute(
             applied=False,
             tests_passed=None,
             error=f"worktree add failed: {_failure_kind(added, WORKTREE_TIMEOUT_S)}",
+            environment=True,
         )
 
     # (4) The patch lands in the worktree — never in the main tree.
@@ -896,10 +916,13 @@ def _execute(
         _GIT_APPLY_COMMAND, cwd=worktree, env=env, timeout=GIT_APPLY_TIMEOUT_S, stdin_text=candidate.diff
     )
     if not patched.ok:
+        kind = _failure_kind(patched, GIT_APPLY_TIMEOUT_S)
+        # `does_not_apply` 是候选的问题；**超时**不是 —— 那是"没能来得及应用"，不是"应用不了"。
         return report(
             applied=False,
             tests_passed=None,
-            error=f"git apply failed: {_failure_kind(patched, GIT_APPLY_TIMEOUT_S)}",
+            error=f"git apply failed: {kind}",
+            environment=kind.startswith("timeout"),
         )
 
     # (5) The candidate's own verification tests, inside the worktree.
@@ -1150,7 +1173,14 @@ def record_sandbox_outcome(
     Callers are administrator-facing runners, never the worker — a sandbox needs a clean main tree
     and isolates itself in worktrees, which is not something a background round should start.
     """
-    status, detail = sandbox_gate_outcome(report)
+    outcome = sandbox_gate_outcome(report)
+    if outcome is None:
+        # 环境问题不写状态：写下去只会把候选推到一个终态上，那等于让"主树脏"吃掉一条候选。
+        raise ValueError(
+            f"sandbox could not run: {report.error}"
+            "（环境问题，不是候选的问题 ⇒ 候选状态保持不变，修好后重跑）"
+        )
+    status, detail = outcome
     return store.advance_candidate(
         int(candidate_id),
         status,
@@ -1162,15 +1192,22 @@ def record_sandbox_outcome(
     )
 
 
-def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str]:
-    """``(status, gate_detail)`` for the write-back a caller makes after a run.
+def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str] | None:
+    """``(status, gate_detail)`` for the write-back a caller makes after a run — or ``None``.
+
+    ``None`` 表示**这次运行没有说明关于该候选的任何事，因此不许写状态**：它根本没跑起来
+    （主树脏、git 问不动、worktree 建不出来、超时）。它能到达的状态全是终态（``rejected``、
+    ``blocked``、``needs_more_evidence``），写下去就等于让一个环境问题**吃掉一条候选**。
+    调用方应当把原因报给人，并把那一行原样留在原状态。
 
     The caller writes::
 
-        status, detail = sandbox_gate_outcome(report)
-        store.advance_candidate(
-            candidate_id, status, actor_id=..., note=..., gate="sandbox", gate_detail=detail
-        )
+        outcome = sandbox_gate_outcome(report)
+        if outcome is not None:
+            status, detail = outcome
+            store.advance_candidate(
+                candidate_id, status, actor_id=..., note=..., gate="sandbox", gate_detail=detail
+            )
 
     ``awaiting_verification`` means nothing in the plan's veto list failed: the
     diff applied, the target tests passed, and the replay either passed or could
@@ -1181,6 +1218,8 @@ def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str]:
     a layer-2 timeout.
     """
     if not report.applied:
+        if report.environment:
+            return None
         return EvolutionStatus.REJECTED.value, f"sandbox refused the patch: {report.error}"
     if report.tests_passed is False:
         failing = ", ".join(report.failed_tests) or report.error
