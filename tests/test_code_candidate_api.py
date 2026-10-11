@@ -680,13 +680,39 @@ def test_an_observation_that_already_has_a_patch_leaves_the_queue(
 # ------------------------------------------------------------------
 
 
+def _head_text(path: Path) -> str:
+    """``path`` 在 HEAD 里的内容（git 不可用时退回工作树）。
+
+    与 :func:`_real_comment_diff` 同源：这条测试整体是拿"HEAD 检出的 worktree"做验证的，
+    所以前像与比对基准都必须是 HEAD 的内容。否则只要工作树里有未提交的候选补丁，
+    断言就会拿工作树去比 HEAD，进而失败（实测 #20 应用后就是如此）。
+    """
+    relative = path.relative_to(REPO_ROOT).as_posix()
+    head = subprocess.run(
+        ["git", "show", f"HEAD:{relative}"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+    return head.stdout if head.returncode == 0 else path.read_text(encoding="utf-8")
+
+
 def _real_comment_diff(path: Path) -> str:
-    """A diff that really applies to ``path`` at HEAD (git's own unified format)."""
+    """A diff that really applies to ``path`` at HEAD (git's own unified format).
+
+    前像取自 **HEAD**，不取工作树：这条测试把补丁应用到一个 "从 HEAD 检出" 的 worktree，
+    而"一键应用"会在**候选补丁已应用但未提交**的状态下跑全量套件 —— 也就是说执行到这条测试时，
+    工作树与 HEAD 本来就可能不一致。原先读工作树，等于让这条测试对 `rag/reranker.py` 的任何
+    未提交改动都过敏：实测 #20（+5 行净增）应用后，这条测试挂在 `patch failed: rag/reranker.py:82`，
+    而闸会因此回滚补丁 —— 结果是**任何 reranking 候选都永远过不了应用闸**。
+    """
     import difflib
 
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    edited = [*lines, "# evolution candidate: tightened filename collision penalty\n"]
     relative = path.relative_to(REPO_ROOT).as_posix()
+    lines = _head_text(path).splitlines(keepends=True)
+    edited = [*lines, "# evolution candidate: tightened filename collision penalty\n"]
     return "".join(difflib.unified_diff(lines, edited, fromfile=f"a/{relative}", tofile=f"b/{relative}"))
 
 
@@ -702,7 +728,7 @@ def test_the_exported_patch_carries_a_revert_command_that_really_reverses_it(
     import json
 
     real_diff = _real_comment_diff(TARGET_FILE)
-    target_text = TARGET_FILE.read_text(encoding="utf-8")
+    target_text = _head_text(TARGET_FILE)
     before = _worktree_state()
     store = _store()
     try:
