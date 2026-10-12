@@ -552,3 +552,43 @@ export async function applyCodePatch(
   )
   return res.data
 }
+
+/**
+ * Regenerate a patch from the cluster a rolled-back patch came from.
+ *
+ * `rolled_back` is terminal — the interface cannot move it back to an applicable state — so the
+ * way to try the same change again is a **new** candidate for the same cluster, which then walks
+ * the ordinary path (sandbox → review → approval → apply). The backend refuses while the cluster
+ * already carries another open patch, and refuses when the newest diagnosis draft no longer
+ * agrees with the confirmed layer.
+ */
+export async function regenerateCodePatch(
+  candidateId: number,
+  note = ''
+): Promise<EvolutionCodePatchDetail> {
+  const res = await api.post(
+    `/knowledge-operations/evolution/code-candidates/${candidateId}/regenerate`,
+    { note }
+  )
+  return res.data
+}
+
+/**
+ * Close a patch row out as merged: the change reached the code through a **commit**, not through
+ * apply (an operator merged it by hand).
+ *
+ * The backend refuses unless the patch is present in the tree **and** the paths it touches are
+ * clean relative to HEAD, so this cannot turn "not shipped" into "accepted". `mergedCommit` is
+ * optional: when omitted, the backend names the last commit that touched those paths.
+ */
+export async function closeOutMergedCodePatch(
+  candidateId: number,
+  note = '',
+  mergedCommit = ''
+): Promise<EvolutionCodePatchDetail> {
+  const res = await api.post(
+    `/knowledge-operations/evolution/code-candidates/${candidateId}/decision`,
+    { action: 'close_out_merged', note, merged_commit: mergedCommit }
+  )
+  return res.data
+}

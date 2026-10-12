@@ -9,16 +9,20 @@ vi.mock('../../api/evolution', () => ({
   fetchGapTickets: vi.fn(),
   fetchCodePatches: vi.fn(),
   fetchCodePatch: vi.fn(),
+  regenerateCodePatch: vi.fn(),
+  closeOutMergedCodePatch: vi.fn(),
 }))
 
 import {
+  closeOutMergedCodePatch,
   fetchCodePatch,
   fetchCodePatches,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
   fetchEvolutionObservations,
   fetchEvolutionStateMachine,
-  fetchGapTickets
+  fetchGapTickets,
+  regenerateCodePatch
 } from '../../api/evolution'
 import EvolutionCenterView from '../EvolutionCenterView.vue'
 
@@ -346,5 +350,145 @@ describe('EvolutionCenterView', () => {
     expect(wrapper.get('[data-test="copy-hint"]').text()).toContain('已复制')
   })
 
+  it('offers regeneration only on a rolled-back patch, and opens the new candidate', async () => {
+    const rolledBackPatch = {
+      id: 26,
+      observation_id: 135,
+      cluster_id: 30,
+      artifact_type: 'code_patch',
+      layer: 'code',
+      paths: ['rag/prompt_manager.py'],
+      test_paths: ['tests/test_prompt_manager.py'],
+      status: 'rolled_back',
+      pool: 'candidate_pool',
+      confidence: 'low',
+      prompt_version: 'patch-v5',
+      model: 'scripted',
+      rationale: '理由',
+      expected_effect: '效果',
+      rollback_ref: { base_commit: 'b'.repeat(40) },
+      sandbox_summary: [],
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000
+    }
+    vi.mocked(fetchCodePatches).mockResolvedValue({
+      items: [rolledBackPatch], total: 1, page: 1, page_size: 20
+    })
+    vi.mocked(fetchCodePatch).mockImplementation(async (id: number) => ({
+      ...rolledBackPatch,
+      id,
+      // 重新生成出来的那条是 candidate_testing；详情端点读的就是它
+      status: id === 31 ? 'candidate_testing' : 'rolled_back',
+      diff: 'diff --git a/rag/prompt_manager.py b/rag/prompt_manager.py',
+      gate_log: [],
+      audit: [],
+      apply_command: `git -C /repo apply artifacts/patches/candidate-${id}.patch`,
+      revert_command: `git -C /repo apply -R artifacts/patches/candidate-${id}.patch`,
+      export_path: `/repo/artifacts/patches/candidate-${id}.patch`,
+      exported: false
+    }))
+    vi.mocked(regenerateCodePatch).mockResolvedValue({
+      ...rolledBackPatch,
+      id: 31,
+      observation_id: 135,
+      status: 'candidate_testing',
+      diff: 'diff --git a/rag/prompt_manager.py b/rag/prompt_manager.py',
+      gate_log: [],
+      audit: [],
+      apply_command: 'git -C /repo apply artifacts/patches/candidate-31.patch',
+      revert_command: 'git -C /repo apply -R artifacts/patches/candidate-31.patch',
+      export_path: '/repo/artifacts/patches/candidate-31.patch',
+      exported: false
+    })
 
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    // 回滚是终态：应用按钮不可用，重新生成按钮可用
+    expect(
+      wrapper.get('[data-test="code-candidate-apply"]').attributes('disabled')
+    ).toBeDefined()
+    const regenerate = wrapper.get('[data-test="code-candidate-regenerate"]')
+    expect(regenerate.attributes('disabled')).toBeUndefined()
+
+    await regenerate.trigger('click')
+    await flushPromises()
+
+    expect(regenerateCodePatch).toHaveBeenCalledWith(26, '')
+    // 新候选成为当前选中项（管理员接着审这一条），而它又回到"不可重新生成"的状态
+    expect(wrapper.get('[data-test="code-candidate-detail"]').text()).toContain('补丁 #31')
+    expect(
+      wrapper.get('[data-test="code-candidate-regenerate"]').attributes('disabled')
+    ).toBeDefined()
+  })
+
+  it('offers "已合入结案" only on an applied patch and shows the settled status', async () => {
+    const appliedPatch = {
+      id: 10,
+      observation_id: null,
+      cluster_id: 30,
+      artifact_type: 'code_patch',
+      layer: 'code',
+      paths: ['rag/agent.py'],
+      test_paths: ['tests/test_agent.py'],
+      status: 'approved_for_canary',
+      pool: 'candidate_pool',
+      confidence: 'low',
+      prompt_version: 'patch-v3',
+      model: 'scripted',
+      rationale: '理由',
+      expected_effect: '效果',
+      rollback_ref: { base_commit: 'c'.repeat(40) },
+      sandbox_summary: [],
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000
+    }
+    vi.mocked(fetchCodePatches).mockResolvedValue({
+      items: [appliedPatch], total: 1, page: 1, page_size: 20
+    })
+    vi.mocked(fetchCodePatch).mockResolvedValue({
+      ...appliedPatch,
+      diff: 'diff --git a/rag/agent.py b/rag/agent.py',
+      gate_log: [],
+      audit: [],
+      apply_command: 'git -C /repo apply artifacts/patches/candidate-10.patch',
+      revert_command: 'git -C /repo apply -R artifacts/patches/candidate-10.patch',
+      export_path: '/repo/artifacts/patches/candidate-10.patch',
+      exported: true
+    })
+    vi.mocked(closeOutMergedCodePatch).mockResolvedValue({
+      ...appliedPatch,
+      status: 'stable',
+      diff: 'diff --git a/rag/agent.py b/rag/agent.py',
+      gate_log: [],
+      audit: [],
+      apply_command: '',
+      revert_command: '',
+      export_path: '',
+      exported: false
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    const closeOut = wrapper.get('[data-test="code-candidate-close-merged"]')
+    expect(closeOut.attributes('disabled')).toBeUndefined()
+
+    await closeOut.trigger('click')
+    await flushPromises()
+
+    expect(closeOutMergedCodePatch).toHaveBeenCalledWith(10, '')
+    // 结案是终态：按钮随之不可用（状态已不是 approved_for_canary / canary）
+    expect(
+      wrapper.get('[data-test="code-candidate-close-merged"]').attributes('disabled')
+    ).toBeDefined()
+  })
 })

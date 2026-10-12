@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   applyCodePatch,
+  closeOutMergedCodePatch,
   fetchDiagnosis,
+  regenerateCodePatch,
   submitDecision,
   fetchEvolutionCluster,
   fetchEvolutionClusters,
@@ -159,5 +161,36 @@ describe('applyCodePatch', () => {
     )
     expect(result.applied).toBe(true)
     expect(result.steps.import_smoke).toBe(true)
+  })
+})
+
+describe('regenerateCodePatch', () => {
+  it('posts to the regenerate endpoint and returns the new candidate', async () => {
+    vi.mocked(api.post).mockResolvedValue({
+      data: { id: 31, status: 'candidate_testing', cluster_id: 30, diff: 'diff --git a/x b/x' }
+    } as any)
+
+    const result = await regenerateCodePatch(26, '回滚后重生成')
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/knowledge-operations/evolution/code-candidates/26/regenerate',
+      { note: '回滚后重生成' }
+    )
+    expect(result.id).toBe(31)
+    expect(result.status).toBe('candidate_testing')
+  })
+})
+
+describe('closeOutMergedCodePatch', () => {
+  it('posts the close-out decision and returns the settled row', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { id: 10, status: 'stable' } } as any)
+
+    const result = await closeOutMergedCodePatch(10, '人手合进提交了', 'bcb645a')
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/knowledge-operations/evolution/code-candidates/10/decision',
+      { action: 'close_out_merged', note: '人手合进提交了', merged_commit: 'bcb645a' }
+    )
+    expect(result.status).toBe('stable')
   })
 })

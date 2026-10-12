@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
+  closeOutMergedCodePatch,
   fetchCandidate,
   fetchCandidates,
   applyCodePatch,
@@ -13,6 +14,7 @@ import {
   fetchEvolutionObservations,
   fetchEvolutionStateMachine,
   fetchGapTickets,
+  regenerateCodePatch,
   rollbackCandidate,
   submitCanary,
   submitCodePatchDecision,
@@ -300,6 +302,72 @@ async function runApply() {
 const codePatchDecidable = computed(
   () => selectedCodePatch.value?.status === 'awaiting_verification'
 )
+
+/**
+ * "已合入结案"只对**已经走到上线那一步**的补丁有意义（approved_for_canary / canary）。
+ *
+ * 它处理的是 2026-10-12 演练发现的那类陈旧行：改动早就随提交落地，候选行却停在
+ * approved_for_canary，作为"未决补丁"一直占着聚类的准入名额。
+ */
+const codePatchClosable = computed(() =>
+  ['approved_for_canary', 'canary'].includes(selectedCodePatch.value?.status || '')
+)
+
+async function runCloseOutMerged() {
+  if (!selectedCodePatch.value || codePatchActing.value) return
+  codePatchActing.value = true
+  try {
+    const updated = await closeOutMergedCodePatch(selectedCodePatch.value.id, codePatchNote.value)
+    selectedCodePatch.value = updated
+    decisionHint.value = `已结案为 ${updated.status}（改动已随提交落地）`
+    error.value = ''
+    codePatchNote.value = ''
+    await loadCodePatches()
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '结案失败'
+  } finally {
+    codePatchActing.value = false
+  }
+}
+
+/**
+ * 回滚后从同一聚类重新生成一条候选。
+ *
+ * 回滚把状态写成终态 `rolled_back`，接口层面无法再应用；这条路径产出一条**新**候选回到
+ * `candidate_testing`，重新走沙箱 → 审核 → 批准 → 应用，因此它是"再试一次"的正道，
+ * 而不是绕过状态机的复活。
+ */
+const codePatchRegenerable = computed(
+  () => selectedCodePatch.value?.status === 'rolled_back'
+)
+
+async function runRegenerate() {
+  if (!selectedCodePatch.value || codePatchActing.value) return
+  const source = selectedCodePatch.value
+  codePatchActing.value = true
+  try {
+    const created = await regenerateCodePatch(source.id, codePatchNote.value)
+    decisionHint.value =
+      `已从同一聚类重新生成候选 #${created.id}（状态 ${created.status}）` +
+      `：它需要重新走沙箱与审核，批准后才会进入应用`
+    error.value = ''
+    codePatchNote.value = ''
+    await loadCodePatches()
+    await openCodePatch(created)
+  } catch (err: any) {
+    if (isForbidden(err)) {
+      forbidden.value = true
+      return
+    }
+    error.value = err?.response?.data?.detail || '重新生成失败'
+  } finally {
+    codePatchActing.value = false
+  }
+}
 
 async function decide(action: EvolutionDecisionAction) {
   if (!selectedCluster.value || deciding.value) return
@@ -957,46 +1025,6 @@ onMounted(async () => {
         </div>
 
 
-        <div class="apply-bar" data-test="code-candidate-apply-bar">
-
-
-          <button
-
-
-            type="button"
-
-
-            class="query-button"
-
-
-            data-test="code-candidate-apply"
-
-
-            :disabled="codePatchActing || selectedCodePatch?.status !== 'approved_for_canary'"
-
-
-            @click="runApply"
-
-
-          >
-
-
-            应用并重启（先跑前置检查；失败会回滚且不重启）
-
-
-          </button>
-
-
-          <span class="cluster-meta">
-
-
-            只有「已批准（approved_for_canary）」的补丁可用；已应用的补丁再点即为"校验 + 重启"。
-
-
-          </span>
-
-
-        </div>
 
 
 
@@ -1496,6 +1524,83 @@ onMounted(async () => {
             </li>
           </ul>
           <p v-else class="muted">暂无审计记录</p>
+          <div class="apply-bar" data-test="code-candidate-apply-bar">
+
+
+          <button
+
+
+            type="button"
+
+
+            class="query-button"
+
+
+            data-test="code-candidate-apply"
+
+
+            :disabled="codePatchActing || selectedCodePatch?.status !== 'approved_for_canary'"
+
+
+            @click="runApply"
+
+
+          >
+
+
+            应用并重启（先跑前置检查；失败会回滚且不重启）
+
+
+          </button>
+
+
+          <span class="cluster-meta">
+
+
+            只有「已批准（approved_for_canary）」的补丁可用；已应用的补丁再点即为"校验 + 重启"。
+
+
+          </span>
+
+
+          <button
+
+
+            type="button"
+
+
+            class="query-button"
+
+
+            data-test="code-candidate-regenerate"
+
+
+            :disabled="codePatchActing || !codePatchRegenerable"
+
+
+            @click="runRegenerate"
+
+
+          >
+
+
+            回滚后重新生成（同一聚类产出一条新候选，重新走沙箱与审核）
+
+
+          </button>
+
+
+          <span class="cluster-meta">
+
+
+            回滚是终态：这条路径不回滚状态机，而是让同一聚类的**新**候选重新走一遍五层门禁。
+
+
+          </span>
+
+
+          </div>
+
 
           <div class="decision-bar">
             <textarea
@@ -1534,7 +1639,20 @@ onMounted(async () => {
               >
                 需修订
               </button>
+              <button
+                type="button"
+                class="decision-button"
+                data-test="code-candidate-close-merged"
+                :disabled="codePatchActing || !codePatchClosable"
+                @click="runCloseOutMerged"
+              >
+                已合入：结案
+              </button>
             </div>
+            <span class="cluster-meta">
+              「结案」用于**人已经把改动合进提交**的情形（不经 apply）；后端会核对改动确实在代码里、
+              且那些文件相对 HEAD 干净，否则拒绝。
+            </span>
           </div>
         </template>
       </div>
