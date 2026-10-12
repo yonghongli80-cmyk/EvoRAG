@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from rag.auth import create_token
 from rag.evolution import api as evolution_api
+from rag.evolution.candidate_store import CandidateStore
 from rag.evolution.models import (
     EVOLUTION_TRANSITIONS,
     DiagnosisDraft,
@@ -872,7 +873,9 @@ def test_confirming_a_layer_needs_a_layer_and_a_reviewable_cluster(
 # ------------------------------------------------------------------
 
 
-def _seed_code_patch_candidate(store) -> int:
+def _seed_code_patch_candidate(
+    store, *, marker: str = "审查台测试用的注释行", observation_id: int | None = None
+) -> int:
     """一份最小但合法的代码补丁候选（diff/测试路径/base_commit 都过边界校验）。"""
     import subprocess
     from pathlib import Path
@@ -892,7 +895,7 @@ def _seed_code_patch_candidate(store) -> int:
         "+++ b/rag/pipeline.py\n"
         "@@ -1,3 +1,4 @@\n"
         " import asyncio\n"
-        "+# 审查台测试用的注释行\n"
+        f"+# {marker}\n"
         " import json\n"
         " import logging\n"
     )
@@ -908,7 +911,7 @@ def _seed_code_patch_candidate(store) -> int:
         confidence="low",
     )
     return CandidateStore(store).add_candidate(
-        None, 1, candidate, prompt_version="patch-v3", model="scripted"
+        observation_id, 1, candidate, prompt_version="patch-v3", model="scripted"
     )
 
 
@@ -1102,7 +1105,6 @@ def test_apply_restarts_only_after_every_guard_passes(
     response = evolution_client.post(
         f"{PREFIX}/code-candidates/{candidate_id}/apply", headers=admin_headers, json={"restart": True}
     )
-
     assert response.status_code == 200
     body = response.json()
     assert body["applied"] is True and body["applied_now"] is True
@@ -1112,6 +1114,135 @@ def test_apply_restarts_only_after_every_guard_passes(
     assert int(calls["spawn_kwargs"]["service_pid"]) > 0
     assert calls["spawn_kwargs"]["test_scope"] in {"full", "target"}
     assert "--3way" not in body["apply_command"]
+    # **状态要跟着事实走**：补丁现在确实在运行代码里 ⇒ 状态是 canary（在观察），
+    # 而不是继续显示 approved_for_canary。2026-10-12 演练发现：apply 此前不写这一步，
+    # 于是"已应用"只活在工作树与 service-control.log 里，队列上分不清哪些行已落地。
+    assert body["steps"]["status_after_apply"] == "canary"
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "canary"
+    store.close()
+
+
+def test_apply_leaves_an_already_canary_patch_where_it_is(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """已应用的补丁再点一次是"校验 + 重启"：状态已是 canary 就不再写一次转移（幂等）。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    from rag.evolution.candidate_store import CandidateStore
+
+    CandidateStore(store).advance_candidate(candidate_id, "canary", actor_id="test", note="seed")
+    _fake_control(monkeypatch)
+    before = len(CandidateStore(store).list_audit(candidate_id))
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply", headers=admin_headers, json={"restart": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["steps"]["status_after_apply"] == "canary"
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "canary"
+    assert len(CandidateStore(store).list_audit(candidate_id)) == before, "状态没变就不该多写审计"
+    store.close()
+
+
+# ------------------------------------------------------------------
+# 合入之后关闭候选行：人手合进提交的那条路（#10 占了聚类准入名额两周）。
+# ------------------------------------------------------------------
+
+
+def _fake_committed(monkeypatch, *, state="applied", committed=True):
+    """把"补丁在代码里、且这些路径相对 HEAD 干净"这套判据换成替身（测试不动真树）。"""
+    import rag.evolution.service_control as control
+
+    monkeypatch.setattr(control, "patch_state", lambda *a, **k: state)
+    monkeypatch.setattr(control, "patch_paths", lambda diff: ("rag/pipeline.py",))
+    monkeypatch.setattr(control, "patch_is_committed", lambda *a, **k: committed)
+
+
+def test_close_out_merged_records_the_commit_and_releases_the_cluster(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """改动已随提交落地 ⇒ 结案为 stable（终态），备注里点名那次提交，聚类随之释放。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_committed(monkeypatch)
+    monkeypatch.setattr(evolution_api, "_git_last_commit_for", lambda paths: "abc1234")
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/decision",
+        headers=admin_headers,
+        json={"action": "close_out_merged", "note": "人手合进提交了", "merged_commit": "abc1234"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "stable"
+    audit = body["audit"][-1]
+    assert audit["action"] == "accept"
+    assert "abc1234" in audit["note"] and "人手合进提交了" in audit["note"]
+    # stable 是终态 ⇒ 这一行的"未决"身份没了，聚类重新可生成。
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "stable"
+    store.close()
+
+
+def test_close_out_merged_refuses_when_the_change_is_only_in_the_working_tree(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """改动还在工作树里（没进提交）⇒ 拒绝结案：`git apply -R` 会留下"某次提交的逆"那种状态。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_committed(monkeypatch, committed=False)
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/decision",
+        headers=admin_headers,
+        json={"action": "close_out_merged", "note": "先结案再说"},
+    )
+
+    assert response.status_code == 409
+    assert "没有进入任何提交" in response.json()["detail"]
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "approved_for_canary", "拒绝不得改状态"
+    store.close()
+
+
+def test_close_out_merged_refuses_when_the_change_is_not_in_the_code(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """改动根本不在代码里 ⇒ 拒绝：不能把"没上线"写成"已接受"。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_committed(monkeypatch, state="not_applied")
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/decision",
+        headers=admin_headers,
+        json={"action": "close_out_merged", "note": "结案"},
+    )
+
+    assert response.status_code == 409
+    assert "并不在当前代码里" in response.json()["detail"]
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "approved_for_canary"
+    store.close()
+
+
+def test_close_out_merged_is_not_allowed_before_approval(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """未批准的候选不能结案（转移表不允许）—— 结案是"已经走到上线那一步"的收尾。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)  # candidate_testing
+    _fake_committed(monkeypatch)
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/decision",
+        headers=admin_headers,
+        json={"action": "close_out_merged", "note": "结案"},
+    )
+
+    assert response.status_code == 409
+    assert "不允许" in response.json()["detail"]
     store.close()
 
 # ------------------------------------------------------------------
@@ -1191,4 +1322,289 @@ def test_rollback_reverts_restarts_and_records_the_status(
     assert calls["restart"] == 1
     # 助手必须知道这是"回滚"，失败时才应当把补丁**重新应用**而不是再反向一次。
     assert calls["spawn_kwargs"]["direction"] == "revert"
+    store.close()
+
+
+# ------------------------------------------------------------------
+# 回滚之后从同一聚类重新生成（14.3 缺口二：rolled_back 是终态，接口层面没法再应用）。
+# 修法 ①：不回滚状态机，改从聚类产出一条**新**候选，让它重新走一遍原有路径。
+# ------------------------------------------------------------------
+
+
+def _rolled_back_patch(store, cluster_id: int, member_id: int, *, marker: str = "旧补丁") -> int:
+    """把一份种子补丁推进到终态 ``rolled_back``（回滚后重新生成的唯一合法前态）。
+
+    同时把聚类推进到"已批准生成候选"并写下一条层级一致的成员草案——这正是回滚之后
+    聚类所处的状态（回滚只动候选，不动聚类）。
+    """
+    import time
+
+    from rag.evolution.candidate_store import CandidateStore
+
+    candidate_id = _seed_code_patch_candidate(store, marker=marker, observation_id=member_id)
+    candidates = CandidateStore(store)
+    for status in ("awaiting_verification", "approved_for_canary", "canary", "rolled_back"):
+        candidates.advance_candidate(candidate_id, status, actor_id="test", note="seed")
+    store.decide_cluster(
+        cluster_id,
+        new_status="approved_for_candidate",
+        pool="candidate_pool",
+        member_status="clustered",
+        now=time.time(),
+        confirmed_layer="code",
+    )
+    store.add_draft(
+        cluster_id,
+        sample_draft(suggested_layer="code", stage="generation"),
+        observation_id=member_id,
+        prompt_version="diagnosis-v10",
+        model="scripted",
+    )
+    return candidate_id
+
+
+def _fake_patch_generator(monkeypatch, *, markers=("新补丁",)):
+    """把生成器换成替身：测试**绝不**调模型（真调用要几十秒且不确定）。"""
+    import itertools
+
+    import rag.evolution.api as api_module
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    seen: dict = {"calls": 0, "clusters": [], "drafts": [], "layers": [], "repo_roots": []}
+    circle = itertools.cycle(markers)
+
+    class _FakeGenerator:
+        prompt_version = "patch-v5"
+        model_name = "scripted"
+
+        def generate(self, cluster, drafts, *, layer, repo_root, observation_id, cluster_id, trace_store):
+            seen["calls"] += 1
+            seen["clusters"].append(cluster)
+            seen["drafts"].append(drafts)
+            seen["layers"].append(layer)
+            seen["repo_roots"].append(repo_root)
+            seen["observation_id"] = observation_id
+            return CodePatchCandidate(
+                artifact_type="code_patch",
+                layer=layer,
+                paths=("rag/pipeline.py",),
+                diff=_seed_diff(next(circle)),
+                test_paths=("tests/test_pipeline.py",),
+                rationale="回滚后重新生成（替身）",
+                expected_effect="无行为变化",
+                rollback_ref={"base_commit": "0" * 40},
+                confidence="low",
+            )
+
+    monkeypatch.setattr(api_module, "_patch_generator", lambda: _FakeGenerator())
+    return seen
+
+
+def _seed_diff(marker: str) -> str:
+    return (
+        "diff --git a/rag/pipeline.py b/rag/pipeline.py\n"
+        "--- a/rag/pipeline.py\n"
+        "+++ b/rag/pipeline.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " import asyncio\n"
+        f"+# {marker}\n"
+        " import json\n"
+        " import logging\n"
+    )
+
+
+def _regenerate(client, admin_headers, candidate_id: int, **body):
+    return client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/regenerate",
+        headers=admin_headers,
+        json=body,
+    )
+
+
+def test_regenerate_after_rollback_creates_a_new_pending_candidate(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """终态 rolled_back 不可复活 ⇒ 从同一聚类产出**新**候选，并留下"谁因何重生成"的审计。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(
+        evolution_client, admin_headers, rolled_back_id, note="回滚后重生成演练"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    new_id = body["id"]
+    assert new_id != rolled_back_id
+    assert body["status"] == "candidate_testing"
+    assert body["cluster_id"] == cluster_id
+    assert body["observation_id"] == member_id
+    # 新候选必须**重新走**原有路径，而不是被当作已批准。
+    assert body["status"] not in {"approved_for_canary", "canary", "stable"}
+    assert body["prompt_version"] == "patch-v5" and body["model"] == "scripted"
+    assert "新补丁" in body["diff"]
+
+    # 生成器拿到的是**同一聚类 + 该观测最新且层级一致的草案**（不是空参数、不是别的聚类）。
+    assert seen["calls"] == 1
+    assert int(seen["clusters"][0]["id"]) == cluster_id
+    assert seen["layers"] == ["code"]
+    assert seen["observation_id"] == member_id
+    assert seen["drafts"][0][0]["suggested_layer"] == "code"
+
+    # 旧候选仍是终态（修法 ① 不回滚状态机的语义），新的那条带审计。
+    candidates = CandidateStore(store)
+    assert candidates.get_candidate(rolled_back_id)["status"] == "rolled_back"
+    created = candidates.get_candidate(new_id)
+    assert created["status"] == "candidate_testing"
+    assert created["observation_id"] == member_id
+    audit = candidates.list_audit(new_id)
+    assert [entry["action"] for entry in audit] == ["generate", "advance"]
+    assert "重新生成" in audit[-1]["note"]
+    assert f"#{rolled_back_id}" in audit[-1]["note"]
+    store.close()
+
+
+def test_regenerate_refuses_while_the_cluster_has_an_open_candidate(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """堆放守卫同样生效：聚类还有未决候选时不许再生成，否则一个想法又能并排堆几份。"""
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+    seen = _fake_patch_generator(monkeypatch)
+    first = _regenerate(evolution_client, admin_headers, rolled_back_id)
+    assert first.status_code == 200  # 第一条新候选现在是 candidate_testing（未决）
+    assert seen["calls"] == 1
+    seen["calls"] = 0
+
+    second = _regenerate(evolution_client, admin_headers, rolled_back_id)
+
+    assert second.status_code == 409
+    assert "已有未决" in second.json()["detail"]
+    assert seen["calls"] == 0, "被守卫拦下时绝不调用模型"
+    store.close()
+
+
+def test_regenerate_refuses_a_candidate_that_was_not_rolled_back(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """别的状态走原有路径：这个端点只补'回滚之后'那一段。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)  # 停在 candidate_testing
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(evolution_client, admin_headers, candidate_id)
+
+    assert response.status_code == 409
+    assert "只有回滚过" in response.json()["detail"]
+    assert seen["calls"] == 0
+    store.close()
+
+
+def test_regenerate_refuses_when_the_cluster_has_no_confirmed_layer(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """没有确认层级就没有可生成的层级（人给的那条权威不能由端点自己猜）。
+
+    ``set_confirmed_layer`` 只接受字符串（``None`` 会写成 "None"），所以这里直接用一条 SQL
+    把列清空——端点读的就是这一列，而"层级未确认"正是真实系统里聚类刚被批准时的状态。
+    """
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+    store._conn.execute(
+        "UPDATE failure_clusters SET confirmed_layer = NULL WHERE id = ?", (int(cluster_id),)
+    )
+    store._conn.commit()
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(evolution_client, admin_headers, rolled_back_id)
+
+    assert response.status_code == 409
+    assert "确认根因层级" in response.json()["detail"]
+    assert seen["calls"] == 0
+    store.close()
+
+
+def test_regenerate_refuses_a_draft_that_disagrees_with_the_confirmed_layer(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """最新草案说别的层级 ⇒ 当场拒绝并说明，而不是烧一次注定被拒的模型调用。"""
+    import time
+
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+    store.add_draft(
+        cluster_id,
+        sample_draft(suggested_layer="reranking", stage="retrieval"),
+        observation_id=member_id,
+        prompt_version="diagnosis-v10",
+        model="scripted",
+    )
+    store.set_confirmed_layer(cluster_id, confirmed_layer="code", now=time.time())
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(evolution_client, admin_headers, rolled_back_id)
+
+    assert response.status_code == 409
+    assert "reranking" in response.json()["detail"] and "code" in response.json()["detail"]
+    assert seen["calls"] == 0
+    store.close()
+
+
+def test_regenerate_refuses_an_observation_from_another_cluster(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """跨簇观测会把一次失败的证据算到另一条候选头上 ⇒ 显式 id 也必须是本簇成员。"""
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(evolution_client, admin_headers, rolled_back_id, observation_id=999999)
+
+    assert response.status_code == 409
+    assert "不存在" in response.json()["detail"]
+    assert seen["calls"] == 0
+    store.close()
+
+
+def test_regenerate_reports_a_generator_refusal_without_writing_a_row(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """生成器的拒绝是**答案**：409 带原因，且库里不留半条候选。"""
+    import rag.evolution.api as api_module
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.patch_generator import PatchUnavailable
+
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+
+    class _RefusingGenerator:
+        prompt_version = "patch-v5"
+        model_name = "scripted"
+
+        def generate(self, *args, **kwargs):
+            raise PatchUnavailable("timeout", "provider timed out")
+
+    monkeypatch.setattr(api_module, "_patch_generator", lambda: _RefusingGenerator())
+
+    response = _regenerate(evolution_client, admin_headers, rolled_back_id)
+
+    assert response.status_code == 409
+    assert "timeout" in response.json()["detail"]
+    candidates = CandidateStore(store)
+    assert [row["id"] for row in candidates.list_candidates()] == [rolled_back_id]
     store.close()

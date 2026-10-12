@@ -927,6 +927,13 @@ CODE_PATCH_DECISIONS: dict[str, dict[str, str]] = {
         "new_status": EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
         "gate_detail": "needs_revision",
     },
+    # 合入提交的那条路。人不经过 apply 就把改动合进代码时（2026-10-12 的 #10：改动早在
+    # bcb645a 里，候选行却停在 approved_for_canary 两周、一直占着聚类的准入名额），
+    # 系统无从自动知道；能做的只有"让管理员把这件事说出来并留痕"。
+    "close_out_merged": {
+        "new_status": EvolutionStatus.STABLE.value,
+        "gate_detail": "merged_by_commit",
+    },
 }
 
 
@@ -940,6 +947,9 @@ class CodePatchDecision(BaseModel):
     # the phase-3 decision endpoint and the question-set canary use.
     action: str
     note: str = ""
+    #: Only ``close_out_merged`` reads it: the commit that carried the change into the code, so the
+    #: audit row names something a reader can open instead of "somewhere in history".
+    merged_commit: str = ""
 
 
 def _diff_paths(diff: str) -> list[str]:
@@ -1164,19 +1174,74 @@ def _export_patch(candidate: dict) -> tuple[Path, str]:
 
 
 def _decision_note(
-    action: str, note: str, export_path: Path | None, apply_command: str
+    action: str, note: str, export_path: Path | None, apply_command: str, *, merged_commit: str = ""
 ) -> str:
-    """The audit note: the administrator's words, plus what an approval produced.
+    """The audit note: the administrator's words, plus what the decision produced.
 
     ``advance_candidate`` writes this note as the audit row of the same
     transaction that moves the status, so the trail always names the exported
-    file and the command a human has to run afterwards — and for the two other
-    decisions it stays exactly what the administrator typed.
+    file and the command a human has to run afterwards — and for the other
+    decisions it stays exactly what the administrator typed. A close-out names
+    the commit whose content the row is being closed against, because that sha
+    is the thing a later reader has to open to check the claim.
     """
+    if action == "close_out_merged":
+        detail = f"改动已随提交 {merged_commit or '<未知>'} 落地，结案为 stable"
+        return f"{detail}；备注：{note}" if note else detail
     if action != "approve_for_apply" or export_path is None:
         return note
     detail = f"导出补丁 {export_path}；应用命令：{apply_command}"
     return f"{detail}；备注：{note}" if note else detail
+
+
+def _merged_commit_for_closeout(row: dict, claimed: str) -> str:
+    """Resolve the commit a close-out names, and refuse when the tree disagrees.
+
+    A row that is closed for being merged has to be closed against something. The content test is
+    authoritative and fail-closed: the patch must still be **present** in the tree while the paths
+    it touches are **clean relative to HEAD** — that combination is exactly ``patch_is_committed``,
+    and it is the same judgement rollback uses to send a committed patch to ``git revert``. When it
+    does not hold (the change is not in the code at all, or it is still an uncommitted working-tree
+    modification), the close-out is refused rather than silently marked accepted.
+
+    The claimed sha is deliberately *not* trusted as the only evidence: a reader checking the row
+    later wants a commit to open, so when the caller names one it is used, and otherwise the commit
+    that last touched these paths is looked up. Either way the refusal names what to do instead.
+    """
+    from rag.evolution.service_control import patch_is_committed, patch_paths, patch_state
+
+    diff = str(row.get("diff") or "")
+    if not diff.strip():
+        raise HTTPException(status_code=409, detail="该候选没有存储的 diff，无法核对是否已合入")
+    state = patch_state(REPO_ROOT, diff)
+    if state == "not_applied":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "该补丁的改动并不在当前代码里，不能按“已合入”结案；"
+                "请先应用它，或改用 reject / needs_revision"
+            ),
+        )
+    if state == "conflict":
+        raise HTTPException(
+            status_code=409,
+            detail="补丁与当前代码不再匹配（conflict），无法判定是否已合入；请人工核对后再决定",
+        )
+    paths = patch_paths(diff)
+    if not patch_is_committed(REPO_ROOT, paths):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "该补丁的改动还在工作树里、没有进入任何提交，不能按“已合入”结案；"
+                "请先提交，或改用 apply 让系统记录它已上线"
+            ),
+        )
+    resolved = _git_last_commit_for(paths)
+    claimed = str(claimed or "").strip()
+    if claimed and resolved and not resolved.startswith(claimed[:7]) and not claimed.startswith(resolved[:7]):
+        # 只做可读性提示，不据此拒绝：短 sha 与前缀的写法太多，宁可信"路径干净"这个硬判据。
+        return claimed
+    return claimed or resolved
 
 
 def _serialize_generation_queue_row(row: dict) -> dict:
@@ -1384,7 +1449,13 @@ def apply_code_candidate(
     row = _require_candidate(store, candidate_id)
     if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
         raise HTTPException(status_code=404, detail="候选不存在")
-    if row["status"] != EvolutionStatus.APPROVED_FOR_CANARY.value:
+    # 已批准的补丁可以应用；**已在观察（canary）的也可以**——那就是"再点一次＝校验 + 重启"，
+    # 而这个动作在 apply 现在会把状态推到 canary 之后，才真正可能被用到（此前 canary 只在
+    # 回滚前置那一步短暂出现）。stable 不接受：接受过的补丁要走 git revert，不是再 apply。
+    if row["status"] not in {
+        EvolutionStatus.APPROVED_FOR_CANARY.value,
+        EvolutionStatus.CANARY.value,
+    }:
         raise HTTPException(
             status_code=409,
             detail=f"只有已批准的补丁才能应用（当前状态：{row['status']}）",
@@ -1426,6 +1497,21 @@ def apply_code_candidate(
     steps["target_tests"] = tests_ok
     if not tests_ok:
         _revert_and_refuse("target_tests", f"目标测试未通过：{tests_why}")
+
+    # 状态先与事实对齐（与 rollback 的开头同一手法、方向相反）：补丁现在**确实**在运行代码里了，
+    # 那就是"已上线、在观察"。此前 apply 不写这一步，于是"已应用"只存在于工作树与
+    # service-control.log 里，队列上仍显示 approved_for_canary —— 时间一长就分不清哪些行已经
+    # 落地、哪些还没，而 `_clusters_with_open_candidates` 正是按状态判断"这个聚类还有没有未决"。
+    # rolled_back 侧也是同一个坑的另一面：回滚若不先写 canary，状态就到不了 rolled_back。
+    if row["status"] != EvolutionStatus.CANARY.value:
+        store.advance_candidate(
+            candidate_id,
+            EvolutionStatus.CANARY.value,
+            actor_id=str(user["id"]),
+            note=f"应用前置：补丁已进入工作树，状态与事实对齐（进入观察）｜{payload.note}".strip("｜"),
+        )
+    # 无论刚才有没有写、状态都是 canary：调用方据此知道"这一条现在说的是事实"。
+    steps["status_after_apply"] = EvolutionStatus.CANARY.value
 
     restart_path = ""
     if payload.restart:
@@ -1637,6 +1723,192 @@ def rollback_code_candidate(
     }
 
 
+class RegenerateRequest(BaseModel):
+    """One administrative action on a patch the system already rolled back."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Which member observation the new patch is generated from. Empty means "the one the
+    #: rolled-back candidate came from", which is the reproduce-the-same-idea default.
+    observation_id: int | None = None
+    note: str = ""
+
+
+def _patch_generator():
+    """The generator a regeneration calls; a seam so tests never reach a model.
+
+    The timeout and format come from the same settings the worker's generation step uses, so
+    an administrator-triggered regeneration and a round-generated candidate are the same thing
+    built by the same code — the only difference is who asked.
+    """
+    from rag.evolution.patch_generator import PatchGenerator
+
+    return PatchGenerator(
+        timeout_seconds=float(getattr(settings, "evolution_patch_timeout_seconds", 600.0)),
+        patch_format=str(getattr(settings, "evolution_patch_format", "diff") or "diff"),
+    )
+
+
+def _observation_for_regeneration(
+    store, candidate: dict, cluster_id: int, requested: int | None
+) -> int:
+    """The member observation a regenerated patch is based on.
+
+    ``observation_id`` is the argument's name in every generation the worker makes, so a
+    regeneration that omitted it would produce a row nobody can join back to its evidence.
+    The rolled-back candidate's own observation is the default: the same failure, re-diagnosed
+    with the current draft and the current code. An explicit id must still be a member of the
+    same cluster — a patch generated across clusters would attribute one failure's evidence to
+    another's candidate.
+    """
+    observation_id = int(requested) if requested else candidate.get("observation_id")
+    if observation_id is None:
+        raise HTTPException(status_code=409, detail="该候选没有绑定观测，无法重新生成")
+    observation = store.get_observation(int(observation_id))
+    if observation is None:
+        raise HTTPException(status_code=409, detail=f"观测 {int(observation_id)} 不存在，无法重新生成")
+    if int(observation.get("cluster_id") or 0) != int(cluster_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"观测 {int(observation_id)} 不属于聚类 {cluster_id}，无法重新生成",
+        )
+    return int(observation_id)
+
+
+def _draft_for_regeneration(store, observation_id: int, layer: str) -> dict:
+    """The newest diagnosis draft of ``observation_id``, when it names the requested layer.
+
+    ``PatchGenerator`` refuses a draft whose ``suggested_layer`` disagrees with the layer it is
+    asked for. Rather than hunt for an older draft that happens to match — which would hide a
+    re-diagnosis that changed its mind — this returns the newest draft and refuses with that
+    reason, without spending a model call that is already known to be refused.
+    """
+    newest = next(
+        (
+            draft
+            for draft in store.list_drafts()  # newest first
+            if draft.get("observation_id") is not None
+            and int(draft["observation_id"]) == int(observation_id)
+        ),
+        None,
+    )
+    if newest is None:
+        raise HTTPException(status_code=409, detail="该观测还没有诊断草案，无法重新生成")
+    suggested = str((newest.get("payload") or {}).get("suggested_layer") or "").strip()
+    if suggested != layer:
+        shown = suggested or "（未给出）"
+        raise HTTPException(
+            status_code=409,
+            detail=f"该观测最新的诊断草案建议层级为 {shown}，与聚类已确认的 {layer} 不一致；"
+            "请先重新诊断，或确认层级",
+        )
+    return newest
+
+
+@router.post(
+    "/code-candidates/{candidate_id}/regenerate",
+    summary="回滚后从同一聚类重新生成一条候选",
+)
+def regenerate_code_candidate(
+    candidate_id: int, payload: RegenerateRequest, user: dict = Depends(_admin_user)
+) -> dict:
+    """Generate a **new** candidate from the cluster a rolled-back patch came from.
+
+    ``rolled_back`` is a terminal status: the transition table has no way back to
+    ``approved_for_canary``, so after a rollback the interface could not re-apply the same
+    change (14.3 gap two; the drill needed an audited manual repair). This closes that gap the
+    non-structural way: it does not reopen the rolled-back row, it produces a **new** candidate
+    from the same cluster, which then walks the ordinary path — sandbox, administrator review,
+    approval, apply. The cluster has to be still ``approved_for_candidate`` with a confirmed
+    layer, which is the state it is in after a rollback by construction.
+
+    Pile guard, same as the worker's: refuse while the cluster carries another open patch
+    candidate, so regenerating cannot be used to stack variants of one idea side by side. A
+    refusal from the generator itself is a 409 carrying its reason, never a silent success and
+    never a row without its audit trail.
+    """
+    from rag.evolution.diagnoser import DiagnosisUnavailable
+    from rag.evolution.patch_generator import PatchUnavailable
+    from rag.evolution.worker import _clusters_with_open_candidates
+
+    store = _open_store()
+    candidates = _open_candidate_store()
+    if store is None or candidates is None:
+        raise HTTPException(status_code=404, detail="观测数据库不存在")
+    row = _require_candidate(candidates, candidate_id)
+    if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
+        raise HTTPException(status_code=404, detail="候选不存在")
+    if row["status"] != EvolutionStatus.ROLLED_BACK.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "只有回滚过的补丁才需要重新生成（当前状态："
+                f"{row['status']}）；已回滚之外的状态请走原有路径"
+            ),
+        )
+
+    cluster_id = int(row["cluster_id"])
+    cluster = next(
+        (item for item in store.list_clusters() if int(item["id"]) == cluster_id), None
+    )
+    if cluster is None:
+        raise HTTPException(status_code=409, detail=f"聚类 {cluster_id} 不存在，无法重新生成")
+    if cluster.get("status") != EvolutionStatus.APPROVED_FOR_CANDIDATE.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"聚类 {cluster_id} 当前状态为 {cluster.get('status')}，不接受生成候选",
+        )
+    layer = str(cluster.get("confirmed_layer") or "").strip()
+    if not layer:
+        raise HTTPException(status_code=409, detail="该聚类还没有确认根因层级，无法重新生成")
+    open_clusters = _clusters_with_open_candidates(candidates, CODE_PATCH_ARTIFACT_TYPE)
+    if cluster_id in open_clusters:
+        raise HTTPException(
+            status_code=409,
+            detail=f"聚类 {cluster_id} 已有未决的补丁候选：请先处理它，再重新生成",
+        )
+
+    observation_id = _observation_for_regeneration(
+        store, row, cluster_id, payload.observation_id
+    )
+    draft = _draft_for_regeneration(store, observation_id, layer)
+
+    generator = _patch_generator()
+    try:
+        candidate = generator.generate(
+            cluster,
+            [draft.get("payload") or {}],
+            layer=layer,
+            repo_root=REPO_ROOT,
+            observation_id=observation_id,
+            cluster_id=cluster_id,
+            trace_store=store,
+        )
+    except (PatchUnavailable, DiagnosisUnavailable) as error:
+        # 生成器的拒绝是**答案**，不是异常：把原因如实交回给管理员，且不写任何行。
+        raise HTTPException(status_code=409, detail=f"生成被拒绝：{error}") from error
+
+    new_id = candidates.add_candidate(
+        observation_id,
+        cluster_id,
+        candidate,
+        prompt_version=str(getattr(generator, "prompt_version", "")),
+        model=str(getattr(generator, "model_name", "")),
+    )
+    candidates.add_audit(
+        str(user["id"]),
+        "advance",
+        new_id,
+        (
+            f"回滚后重新生成：由 {user.get('username')} 从候选 #{int(row['id'])}（rolled_back）"
+            f"所在的聚类 {cluster_id} 重新生成，观测 {observation_id}，草案 {draft.get('id')}，"
+            f"层级 {layer}｜{payload.note}"
+        ).strip("｜"),
+    )
+    created = candidates.get_candidate(new_id)
+    return _serialize_code_candidate_detail(created, candidates)
+
+
 @router.post("/code-candidates/{candidate_id}/decision", summary="提交代码补丁审核决策")
 def decide_code_candidate(
     candidate_id: int, payload: CodePatchDecision, user: dict = Depends(_admin_user)
@@ -1679,11 +1951,16 @@ def decide_code_candidate(
         )
     export_path: Path | None = None
     apply_command = ""
+    merged_commit = ""
     if payload.action == "approve_for_apply":
         if not str(row.get("diff") or "").strip():
             raise HTTPException(status_code=409, detail="补丁缺少 diff 正文，拒绝导出")
         export_path, apply_command = _export_patch(row)
-    note = _decision_note(payload.action, payload.note, export_path, apply_command)
+    elif payload.action == "close_out_merged":
+        merged_commit = _merged_commit_for_closeout(row, payload.merged_commit)
+    note = _decision_note(
+        payload.action, payload.note, export_path, apply_command, merged_commit=merged_commit
+    )
     try:
         updated = store.advance_candidate(
             candidate_id,
