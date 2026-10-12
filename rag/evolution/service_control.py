@@ -125,6 +125,12 @@ def patch_is_committed(repo_root: str | Path, paths: tuple[str, ...]) -> bool:
     are clean relative to HEAD, that content arrived through a commit. Rolling it back with
     ``git apply -R`` would leave the working tree holding the inverse of a commit — a modification
     nobody asked for, and a confusing state to hand anyone. Such a patch is undone with ``git revert``.
+
+    **What it cannot tell.** "Clean" is also what a path nobody ever touched looks like, so on its own
+    this says nothing about whether the change is anywhere in the code. Both callers pair it with
+    ``patch_state == "applied"`` first, and the close-out path (2026-10-12) additionally verifies the
+    content the diff adds is actually present in those files — a probe caught that gap live, after a
+    clean-but-untouched file had passed this check alone.
     """
     if not paths:
         return False

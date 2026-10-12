@@ -1194,15 +1194,68 @@ def _decision_note(
     return f"{detail}；备注：{note}" if note else detail
 
 
+def _added_patch_lines(diff: str) -> list[str]:
+    """The content lines a diff adds, headers excluded.
+
+    ``patch_is_committed`` asks whether the paths a patch touches are clean relative to HEAD, and
+    a file nobody ever touched is clean too — so "clean" alone cannot tell "this change is in a
+    commit" from "this change is nowhere". The probe that tells them apart is the content itself:
+    the lines the diff adds have to exist in the file for the claim to be true.
+    """
+    lines: list[str] = []
+    for line in str(diff or "").splitlines():
+        if not line.startswith("+") or line.startswith("+++"):
+            continue
+        body = line[1:]
+        if not body.strip() or body.startswith("# "):
+            continue
+        lines.append(body)
+    return lines
+
+
+def _added_lines_present_in_tree(diff: str) -> tuple[bool, str]:
+    """Is every content line the diff adds present in the working-tree files it names?
+
+    A path that does not exist, or one where any added line is missing, fails: both mean the
+    patch's content is not in the code, whatever ``git status`` says about the directory. Removal
+    hunks are deliberately not checked — a patch whose lines are still there is "not reversed",
+    which is all this guard needs to establish.
+    """
+    from rag.evolution.service_control import patch_paths
+
+    paths = patch_paths(diff)
+    if not paths:
+        return False, "diff 里没有可核对的文件路径"
+    added = _added_patch_lines(diff)
+    if not added:
+        return False, "diff 里没有可核对的新增内容行，无法证明改动已在代码里"
+    for path in paths:
+        target = REPO_ROOT / path
+        if not target.is_file():
+            return False, f"{path} 不在当前代码里"
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:  # pragma: no cover - unreadable source
+            return False, f"{path} 无法读取（{type(error).__name__}）"
+        for line in added:
+            if line not in text:
+                return False, f"{path} 里找不到补丁新增的内容行：{line.strip()[:60]}"
+    return True, ""
+
+
 def _merged_commit_for_closeout(row: dict, claimed: str) -> str:
     """Resolve the commit a close-out names, and refuse when the tree disagrees.
 
-    A row that is closed for being merged has to be closed against something. The content test is
-    authoritative and fail-closed: the patch must still be **present** in the tree while the paths
-    it touches are **clean relative to HEAD** — that combination is exactly ``patch_is_committed``,
-    and it is the same judgement rollback uses to send a committed patch to ``git revert``. When it
-    does not hold (the change is not in the code at all, or it is still an uncommitted working-tree
-    modification), the close-out is refused rather than silently marked accepted.
+    A row that is closed for being merged has to be closed against something, and the claim has to
+    survive two independent tests — because "not shipped" silently recorded as "accepted" is this
+    path's dangerous failure mode:
+
+    1. the patch must be **present** in the tree (``patch_state``) while the paths it touches are
+       **clean relative to HEAD** (``patch_is_committed``): that combination is what a committed
+       change looks like, and it is the same judgement rollback uses to send a committed patch to
+       ``git revert``;
+    2. the content the diff adds must actually be found in those files (this is the test that
+       separates "committed" from "never changed at all", which step 1 cannot do on its own).
 
     The claimed sha is deliberately *not* trusted as the only evidence: a reader checking the row
     later wants a commit to open, so when the caller names one it is used, and otherwise the commit
@@ -1236,11 +1289,17 @@ def _merged_commit_for_closeout(row: dict, claimed: str) -> str:
                 "请先提交，或改用 apply 让系统记录它已上线"
             ),
         )
+    present, why = _added_lines_present_in_tree(diff)
+    if not present:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"核对未通过：{why}。“这些文件相对 HEAD 干净”本身不足以证明改动已合入"
+                "（从未被改动的文件同样干净），所以此处按内容核对，未通过即拒绝结案"
+            ),
+        )
     resolved = _git_last_commit_for(paths)
     claimed = str(claimed or "").strip()
-    if claimed and resolved and not resolved.startswith(claimed[:7]) and not claimed.startswith(resolved[:7]):
-        # 只做可读性提示，不据此拒绝：短 sha 与前缀的写法太多，宁可信"路径干净"这个硬判据。
-        return claimed
     return claimed or resolved
 
 

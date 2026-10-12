@@ -895,8 +895,8 @@ def _seed_code_patch_candidate(
         "+++ b/rag/pipeline.py\n"
         "@@ -1,3 +1,4 @@\n"
         " import asyncio\n"
+        "+import json\n"
         f"+# {marker}\n"
-        " import json\n"
         " import logging\n"
     )
     candidate = CodePatchCandidate(
@@ -1150,13 +1150,90 @@ def test_apply_leaves_an_already_canary_patch_where_it_is(
 # ------------------------------------------------------------------
 
 
-def _fake_committed(monkeypatch, *, state="applied", committed=True):
-    """把"补丁在代码里、且这些路径相对 HEAD 干净"这套判据换成替身（测试不动真树）。"""
+def _fake_committed(monkeypatch, *, state="applied", committed=True, content_present=True):
+    """把"补丁在代码里、且这些路径相对 HEAD 干净"这套判据换成替身（测试不动真树）。
+
+    ``content_present`` 单独留一个开关：**路径干净 ≠ 改动真的在代码里**（从未被改动的文件也干净），
+    所以结案还有第二道内容核对；那条守卫在下面单独用真实现验。
+    """
     import rag.evolution.service_control as control
 
     monkeypatch.setattr(control, "patch_state", lambda *a, **k: state)
     monkeypatch.setattr(control, "patch_paths", lambda diff: ("rag/pipeline.py",))
     monkeypatch.setattr(control, "patch_is_committed", lambda *a, **k: committed)
+    monkeypatch.setattr(
+        evolution_api, "_added_lines_present_in_tree", lambda diff: (content_present, "" if content_present else "核对失败")
+    )
+
+
+def test_close_out_merged_refuses_when_the_paths_are_clean_but_the_content_is_not_there(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """**本轮真机验证抓到的坑**：`git status` 干净可能只是"这个文件从没被改过"。
+
+    所以"已合入"不能只靠"路径干净"判定；内容对不上就必须拒绝 —— 否则会把"根本没上线"
+    写成"已接受"。这里让前两道判据都放行、只让**真的**内容核对跑，用假 diff 触发拒绝。
+    """
+    import rag.evolution.service_control as control
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    monkeypatch.setattr(control, "patch_state", lambda *a, **k: "applied")
+    monkeypatch.setattr(control, "patch_paths", lambda diff: ("rag/pipeline.py",))
+    monkeypatch.setattr(control, "patch_is_committed", lambda *a, **k: True)
+    # 前两道判据全放行，只让**真的**内容核对跑：这份 diff 的新增行在文件里并不存在。
+    candidates = CandidateStore(store)
+    row = candidates.get_candidate(candidate_id)
+    missing_line = "+import 这个模块在代码里并不存在_xyz"
+    candidates._conn.execute(
+        "UPDATE candidates SET diff = ? WHERE id = ?",
+        (row["diff"].replace("+import json", missing_line), int(candidate_id)),
+    )
+    candidates._conn.commit()
+
+    response = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/decision",
+        headers=admin_headers,
+        json={"action": "close_out_merged", "note": "按路径干净结案"},
+    )
+
+    assert response.status_code == 409
+    assert "核对未通过" in response.json()["detail"]
+    assert "找不到补丁新增的内容行" in response.json()["detail"]
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "approved_for_canary"
+    store.close()
+
+
+def test_added_lines_present_in_tree_accepts_real_content_and_rejects_a_clean_untouched_file():
+    """内容核对的正反两面：真在文件里的行通过；一个**从没被改过**的文件必须被拒。"""
+    accepted, _ = evolution_api._added_lines_present_in_tree(
+        "diff --git a/rag/pipeline.py b/rag/pipeline.py\n"
+        "--- a/rag/pipeline.py\n"
+        "+++ b/rag/pipeline.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " import asyncio\n"
+        "+import json\n"
+    )
+    assert accepted is True
+
+    rejected, why = evolution_api._added_lines_present_in_tree(
+        "diff --git a/rag/pipeline.py b/rag/pipeline.py\n"
+        "--- a/rag/pipeline.py\n"
+        "+++ b/rag/pipeline.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        " import asyncio\n"
+        "+def 这个函数在代码里并不存在_xyz():\n"
+    )
+    assert rejected is False and "找不到补丁新增的内容行" in why
+
+    missing, missing_why = evolution_api._added_lines_present_in_tree(
+        "diff --git a/rag/does_not_exist_at_all.py b/rag/does_not_exist_at_all.py\n"
+        "--- a/rag/does_not_exist_at_all.py\n"
+        "+++ b/rag/does_not_exist_at_all.py\n"
+        "@@ -1 +1 @@\n"
+        "+something\n"
+    )
+    assert missing is False and "不在当前代码里" in missing_why
 
 
 def test_close_out_merged_records_the_commit_and_releases_the_cluster(
@@ -1401,14 +1478,18 @@ def _fake_patch_generator(monkeypatch, *, markers=("新补丁",)):
 
 
 def _seed_diff(marker: str) -> str:
+    """一份含**真实存在的内容行**的 diff（`import json` 就在 rag/pipeline.py 里）。
+
+    只加注释行的 diff 过不了结案的内容核对（注释行被有意排除），所以这里必须带一行真实代码。
+    """
     return (
         "diff --git a/rag/pipeline.py b/rag/pipeline.py\n"
         "--- a/rag/pipeline.py\n"
         "+++ b/rag/pipeline.py\n"
         "@@ -1,3 +1,4 @@\n"
         " import asyncio\n"
+        "+import json\n"
         f"+# {marker}\n"
-        " import json\n"
         " import logging\n"
     )
 
