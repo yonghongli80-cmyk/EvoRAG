@@ -83,7 +83,12 @@ EVOLUTION_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "approved_for_candidate": ("candidate_testing", "rejected", "blocked"),
     "candidate_testing": ("awaiting_verification", "rejected", "blocked"),
     "awaiting_verification": ("approved_for_canary", "rejected", "blocked", "needs_more_evidence"),
-    "approved_for_canary": ("canary", "rejected", "blocked"),
+    # ``approved_for_canary → stable`` exists for one real shape: the change reached production
+    # through a **commit** rather than through apply (2026-10-12: candidate 10's hardening was in
+    # commit bcb645a while its row sat approved for two weeks and held the cluster's admission
+    # slot). Closing such a row is an administrator statement, so it carries a commit and a note;
+    # it is the only path to stable that does not pass through canary, and it is never automatic.
+    "approved_for_canary": ("canary", "stable", "rejected", "blocked"),
     "canary": ("stable", "rolled_back", "rejected", "blocked", "needs_more_evidence"),
     "stable": ("rolled_back",),
     "rejected": (),

@@ -1,7 +1,7 @@
 # 交接文档：自演化系统（2026-10-11 会话）
 
 > 给**零上下文**的新会话用。读完这一份就能接手：现状、红线、运维命令、踩过的坑、未决事项。
-> 详细叙事在 `docs/development-log.md`（第 1–14 节按时间记录，含每次测量的证据与失败）。
+> 详细叙事在 `docs/development-log.md`（第 1–15 节按时间记录，含每次测量的证据与失败）。
 
 ## 0. 一句话现状
 
@@ -10,14 +10,32 @@
 当前卡点不在代码，而在**三件非代码的事**：真实流量（观察窗零样本）、评测分辨率（20 例基准测不出提升）、
 以及需要人的领域判断（4 个聚类、4 张内容缺口工单）。
 
+**2026-10-12 追加**：14.3 的"回滚之后没法再应用"已按修法 ① 补上
+（`POST /code-candidates/{id}/regenerate`：不动状态机，从同一聚类产出**新**候选；
+development-log 第 15 节 / `evolution-code-patches` §5.8），并已在**真机**把整条链路走完一次
+（回滚 → 重新生成 → 沙箱 → 批准 → 应用 → 服务重启健康；development-log **第 15.5 节**）。
+同一次还纠了一个在 HEAD 上就存在的界面错误：
+**一键应用栏此前放在「聚类」标签页里（因此两个按钮恒为禁用、补丁详情页里根本没有）**，现已移入补丁详情。
+
+**演练换来的现状变化（务必知道）**：
+
+* **线上代码现在是 `#29` + `#27`**（不再是 `#26` + `#27`）：`#29` 是 `#26` 回滚后从聚类 30
+  重新生成的新候选，覆盖同一根因（`PromptManager.render` 与 `_check_answer_quality` 里的异常），
+  但**不是逐字相同**的补丁 —— 见 development-log 15.5 的"发现三"。
+* **`#26`、`#27` 现在是 `rolled_back` 终态**：`#27` 被回滚只是为了腾开聚类 30 的准入名额，
+  它的改动已**用原补丁文件放回工作树**（终态无法再用接口 apply，这是一次如实记录了的人工放回）。
+* **`#10` 被结案为 `rejected`**：它的改动早在提交 `bcb645a` 里，候选行却一直停在 `approved_for_canary`，
+  把聚类 30 的准入名额占了两周 —— 见第 3 节新增的那条真缺陷。
+
 | 项 | 值 |
 | --- | --- |
-| 代码 | `HEAD = 729b5f8`，与 gitee 远端一致，工作树干净（除三位其他 agent 未提交的文档） |
-| 已应用未提交 | `rag/agent.py`（#27）、`rag/prompt_manager.py`（#26） |
-| 后端测试 | 全量 **2044 passed**（最近一次 10 分 33 秒） |
-| 服务 | `http://127.0.0.1:8080`，pid 5444 起于 22:37，`/health` 正常（qdrant + sqlite） |
+| 代码 | `HEAD = 942ffc5`，与 gitee 远端一致，工作树只有本会话改动 + 线上两处补丁改动 |
+| 已应用未提交 | `rag/agent.py`（**#27 + #29**）、`rag/prompt_manager.py`（**#29**） |
+| 本次改动（未提交） | `rag/evolution/api.py`、`tests/test_evolution_api.py`、`frontend/`（3 文件）、`docs/`（3 文件） |
+| 后端测试 | 全量 **2051 passed**（2044 + 新增 7；最近一次 20 分 56 秒，由重启助手在应用前跑，exit 0） |
+| 服务 | `http://127.0.0.1:8080`，pid **26340**（`start.py` pid **41884**，2026-10-12 11:15 由应用助手重启），`/health` 正常 |
 | 前端 | `frontend/` 构建产物写入 `static/`，由服务在 `/static` 提供（改前端必须重新 build） |
-| 队列 | 候选：4 条已批准（#10 #20 #26 #27）、2 条待验证（#15 #16 问题集）；聚类：2 已批准、4 停靠待判断、3 无草稿；开放工单 4 张 |
+| 队列 | 候选：**#29 #20 已批准**、#10 `rejected`、#26 #27 `rolled_back`、#15 #16 待验证（问题集）；聚类：2 已批准、4 停靠待判断、3 无草稿；开放工单 4 张 |
 
 ## 1. 30 秒读懂系统
 
@@ -59,16 +77,32 @@
 8. **沙箱如实化**：环境类拒跑不再写状态（此前会"吃掉"候选）；未跟踪文件不再算主树脏；
    二层对照在沙箱里如实记为"未在此测量"（沙箱无凭据，无 fixture 不跑回放）。
 
+**2026-10-12 追加（本会话，详见 development-log 第 15 节）**：
+
+9. **回滚后重新生成**（`POST /code-candidates/{id}/regenerate`）：6 条前置守卫 + 7 条用例；
+   **真机链路已走完**（见下）：#26 回滚 → 重新生成 #29（65s 真实模型调用）→ 沙箱通过 →
+   批准导出 → 一键应用（助手跑全量 2051 passed → 重启 → `/health` 200）。
+10. **修了一个恒不可点的界面**：一键应用栏此前在「聚类」标签页里（两个按钮读 `selectedCodePatch`），
+    补丁详情页里根本没有 ⇒ 已移入补丁详情；前端 213 passed、`static/` 已重建并由服务提供。
+
 ## 3. **未验证 / 未决**（接手第一件事就是别把它们当成已完成）
 
 1. **观察窗零样本**：三个补丁上线后**新增观测 0 条**（最近一条观测 13:56，在上线之前）⇒
    "稳定"或"回滚"都没有依据。窗口要靠真实使用来填（当时的判据：200 次调用或 24 小时）。
-2. **#26/#27 未提交 git**：已应用、服务在跑，但只存在于工作树。要不要像 #20 那样提交，等人决定。
-3. **#26/#27 的效果不可测**：宿主 A/B 两轮结论翻转（第一轮 legacy 侧 -2.5pp、第二轮 0.0pp）⇒
-   那 2.5pp 是噪声（40 样本里的 1 个用例）。诚实说法是"**当前分辨率下既测不出回归也测不出改善**"。
+   演练后仍成立：整场演练没有产生任何新观测（它不产生流量）。
+2. **线上未提交的补丁换了人**：现在是 **#29 + #27**（`#29` 顶替了 `#26`）。要不要像 #20 那样提交、提交哪一份，
+   等人决定；`#26` 的正文仍在 `evolution.db` 与 `artifacts/patches/candidate-26.patch` 里，随时可取回。
+3. **#26/#29 的效果不可测**：宿主 A/B 两轮结论翻转（第一轮 legacy 侧 -2.5pp、第二轮 0.0pp）⇒
+   那 2.5pp 是噪声（40 样本里的 1 个用例）。诚实说法是"**当前分辨率下既测不出回归也测不出改善**"；
+   #29 与 #26 改的是同一处，这条结论不变。
 4. **#15/#16**（问题集候选）从未沙箱过，仍在待验证。
 5. **回滚后无法通过接口重新应用**：`rolled_back` 是终态，`canary → approved_for_canary` 不合法。
-   演练用了一次**审计式人工修复**绕过。诚实修法：① 从同一聚类重新生成候选；② 给回滚加"可恢复"语义（需改状态机，属设计变更）。
+   演练用了一次**审计式人工修复**绕过。**修法 ① 已落地并真机验证（2026-10-12）**：
+   `POST /code-candidates/{id}/regenerate` 从同一聚类产出**新**候选（旧行保持终态，不动状态机），
+   新行重新走沙箱 → 审核 → 批准 → 应用；六条前置守卫任一不满足即 409 且不写一行。
+   修法 ②（给回滚"可恢复"语义）仍是设计变更，未做、也不建议现在做。
+   **注意**：本次演练里 `#27` 被回滚后，是用**原补丁文件人工放回**的（终态没有接口路径），
+   这与上一次演练的绕过方式同类 —— 修法 ① 解决的是"想再试一次"，不是"把同一条原样放回"。
 6. **4 个聚类的判断**（#1 #2 #5 #15）缺的是**人的领域知识**（那份资料到底在不在库里、能否复现），
    系统已把它们停靠为"需更多证据"；**4 张开放工单**要人补资料。
 7. **评测分辨率**：20 例 `rag_docs` 基准只能证明"没变差"，很难证明"变好"。扩基准（含多轮）是唯一的结构性修法。
@@ -76,6 +110,14 @@
    `cybernetic-organism-rag-evolution-manifesto.md`、`architecture-hybrid-knowledge-and-evolution.md`）；
    审计那份我已逐条核验过（点踩那条见 development-log 第 7 节，多轮改写与切块见第 8.3 节；切块那条我最终撤回了“属实”，同时记下三个不成立的指标）。
 9. 小卫生问题：接口用例会往 `artifacts/service-control.log` 写行，与真实运维记录混在一起。
+10. **（已修，2026-10-12）合入之后没有人关闭候选行。** `#10` 的改动早已随提交 `bcb645a` 落地，
+    但候选行一直停在 `approved_for_canary`，作为"未决补丁"**长期占住聚类 30 的准入名额**；
+    `#27` 也回滚之后聚类 30 依旧被判"有未决"，而那条未决是两周前就合进代码的旧行。
+    修法：新增审核动作 **`close_out_merged`**（终态 `stable`，转移表加了
+    `approved_for_canary → stable`；必须给出/解析出那次提交，且后端先核对"补丁在代码里、那些文件
+    相对 HEAD 干净"，否则 409 拒绝）。同一次还修了它的另一面：**`apply` 成功之后会把状态推进到
+    `canary`**，于是"已应用"不再只活在工作树与 `service-control.log` 里（`#29` 之前就是这个形状）。
+    详见 development-log 第 15.6 节；5 条用例 + 前端按钮。
 
 ## 4. 运维手册（都已实测）
 
@@ -84,9 +126,13 @@
 ```powershell
 # 起服务（端口被占时 start.py 会拒绝启动 —— 这是"假重启"陷阱的来源）
 python start.py
-# 正确的重启：杀掉旧进程 → 等端口真正释放 → 再启动
+# 正确的重启：把 start.py 与它拉起的 uvicorn **一起**杀掉 → 等端口真正释放 → 再启动。
+# 只杀 uvicorn 不够：start.py 还活着（2026-10-12 实测：杀掉了 uvicorn 的 pid，父进程仍在，
+# 于是"以为重启了"而实际接口还是旧代码 —— 见坑清单最后一行）。
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -like '*uvicorn rag.api:app*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  Where-Object { $_.CommandLine -like '*RAGv3*' -and ($_.CommandLine -like '*start.py*' -or $_.CommandLine -like '*uvicorn rag.api:app*') } |
+  Select-Object -ExpandProperty ProcessId -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
+# 等端口真正空闲（TcpClient 连得上就是还有人占着），再 python start.py
 # 判定"服务是否带上了新代码"：比较进程启动时间与源文件 mtime（我手工重启时被这个骗过两次）
 ```
 
@@ -103,6 +149,8 @@ POST /knowledge-operations/evolution/code-candidates/26/decision {"action":"appr
 POST /knowledge-operations/evolution/code-candidates/26/apply {"restart":true,"note":"..."}
 # 一键回滚
 POST /knowledge-operations/evolution/code-candidates/26/rollback {"restart":true,"note":"..."}
+# 回滚后重新生成（rolled_back 是终态：从同一聚类产出一条**新**候选，重新走沙箱→审核→批准→应用）
+POST /knowledge-operations/evolution/code-candidates/26/regenerate {"note":"..."}
 # 聚类诊断决策（approve_for_candidate / reject / needs_more_evidence / confirm_layer）
 POST /knowledge-operations/evolution/clusters/1/decision {"action":"needs_more_evidence","note":"..."}
 ```
@@ -155,11 +203,17 @@ cd frontend; npx vue-tsc -b; npx vitest run; npm run build   # 构建写入 ../s
 | 候选被"什么都没应用"的运行写成 rejected | 环境类拒跑被当成候选问题 | 已修：环境类不写状态 |
 | 审查台显示"没有数字"，但详情里有结论 | metrics 把 verdict 当原始载荷又比了一次 | 已修：以 `passed` 键识别结论 |
 | 本地 `origin/main` 显示 ahead 很多 | 一直用 **URL** 推送，git 不更新跟踪引用 | 用 `git ls-remote <url> main` 核实；或 `git update-ref` 修引用 |
+| 界面里有按钮，但**永远点不到** | 按钮被写在错的标签页（如"一键应用栏"曾在「聚类」页，而它读的是 `selectedCodePatch`） | 先确认按钮所在的 `v-if` 分支选中了它要操作的对象；前端用例要同时钉"可用/禁用"两种状态 |
+| "重启完了"但接口还是旧的 | 只杀了 uvicorn，`start.py` 父进程还活着（它的子进程与日志会让人以为换过了） | 按 4.1 的命令把 `start.py` 与 uvicorn 一起杀；用"接口行为有没有变"验证，别只看进程在不在 |
 
 ## 6. 建议的下一步（按价值排序）
 
 **我能继续做的**
-1. **补"回滚后可重新应用"**：回滚后从同一聚类重新生成候选（无需改状态机），把 14.3 的缺口堵上；
+1. ~~**补"回滚后可重新应用"**：回滚后从同一聚类重新生成候选（无需改状态机），把 14.3 的缺口堵上；~~
+   **已完成（2026-10-12，见 development-log 第 15 节与 evolution-code-patches §5.8）**：
+   `POST /code-candidates/{id}/regenerate` + 界面按钮；7 条用例，全量 **2051 passed**。
+   **还差一步真人决定**：在真实系统上对一个已回滚的候选跑完整链路
+   （回滚 → 重新生成 → 沙箱 → 批准 → 应用；要真实模型调用 + 一次带全量套件的重启）。
 2. **扩评测集**（含多轮）—— 这是"能证明变好"的唯一结构性前提；
 3. **修测试污染运维日志**的小卫生问题；
 4. **#15/#16 跑沙箱**，让队列里最后两条变成可决策；
