@@ -38,9 +38,23 @@ class PromptManager:
         return all_versions[-1]["template"]
 
     def render(self, prompt_name: str, version: int | None = None, **kwargs) -> str:
-        """加载并渲染模板变量。"""
+        """加载并渲染模板变量。
+
+        模板或入参中出现孤立花括号、非法格式说明符等问题时，``str.format`` 会抛出
+        ``ValueError``/``IndexError``；此前这类异常会一路冒泡成未捕获异常并中断整条请求
+        （kb_accessories 配件明细失败簇即为此形态：内容存在、失败在取用侧）。
+        这里退化为安全替换：已知变量照常填值，未知占位符与非法花括号原样保留，不再抛异常。
+        """
         template = self.get(prompt_name, version=version)
-        return template.format(**kwargs)
+        if not isinstance(template, str):
+            template = str(template)
+        try:
+            return template.format(**kwargs)
+        except (KeyError, IndexError, ValueError):
+            safe = template
+            for key, value in kwargs.items():
+                safe = safe.replace("{" + key + "}", str(value))
+            return safe
 
     def list_versions(self, name: str) -> list[dict]:
         """列出 prompt 的所有版本信息。"""

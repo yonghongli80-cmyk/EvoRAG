@@ -25,7 +25,13 @@ def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts",
 
     from rag.tools import calculate, create_sql_tool
 
-    sql_tool = create_sql_tool(db_path)
+    try:
+        sql_tool = create_sql_tool(db_path)
+    except ValueError as exc:
+        logger.warning("sql_tool_init_failed exception=%s", type(exc).__name__)
+
+        def sql_tool(_query: str) -> str:
+            return "SQL 工具初始化失败，无法执行 SQL 查询。"
 
     def _retrieve(q: str) -> str:
         """检索知识库并返回格式化片段，已应用权限过滤。"""
@@ -344,7 +350,14 @@ def _wrap_tool_with_reflection(tool, recorder=None):
 
 def _check_answer_quality(question: str, answer: str) -> dict:
     """用 LLM 自检答案质量。"""
-    prompt = _pm.render("quality_check", question=question, answer=answer)
+    try:
+        prompt = _pm.render("quality_check", question=question, answer=answer)
+    except Exception as error:
+        # prompt 取用/渲染失败（如缺少对应 prompt 版本、模板非法）属于增强项故障；
+        # 此前该异常在 try 之外，会冒泡成未捕获异常并中断请求。这里降级为"通过"，
+        # 让主循环采用已有答案；异常类进日志，不进答复文本。
+        logger.warning("agent_quality_check_render_failed exception=%s", type(error).__name__)
+        return {"verdict": "pass", "missing": [], "check_failed": type(error).__name__}
     messages = [
         {"role": "system", "content": "你是一个答案质量审查员。"},
         {"role": "user", "content": prompt},
