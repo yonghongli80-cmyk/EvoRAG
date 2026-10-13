@@ -277,7 +277,6 @@ describe('EvolutionCenterView', () => {
       rationale: '理由',
       expected_effect: '效果',
       rollback_ref: { base_commit: 'a'.repeat(40) },
-      sandbox_summary: [],
       created_at: 1_700_000_000,
       updated_at: 1_700_000_000,
       diff: 'diff --git a/rag/pipeline.py b/rag/pipeline.py',
@@ -317,6 +316,43 @@ describe('EvolutionCenterView', () => {
         }
       ],
       audit: [],
+      // 层 2 的两个生产者分开给：这份是沙箱的（详情端点真实返回的形状）
+      sandbox_summary: [
+        {
+          gate: 'sandbox',
+          result: 'passed',
+          detail: 'sandbox passed; the layer-2 regression A/B is not measured here',
+          created_at: 1_700_000_000,
+          metrics: {
+            applied: true,
+            tests_passed: true,
+            failed_tests: [],
+            verdict: {
+              sides: {
+                jev: {
+                  baseline: {
+                    route_accuracy: 1,
+                    top5_hit_rate: 0.98,
+                    failed_calls: 0,
+                    prep_p50_ms: 900
+                  },
+                  patched: {
+                    route_accuracy: 1,
+                    top5_hit_rate: 0.98,
+                    failed_calls: 0,
+                    prep_p50_ms: 850
+                  }
+                }
+              },
+              route_delta_pp: 0,
+              top5_delta_pp: 0,
+              failed_calls_delta: 0,
+              passed: true
+            }
+          }
+        }
+      ],
+      host_ab_summary: [],
       apply_command: 'git -C /repo apply --3way artifacts/patches/candidate-12.patch',
       revert_command: 'git -C /repo apply -R artifacts/patches/candidate-12.patch',
       export_path: '/repo/artifacts/patches/candidate-12.patch',
@@ -368,6 +404,7 @@ describe('EvolutionCenterView', () => {
       expected_effect: '效果',
       rollback_ref: { base_commit: 'b'.repeat(40) },
       sandbox_summary: [],
+      host_ab_summary: [],
       created_at: 1_700_000_000,
       updated_at: 1_700_000_000
     }
@@ -444,6 +481,7 @@ describe('EvolutionCenterView', () => {
       expected_effect: '效果',
       rollback_ref: { base_commit: 'c'.repeat(40) },
       sandbox_summary: [],
+      host_ab_summary: [],
       created_at: 1_700_000_000,
       updated_at: 1_700_000_000
     }
@@ -490,5 +528,134 @@ describe('EvolutionCenterView', () => {
     expect(
       wrapper.get('[data-test="code-candidate-close-merged"]').attributes('disabled')
     ).toBeDefined()
+  })
+
+  it('renders the host A/B comparison as its own block, never as the sandbox conclusion', async () => {
+    const patch = {
+      id: 26,
+      observation_id: 135,
+      cluster_id: 30,
+      artifact_type: 'code_patch',
+      layer: 'code',
+      paths: ['rag/prompt_manager.py'],
+      test_paths: ['tests/test_prompt_manager.py'],
+      status: 'canary',
+      pool: 'candidate_pool',
+      confidence: 'low',
+      prompt_version: 'patch-v5',
+      model: 'scripted',
+      rationale: '理由',
+      expected_effect: '效果',
+      rollback_ref: { base_commit: 'd'.repeat(40) },
+      sandbox_summary: [],
+      host_ab_summary: [],
+      created_at: 1_700_000_000,
+      updated_at: 1_700_000_000
+    }
+    const side = (route: number, top5: number, p50: number) => ({
+      route_accuracy: route,
+      top5_hit_rate: top5,
+      failed_calls: 0,
+      prep_p50_ms: p50
+    })
+    vi.mocked(fetchCodePatches).mockResolvedValue({
+      items: [patch], total: 1, page: 1, page_size: 20
+    })
+    vi.mocked(fetchCodePatch).mockResolvedValue({
+      ...patch,
+      diff: 'diff --git a/rag/prompt_manager.py b/rag/prompt_manager.py',
+      gate_log: [
+        {
+          gate: 'sandbox',
+          result: 'passed',
+          detail: 'sandbox passed',
+          created_at: 1_700_000_000,
+          metrics: { applied: true, tests_passed: true, failed_tests: [], verdict_unavailable: true }
+        },
+        {
+          gate: 'host_ab',
+          result: 'passed',
+          detail: 'host A/B (2 run(s) per side, kb=rag_docs): passed',
+          created_at: 1_700_000_100,
+          metrics: {
+            runs: 2,
+            warmups: 0,
+            kb_id: 'rag_docs',
+            worktrees: ['clean', 'patched'],
+            verdict: {
+              sides: {
+                jev: { baseline: side(0.9, 0.96, 700), patched: side(0.9, 0.94, 640) }
+              },
+              route_delta_pp: 0,
+              top5_delta_pp: -2,
+              failed_calls_delta: 0,
+              passed: true
+            }
+          }
+        }
+      ],
+      audit: [],
+      // 沙箱这次**没有**产出可比的对照 —— 宿主 A/B 的那份数字绝不能顶替它
+      sandbox_summary: [
+        {
+          gate: 'sandbox',
+          result: 'passed',
+          detail: 'sandbox passed',
+          created_at: 1_700_000_000,
+          metrics: { applied: true, tests_passed: true, failed_tests: [], verdict_unavailable: true }
+        }
+      ],
+      host_ab_summary: [
+        {
+          gate: 'host_ab',
+          result: 'passed',
+          detail: 'host A/B (2 run(s) per side, kb=rag_docs): passed',
+          created_at: 1_700_000_100,
+          metrics: {
+            runs: 2,
+            warmups: 0,
+            kb_id: 'rag_docs',
+            worktrees: ['clean', 'patched'],
+            verdict: {
+              sides: {
+                jev: { baseline: side(0.9, 0.96, 700), patched: side(0.9, 0.94, 640) }
+              },
+              route_delta_pp: 0,
+              top5_delta_pp: -2,
+              failed_calls_delta: 0,
+              passed: true
+            }
+          }
+        }
+      ],
+      apply_command: 'git -C /repo apply artifacts/patches/candidate-26.patch',
+      revert_command: 'git -C /repo apply -R artifacts/patches/candidate-26.patch',
+      export_path: '/repo/artifacts/patches/candidate-26.patch',
+      exported: true
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-code-patches"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="code-candidate-row"]').trigger('click')
+    await flushPromises()
+
+    // 宿主那份：自己的块 + 两侧数字
+    const hostAb = wrapper.get('[data-test="host-ab-metrics"]')
+    expect(hostAb.text()).toContain('干净侧')
+    expect(hostAb.text()).toContain('打补丁侧')
+    expect(hostAb.text()).toContain('94.0%')
+    expect(hostAb.text()).toContain('640')
+
+    // 沙箱那份仍是"没有可比对照"，**没有**被宿主 A/B 的数字冒名顶替
+    const sandbox = wrapper.get('[data-test="sandbox-metrics-unavailable"]')
+    expect(sandbox.text()).toContain('没有数字')
+    expect(wrapper.find('[data-test="sandbox-metrics"]').exists()).toBe(false)
+
+    // 门禁轨迹两条都在，且各自带自己的标签
+    const trail = wrapper.get('[data-test="code-candidate-gate-log"]')
+    expect(trail.text()).toContain('层 2 宿主 A/B 对照')
+    expect(trail.text()).toContain('层 2/3 沙箱（隔离 worktree）')
   })
 })

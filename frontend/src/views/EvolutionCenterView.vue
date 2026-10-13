@@ -415,7 +415,9 @@ const GATE_LABELS: Record<string, string> = {
   benchmark: '层 2 基准门禁',
   shadow: '层 3 影子对比',
   canary: '层 4 灰度',
-  rollback: '层 5 回滚'
+  rollback: '层 5 回滚',
+  sandbox: '层 2/3 沙箱（隔离 worktree）',
+  host_ab: '层 2 宿主 A/B 对照'
 }
 
 const GATE_RESULT_LABELS: Record<string, string> = {
@@ -646,9 +648,14 @@ async function loadGapTickets() {
   }
 }
 
-/** 最近一次带结构化指标的沙箱条目（没有就返回 null，让面板如实说不显示对照）。 */
+/**
+ * 最近一次带结构化指标的**沙箱**条目（没有就返回 null，让面板如实说不显示对照）。
+ *
+ * 只看 `sandbox_summary`，不看整条 gate_log：宿主 A/B 的条目的 `metrics.verdict` 形状与沙箱
+ * 那份相同，若在 gate_log 里按"有 verdict"找，会把宿主 A/B 的数字当成沙箱的结论画出来。
+ */
 const sandboxMetrics = computed(() => {
-  const entries = selectedCodePatch.value?.gate_log || []
+  const entries = selectedCodePatch.value?.sandbox_summary || []
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const metrics = entries[index].metrics
     if (metrics?.verdict) return { entry: entries[index], verdict: metrics.verdict }
@@ -657,7 +664,22 @@ const sandboxMetrics = computed(() => {
 })
 
 const sandboxMetricsUnavailable = computed(() => {
-  const entries = selectedCodePatch.value?.gate_log || []
+  const entries = selectedCodePatch.value?.sandbox_summary || []
+  return entries.some((entry) => entry.metrics?.verdict_unavailable)
+})
+
+/** 最近一次带对照数字的宿主 A/B 条目（层 2 的另一个生产者，不动候选状态）。 */
+const hostAbMetrics = computed(() => {
+  const entries = selectedCodePatch.value?.host_ab_summary || []
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const metrics = entries[index].metrics
+    if (metrics?.verdict) return { entry: entries[index], verdict: metrics.verdict, metrics }
+  }
+  return null
+})
+
+const hostAbUnavailable = computed(() => {
+  const entries = selectedCodePatch.value?.host_ab_summary || []
   return entries.some((entry) => entry.metrics?.verdict_unavailable)
 })
 
@@ -1508,6 +1530,56 @@ onMounted(async () => {
             data-test="sandbox-metrics-unavailable"
           >
             这次沙箱运行没有可比的对照（回放不可用或未产出报告）——"没有数字"不等于"没有变差"。
+          </p>
+
+          <h4 class="panel-subtitle">宿主 A/B 对照（层 2 的真实回归：干净树 vs 打过补丁的树）</h4>
+          <div v-if="hostAbMetrics" class="ab-table" data-test="host-ab-metrics">
+            <p class="cluster-meta">
+              对照：{{ hostAbMetrics.verdict.passed ? '通过' : '未通过' }} ·
+              route {{ formatDelta(hostAbMetrics.verdict.route_delta_pp) }}pp ·
+              top-5 {{ formatDelta(hostAbMetrics.verdict.top5_delta_pp) }}pp ·
+              失败调用 {{ formatDelta(hostAbMetrics.verdict.failed_calls_delta) }} ·
+              每侧 {{ hostAbMetrics.metrics.runs ?? '—' }} 次（kb={{ hostAbMetrics.metrics.kb_id || '—' }}）
+            </p>
+            <table v-for="(side, name) in hostAbMetrics.verdict.sides" :key="name">
+              <thead>
+                <tr>
+                  <th>{{ name }}</th><th>route 准确率</th><th>Top-5 命中</th>
+                  <th>失败调用</th><th>预处理 P50</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>干净侧</td>
+                  <td>{{ formatRate(side.baseline.route_accuracy) }}</td>
+                  <td>{{ formatRate(side.baseline.top5_hit_rate) }}</td>
+                  <td>{{ side.baseline.failed_calls }}</td>
+                  <td>{{ formatLatency(side.baseline.prep_p50_ms) }}</td>
+                </tr>
+                <tr>
+                  <td>打补丁侧</td>
+                  <td>{{ formatRate(side.patched.route_accuracy) }}</td>
+                  <td>{{ formatRate(side.patched.top5_hit_rate) }}</td>
+                  <td>{{ side.patched.failed_calls }}</td>
+                  <td>{{ formatLatency(side.patched.prep_p50_ms) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="cluster-meta">
+              这是管理员在**宿主**上跑出来的对照（沙箱无凭据，量不了回归）；它只作为审核证据，
+              从不自动改候选状态。
+            </p>
+          </div>
+          <p
+            v-else-if="hostAbUnavailable"
+            class="cluster-meta"
+            data-test="host-ab-unavailable"
+          >
+            最近一次宿主 A/B 没有产出可比的对照——"没有数字"不等于"没有变差"。
+          </p>
+          <p v-else class="cluster-meta" data-test="host-ab-empty">
+            还没跑过宿主 A/B：层 2 的真实对照发生在应用之后的宿主上
+            （<code>scripts/measure_patch_regression_ab.py</code>），跑完会回流到这条轨迹。
           </p>
 
           <h4 class="panel-subtitle">生命周期审计</h4>

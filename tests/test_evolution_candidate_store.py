@@ -320,6 +320,73 @@ def test_advance_candidate_appends_no_gate_entry_without_a_gate_name(tmp_path):
     assert store.get_candidate(candidate_id)["status"] == EvolutionStatus.AWAITING_VERIFICATION.value
 
 
+def test_record_gate_entry_appends_evidence_without_moving_the_candidate(tmp_path):
+    """层 2 的宿主 A/B 是**证据**：它进轨迹、带数字、写审计，但不动状态。
+
+    "测量"和"决策"必须能分开：宿主 A/B 的结论属于管理员按下决定前的输入。
+    """
+    _, store, cluster, member = seeded(tmp_path)
+    candidate_id = store.add_candidate(member["id"], cluster["id"], sample_candidate())
+    store.advance_candidate(
+        candidate_id, EvolutionStatus.AWAITING_VERIFICATION.value, actor_id="worker", note="沙箱通过"
+    )
+    before = store.get_candidate(candidate_id)
+
+    updated = store.record_gate_entry(
+        candidate_id,
+        actor_id="admin:cli",
+        note="宿主 A/B 对照（层 2）",
+        gate="host_ab",
+        result="passed",
+        gate_detail="host A/B: passed",
+        gate_metrics={"runs": 2, "verdict": {"passed": True}},
+    )
+
+    assert updated["status"] == before["status"] == EvolutionStatus.AWAITING_VERIFICATION.value
+    entry = updated["gate_log"][-1]
+    assert entry["gate"] == "host_ab" and entry["result"] == "passed"
+    assert entry["metrics"] == {"runs": 2, "verdict": {"passed": True}}
+    assert len(updated["gate_log"]) == len(before["gate_log"]) + 1
+    assert [row["action"] for row in store.list_audit(candidate_id)] == ["generate", "advance", "advance"]
+
+
+def test_record_gate_entry_refuses_an_unknown_result_and_the_layer_one_accepted(tmp_path):
+    """``accepted`` 是层 1 生成时的结论：后来的任何测量都不能替它说"通过"。"""
+    from rag.evolution.candidate_store import GATE_EVIDENCE_RESULTS
+
+    _, store, cluster, member = seeded(tmp_path)
+    candidate_id = store.add_candidate(member["id"], cluster["id"], sample_candidate())
+    before = store.get_candidate(candidate_id)
+
+    assert "accepted" not in GATE_EVIDENCE_RESULTS
+    for bad in ("accepted", "", "whatever"):
+        with pytest.raises(ValueError, match="unknown gate evidence result"):
+            store.record_gate_entry(
+                candidate_id,
+                actor_id="admin:cli",
+                note="伪造",
+                gate="host_ab",
+                result=bad,
+                gate_detail="",
+            )
+    with pytest.raises(ValueError, match="needs a gate name"):
+        store.record_gate_entry(
+            candidate_id, actor_id="admin:cli", note="无门禁名", gate="  ", result="passed", gate_detail=""
+        )
+
+    after = store.get_candidate(candidate_id)
+    assert after["gate_log"] == before["gate_log"]
+    assert [row["action"] for row in store.list_audit(candidate_id)] == ["generate"]
+
+
+def test_record_gate_entry_on_an_unknown_id_raises_key_error(tmp_path):
+    _, store, _, _ = seeded(tmp_path)
+    with pytest.raises(KeyError):
+        store.record_gate_entry(
+            4242, actor_id="admin", note="不存在", gate="host_ab", result="passed", gate_detail=""
+        )
+
+
 def test_illegal_transition_raises_and_writes_nothing(tmp_path):
     _, store, cluster, member = seeded(tmp_path)
     candidate_id = store.add_candidate(member["id"], cluster["id"], sample_candidate())

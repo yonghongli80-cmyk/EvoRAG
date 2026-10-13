@@ -1142,6 +1142,121 @@ def run_patch_sandbox(
 #: constant here rather than a caller's choice.
 GATE_NAME = "sandbox"
 
+#: 层 2 的第二个生产者：**宿主上的 A/B**。沙箱按设计量不了回归（无凭据、fixture 描述的是另一份
+#: 代码），所以 layer-2 的真实对照发生在管理员应用之后的宿主上；这个 gate 名就是它回流的位置。
+#: 它**不动状态**：A/B 是给管理员决策用的证据，不是决策本身（见 ``record_host_ab_outcome``）。
+HOST_AB_GATE_NAME = "host_ab"
+
+
+@dataclass(frozen=True)
+class HostAbReport:
+    """What one host-side clean-versus-patched A/B measured about one candidate.
+
+    ``verdict`` is :func:`patch_verdict`'s product — ``None`` when the reports carried no
+    comparable work (see :func:`_execution_evidence_reason`), which must stay visible as
+    "not measured" rather than pass as "no regression". ``error`` is a short category.
+    """
+
+    candidate_id: int
+    kb_id: str = ""
+    runs: int = 0
+    warmups: int = 0
+    verdict: dict | None = None
+    error: str = ""
+    duration_s: float = 0.0
+    #: 两侧回放各自跑在哪个 worktree（``clean`` / ``patched``），只作可读的留痕。
+    worktrees: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        """The JSON-safe form the artifact file and a gate log both store."""
+        return {
+            "candidate_id": int(self.candidate_id),
+            "kb_id": str(self.kb_id),
+            "runs": int(self.runs),
+            "warmups": int(self.warmups),
+            "verdict": self.verdict,
+            "error": str(self.error),
+            "duration_s": float(self.duration_s),
+            "worktrees": list(self.worktrees),
+        }
+
+
+def host_ab_gate_metrics(report: HostAbReport) -> dict:
+    """The numbers behind a host A/B, in the shape the review panel already renders.
+
+    Same contract as :func:`sandbox_gate_metrics`: the ``verdict`` carries both sides plus the
+    thresholds' outcome, and a run that produced no comparable verdict says so explicitly —
+    "没有数字" must never look like "没有变差".
+    """
+    metrics: dict = {
+        "runs": int(report.runs),
+        "warmups": int(report.warmups),
+        "kb_id": str(report.kb_id),
+    }
+    if report.worktrees:
+        metrics["worktrees"] = list(report.worktrees)
+    if report.duration_s:
+        metrics["duration_s"] = float(report.duration_s)
+    if report.error:
+        metrics["error"] = str(report.error)
+    if isinstance(report.verdict, Mapping) and "passed" in report.verdict:
+        metrics["verdict"] = dict(report.verdict)
+    else:
+        metrics["verdict_unavailable"] = True
+    return metrics
+
+
+def host_ab_gate_detail(report: HostAbReport) -> str:
+    """One line a reviewer can read on the trail without opening the numbers."""
+    if isinstance(report.verdict, Mapping) and "passed" in report.verdict:
+        # ``patch_verdict`` 自带一句人话（passed/failed 加上两侧的差值与阈值），原样引用它，
+        # 别在这里另写一套措辞 —— 两处措辞会漂移，而它已经带了"哪一侧、差多少、限多少"。
+        summary = str(report.verdict.get("verdict") or "").strip()
+        if not summary:
+            summary = "passed" if report.verdict.get("passed") else "failed"
+        return f"host A/B ({report.runs} run(s) per side, kb={report.kb_id or '—'}): {summary}"
+    if report.error:
+        return f"host A/B did not produce a verdict: {report.error}"
+    return (
+        "host A/B did not produce a comparable verdict (the reports carried no measurable work), "
+        "so this is not a 'no regression' claim"
+    )
+
+
+def record_host_ab_outcome(
+    store,
+    report: HostAbReport,
+    *,
+    actor_id: str,
+    note: str = "",
+) -> dict:
+    """Append a host A/B verdict to its candidate's trail, **without moving its status**.
+
+    This exists because the layer-2 comparison had no writer into the system: the script ran it,
+    wrote ``artifacts/regression-ab-candidate-N.json`` and stopped, so the review panel showed
+    nothing and the administrator decided by reading a file (2026-10-12: that is exactly how #26's
+    two host rounds were judged). The measurement is real evidence and belongs on the trail; the
+    decision still belongs to the administrator, which is why this appends a gate entry and leaves
+    the status alone.
+
+    A verdict that **fails** the thresholds is recorded as ``failed``, not refused: the numbers are
+    the point, and a human reads them. Nothing here moves a candidate to a terminal state.
+    """
+    verdict = report.verdict if isinstance(report.verdict, Mapping) else None
+    if verdict is not None and "passed" in verdict:
+        result = "passed" if bool(verdict.get("passed")) else "failed"
+    else:
+        result = "inconclusive"
+    return store.record_gate_entry(
+        int(report.candidate_id),
+        actor_id=str(actor_id),
+        note=str(note) or host_ab_gate_detail(report),
+        gate=HOST_AB_GATE_NAME,
+        result=result,
+        gate_detail=host_ab_gate_detail(report),
+        gate_metrics=host_ab_gate_metrics(report),
+    )
+
 
 def sandbox_gate_metrics(report: SandboxReport) -> dict:
     """The numbers behind a sandbox outcome, for the review panel to compare side by side.

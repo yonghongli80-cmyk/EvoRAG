@@ -1011,6 +1011,100 @@ def test_gate_entry_serialisation_passes_metrics_through_but_only_when_present()
     legacy.pop("metrics")
     assert "metrics" not in evolution_api._serialize_gate_entry(legacy)
 
+
+def test_host_ab_entries_get_their_own_summary_and_stay_out_of_the_sandbox_one(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """层 2 的两个生产者分开呈现：宿主 A/B 有数字，就不能被算成沙箱的结论。
+
+    此前宿主 A/B 只写一个 artifacts JSON，审查台一无所知；回流之后它进同一条 gate_log，
+    但**必须**能被分辨出来 —— 合并渲染会让"这个数字是谁量出来的"消失。
+    """
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.sandbox import HOST_AB_GATE_NAME, HostAbReport, record_host_ab_outcome
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)
+    candidates = CandidateStore(store)
+    verdict = {
+        "cases": 20,
+        "sides": {
+            "jev": {
+                "baseline": {"route_accuracy": 1.0, "top5_hit_rate": 1.0, "failed_calls": 0, "prep_p50_ms": 900},
+                "patched": {"route_accuracy": 1.0, "top5_hit_rate": 0.98, "failed_calls": 0, "prep_p50_ms": 850},
+                "route_delta_pp": 0.0,
+                "top5_delta_pp": -2.0,
+                "failed_calls_delta": 0,
+                "passed": True,
+            }
+        },
+        "route_delta_pp": 0.0,
+        "top5_delta_pp": -2.0,
+        "thresholds": {"route_drop_max_pp": 0.0, "top5_drop_max_pp": 2.0},
+        "passed": True,
+        "verdict": "passed: Jev side route delta +0.0pp (limit +0.0pp), top-5 delta -2.0pp (limit -2.0pp) over 20 cases",
+    }
+    record_host_ab_outcome(
+        candidates,
+        HostAbReport(
+            candidate_id=candidate_id,
+            kb_id="rag_docs",
+            runs=2,
+            verdict=verdict,
+            duration_s=12.5,
+            worktrees=("clean", "patched"),
+        ),
+        actor_id="admin:cli",
+        note="宿主 A/B 对照（层 2）",
+    )
+
+    detail = evolution_client.get(
+        f"{PREFIX}/code-candidates/{candidate_id}", headers=admin_headers
+    ).json()
+
+    assert len(detail["host_ab_summary"]) == 1
+    entry = detail["host_ab_summary"][0]
+    assert entry["gate"] == HOST_AB_GATE_NAME
+    assert entry["result"] == "passed"
+    assert entry["metrics"]["runs"] == 2
+    assert entry["metrics"]["verdict"]["passed"] is True
+    # 两侧数字都在（审查台据此画对照表）
+    assert entry["metrics"]["verdict"]["sides"]["jev"]["patched"]["top5_hit_rate"] == 0.98
+    # 沙箱那份摘要**不得**把宿主条目算进去（反之亦然）
+    assert detail["sandbox_summary"] == []
+    # 一次测量只追加证据：候选状态没有被这件事推动
+    assert detail["status"] == "candidate_testing"
+    assert [row["gate"] for row in detail["gate_log"]] == ["scope", HOST_AB_GATE_NAME]
+    store.close()
+
+
+def test_host_ab_summary_says_when_no_comparison_was_produced(
+    evolution_client, admin_headers, store_with_cluster
+):
+    """没有可比对照 ⇒ 显式记 inconclusive，别让"没有数字"看起来像"没有变差"。"""
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.sandbox import HostAbReport, record_host_ab_outcome
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _seed_code_patch_candidate(store)
+    record_host_ab_outcome(
+        CandidateStore(store),
+        HostAbReport(candidate_id=candidate_id, kb_id="rag_docs", runs=2, verdict=None, error="replay_exit_1"),
+        actor_id="admin:cli",
+    )
+
+    detail = evolution_client.get(
+        f"{PREFIX}/code-candidates/{candidate_id}", headers=admin_headers
+    ).json()
+
+    entry = detail["host_ab_summary"][0]
+    assert entry["result"] == "inconclusive"
+    assert entry["metrics"]["verdict_unavailable"] is True
+    assert "did not produce a verdict" in entry["detail"]
+    assert detail["status"] == "candidate_testing"
+    store.close()
+
+
 def test_state_machine_exposes_the_confirmable_layers(evolution_client, admin_headers):
     """可确认层级由后端**派生**并透出，前端据此渲染下拉框（不各写一份清单）。"""
     body = evolution_client.get(f"{PREFIX}/state-machine", headers=admin_headers).json()

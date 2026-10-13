@@ -131,6 +131,25 @@ legacy 侧 route Δ+2.5pp、Top-5 Δ0.0pp、失败 0 ⇒ **`passed: true`**。
 应用后人工检查、跑全量测试、重启服务；回退同样由人执行 `# revert` 那条命令。
 测试在真实仓库的一次隔离 worktree 上验证过 apply 与 revert 互为逆操作，且导出前后主工作树字节不变。
 
+**2026-10-12：结论回流门禁轨迹（层 2 第一次有了真实的生产者）。** 此前这个脚本跑完只写一个
+`artifacts/regression-ab-candidate-<id>.json` —— 系统里既没有 `CandidateStore` 也没有门禁写入，
+于是 #26/#27 的"两轮宿主对照"是**人在系统外读那个 JSON** 做的判断，审查台上看不到任何宿主数字，
+候选自己的轨迹里也没有这一层。现在：
+
+* **写回**：脚本把这次对照以 gate 名 **`host_ab`** 追加进 `candidates.gate_log`（带两侧数字），
+  并写一条审计；`--no-record` 可只测不写（JSON 文件仍然写）。写回失败（候选不存在、结果名非法）
+  只记进 `report.record_error`，**不影响测量本身的留痕**。
+* **不动状态**：宿主 A/B 是**给决策用的证据**，不是决策。为此 `CandidateStore` 新增
+  `record_gate_entry()`：只追加 `gate_log` + 审计，**不碰 status**；它能写的结果集是
+  `passed / failed / inconclusive / blocked`，**刻意不含 `accepted`** —— 那是层 1 生成时的产物
+  边界结论，后来跑的任何测量都不能替生成门禁说"通过"（证据可以量出失败，不能伪造准入）。
+* **不达阈值也照样记录**：`passed: false` 记成 `failed` 而不是拒绝写入 —— 数字本身才是重点，
+  由人来读；这条路径从不把候选推进任何终态。
+* **审查台分开呈现**：详情响应同时给 `sandbox_summary`（沙箱：应用 + 目标测试 + 固定回归网）与
+  `host_ab_summary`（宿主 A/B：干净树 vs 打过补丁的树），各画各的对照表。
+  合并成一个列表会让"这个数字是谁量出来的"消失；前端 `sandboxMetrics` 因此只读 `sandbox_summary`
+  —— 两个生产者的 `metrics.verdict` 形状相同，按"有 verdict"在整条 `gate_log` 里找会张冠李戴。
+
 ### 5.3 沙箱运行器与"过期 fixture"规则（2026-10-09 起）
 
 **沙箱结论以前没有生产写回者**：`sandbox_gate_outcome` 只被测试调用过，所以 `candidates.gate_log`

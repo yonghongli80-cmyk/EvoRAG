@@ -260,15 +260,27 @@ export interface EvolutionGateEntry {
   result: string
   detail: string
   created_at: number
-  /** 沙箱写回的结构化指标；老条目没有这个键，读取端据此决定要不要画对照表。 */
+  /** 这一层写回的结构化指标；老条目没有这个键，读取端据此决定要不要画对照表。 */
   metrics?: SandboxGateMetrics
 }
 
-/** 沙箱一次运行的数字：做了什么 + 干净侧与打补丁侧逐项对照。 */
+/**
+ * 一次**层 2 对照**的数字，沙箱与宿主 A/B 共用这一个形状。
+ *
+ * 两者都量"干净侧 vs 打补丁侧"，差别只在谁跑的：沙箱一定写 `applied`/`tests_passed`；
+ * 宿主 A/B 写 `runs`/`kb_id` 这些它自己才知道的事实。所以这三项按可选处理，渲染端逐个判空。
+ */
 export interface SandboxGateMetrics {
-  applied: boolean
-  tests_passed: boolean | null
-  failed_tests: string[]
+  applied?: boolean
+  tests_passed?: boolean | null
+  failed_tests?: string[]
+  /** 宿主 A/B：每侧跑了几次、在哪个库上跑、跑了哪个 worktree。 */
+  runs?: number
+  warmups?: number
+  kb_id?: string
+  worktrees?: string[]
+  duration_s?: number
+  error?: string
   verdict?: {
     sides: Record<
       string,
@@ -281,10 +293,16 @@ export interface SandboxGateMetrics {
     top5_delta_pp: number
     failed_calls_delta: number
     passed: boolean
+    /** patch_verdict 自带的人话结论（含哪一侧、差多少、限多少）。 */
+    verdict?: string
+    cases?: number
   }
   /** 没有可比的对照（例如回放不可用）：显式标出来，别让"没有数字"看起来像"没变差"。 */
   verdict_unavailable?: boolean
 }
+
+/** 宿主 A/B 的指标与沙箱同形（同一个层 2 对照，只是跑在宿主上）。 */
+export type HostAbGateMetrics = SandboxGateMetrics
 
 export interface SandboxSideMetrics {
   route_accuracy: number
@@ -436,6 +454,12 @@ export interface EvolutionCodePatchDetail extends EvolutionCodePatch {
   diff: string
   gate_log: EvolutionGateEntry[]
   audit: EvolutionCandidateAudit[]
+  /**
+   * 层 2 的两个生产者分开给：沙箱（应用 + 目标测试 + 固定回归网）与宿主 A/B
+   * （真实的干净侧 vs 打补丁侧）。合并成一个列表会让"这个数字是谁量出来的"消失。
+   */
+  sandbox_summary: EvolutionGateEntry[]
+  host_ab_summary: EvolutionGateEntry[]
   /** 批准后导出的补丁文件；命令只有导出后可用（端点从不执行命令）。 */
   apply_command: string
   revert_command: string

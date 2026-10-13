@@ -75,6 +75,11 @@ _DEFAULT_GATE_RESULT = "passed"
 #: ``candidate_testing``，下一轮扫描会再次给它机会（基础设施故障不该烧掉候选）。
 _INCONCLUSIVE_GATE_RESULT = "inconclusive"
 
+#: 一个"追加证据"的门禁条目可以写的结果值（见 :meth:`CandidateStore.record_gate_entry`）。
+#: ``accepted`` **不在**其中：它是层 1 生成时的产物边界结论，后来跑的任何测量都不能替生成门禁
+#: 说"通过" —— 证据可以量出失败，不能伪造准入。
+GATE_EVIDENCE_RESULTS: frozenset[str] = frozenset({"passed", "failed", "inconclusive", "blocked"})
+
 _STATUS_IN = _sql_in("status", _enum_values(EvolutionStatus))
 _POOL_IN = _sql_in("pool", _enum_values(ObservationPool))
 _CONFIDENCE_IN = _sql_in("confidence", ("low", "medium", "high"))
@@ -408,6 +413,69 @@ class CandidateStore:
             self._conn.execute(
                 "UPDATE candidates SET gate_log = ? WHERE id = ?",
                 (json.dumps(gate_log, ensure_ascii=False), candidate_id),
+            )
+            self._conn.commit()
+            updated = self._conn.execute(
+                "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+        return _decode_candidate_row(updated)
+
+    def record_gate_entry(
+        self,
+        id: int,
+        *,
+        actor_id: str,
+        note: str,
+        gate: str,
+        result: str,
+        gate_detail: str,
+        gate_metrics: dict | None = None,
+    ) -> dict:
+        """Append one gate entry as **evidence**, without moving the candidate's status.
+
+        Some measurements are evidence for a decision rather than a decision themselves. Layer 2's
+        host A/B is the case that forced this method (2026-10-12): the script ran the comparison and
+        wrote its verdict into an artifact file, so the review panel never showed it and the
+        administrator judged from something outside the system. Recording it has to be possible
+        without pretending the candidate moved — the status stays whatever the decision it belongs
+        to left it at.
+
+        ``result`` is checked against :data:`GATE_EVIDENCE_RESULTS` because the entry is *not*
+        allowed to claim the layer-1 ``accepted``: nothing that ran afterwards can accept a
+        candidate on the generation gate's behalf. The audit row is ``advance``-shaped, as in
+        :meth:`record_inconclusive_gate`, and the note carries the reason.
+        """
+        result = str(result or "").strip()
+        if result not in GATE_EVIDENCE_RESULTS:
+            raise ValueError(
+                f"unknown gate evidence result: {result!r} (expected one of {sorted(GATE_EVIDENCE_RESULTS)})"
+            )
+        if not str(gate or "").strip():
+            raise ValueError("a gate entry needs a gate name")
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM candidates WHERE id = ?", (int(id),)
+            ).fetchone()
+            if row is None:
+                raise KeyError("candidate not found")
+            candidate_id = int(row["id"])
+            self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
+            gate_log = _decode_json(row["gate_log"])
+            if not isinstance(gate_log, list):
+                gate_log = []
+            entry = {
+                "gate": str(gate),
+                "result": result,
+                "detail": "" if gate_detail is None else str(gate_detail),
+                "created_at": now,
+            }
+            if gate_metrics:
+                entry["metrics"] = gate_metrics
+            gate_log.append(entry)
+            self._conn.execute(
+                "UPDATE candidates SET gate_log = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(gate_log, ensure_ascii=False), now, candidate_id),
             )
             self._conn.commit()
             updated = self._conn.execute(

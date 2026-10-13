@@ -54,6 +54,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--runs", type=int, default=2, help="每侧重复次数（降次数=更快更糙）")
     parser.add_argument("--warmups", type=int, default=0)
+    parser.add_argument("--actor-id", default="admin:cli", help="审计里记谁跑的这次对照")
+    parser.add_argument("--note", default="", help="写进门禁轨迹与审计的备注")
+    parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="只测量、不把结论写回候选轨迹（JSON 文件仍然写）",
+    )
     args = parser.parse_args()
 
     from rag.evolution.host_lock import HostLocked, host_measurement_lock
@@ -151,10 +158,37 @@ def _measure(args) -> int:
         report["runs"] = args.runs
         report["elapsed_s"] = round(time.perf_counter() - started, 1)
         error = baseline_error or patched_error
+        verdict = None
         if error:
             report["replay_error"] = error
         else:
-            report["verdict"] = patch_verdict(baseline or {}, patched_payload or {})
+            verdict = patch_verdict(baseline or {}, patched_payload or {})
+            report["verdict"] = verdict
+        # 回流：把这次对照写进候选的门禁轨迹（**不动状态**）。此前它只写进一个 JSON 文件，
+        # 审查台看不到、管理员要在系统外读它才能判断 —— 于是"层 2 有结论"这件事从来没有
+        # 出现在候选自己的轨迹里。落库失败不算测量失败：文件仍然是留痕。
+        if not args.no_record:
+            from rag.evolution.sandbox import HostAbReport, record_host_ab_outcome
+
+            try:
+                record_host_ab_outcome(
+                    store,
+                    HostAbReport(
+                        candidate_id=int(args.candidate_id),
+                        kb_id=str(args.kb_id),
+                        runs=int(args.runs),
+                        warmups=int(args.warmups),
+                        verdict=verdict,
+                        error=str(error or ""),
+                        duration_s=float(report["elapsed_s"]),
+                        worktrees=("clean", "patched"),
+                    ),
+                    actor_id=args.actor_id,
+                    note=args.note or "宿主 A/B 对照（层 2：干净树 vs 打过补丁的树）",
+                )
+                report["recorded_gate"] = "host_ab"
+            except (KeyError, ValueError) as write_error:
+                report["record_error"] = f"{type(write_error).__name__}: {write_error}"
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
         (OUT / f"regression-ab-candidate-{args.candidate_id}.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

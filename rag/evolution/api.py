@@ -904,6 +904,9 @@ CODE_PATCH_ARTIFACT_TYPE = "code_patch"
 #: by — the store only ever copies them into ``gate_log``.
 SANDBOX_GATE = "sandbox"
 REVIEW_GATE = "review"
+#: 层 2 的第二个生产者：宿主上的 A/B（见 ``sandbox.HOST_AB_GATE_NAME``）。它写进同一条 gate_log，
+#: 但**不移动状态**——测量是证据，决策仍是管理员那一步。审查台按门禁名分开渲染两者。
+HOST_AB_GATE = "host_ab"
 
 #: Where an approved patch is exported, and the repository the exported apply
 #: command names. ``artifacts/`` is locally ignored, so an export is a working
@@ -969,7 +972,9 @@ def _sandbox_summary(gate_log: object) -> list[dict]:
     """The sandbox conclusions of layers 2/3, lifted out of the gate trail.
 
     A patch that never reached the sandbox summarizes to an empty list, which is
-    exactly what a reviewer needs to see before deciding about it.
+    exactly what a reviewer needs to see before deciding about it. Only the ``sandbox`` gate
+    qualifies: the host A/B writes the same layer's comparison on a different surface and gets its
+    own summary, so the panel can say which of the two produced a number instead of merging them.
     """
     if not isinstance(gate_log, list):
         return []
@@ -977,6 +982,22 @@ def _sandbox_summary(gate_log: object) -> list[dict]:
         _serialize_gate_entry(entry)
         for entry in gate_log
         if isinstance(entry, Mapping) and entry.get("gate") == SANDBOX_GATE
+    ]
+
+
+def _host_ab_summary(gate_log: object) -> list[dict]:
+    """The host A/B conclusions, lifted out of the same trail.
+
+    Layer 2's real clean-versus-patched comparison happens on the host **after** an administrator
+    applies the patch (the sandbox carries no credentials), so this is where the number a release
+    decision leans on actually lives. Its entries never move a candidate's status.
+    """
+    if not isinstance(gate_log, list):
+        return []
+    return [
+        _serialize_gate_entry(entry)
+        for entry in gate_log
+        if isinstance(entry, Mapping) and entry.get("gate") == HOST_AB_GATE
     ]
 
 
@@ -1018,6 +1039,10 @@ def _serialize_code_candidate_detail(row: dict, store: CandidateStore) -> dict:
     payload = _serialize_code_candidate(row)
     payload["diff"] = str(row.get("diff") or "")
     payload["gate_log"] = [_serialize_gate_entry(entry) for entry in row["gate_log"]]
+    # 层 2 的两个生产者分开呈现：沙箱（应用 + 目标测试 + 固定回归网，回放按设计不量）
+    # 与宿主 A/B（真实的干净侧 vs 打补丁侧）。合并成一个列表会让"这次数字是谁量出来的"消失。
+    payload["sandbox_summary"] = _sandbox_summary(row["gate_log"])
+    payload["host_ab_summary"] = _host_ab_summary(row["gate_log"])
     payload["audit"] = [
         _serialize_candidate_audit(entry) for entry in store.list_audit(row["id"])
     ]

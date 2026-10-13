@@ -1467,6 +1467,76 @@ def test_record_sandbox_outcome_writes_status_detail_and_numbers():
     assert call["gate_metrics"]["verdict"]["passed"] is True
 
 
+class _RecordingGateStore:
+    """只记 ``record_gate_entry`` 的替身：宿主 A/B 的回流**不该**碰 ``advance_candidate``。"""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.advance_calls: list[dict] = []
+
+    def record_gate_entry(self, candidate_id, **kwargs):
+        self.calls.append({"candidate_id": candidate_id, **kwargs})
+        return {"status": "unchanged", "gate_log": [{"gate": kwargs.get("gate")}]}
+
+    def advance_candidate(self, *args, **kwargs):  # pragma: no cover - 调用即失败
+        self.advance_calls.append({"args": args, "kwargs": kwargs})
+        raise AssertionError("宿主 A/B 是证据，不许移动候选状态")
+
+
+def test_record_host_ab_outcome_appends_evidence_and_never_moves_the_status():
+    """层 2 的宿主对照回流：进 gate_log、带两侧数字，但**不**推进状态。"""
+    from rag.evolution.sandbox import (
+        HOST_AB_GATE_NAME,
+        HostAbReport,
+        patch_verdict,
+        record_host_ab_outcome,
+    )
+
+    store = _RecordingGateStore()
+    payload = _benchmark_payload(route_accuracy=0.875)
+    report = HostAbReport(
+        candidate_id=26,
+        kb_id="rag_docs",
+        runs=2,
+        warmups=0,
+        verdict=patch_verdict(payload, payload),
+        duration_s=31.5,
+        worktrees=("clean", "patched"),
+    )
+
+    record_host_ab_outcome(store, report, actor_id="evolab-admin", note="宿主 A/B 对照（层 2）")
+
+    call = store.calls[0]
+    assert call["candidate_id"] == 26
+    assert call["gate"] == HOST_AB_GATE_NAME
+    assert call["result"] == "passed"
+    assert call["gate_metrics"]["verdict"]["passed"] is True
+    assert call["gate_metrics"]["runs"] == 2
+    # 两侧的数字原样落库（审查台照沙箱那张表渲染宿主这一份）
+    assert call["gate_metrics"]["verdict"]["sides"]["jev"]["baseline"]["route_accuracy"] == 0.875
+    assert set(call["gate_metrics"]["verdict"]["sides"]) == {"legacy", "jev"}
+    assert call["gate_metrics"]["worktrees"] == ["clean", "patched"]
+    assert store.advance_calls == []
+
+
+def test_host_ab_metrics_and_detail_say_when_there_was_no_comparison():
+    """没有可比对照 ⇒ 显式 inconclusive + 明确措辞，别让"没有数字"读成"没有变差"。"""
+    from rag.evolution.sandbox import HostAbReport, host_ab_gate_detail, host_ab_gate_metrics
+
+    unavailable = HostAbReport(candidate_id=9, kb_id="rag_docs", runs=2, verdict=None)
+    metrics = host_ab_gate_metrics(unavailable)
+    assert "verdict" not in metrics and metrics["verdict_unavailable"] is True
+    assert "not a 'no regression' claim" in host_ab_gate_detail(unavailable)
+
+    errored = HostAbReport(candidate_id=9, kb_id="rag_docs", runs=2, verdict=None, error="replay_exit_1")
+    assert "replay_exit_1" in host_ab_gate_detail(errored)
+
+    failed_verdict = {"passed": False, "verdict": "failed: jev side: top-5 hit dropped 7.5pp"}
+    failing = HostAbReport(candidate_id=9, kb_id="rag_docs", runs=2, verdict=failed_verdict)
+    assert host_ab_gate_metrics(failing)["verdict"]["passed"] is False
+    assert "failed" in host_ab_gate_detail(failing)
+
+
 def test_a_replay_that_died_on_a_missing_collection_says_so(tmp_path, monkeypatch):
     """实测形状：语料副本里没有回放要的集合 ⇒ 类别应当是 corpus_missing，而不是光秃秃的 exit_1。
 
