@@ -88,3 +88,60 @@ def test_repeat_counts_must_be_one_or_an_odd_number(repeats):
     """偶数次会平票；平票在这条路径上必须是"未决"，与其发明平票语义不如要求奇数。"""
     with pytest.raises(SystemExit):
         _parse_args(["--apply", "--user-id", "1", "--repeats", repeats])
+
+
+def test_apply_refuses_when_total_planned_runs_exceed_safety_ceiling():
+    """成本守卫：--limit * --repeats 超过安全阈值（默认 15）时拒绝，防止意外烧掉几十分钟。"""
+    with pytest.raises(SystemExit):
+        _parse_args(["--apply", "--user-id", "1", "--limit", "10", "--repeats", "3"])
+
+
+def test_apply_allows_large_runs_with_force_or_higher_ceiling():
+    """显式指定 --force 或调高 --max-total-runs 时放行。"""
+    forced = _parse_args(["--apply", "--user-id", "1", "--limit", "10", "--repeats", "3", "--force"])
+    assert forced.limit == 10
+    assert forced.repeats == 3
+
+    raised = _parse_args(
+        ["--apply", "--user-id", "1", "--limit", "10", "--repeats", "3", "--max-total-runs", "30"]
+    )
+    assert raised.limit == 10
+    assert raised.repeats == 3
+
+
+def test_run_single_passes_repeats_to_evaluate_repeatable(monkeypatch):
+    """单候选运行将 --repeats 真正交给可重复判定函数，报告带上 repeats 字段。"""
+    import scripts.benchmark_candidate_questions as script_module
+    from rag.evolution.candidate_gates import GateResult
+
+    captured = {}
+
+    def fake_evaluate_repeatable(candidate, *, baseline_route_fn, candidate_route_fn, cases, repeats=1):
+        captured["repeats"] = repeats
+        return GateResult(
+            gate="benchmark",
+            passed=True,
+            stats={
+                "thresholds": {"route_drop_max_pp": 0.0, "top5_drop_max_pp": 2.0},
+                "route_delta_pp": 0.0,
+                "top5_delta_pp": 0.0,
+            },
+            per_case=[],
+            verdict="passed [3 repeat(s): 3 passed, 0 failed]",
+        )
+
+    monkeypatch.setattr(script_module, "build_gate_callables", lambda *a, **k: (lambda q: {}, lambda t, p: (lambda q: {})))
+    monkeypatch.setattr("rag.evolution.candidate_gates.evaluate_repeatable_on_benchmark", fake_evaluate_repeatable)
+
+    written_reports = []
+    monkeypatch.setattr(script_module, "_write_outputs", lambda report, args: written_reports.append(report))
+
+    args = _parse_args(
+        ["--target", "preflight", "--payload-json", '{"q1": {"instructions": "override"}}', "--user-id", "1", "--repeats", "3"]
+    )
+    cases = [case()]
+    exit_code = script_module._run_single(args, cases)
+    assert exit_code == 0
+    assert captured["repeats"] == 3
+    assert written_reports[0]["repeats"] == 3
+

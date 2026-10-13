@@ -1274,6 +1274,45 @@ def test_the_patch_step_is_off_without_the_switch_or_a_budget(tmp_path):
     assert generator.calls == 0
 
 
+def test_stable_candidate_does_not_block_future_candidates_in_cluster(tmp_path):
+    """已合入/结案的 stable 候选不再算作 open，不阻挡该聚类后续其他观测的候选生成。"""
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.store import EvolutionStatus
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    cluster, _ = _confirmed_cluster(
+        store, "kb1|unknown|settled_cluster", questions=("第一条观测", "第二条观测")
+    )
+    members = store.list_observations(cluster["id"])
+    generator = FakePatchGenerator()
+
+    # 第一轮：生成第一条候选（来自成员 1）并将其推进到 STABLE（模拟已合入上线）
+    outcome = _patch_step(store, generator)()
+    assert outcome["patches_created"] == 1
+    candidates = CandidateStore(store)
+    rows = candidates.list_candidates()
+    assert len(rows) == 1
+    cid = int(rows[0]["id"])
+    candidates.advance_candidate(cid, EvolutionStatus.AWAITING_VERIFICATION.value, actor_id="admin", note="gate passed")
+    candidates.advance_candidate(cid, EvolutionStatus.APPROVED_FOR_CANARY.value, actor_id="admin", note="approved")
+    candidates.advance_candidate(cid, EvolutionStatus.STABLE.value, actor_id="admin", note="merged and stable")
+
+    # 成员 2 补充 draft
+    store.add_draft(
+        cluster["id"],
+        sample_draft(suggested_layer="code"),
+        observation_id=members[1]["id"],
+        prompt_version="diagnosis-v9",
+        model="scripted",
+    )
+
+    # 第二轮：因为已有候选已经 stable（终态），堆放守卫放行新观测的生成
+    outcome2 = _patch_step(store, FakePatchGenerator())()
+    assert outcome2["patches_created"] == 1
+    assert len(candidates.list_candidates()) == 2
+
+
+
 # ------------------------------------------------------------------
 # 第 4 阶段运行化：问题集候选步骤（只生成；门禁与灰度仍归管理员）。
 # ------------------------------------------------------------------

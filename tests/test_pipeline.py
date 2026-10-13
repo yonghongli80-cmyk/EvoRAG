@@ -911,3 +911,48 @@ def test_finalize_refuses_gracefully_when_nothing_is_citable():
         assert prepared["decision"].kind == "insufficient_evidence"
     finally:
         pipeline.close()
+
+
+def test_route_with_history_correction_branches():
+    """多轮路由历史修正：仅在'判澄清且有历史且改写改变问法'时用补全问题重判。"""
+    from types import SimpleNamespace
+
+    pipeline = object.__new__(RAGPipeline)
+    pipeline.jev = MagicMock()
+    pipeline.memory = MagicMock()
+
+    # 1. 初始路由非 clarification：直接原样返回，零历史读取、零改写
+    rag_decision = SimpleNamespace(route="rag")
+    pipeline.jev.route.return_value = rag_decision
+    assert pipeline._route_with_history_correction("问题", "s1", None) is rag_decision
+    pipeline.memory.get_recent_messages.assert_not_called()
+
+    # 2. 初始判 clarification 但无历史：原样返回澄清
+    clarify_decision = SimpleNamespace(route="clarification")
+    pipeline.jev.route.return_value = clarify_decision
+    pipeline.memory.get_recent_messages.return_value = []
+    assert pipeline._route_with_history_correction("那它呢", "s1", None) is clarify_decision
+
+    # 3. 初始判 clarification，有历史但改写结果不变：原样返回澄清
+    pipeline.memory.get_recent_messages.return_value = [SimpleNamespace(role="user", content="前置问题")]
+    with patch.object(pipeline, "_rewrite_for_retrieval", return_value="那它呢"):
+        assert pipeline._route_with_history_correction("那它呢", "s1", None) is clarify_decision
+
+    # 4. 初始判 clarification，有历史且改写补全了先行词：重判且采用新决策
+    pipeline.jev.route.reset_mock()
+    new_rag_decision = SimpleNamespace(route="rag", completed=True)
+    pipeline.jev.route.side_effect = [clarify_decision, new_rag_decision]
+    with patch.object(pipeline, "_rewrite_for_retrieval", return_value="补全后的完整问题"):
+        result = pipeline._route_with_history_correction("那它呢", "s1", None)
+        assert result is new_rag_decision
+        assert pipeline.jev.route.call_count == 2
+        pipeline.jev.route.assert_called_with("补全后的完整问题", None)
+
+    # 5. 重判后依然判定为 clarification：保留原决策
+    pipeline.jev.route.reset_mock()
+    clarify_2 = SimpleNamespace(route="clarification", marker="second")
+    pipeline.jev.route.side_effect = [clarify_decision, clarify_2]
+    with patch.object(pipeline, "_rewrite_for_retrieval", return_value="补全后依然模糊的问题"):
+        result = pipeline._route_with_history_correction("模糊问题", "s1", None)
+        assert result is clarify_decision
+

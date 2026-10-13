@@ -920,7 +920,34 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
 制品做出来了，但没有任何东西负责把它交给下一个环节**（结果写进 JSON 没人读、测量不回流、
 状态不跟事实走、判定不可重复却当结论用）。这条模式本身值得带到下一轮。
 
-## 21. 工程实践清单（这套代码里反复出现的做法）
+## 21. 2026-10-13（接手进展）：结案状态与堆放守卫解耦、单候选多数票接入与回放成本上限
+
+**一、解开 `stable` 与堆放守卫（`_OPEN_CANDIDATE_STATUSES`）的死锁：**
+* **发现与定性**：#20 早已通过 `close_out_merged` 结案并标记为 `stable`。但此前 `_OPEN_CANDIDATE_STATUSES`
+  把 `EvolutionStatus.STABLE.value` 错误算作“未决”，导致聚类 3 和 30 在补丁合入后依然被永久判定为
+  “已有未决候选”，堆放守卫彻底堵死后续演化；
+* **修法**：将 `STABLE` 从 `_OPEN_CANDIDATE_STATUSES` 移除。已结案合入的补丁属于终态，不再占用聚类名额；
+  未决集合严格收敛到 `candidate_testing / awaiting_verification / approved_for_canary / canary`；
+* **验证**：聚类 3 与 30 的 open patch clusters 从 `{3, 30}` 恢复为 `set()`；新增单元测试覆盖
+  `test_stable_candidate_does_not_block_future_candidates_in_cluster` 与
+  `test_regenerate_allows_when_other_candidate_is_stable`。
+
+**二、单候选回放真正接入多数票判定（修复闲置参数与未闭环）：**
+* **发现**：`scripts/benchmark_candidate_questions.py` 之前只在 `--apply` 批量写回路径调用了
+  `evaluate_repeatable_on_benchmark`；在单候选回放 `_run_single` 中，命令行传入 `--repeats 3` 却被
+  完全忽略，依然调用单次 `evaluate_on_benchmark`（又是典型的“制品做出来了但没交给下一环节”）；
+* **修法**：`_run_single` 统一切换到 `evaluate_repeatable_on_benchmark`，透传 `repeats=args.repeats`，
+  并在报告中记录真实 `repeats` 轮次。
+
+**三、回放成本安全上限守卫（`--max-total-runs`）：**
+* **动机**：`--limit N --repeats M` 的耗时与调用量呈乘积增长；无限制的批量回放易导致限流或卡顿；
+* **修法**：新增 `--max-total-runs`（默认 25）和 `--force` 开关，默认 `--limit` 调优为 5（5 × 3 = 15 次回放）；
+  超限时显式报错拦截，提示降低批次或显式传参；补充 3 组针对性参数单元测试。
+
+**四、多轮路由历史修正全分支单元测试覆盖：**
+* 针对 `_route_with_history_correction()` 补齐 5 种场景的分支测试（无历史、非澄清、改写不变、补全重判生效、重判依然澄清），全量测试基线升至 **2102 passed**（+6 条测试，0 失败）。
+
+## 22. 工程实践清单（这套代码里反复出现的做法）
 
 1. **先定判据，再动手**：每项改动都先写"达标线"（如"生成成功率 ≥80%"），并留下对照数字。
 2. **测量先行，且防自欺**：固定样本、串行执行（并行跑两条 A/B 实测触发服务商限流，让一次基线侧 26 次调用失败）。
@@ -931,7 +958,7 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
 6. **测试防固化**：彩排暴露了"夹具按错误假设塞字段"的问题之后，改为**按真实形态**构造夹具。
 7. **不猜接口**：每个新代码都先读真实签名/表结构/schema，再写。
 
-## 22. 诚实边界（面试时也会被问到）
+## 23. 诚实边界（面试时也会被问到）
 
 * **系统永不自动合入**是设计红线，不是没做完；
 * 黄金回放 fixture 对"触及外部 seam 的补丁"**按设计不可用**（录制描述的是另一份代码），这类补丁只能
@@ -939,7 +966,7 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
 * 结构化 `edits` 的 12/12 来自**一个聚类的 6 个观测 × 2 次**，结论强但**不外推**到别的层；
 * 上游供给（真实失败流量）决定这套回路的产出速度 —— 没有流量时它诚实地空转（`scanned=0`）。
 
-## 23. 可复现命令（挑几条）
+## 24. 可复现命令（挑几条）
 
 ```powershell
 python scripts/measure_patch_generation.py --observation-ids 131,151,153,154,155,156 --repeats 2   # 生成成功率基线

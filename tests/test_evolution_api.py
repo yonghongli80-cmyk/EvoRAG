@@ -1668,6 +1668,31 @@ def test_regenerate_refuses_while_the_cluster_has_an_open_candidate(
     store.close()
 
 
+def test_regenerate_allows_when_other_candidate_is_stable(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """已合入的 stable 补丁不再算作未决：聚类里有已结案补丁时，回滚候选依然允许重新生成。"""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    rolled_back_id = _rolled_back_patch(store, cluster_id, member_id)
+
+    # 模拟聚类中同时存在一条已结案合入的 stable 候选
+    candidates = CandidateStore(store)
+    stable_id = _seed_code_patch_candidate(store, marker="已结案补丁", observation_id=member_id)
+    for status in ("awaiting_verification", "approved_for_canary", "stable"):
+        candidates.advance_candidate(stable_id, status, actor_id="admin", note="merged")
+
+    seen = _fake_patch_generator(monkeypatch)
+    response = _regenerate(evolution_client, admin_headers, rolled_back_id)
+    assert response.status_code == 200
+    assert seen["calls"] == 1
+    store.close()
+
+
+
 def test_regenerate_refuses_a_candidate_that_was_not_rolled_back(
     evolution_client, admin_headers, store_with_cluster, monkeypatch
 ):

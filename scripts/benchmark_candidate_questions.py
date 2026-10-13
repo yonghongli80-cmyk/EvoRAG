@@ -480,7 +480,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--user-id", type=int, default=None, help="run the enterprise path with this principal")
     parser.add_argument("--user-db", default=None, help="user database path for --user-id")
     parser.add_argument("--apply", action="store_true", help="write gate outcomes back for every pending candidate")
-    parser.add_argument("--limit", type=int, default=10, help="pending candidates per --apply round")
+    parser.add_argument("--limit", type=int, default=5, help="pending candidates per --apply round (default: 5)")
     parser.add_argument("--actor-id", default="evolver/benchmark-gate", help="audit actor for --apply")
     parser.add_argument(
         "--repeats",
@@ -490,6 +490,17 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "how many times to take the same comparison; only a stable verdict settles a candidate "
             "(default: 3 with --apply, 1 for a read-only replay)"
         ),
+    )
+    parser.add_argument(
+        "--max-total-runs",
+        type=int,
+        default=25,
+        help="safety ceiling on candidate_limit * repeats for --apply rounds (default: 25)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="override the safety ceiling on total replay runs",
     )
     parser.add_argument("--json-out", default=None)
     parser.add_argument("--markdown-out", default=None)
@@ -506,6 +517,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     if args.apply:
         if args.candidate_id is not None or args.payload_json is not None:
             parser.error("--apply runs the pending round; drop --candidate-id/--payload-json")
+        total_planned_runs = args.limit * args.repeats
+        if not args.force and total_planned_runs > args.max_total_runs:
+            parser.error(
+                f"--apply total planned runs ({args.limit} candidates * {args.repeats} repeats = "
+                f"{total_planned_runs}) exceeds safety limit ({args.max_total_runs}). "
+                "Reduce --limit/--repeats, raise --max-total-runs, or pass --force."
+            )
     elif (args.candidate_id is not None) == (args.payload_json is not None):
         parser.error("pass exactly one of --candidate-id or --payload-json (with --target)")
     elif args.payload_json is not None and not args.target:
@@ -520,7 +538,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _run_single(args: argparse.Namespace, cases: Sequence) -> int:
-    from rag.evolution.candidate_gates import GATE_NAME, evaluate_on_benchmark
+    from rag.evolution.candidate_gates import GATE_NAME, evaluate_repeatable_on_benchmark
 
     spec = _resolve_candidate_spec(args)
     baseline_route, candidate_route_for = build_gate_callables(
@@ -531,11 +549,12 @@ def _run_single(args: argparse.Namespace, cases: Sequence) -> int:
         user_db_path=args.user_db,
         provider_spec=args.provider,
     )
-    result = evaluate_on_benchmark(
+    result = evaluate_repeatable_on_benchmark(
         spec.candidate,
         baseline_route_fn=baseline_route,
         candidate_route_fn=candidate_route_for(spec.target, spec.payload),
         cases=cases,
+        repeats=args.repeats,
     )
     overlay = "provider overlay" if args.provider else ("smoke overlay" if spec.payload else "identical (no overlay)")
     report = {
@@ -543,6 +562,7 @@ def _run_single(args: argparse.Namespace, cases: Sequence) -> int:
         "cases": len(cases),
         "thresholds": result.stats["thresholds"],
         "applied": False,
+        "repeats": int(args.repeats),
         "candidate_question_set": overlay,
         "results": [
             _result_block(

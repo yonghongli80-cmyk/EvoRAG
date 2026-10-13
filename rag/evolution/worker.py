@@ -773,13 +773,14 @@ def _keep_defects(items: list[dict], marked: frozenset[str]) -> list[dict]:
 #: 实测动机（2026-10-11）：`rag/reranker.py` 上堆了 11 条候选，其中 5 条是同一个"同义对齐"想法的
 #: 不同写法；根因是准入此前**按观测**判（该观测尚无候选），而 cluster 3 有 112 个成员 ⇒ 理论上
 #: 一个聚类能一口气产出 112 条。人被驳回（rejected）之后重新放开 ⇒ 管理员驳回即"可以再试"。
+#: 2026-10-13 修复：stable 已经是上线/合入终态（如 close_out_merged 结案的 #20/#29），不应继续
+#: 作为"未决"占着聚类名额，否则该聚类将永远无法再次演化。
 _OPEN_CANDIDATE_STATUSES: frozenset[str] = frozenset(
     {
         EvolutionStatus.CANDIDATE_TESTING.value,
         EvolutionStatus.AWAITING_VERIFICATION.value,
         EvolutionStatus.APPROVED_FOR_CANARY.value,
         EvolutionStatus.CANARY.value,
-        EvolutionStatus.STABLE.value,
     }
 )
 
