@@ -1,6 +1,7 @@
 """Task 8: benchmark statistics, acceptance thresholds, and report rendering tests."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ def case(
     expected_sources=("doc.md",),
     expected_route: str = "rag",
     category: str = "ordinary",
+    history=(),
 ) -> BenchmarkCase:
     return BenchmarkCase(
         id=case_id,
@@ -30,6 +32,7 @@ def case(
         kb_id="rag_docs",
         expected_source_names=tuple(expected_sources),
         category=category,
+        history=tuple(history),
     )
 
 
@@ -250,6 +253,76 @@ def test_load_cases_validates_schema(tmp_path):
         load_cases(path)
 
 
+def test_load_cases_reads_a_multi_turn_history_in_order(tmp_path):
+    """多轮用例：先行轮次按时间顺序读进来，最后一轮必须是助手。"""
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "id": "mt-001",
+                        "question": "那它多少钱？",
+                        "expected_route": "rag",
+                        "kb_id": "kb_accessories",
+                        "category": "multi_turn",
+                        "history": [
+                            {"role": "user", "content": "R50 电池有吗"},
+                            {"role": "assistant", "content": "有，两块装"},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_cases(path)
+
+    assert loaded[0].category == "multi_turn"
+    assert loaded[0].history == (("user", "R50 电池有吗"), ("assistant", "有，两块装"))
+
+
+@pytest.mark.parametrize(
+    "history, message",
+    [
+        ([{"role": "system", "content": "你是助手"}], "has role 'system'"),
+        ([{"role": "user", "content": "  "}], "has empty content"),
+        ([{"role": "user", "content": "先问一句"}], "must end with an assistant turn"),
+        ("不是列表", "must be a list"),
+        ([["user", "先问一句"]], r"history\[0\] for"),
+    ],
+)
+def test_load_cases_rejects_a_malformed_history(tmp_path, history, message):
+    """历史坏掉必须**当场**拒绝：否则那个用例会静默地什么都没测、却照样报一个数字。"""
+    path = tmp_path / "cases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "id": "mt-bad",
+                        "question": "那它呢",
+                        "expected_route": "rag",
+                        "kb_id": "kb",
+                        "category": "multi_turn",
+                        "history": history,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_cases(path)
+
+
+def test_a_single_turn_case_has_no_history_by_default():
+    """旧用例文件逐字节仍然合法：没有 `history` 键就是单轮。"""
+    assert case().history == ()
+
+
 def test_load_cases_rejects_unknown_route(tmp_path):
     path = tmp_path / "cases.json"
     path.write_text(
@@ -280,6 +353,39 @@ def test_load_cases_rejects_unknown_category(tmp_path):
     )
     with pytest.raises(ValueError, match="unknown category"):
         load_cases(path)
+
+
+def test_run_benchmark_gives_every_invocation_its_own_session():
+    """每次调用一个独立会话 —— 多轮用例靠它保证历史里没有上一次的答案。
+
+    共用一个会话时，上一轮写进去的问答会被下一次调用当成"历史"读出来，于是同一份用例在
+    第 1 次和第 2 次测的不是同一个东西。这里用"准备函数收到的会话 id 两两不同"钉住它。
+    """
+    seen: list[str] = []
+
+    def prepare(item, session_id="benchmark"):
+        seen.append(session_id)
+        return outcome()
+
+    cases = [case("a"), case("b")]
+    run_benchmark(cases, prepare, prepare, runs=2, warmups=1)
+
+    # 2 用例 × (1 预热 + 2 正式) × 2 条路径
+    assert len(seen) == 2 * 3 * 2
+    assert len(set(seen)) == len(seen), "会话 id 必须两两不同"
+    assert all(item_id in " ".join(seen) for item_id in ("a", "b"))
+
+
+def test_run_benchmark_still_accepts_a_single_argument_preparation():
+    """既有替身（只收一个参数）不能被这次改动弄坏。"""
+
+    def prepare(item):
+        return outcome()
+
+    report = run_benchmark([case("a")], prepare, prepare, runs=1, warmups=0)
+
+    assert report.sample_count == 2
+    assert report.old.failed_calls == 0
 
 
 def test_rewrite_acceptance_uses_ordinary_population_only():
@@ -393,3 +499,105 @@ def test_report_json_round_trip_without_questions():
     assert payload["sample_count"] == 2
     assert "问题 rag-001" not in json.dumps(payload, ensure_ascii=False)
     assert payload["acceptance"]["passed"] in {True, False}
+
+
+# ------------------------------------------------------------------
+# 多轮：历史被喂进"这一次调用自己的会话"，而不是某一轮的上一次。
+# ------------------------------------------------------------------
+
+
+class _StubPipeline:
+    """只提供 `prepare` 会碰到的东西：记忆、重排器、Jev、以及 `_prepare_context`。"""
+
+    def __init__(self):
+        self.memory = _StubMemory()
+        self.reranker = SimpleNamespace(rerank=lambda documents, top_k=None: documents)
+        self.jev = None
+        self.seen: list[tuple[str, int]] = []
+        is_pipeline = self
+
+        def _prepare_context(question, session_id, doc_name, **kwargs):
+            is_pipeline.seen.append((session_id, len(self.memory.get_recent_messages(session_id, 10))))
+            return ({"kind": "rag", "sources": [{"doc_name": "doc.md"}]}, None)
+
+        self._prepare_context = _prepare_context
+
+
+class _StubMemory:
+    def __init__(self):
+        self.sessions: dict[str, list[tuple[str, str]]] = {}
+
+    def add_message(self, session_id, role, content):
+        self.sessions.setdefault(session_id, []).append((role, content))
+
+    def get_recent_messages(self, session_id, n=10):
+        return [
+            SimpleNamespace(role=role, content=content)
+            for role, content in self.sessions.get(session_id, [])[-n:]
+        ]
+
+    def get_summary(self, session_id):  # pragma: no cover - 多轮用例不带摘要
+        return None
+
+
+def _stub_live_preparations(monkeypatch, pipeline):
+    """把 `build_live_preparations` 里的真实管线换成桩：只验"历史怎么喂"。"""
+    import rag.agent
+    import rag.pipeline
+
+    monkeypatch.setattr(rag.pipeline, "RAGPipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(rag.pipeline, "rewrite_query", lambda question, **kwargs: question)
+    monkeypatch.setattr(rag.agent, "route_question", lambda question: "rag")
+    from scripts.benchmark_jev_retrieval import build_live_preparations
+
+    return build_live_preparations(kb_id="rag_docs")
+
+
+def test_a_multi_turn_case_seeds_its_own_session_and_reads_it_back(monkeypatch):
+    pipeline = _StubPipeline()
+    old, new = _stub_live_preparations(monkeypatch, pipeline)
+    multi = case(
+        "mt-001",
+        category="multi_turn",
+        history=(("user", "R50 电池有吗"), ("assistant", "有，两块装")),
+    )
+
+    old(multi, "session-a")
+    new(multi, "session-b")
+
+    # 两次调用各自把自己的历史写进自己的会话，且都恰好两轮
+    assert pipeline.memory.sessions["session-a"] == [
+        ("user", "R50 电池有吗"),
+        ("assistant", "有，两块装"),
+    ]
+    assert pipeline.memory.sessions["session-b"] == pipeline.memory.sessions["session-a"]
+    assert [seen[1] for seen in pipeline.seen] == [2, 2]
+
+
+def test_a_second_call_in_a_new_session_does_not_inherit_the_first(monkeypatch):
+    """换一个会话就只剩这个用例自己的历史 —— 上一次调用留下的问答不该被读成历史。"""
+    pipeline = _StubPipeline()
+    old, _new = _stub_live_preparations(monkeypatch, pipeline)
+    first = case("mt-001", category="multi_turn", history=(("user", "A 有吗"), ("assistant", "有")))
+    second = case("mt-002", category="multi_turn", history=(("user", "B 呢"), ("assistant", "也有")))
+
+    old(first, "session-1")
+    old(second, "session-2")
+
+    assert pipeline.memory.sessions["session-1"] == [("user", "A 有吗"), ("assistant", "有")]
+    assert pipeline.memory.sessions["session-2"] == [("user", "B 呢"), ("assistant", "也有")]
+    assert [seen[1] for seen in pipeline.seen] == [2, 2]
+
+
+def test_a_single_turn_case_still_runs_with_history_turned_off(monkeypatch):
+    """单轮用例不写历史、也不打开多轮改写开关（既有 20 例的行为逐字节不变）。"""
+    from config import settings
+
+    pipeline = _StubPipeline()
+    old, _new = _stub_live_preparations(monkeypatch, pipeline)
+    before = settings.query_rewrite_history_turns
+
+    old(case("rag-001"), "session-single")
+
+    assert pipeline.memory.sessions == {}
+    assert settings.query_rewrite_history_turns == before == 0

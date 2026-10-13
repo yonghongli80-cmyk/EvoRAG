@@ -45,9 +45,20 @@ class BenchmarkCase:
     expected_source_names: tuple[str, ...] = ()
     notes: str = ""
     category: str = "ordinary"
+    #: 多轮用例的**先行轮次**，按时间顺序：`(("user", "…"), ("assistant", "…"), …)`。
+    #: 空元组 = 单轮（既有 20 例全是这种，所以旧用例文件逐字节仍然合法）。
+    #: 它测的是"指代补全"：问题本身没有先行词（"它呢？"），能不能答对取决于前面那几轮。
+    history: tuple[tuple[str, str], ...] = ()
 
 
-CASE_CATEGORIES = ("ordinary", "special")
+#: 用例类别。``multi_turn`` 是 2026-10-12 加的：既有 20 例全是单轮，而"评测分辨率"这个结构性
+#: 瓶颈的一部分正是**一轮一个样本**——多轮是真实流量里最主要的形态，也是唯一能测出
+#: `query_rewrite_history_turns` 有没有用的形态。
+CASE_CATEGORIES = ("ordinary", "special", "multi_turn")
+
+#: 历史轮次里允许的角色。``system``/``tool`` 刻意不收：基准要复现的是**用户与助手**的对话轨迹，
+#: 别的角色会引入与"指代补全"无关的变量。
+HISTORY_ROLES = ("user", "assistant")
 
 
 @dataclass(frozen=True)
@@ -245,11 +256,43 @@ def load_cases(path: str | Path) -> tuple[BenchmarkCase, ...]:
                 expected_source_names=tuple(entry.get("expected_source_names") or ()),
                 notes=entry.get("notes", ""),
                 category=category,
+                history=_load_history(case_id, entry.get("history")),
             )
         )
     if not cases:
         raise ValueError("benchmark case set is empty")
     return tuple(cases)
+
+
+def _load_history(case_id: str, raw: object) -> tuple[tuple[str, str], ...]:
+    """Validate one case's prior turns.
+
+    A malformed history is rejected at load time rather than becoming a mysterious preparation
+    result later: the whole point of these cases is that the follow-up question cannot be answered
+    from its own words, so a history that silently did not load would make the case measure nothing
+    while still reporting a number.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"history for {case_id} must be a list of {{\"role\", \"content\"}} entries")
+    history: list[tuple[str, str]] = []
+    for index, turn in enumerate(raw):
+        if not isinstance(turn, dict):
+            raise ValueError(f"history[{index}] for {case_id} must be an object")
+        role = str(turn.get("role") or "").strip()
+        content = str(turn.get("content") or "").strip()
+        if role not in HISTORY_ROLES:
+            raise ValueError(
+                f"history[{index}] for {case_id} has role {role!r} (expected one of {HISTORY_ROLES})"
+            )
+        if not content:
+            raise ValueError(f"history[{index}] for {case_id} has empty content")
+        history.append((role, content))
+    if history and history[-1][0] != "assistant":
+        # 一个多轮用例的最后一轮必须是助手：跟随其后的就是被测的那个问题。
+        raise ValueError(f"history for {case_id} must end with an assistant turn")
+    return tuple(history)
 
 
 def percentile(values: Sequence[float], p: float) -> float:
@@ -448,9 +491,18 @@ def run_benchmark(
     samples: list[Sample] = []
     failures: list[str] = []
 
-    def invoke(prepare, case):
+    def invoke(prepare, case, session_id):
         try:
-            return prepare(case)
+            return prepare(case, session_id)
+        except TypeError:
+            # 只接受一个参数的准备函数（既有替身、以及不想管会话的调用方）照旧可用。
+            try:
+                return prepare(case)
+            except Exception as error:  # a failed call is recorded, never silently dropped
+                kind = type(error).__name__
+                message = str(error).strip().replace("\n", " ")[:200]
+                failures.append(f"{case.id}: {kind}: {message}")
+                return PreparationOutcome(preparation_ms=0.0, route="error", failure=kind)
         except Exception as error:  # a failed call is recorded, never silently dropped
             kind = type(error).__name__
             message = str(error).strip().replace("\n", " ")[:200]
@@ -458,14 +510,18 @@ def run_benchmark(
             return PreparationOutcome(preparation_ms=0.0, route="error", failure=kind)
 
     for case in cases:
-        for _ in range(warmups):
-            invoke(old_prepare, case)
-            invoke(new_prepare, case)
+        for warmup_index in range(warmups):
+            # 每次调用一个**自己的会话 id**：多轮用例会把历史写进它，共用一个会话就会把上一轮的
+            # 问答累积进去，于是第二次调用读到的"历史"里混着上一次的答案。
+            for path in ("old", "new"):
+                prepare = old_prepare if path == "old" else new_prepare
+                invoke(prepare, case, f"benchmark-{case.id}-warmup{warmup_index}-{path}")
         for run_index in range(runs):
             order = ("old", "new") if run_index % 2 == 0 else ("new", "old")
             for path in order:
                 prepare = old_prepare if path == "old" else new_prepare
-                samples.append(_sample_from(case, path, invoke(prepare, case)))
+                session_id = f"benchmark-{case.id}-run{run_index}-{path}"
+                samples.append(_sample_from(case, path, invoke(prepare, case, session_id)))
 
     old_metrics = compute_metrics([sample for sample in samples if sample.path == "old"])
     new_metrics = compute_metrics([sample for sample in samples if sample.path == "new"])
@@ -619,7 +675,7 @@ def build_live_preparations(
     memory_db_path: str = ":memory:",
     user_id: int | None = None,
     user_db_path: str | None = None,
-) -> tuple[Callable[[BenchmarkCase], PreparationOutcome], Callable[[BenchmarkCase], PreparationOutcome]]:
+) -> tuple[Callable[..., PreparationOutcome], Callable[..., PreparationOutcome]]:
     """Build in-process old/new preparation callables against one cached pipeline per KB.
 
     The same pipeline serves both paths: ``settings.jev_mode`` selects the legacy or the Jev
@@ -627,6 +683,9 @@ def build_live_preparations(
     External-call counting wraps the real seams and still calls through to them.
 
     ``user_id`` runs the enterprise path (permission filtering enabled) with that principal.
+    The returned callables take ``(case, session_id="benchmark")``; a **multi-turn** case seeds its
+    own prior turns into that session and reads exactly as many rounds as its history holds, while
+    single-turn cases behave exactly as before.
     """
     _ensure_project_root_on_path()
     from unittest.mock import patch
@@ -662,13 +721,32 @@ def build_live_preparations(
                 settings.jev_mode = previous_mode
         return pipelines[target_kb]
 
-    def prepare(case: BenchmarkCase, *, jev_path: bool) -> PreparationOutcome:
+    def prepare(
+        case: BenchmarkCase,
+        *,
+        jev_path: bool,
+        session_id: str = "benchmark",
+        history_turns: int | None = None,
+    ) -> PreparationOutcome:
         pipeline = pipeline_for(case)
         previous_mode = settings.jev_mode
         previous_allowlist = settings.jev_kb_allowlist
+        previous_history_turns = settings.query_rewrite_history_turns
         settings.jev_mode = "active" if jev_path else "off"
         settings.jev_kb_allowlist = case.kb_id or kb_id
         counters = {"rewrite": 0, "rerank": 0, "route": 0, "jev": 0}
+
+        # 多轮：把这个用例的先行轮次写进**它自己的会话**，再让改写按这个用例的历史长度去读。
+        # 会话 id 由调用方给（每次调用一个），因为同一个会话被反复调用会把上一轮的问答累积进去，
+        # 于是"历史"变成"历史 + 上次的答案"，两次调用测的就不是同一个东西了。
+        #
+        # 轮数按**用例自己的历史长度**定，而不是读全局的 `query_rewrite_history_turns`：
+        # 用例声明了几轮，就喂几轮；全局开关保持调用方设的值（默认 0 ⇒ 单轮用例逐字节不变）。
+        if case.history:
+            for role, content in case.history:
+                pipeline.memory.add_message(session_id, role, content)
+            turns = len(case.history) if history_turns is None else int(history_turns)
+            settings.query_rewrite_history_turns = max(0, turns)
 
         original_rewrite = rag.pipeline.rewrite_query
         original_route = rag.agent.route_question
@@ -696,7 +774,7 @@ def build_live_preparations(
                 active.start()
             started = time.perf_counter_ns()
             prepared, error = pipeline._prepare_context(
-                case.question, "benchmark", None, user=user, kb_id=case.kb_id
+                case.question, session_id, None, user=user, kb_id=case.kb_id
             )
             preparation_ms = (time.perf_counter_ns() - started) / 1_000_000.0
         finally:
@@ -704,6 +782,7 @@ def build_live_preparations(
                 active.stop()
             settings.jev_mode = previous_mode
             settings.jev_kb_allowlist = previous_allowlist
+            settings.query_rewrite_history_turns = previous_history_turns
 
         if error is not None:
             return PreparationOutcome(preparation_ms=preparation_ms, route="blocked", failure=error)
@@ -719,11 +798,21 @@ def build_live_preparations(
             external_calls=sum(counters.values()),
         )
 
-    def old(case: BenchmarkCase) -> PreparationOutcome:
-        return prepare(case, jev_path=False)
+    def old(
+        case: BenchmarkCase,
+        session_id: str = "benchmark",
+        *,
+        history_turns: int | None = None,
+    ) -> PreparationOutcome:
+        return prepare(case, jev_path=False, session_id=session_id, history_turns=history_turns)
 
-    def new(case: BenchmarkCase) -> PreparationOutcome:
-        return prepare(case, jev_path=True)
+    def new(
+        case: BenchmarkCase,
+        session_id: str = "benchmark",
+        *,
+        history_turns: int | None = None,
+    ) -> PreparationOutcome:
+        return prepare(case, jev_path=True, session_id=session_id, history_turns=history_turns)
 
     return old, new
 
