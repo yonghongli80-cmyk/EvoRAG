@@ -76,6 +76,37 @@ def test_full_suite_gate_passes_and_fails_on_a_tiny_repo(tmp_path):
     assert ok is False
     assert "failed" in why.lower() or "assert" in why.lower()
 
+def _real_service_log_path():
+    """Overwrite the fixture's stand-in with the real function, so the default can be asserted.
+
+    ``conftest.isolated_service_control_log`` replaces the module attribute for every test (that is
+    what keeps the suite out of the operator's log). Reading the original out of the source file is
+    the only way to test the function itself from inside the suite.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "rag" / "evolution" / "service_control.py"
+    spec = importlib.util.spec_from_file_location("_service_control_source", source)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module.service_log_path
+
+
+def test_service_log_path_defaults_to_artifacts_and_follows_the_override(tmp_path, monkeypatch):
+    """日志目的地只有一个决定点：默认落 artifacts，``RAG_EVOLUTION_SERVICE_LOG_DIR`` 可改道。"""
+    from rag.evolution.service_control import LOG_DIR_ENV, LOG_NAME
+
+    service_log_path = _real_service_log_path()
+
+    monkeypatch.delenv(LOG_DIR_ENV, raising=False)
+    assert service_log_path(tmp_path) == tmp_path / "artifacts" / LOG_NAME
+
+    monkeypatch.setenv(LOG_DIR_ENV, str(tmp_path / "elsewhere"))
+    assert service_log_path(tmp_path) == tmp_path / "elsewhere" / LOG_NAME
+
+
 def test_the_helper_source_compiles(tmp_path):
     """助手是写进磁盘再运行的**字符串**：语法错只会在运行时炸，所以这里显式编译一次。"""
     compile(HELPER_SOURCE, "restart-helper", "exec")

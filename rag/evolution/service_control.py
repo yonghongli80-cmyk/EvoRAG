@@ -30,6 +30,24 @@ from pathlib import Path
 #: Where the helper appends what it did, next to the exported patches it acts on.
 LOG_NAME = "service-control.log"
 
+#: 覆盖日志目录的环境变量：留一条缝，让"不该写进运维日志的调用方"（测试、演练）能改道。
+LOG_DIR_ENV = "RAG_EVOLUTION_SERVICE_LOG_DIR"
+
+
+def service_log_path(repo_root: str | Path) -> Path:
+    """The one place that decides where the operational log goes.
+
+    It used to be written inline as ``<repo>/artifacts/service-control.log`` at every call site, and
+    the API tests went through those call sites — so every run of the suite appended its own lines to
+    the operator's log, mixing test fixtures (``candidate 1 applied by admin``) with real operations
+    (2026-10-12: reading that file during a drill, I could not tell which lines were mine and which
+    came from the suite). One function, and a test can point it at a temp directory; the returned
+    path is also what ``spawn_restart_helper`` hands to the detached helper, so both stay in sync.
+    """
+    override = os.environ.get(LOG_DIR_ENV, "").strip()
+    directory = Path(override) if override else Path(repo_root) / "artifacts"
+    return directory / LOG_NAME
+
 #: Bounds: applying and importing are fast; the target tests may not be.
 GIT_TIMEOUT_S = 60.0
 SMOKE_TIMEOUT_S = 120.0
@@ -424,7 +442,7 @@ def spawn_restart_helper(
         # 这份助手是替哪一次动作善后的：apply ⇒ 失败时反向；revert ⇒ 失败时重新应用。
         "direction": "revert" if str(direction) == "revert" else "apply",
         "grace": int(grace_s),
-        "log": str(root / "artifacts" / LOG_NAME),
+        "log": str(service_log_path(root)),
     }
     flags = 0
     if os.name == "nt":  # pragma: no cover - platform specific
@@ -439,13 +457,14 @@ def spawn_restart_helper(
         start_new_session=os.name != "nt",
         creationflags=flags,
     )
-    log_line(root / "artifacts" / LOG_NAME, f"restart requested for candidate {int(candidate_id)}")
+    log_line(service_log_path(root), f"restart requested for candidate {int(candidate_id)}")
     return helper
 
 
 
 __all__ = [
     "LOG_NAME",
+    "LOG_DIR_ENV",
     "apply_patch",
     "import_smoke",
     "log_line",
@@ -453,5 +472,6 @@ __all__ = [
     "revert_patch",
     "run_full_suite",
     "run_target_tests",
+    "service_log_path",
     "spawn_restart_helper",
 ]

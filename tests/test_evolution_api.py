@@ -46,6 +46,8 @@ def evolution_client(tmp_path, monkeypatch):
     app.include_router(evolution_api.router)
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "evolution_db_path", str(tmp_path / "evolution.db"))
+    # 运维日志改道由 conftest 的 isolated_service_control_log 统一负责（apply/rollback 用例
+    # 都会写它，而那些行与真实运维记录长得一模一样）。
     with TestClient(app) as client:
         yield client
     evolution_api.close_store()

@@ -739,9 +739,35 @@ CHECK 约束（动作枚举不可扩），所以这条措辞上的不精确只�
 
 **数字**：新增 5 条后端用例（store：追加证据不动状态、拒绝未知结果与层 1 的 `accepted`、未知候选；
 sandbox：回流的 result/metrics/不动状态、没有可比对照时的措辞；api：两份摘要互不混入、没有对照时
-显式 `inconclusive`）+ 1 条前端用例，全量后端与前端都以 exit 0 结束（见下）。
+显式 `inconclusive`）+ 1 条前端用例，全量后端 **2065 passed**、前端 216 passed。
+**真机验证**：对已结案的 `#29` 跑了一次真实宿主 A/B（20 用例、每侧 2 次，10.6 分钟）——
+输出里 `recorded_gate: "host_ab"`，接口详情里 `sandbox_summary` 1 条 / `host_ab_summary` 1 条，
+轨迹变成 `scope → sandbox → review → review → host_ab`，而候选状态**仍是 `stable`**（测量不动状态）。
+顺带得到一条真实数字：Jev 侧 route 1.0 → 1.0（Δ0.0pp）、Top-5 1.0 → 1.0（Δ0.0pp）、失败调用 0 → 0，
+legacy 侧 Δ+2.5pp ⇒ `passed`。
 
-## 17. 工程实践清单（这套代码里反复出现的做法）
+## 17. 2026-10-12（续）：把"测试写进运维日志"这件小事收掉
+
+**现象**（14.4 记过、坑清单里也记过）：跑一次全量套件，`artifacts/service-control.log` 里会多出
+几行 `candidate 1: …`、`candidate 1 applied by admin` —— 接口用例走的是**真实的 apply/rollback
+端点**，于是它们和真实运维记录写进同一个文件、长得一模一样。这一轮的演练里我读那个文件时确实被
+干扰过：看到 `candidate 1 rolled back by admin (restart=True)` 愣了几秒才想起那是套件写的。
+
+**修法：给日志目的地一个决定点，而不是让每个调用点自己拼路径。**
+`service_control.service_log_path(repo_root)` 是唯一的决定点（默认 `<repo>/artifacts/service-control.log`，
+可用 `RAG_EVOLUTION_SERVICE_LOG_DIR` 改道），API 的四处与 `spawn_restart_helper` 都从它取；
+`tests/conftest.py` 加一条 autouse 夹具把它指到临时目录 —— 覆盖到每个写者：端点、
+`spawn_restart_helper`、以及它交给分离助手的那个 `log` 字段。
+
+**验证方式是"字节不变"**，因为它就是这个问题的判据：跑之前与跑之后对
+`artifacts/service-control.log` 取 SHA256，跑完 `tests/test_code_candidate_api.py`、
+`test_candidate_api.py`、`test_regenerate.py`、`test_code_review_fixes.py`、`test_api.py`（75 passed）
+之后哈希**一字未变** —— 修之前这些用例每跑一次都会往里加行。
+
+**顺带记一条方法论**：这个问题挂了两个会话没人动，因为它**不影响任何测试结果**——它只污染人读的东西。
+它的成本落在"读日志的人要多想几秒"上，而这恰恰是自动化测试量不出来的那类成本。
+
+## 18. 工程实践清单（这套代码里反复出现的做法）
 
 1. **先定判据，再动手**：每项改动都先写"达标线"（如"生成成功率 ≥80%"），并留下对照数字。
 2. **测量先行，且防自欺**：固定样本、串行执行（并行跑两条 A/B 实测触发服务商限流，让一次基线侧 26 次调用失败）。
@@ -752,7 +778,7 @@ sandbox：回流的 result/metrics/不动状态、没有可比对照时的措辞
 6. **测试防固化**：彩排暴露了"夹具按错误假设塞字段"的问题之后，改为**按真实形态**构造夹具。
 7. **不猜接口**：每个新代码都先读真实签名/表结构/schema，再写。
 
-## 18. 诚实边界（面试时也会被问到）
+## 19. 诚实边界（面试时也会被问到）
 
 * **系统永不自动合入**是设计红线，不是没做完；
 * 黄金回放 fixture 对"触及外部 seam 的补丁"**按设计不可用**（录制描述的是另一份代码），这类补丁只能
@@ -760,7 +786,7 @@ sandbox：回流的 result/metrics/不动状态、没有可比对照时的措辞
 * 结构化 `edits` 的 12/12 来自**一个聚类的 6 个观测 × 2 次**，结论强但**不外推**到别的层；
 * 上游供给（真实失败流量）决定这套回路的产出速度 —— 没有流量时它诚实地空转（`scanned=0`）。
 
-## 19. 可复现命令（挑几条）
+## 20. 可复现命令（挑几条）
 
 ```powershell
 python scripts/measure_patch_generation.py --observation-ids 131,151,153,154,155,156 --repeats 2   # 生成成功率基线

@@ -115,6 +115,9 @@ development-log 第 15 节 / `evolution-code-patches` §5.8），并已在**真�
    `cybernetic-organism-rag-evolution-manifesto.md`、`architecture-hybrid-knowledge-and-evolution.md`）；
    审计那份我已逐条核验过（点踩那条见 development-log 第 7 节，多轮改写与切块见第 8.3 节；切块那条我最终撤回了“属实”，同时记下三个不成立的指标）。
 9. 小卫生问题：接口用例会往 `artifacts/service-control.log` 写行，与真实运维记录混在一起。
+   **已修（2026-10-12）**：日志目的地收敛到 `service_control.service_log_path()`（可用
+   `RAG_EVOLUTION_SERVICE_LOG_DIR` 改道），`tests/conftest.py` 的 autouse 夹具把它指到临时目录；
+   判据是"跑完那些用例后该文件的 SHA256 一字未变"。见 development-log 第 17 节。
 10. **（已修，2026-10-12）合入之后没有人关闭候选行。** `#10` 的改动早已随提交 `bcb645a` 落地，
     但候选行一直停在 `approved_for_canary`，作为"未决补丁"**长期占住聚类 30 的准入名额**；
     `#27` 也回滚之后聚类 30 依旧被判"有未决"，而那条未决是两周前就合进代码的旧行。

@@ -1517,13 +1517,13 @@ def apply_code_candidate(
     """
     from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
-        LOG_NAME,
         apply_patch,
         import_smoke,
         log_line,
         patch_state,
         revert_patch,
         run_target_tests,
+        service_log_path,
         spawn_restart_helper,
     )
 
@@ -1564,7 +1564,9 @@ def apply_code_candidate(
         if applied_now:
             try:
                 revert_patch(REPO_ROOT, diff)
-                log_line(REPO_ROOT / "artifacts" / LOG_NAME, f"candidate {candidate_id}: reverted ({reason})")
+                log_line(
+                    service_log_path(REPO_ROOT), f"candidate {candidate_id}: reverted ({reason})"
+                )
             except RuntimeError as revert_error:  # pragma: no cover - needs a broken tree
                 raise HTTPException(
                     status_code=500,
@@ -1615,7 +1617,7 @@ def apply_code_candidate(
         steps["warning"] = "未请求重启 ⇒ 全量测试没有跑；请自行确认后再上线"
 
     log_line(
-        REPO_ROOT / "artifacts" / LOG_NAME,
+        service_log_path(REPO_ROOT),
         f"candidate {candidate_id} applied by {user.get('username')} "
         f"(applied_now={applied_now}, restart={payload.restart}, note={payload.note[:60]!r})",
     )
@@ -1683,7 +1685,6 @@ def rollback_code_candidate(
     """
     from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
-        LOG_NAME,
         apply_patch,
         import_smoke,
         log_line,
@@ -1692,6 +1693,7 @@ def rollback_code_candidate(
         patch_state,
         revert_patch,
         run_target_tests,
+        service_log_path,
         spawn_restart_helper,
     )
 
@@ -1748,7 +1750,7 @@ def rollback_code_candidate(
         try:
             apply_patch(REPO_ROOT, diff)
             log_line(
-                REPO_ROOT / "artifacts" / LOG_NAME,
+                service_log_path(REPO_ROOT),
                 f"candidate {candidate_id}: rollback refused, patch put back ({reason})",
             )
         except RuntimeError as restore_error:  # pragma: no cover - needs a broken tree
@@ -1793,7 +1795,7 @@ def rollback_code_candidate(
         steps["warning"] = "未请求重启 ⇒ 全量测试没有跑，运行中的服务仍是旧代码"
 
     log_line(
-        REPO_ROOT / "artifacts" / LOG_NAME,
+        service_log_path(REPO_ROOT),
         f"candidate {candidate_id} rolled back by {user.get('username')} "
         f"(restart={payload.restart}, note={payload.note[:60]!r})",
     )

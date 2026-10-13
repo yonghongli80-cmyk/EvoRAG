@@ -67,6 +67,22 @@ def sandbox_api_storage(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_service_control_log(tmp_path_factory, monkeypatch):
+    """Keep the suite out of the operator's ``artifacts/service-control.log``.
+
+    Apply/rollback API tests append lines such as ``candidate 1 applied by admin`` to that file,
+    and they are shaped exactly like real operations — 2026-10-12, reading it during a drill, I
+    could not tell which lines were mine and which came from the suite. ``service_log_path`` is the
+    one place that decides the destination, so pointing it at a temp directory covers every writer:
+    the endpoints, ``spawn_restart_helper`` and the detached helper's own ``log`` entry.
+    """
+    import rag.evolution.service_control as control
+
+    sandbox = tmp_path_factory.mktemp("service-control-log")
+    monkeypatch.setattr(control, "service_log_path", lambda repo_root: sandbox / control.LOG_NAME)
+
+
+@pytest.fixture(autouse=True)
 def reset_vector_store():
     import contextlib
 
