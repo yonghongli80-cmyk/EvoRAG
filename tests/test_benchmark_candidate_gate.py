@@ -18,6 +18,7 @@ from config import settings  # noqa: F401 - imported for the script's settings u
 from rag.user_db import UserDB
 from scripts.benchmark_candidate_questions import (
     MISSING_PRINCIPAL_HINT,
+    _parse_args,
     build_gate_callables,
 )
 
@@ -63,3 +64,27 @@ def test_the_gate_builds_callables_for_a_real_principal(tmp_path):
     assert callable(candidate_for)
     # The identical-set smoke keeps the baseline callable; an overlay builds another.
     assert callable(candidate_for("passages", {}))
+
+
+def test_apply_takes_the_comparison_three_times_unless_told_otherwise():
+    """写回路径**默认不接受单次判定**：2026-10-13 实测同一候选四次得到四种结论。
+
+    代价随之线性增长，所以只在写回时默认 3 次；只读回放保持 1 次（原行为）。
+    """
+    applied = _parse_args(["--apply", "--user-id", "1"])
+    assert applied.repeats == 3
+
+    replay = _parse_args(["--candidate-id", "15", "--user-id", "1"])
+    assert replay.repeats == 1
+
+    explicit = _parse_args(["--apply", "--user-id", "1", "--repeats", "5"])
+    assert explicit.repeats == 5
+    # 只读回放也允许主动多测几次（想看清它稳不稳）
+    assert _parse_args(["--candidate-id", "15", "--user-id", "1", "--repeats", "3"]).repeats == 3
+
+
+@pytest.mark.parametrize("repeats", ["0", "-1", "2", "4"])
+def test_repeat_counts_must_be_one_or_an_odd_number(repeats):
+    """偶数次会平票；平票在这条路径上必须是"未决"，与其发明平票语义不如要求奇数。"""
+    with pytest.raises(SystemExit):
+        _parse_args(["--apply", "--user-id", "1", "--repeats", repeats])

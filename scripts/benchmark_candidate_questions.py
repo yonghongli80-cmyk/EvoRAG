@@ -31,7 +31,12 @@ The runner is read-only by default. ``--apply`` runs a gate round over every
 candidate still in ``candidate_testing`` without a ``benchmark`` gate entry and
 writes the outcomes back through
 :func:`rag.evolution.candidate_gates.run_benchmark_gate`
-(``awaiting_verification`` / ``rejected`` + ``gate_log`` + audit).
+(``awaiting_verification`` / ``rejected`` + ``gate_log`` + audit). That write-back
+takes the comparison **three times by default** and only a stable verdict settles
+a candidate (``--repeats``): measured 2026-10-13, the same candidate scored
+``passed``, ``-10.0pp``, ``-15.0pp`` and ``route -2.3pp`` across four identical
+runs, so a single run must not decide a terminal status. Cost is linear in
+``--repeats`` — a round is minutes per candidate per repeat.
 
 Usage:
     python scripts/benchmark_candidate_questions.py --candidate-id 12
@@ -477,12 +482,27 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--apply", action="store_true", help="write gate outcomes back for every pending candidate")
     parser.add_argument("--limit", type=int, default=10, help="pending candidates per --apply round")
     parser.add_argument("--actor-id", default="evolver/benchmark-gate", help="audit actor for --apply")
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=None,
+        help=(
+            "how many times to take the same comparison; only a stable verdict settles a candidate "
+            "(default: 3 with --apply, 1 for a read-only replay)"
+        ),
+    )
     parser.add_argument("--json-out", default=None)
     parser.add_argument("--markdown-out", default=None)
     parser.add_argument(
         "--include-questions", action="store_true", help="include question text in the report"
     )
     args = parser.parse_args(argv)
+    if args.repeats is None:
+        args.repeats = 3 if args.apply else 1
+    if args.repeats < 1 or (args.repeats > 1 and args.repeats % 2 == 0):
+        # 多数票需要一个裁决者：偶数次可以平票，而"平票"在这条路径上必须是一种**未决**，
+        # 与其发明平票语义，不如要求奇数。
+        parser.error("--repeats must be 1 or an odd number >= 3")
     if args.apply:
         if args.candidate_id is not None or args.payload_json is not None:
             parser.error("--apply runs the pending round; drop --candidate-id/--payload-json")
@@ -562,6 +582,7 @@ def _run_applied(args: argparse.Namespace, cases: Sequence) -> int:
         candidate_route_fn_factory=lambda row: candidate_route_for(row["target"], row["payload"] or {}),
         cases=cases,
         limit=args.limit,
+        repeats=args.repeats,
     )
     overlay = "provider overlay" if args.provider else "smoke overlay (payload) / live set (no payload)"
     report = {
@@ -572,6 +593,7 @@ def _run_applied(args: argparse.Namespace, cases: Sequence) -> int:
             "top5_drop_max_pp": TOP5_DELTA_MAX_PP,
         },
         "applied": True,
+        "repeats": int(args.repeats),
         "candidate_question_set": overlay,
         "results": [
             _result_block(

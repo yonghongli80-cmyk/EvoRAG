@@ -109,8 +109,11 @@ development-log 第 15 节 / `evolution-code-patches` §5.8），并已在**真�
    ⇒ **已修（2026-10-13）**：新增 `evaluate_repeatable_on_benchmark(repeats=N)`（奇数）——
    各次不一致即整体 `inconclusive`（候选留在 `candidate_testing` 等重试，不写终态），
    一致才采多数票，逐次记录进 `stats["repeats"]`；阈值一字未动。
-   **两条 `#15/#16` 目前是 `rejected`（第 19 节那次不可靠的测量写下的），要不要用
-   `repeats=3` 重新判定是留给人的决定**。细节见 development-log 第 19/20 节。
+   `benchmark_candidate_questions.py --apply` **默认 repeats=3**（只读回放仍默认 1，偶数直接拒绝）。
+   **两条 `#15/#16` 仍是 `rejected`、且现在改不回来**：`rejected` 是终态（`rejected → *` 没有转移，
+   上一会话的"人工修复"是手改库），设计里的正道"从同一聚类重新生成"被**堆放守卫**挡住——
+   聚类 3 的 **#20 是 `stable` 却仍算未决**（改动早在 `6dccf59` 里）。
+   ⇒ **下一步：先把 #20 结案（新的 `close_out_merged` 正好干这个），再考虑重新生成。**
 5. **回滚后无法通过接口重新应用**：`rolled_back` 是终态，`canary → approved_for_canary` 不合法。
    演练用了一次**审计式人工修复**绕过。**修法 ① 已落地并真机验证（2026-10-12）**：
    `POST /code-candidates/{id}/regenerate` 从同一聚类产出**新**候选（旧行保持终态，不动状态机），
