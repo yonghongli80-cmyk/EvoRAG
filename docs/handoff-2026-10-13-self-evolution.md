@@ -74,16 +74,16 @@
     并将默认 `--limit` 调为 5（5 × 3 = 15 次回放），拦截过大的回放批次防止意外超时。
 13. **多轮路由历史修正全分支单测**（本次接手）：针对 `_route_with_history_correction` 补齐 5 种场景
     单元测试，防止多轮历史修正逻辑发生静默回归。全量测试提升至 **2102 passed**。
+14. **#15/#16 多数票真实重测（本次接手）**：停服务释放 Qdrant 独占锁，跑真实 44 例 × 3 轮独立回放。
+    #15 `[0 passed, 3 failed]`，#16 `[0 passed, 3 failed]`，均稳定发生 Top-5 召回回归，实证确凿，
+    彻底证明维持 `rejected` 终态公正无误，无需翻案。服务已重新拉起，`/health` 200。
 
 ## 2. 明确**没做**的、以及为什么
 
-1. **#15/#16 没有重新判定**。它们现在的 `rejected` 是一次**不可重复**的测量写下的（第 1.8 条），
-   但**两条路都不通**：① `rejected` 是终态，`advance_candidate` 直接
-   `ValueError: invalid transition: rejected -> candidate_testing`；上一会话在 `rolled_back` 上
-   绕过终态靠的是**手改数据库**（审计里写"人工修复"），那是它自己都记为设计缺口的事，我没重复；
-   ② 设计里的正道"从同一聚类重新生成"被**堆放守卫**挡住——聚类 3 的 **#20 是 `stable` 却仍算未决**。
-   ⇒ **下一步就是：先用 `close_out_merged` 把 #20 结案**（它的内容确实在 `6dccf59` 里、
-   路径相对 HEAD 干净、内容核对能过），解开聚类 3 的准入，再考虑重新生成。
+1. **#15/#16 多数票真实重测完成（已结案确认，见 1.14）**：在真实环境下对 44 例固定语料执行 `repeats=3`
+   多数票判定。#15 为 `[0 passed, 3 failed]`（稳定回归 `real-007` 与 `real-009`）；#16 为 `[0 passed, 3 failed]`
+   （稳定回归 `real-009`，Top-5 从 95% 掉到 90%）。证实此前单次的 passed 属于偶然噪声，
+   两条候选确实存在显著召回退化，维持终态 `rejected` 完全正确，无需且不应手动恢复。
 2. **`stable` 仍被算作"未决"（已解决，见 1.10）**：此前 `_OPEN_CANDIDATE_STATUSES` 含 `stable`，
    导致已合入结案的候选行依然占着聚类名额。现已完成设计收敛：已结案合入的 `stable` 属于终态，
    移除出未决集合；未决集合严格保留 `candidate_testing / awaiting_verification / approved_for_canary / canary`。
