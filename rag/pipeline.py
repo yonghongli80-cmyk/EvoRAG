@@ -362,6 +362,45 @@ class RAGPipeline:
         )
 
 
+    def _route_with_history_correction(self, question: str, session_id: str, capabilities):
+        """路由决策，多轮时按历史修正一次：**只在"它说要澄清、但历史能补全"这一种情况下重新判**。
+
+        2026-10-13 的多轮基准实测：追问本身不含先行词时（"那一步具体是怎么做的？"），路由层只看
+        当前这一句，判 `clarification` 就直接返回，7 例只对 1 例；而旧路径无条件改写，把指代补全之后
+        照常走 RAG，7/7。修法是让上下文只在这一处生效：
+
+        * 没判澄清（含 legacy/tool/structured/rag）⇒ 原样返回，**零额外调用**；
+        * 没有历史、或改写结果与原问法相同 ⇒ 原样返回澄清，**零额外调用**；
+        * 有历史且改写确实改变了问法 ⇒ 用补全后的问法**重新判一次**，按新决策继续。
+
+        只多花一次预判（不是两次模型调用），且只花在"本来要拒答"的那些追问上。改写不可用时退回
+        原决策 —— 补全失败不该变成路由失败。
+        """
+        route_decision = self.jev.route(question, capabilities)
+        if getattr(route_decision, "route", "") != "clarification":
+            return route_decision
+        if not self._history_is_available(session_id):
+            return route_decision
+        try:
+            completed = self._rewrite_for_retrieval(question, session_id)
+        except Exception:  # noqa: BLE001 - 补全失败就按原决策走，绝不因此改变答复形态
+            return route_decision
+        completed = str(completed or "").strip()
+        if not completed or completed == question.strip():
+            return route_decision
+        corrected = self.jev.route(completed, capabilities)
+        # 重新判之后仍然要澄清的话，保留**原**决策（原文才是用户问的那句）。
+        if getattr(corrected, "route", "") == "clarification":
+            return route_decision
+        return corrected
+
+    def _history_is_available(self, session_id: str) -> bool:
+        """这个会话里有没有可用的历史轮次；读不到就当作没有。"""
+        try:
+            return bool(self.memory.get_recent_messages(session_id, n=2))
+        except Exception:  # noqa: BLE001 - 记忆读不到时按"没有历史"处理
+            return False
+
     def _rewrite_for_retrieval(self, question: str, session_id: str) -> str:
         """检索前改写：按配置带上最近几轮对话。
 
@@ -514,7 +553,9 @@ class RAGPipeline:
         """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
         capabilities = KbCapabilities(has_structured_data=coordinator is not None)
         started = time.perf_counter()
-        route_decision = self.jev.route(question, capabilities)
+        route_decision = self._route_with_history_correction(
+            question, session_id, capabilities
+        )
         preflight = route_decision.preflight
         stage = {
             "_started": started,
