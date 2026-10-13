@@ -1,0 +1,90 @@
+{
+  "version": "jev-multi-turn-cases-v1",
+  "description": "多轮（指代补全）用例集：每一例的**追问本身不含先行词**（『它』『那一步』『那个方法』），能不能召回正确文档取决于前面那几轮。它与 benchmarks/jev_retrieval_cases.json（20 例单轮）**分开跑**：那份钉的是准备时延、改写率、路由准确率与 Top-5 不下降，这份钉的是多轮改写有没有把指代补全。category=multi_turn；history 按时间顺序，最后一轮是助手，紧随其后的是被测问题。默认报告不打印问题文本（--include-questions 才会）。",
+  "cases": [
+    {
+      "id": "mt-001",
+      "question": "那它为什么会让模型凭空编出细节？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "追问只含『它』：先行词（大模型幻觉）在上一轮，靠历史才能补全",
+      "history": [
+        {"role": "user", "content": "大模型幻觉在工程上一般怎么分类？"},
+        {"role": "assistant", "content": "通常分为事实性幻觉与忠实性幻觉两类。"}
+      ]
+    },
+    {
+      "id": "mt-002",
+      "question": "那一步具体是怎么做的？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『那一步』指向上一轮的『检索前改写』",
+      "history": [
+        {"role": "user", "content": "检索前改写到底解决什么问题？"},
+        {"role": "assistant", "content": "它把用户口语化的问法改写成更适合检索的形式。"}
+      ]
+    },
+    {
+      "id": "mt-003",
+      "question": "这个做法会不会丢信息？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『这个做法』指向上一轮的『文本切片切分』",
+      "history": [
+        {"role": "user", "content": "文本切片切分的边界为什么重要？"},
+        {"role": "assistant", "content": "边界切错会把一个完整语义单元拆到两个块里。"}
+      ]
+    },
+    {
+      "id": "mt-004",
+      "question": "那它和重排是一回事吗？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『它』指向上一轮的『向量/BM25 混合检索』",
+      "history": [
+        {"role": "user", "content": "混合检索是怎么回事？"},
+        {"role": "assistant", "content": "它把向量检索与 BM25 的关键词命中融合起来排序。"}
+      ]
+    },
+    {
+      "id": "mt-005",
+      "question": "那它对准备时延的影响是什么？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『它』指向上一轮的『预判是否值得改写』",
+      "history": [
+        {"role": "user", "content": "改写为什么要先预判？"},
+        {"role": "assistant", "content": "因为无条件改写会给每个请求都加一次模型调用。"}
+      ]
+    },
+    {
+      "id": "mt-006",
+      "question": "那它为什么不直接去掉？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『它』指向上一轮的『回退到原始召回顺序』",
+      "history": [
+        {"role": "user", "content": "重排不可用的时候系统怎么兜底？"},
+        {"role": "assistant", "content": "会回退到原始召回顺序并标记分数来源不可用。"}
+      ]
+    },
+    {
+      "id": "mt-007",
+      "question": "那它是不是就等于不做检索了？",
+      "expected_route": "rag",
+      "kb_id": "rag_docs",
+      "category": "multi_turn",
+      "notes": "『它』指向上一轮的『无证据拒答』",
+      "history": [
+        {"role": "user", "content": "无证据拒答是怎么判定的？"},
+        {"role": "assistant", "content": "按可答性与置信度判定，证据不足时明确说明而不是硬答。"}
+      ]
+    }
+  ]
+}
