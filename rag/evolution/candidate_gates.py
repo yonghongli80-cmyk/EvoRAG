@@ -452,6 +452,103 @@ def candidate_from_row(row: Mapping[str, Any]) -> JevQuestionSetCandidate:
     return JevQuestionSetCandidate(**{field: row[field] for field in _CANDIDATE_ROW_FIELDS})
 
 
+def evaluate_repeatable_on_benchmark(
+    candidate: object,
+    *,
+    baseline_route_fn: RouteFn,
+    candidate_route_fn: RouteFn,
+    cases: Sequence[object],
+    repeats: int = 3,
+) -> GateResult:
+    """Run :func:`evaluate_on_benchmark` several times and only believe a **stable** verdict.
+
+    Measured reason (2026-10-13): the same question-set candidate measured four times on the same
+    44-case corpus produced `passed`, `-10.0pp`, `-15.0pp` and `route -2.3pp` — and the *baseline*
+    moved between runs too (route 43 or 42 of 44, top-5 19/20 with different cases failing). The
+    judging layer is stochastic, so a single run is a sample, not a verdict; the gate was writing
+    terminal statuses from one sample. Thresholds are untouched: this changes how many times the
+    comparison is taken, never what it is allowed to conclude.
+
+    The rule, in order:
+
+    1. an odd number of repeats is required (a majority needs a tie-breaker);
+    2. **any** run that is inconclusive for its own reasons (baseline side crashed) makes the whole
+       result inconclusive — that is not a statement about the candidate;
+    3. runs that disagree on pass/fail make the whole result inconclusive, and the per-run record
+       travels in ``stats["repeats"]`` so a reviewer sees the spread rather than a single number;
+    4. otherwise the majority verdict is kept, with the median-ish run's stats kept as the payload
+       and the run record attached.
+
+    ``repeats=1`` is exactly :func:`evaluate_on_benchmark`, so existing callers and tests are
+    unaffected.
+    """
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
+    if repeats > 1 and repeats % 2 == 0:
+        raise ValueError("an even repeat count cannot produce a majority; use an odd number")
+    if repeats == 1:
+        return evaluate_on_benchmark(
+            candidate,
+            baseline_route_fn=baseline_route_fn,
+            candidate_route_fn=candidate_route_fn,
+            cases=cases,
+        )
+
+    results = [
+        evaluate_on_benchmark(
+            candidate,
+            baseline_route_fn=baseline_route_fn,
+            candidate_route_fn=candidate_route_fn,
+            cases=cases,
+        )
+        for _ in range(int(repeats))
+    ]
+    record = [
+        {
+            "run": index + 1,
+            "passed": result.passed,
+            "inconclusive": result.inconclusive,
+            "verdict": result.verdict,
+            "route_delta_pp": result.stats.get("route_delta_pp"),
+            "top5_delta_pp": result.stats.get("top5_delta_pp"),
+        }
+        for index, result in enumerate(results)
+    ]
+    inconclusive_runs = [item["run"] for item in record if item["inconclusive"]]
+    passes = sum(1 for result in results if not result.inconclusive and result.passed)
+    fails = sum(1 for result in results if not result.inconclusive and not result.passed)
+    total = passes + fails
+    passed = passes > fails
+    unstable = bool(passes and fails)
+    summary = (
+        f"{int(repeats)} repeat(s): {passes} passed, {fails} failed"
+        + (f", {len(inconclusive_runs)} inconclusive" if inconclusive_runs else "")
+    )
+    if inconclusive_runs or unstable:
+        kept = results[0]
+        return GateResult(
+            gate=kept.gate,
+            passed=False,
+            stats={**kept.stats, "repeats": record, "repeat_summary": summary},
+            per_case=kept.per_case,
+            verdict=(
+                f"gate inconclusive: the same comparison did not agree with itself ({summary})"
+                + (f"; inconclusive runs: {inconclusive_runs}" if inconclusive_runs else "")
+                + " — a candidate must not be settled by an unstable measurement"
+            ),
+            inconclusive=True,
+        )
+    kept = next(result for result in results if result.passed == passed)
+    return GateResult(
+        gate=kept.gate,
+        passed=passed and total > 0,
+        stats={**kept.stats, "repeats": record, "repeat_summary": summary},
+        per_case=kept.per_case,
+        verdict=f"{kept.verdict} [{summary}]",
+        inconclusive=False,
+    )
+
+
 def run_benchmark_gate(
     store: object,
     *,
@@ -461,6 +558,7 @@ def run_benchmark_gate(
     cases: Sequence[object],
     limit: int,
     candidate_route_fn_factory: Callable[[Mapping[str, Any]], RouteFn] | None = None,
+    repeats: int = 1,
 ) -> list[GateResult]:
     """Run layer 2 over every candidate that never ran it; return the results.
 
@@ -478,6 +576,11 @@ def run_benchmark_gate(
     it is omitted, the single ``candidate_route_fn`` serves every candidate —
     the shape a test or an equivalent-candidate smoke round uses; one of the two
     must be supplied.
+
+    ``repeats`` > 1 routes each comparison through
+    :func:`evaluate_repeatable_on_benchmark`, so a candidate is only settled by a **stable**
+    verdict (see that function for the measured reason). Default 1 keeps every existing caller's
+    behaviour identical.
     """
     if candidate_route_fn is None and candidate_route_fn_factory is None:
         raise ValueError("supply candidate_route_fn or candidate_route_fn_factory")
@@ -490,19 +593,30 @@ def run_benchmark_gate(
         route_fn = (
             candidate_route_fn if candidate_route_fn_factory is None else candidate_route_fn_factory(row)
         )
-        result = evaluate_on_benchmark(
-            candidate,
-            baseline_route_fn=baseline_route_fn,
-            candidate_route_fn=route_fn,
-            cases=cases,
+        result = (
+            evaluate_on_benchmark(
+                candidate,
+                baseline_route_fn=baseline_route_fn,
+                candidate_route_fn=route_fn,
+                cases=cases,
+            )
+            if int(repeats) <= 1
+            else evaluate_repeatable_on_benchmark(
+                candidate,
+                baseline_route_fn=baseline_route_fn,
+                candidate_route_fn=route_fn,
+                cases=cases,
+                repeats=int(repeats),
+            )
         )
         # An illegal move here means another writer advanced the row between
         # the scan and the report; the store raises and the round stops rather
         # than silently skipping a candidate.
         if result.inconclusive:
-            # 未决（基线侧撞上基础设施故障）：保留候选在 candidate_testing 等待重试，
-            # 只记录未决原因为何没推进。写成"拒绝"会白烧一个候选，也可能把 provider
-            # 超时伪造成候选退化。
+            # 未决：基线侧撞上基础设施故障，**或者**多次重复的判定自己不一致（2026-10-13 实测：
+            # 同一候选四次得到 passed/−10.0pp/−15.0pp/route−2.3pp）。保留候选在 candidate_testing
+            # 等待重试，只记录未决原因为何没推进。写成"拒绝"会白烧一个候选，也会把随机性
+            # 当成候选的退化。
             store.record_inconclusive_gate(
                 row["id"],
                 actor_id=actor_id,

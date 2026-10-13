@@ -23,6 +23,7 @@ from rag.evolution.candidate_gates import (
     GateResult,
     candidate_from_row,
     evaluate_on_benchmark,
+    evaluate_repeatable_on_benchmark,
     run_benchmark_gate,
 )
 from rag.evolution.candidate_store import CandidateStore
@@ -246,6 +247,117 @@ def test_equivalent_candidate_passes_with_zero_deltas():
     assert set(stats["baseline"]) == SIDE_STATS_KEYS
     assert all(entry["route_changed"] is False for entry in result.per_case)
     assert all(entry["route_regressed"] is False for entry in result.per_case)
+
+
+# ------------------------------------------------------------------
+# 可重复性：同一候选在**同条件下**重复测量，只有稳定的判定才算数（2026-10-13 实测）。
+# ------------------------------------------------------------------
+
+
+def test_repeated_runs_that_agree_keep_the_verdict_and_record_every_run():
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 6)]
+    routes, sources = correct_routes(cases)
+    baseline = route_fn(routes, sources=sources)
+    candidate = route_fn(routes, sources=sources)
+
+    result = evaluate_repeatable_on_benchmark(
+        gate_candidate(), baseline_route_fn=baseline, candidate_route_fn=candidate, cases=cases, repeats=3
+    )
+
+    assert result.passed is True and result.inconclusive is False
+    assert result.stats["repeat_summary"] == "3 repeat(s): 3 passed, 0 failed"
+    assert [run["passed"] for run in result.stats["repeats"]] == [True, True, True]
+    assert "[3 repeat(s): 3 passed, 0 failed]" in result.verdict
+    # 阈值一个字没动
+    assert result.stats["thresholds"] == {"route_drop_max_pp": 0.0, "top5_drop_max_pp": 2.0}
+
+
+def test_repeated_runs_that_disagree_are_inconclusive_not_a_rejection():
+    """**这条就是 2026-10-13 实测的那个形状**：同一候选四次得到 passed/−10/−15/−2.3pp。
+
+    不稳定的判定必须记为未决（候选留在 candidate_testing 等重试），而不是"拒绝"——
+    否则随机性会被当成候选的退化，一条候选就被一次抛硬币判死。
+    """
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 6)]
+    routes, sources = correct_routes(cases)
+    baseline = route_fn(routes, sources=sources)
+    state = {"run": 0}
+
+    def flaky(question, kb_id):
+        perfect = state["run"] % 2 == 0
+        return {
+            "route": routes[question] if perfect else "agent",
+            "sources": list(sources[question]) if perfect else [],
+            "external_calls": 0,
+            "duration_ms": 0.0,
+        }
+
+    def candidate(question, kb_id):
+        if question == cases[0]["id"]:
+            state["run"] += 1
+        return flaky(question, kb_id)
+
+    result = evaluate_repeatable_on_benchmark(
+        gate_candidate(), baseline_route_fn=baseline, candidate_route_fn=candidate, cases=cases, repeats=3
+    )
+
+    assert result.inconclusive is True, "不一致的重复必须记为未决"
+    assert result.passed is False
+    assert "did not agree with itself" in result.verdict
+    assert "3 repeat(s):" in result.verdict
+    # 三次里两坏一好（计数器在第一条用例上自增，所以序列从"坏"开始）——重点是有好有坏
+    assert [run["passed"] for run in result.stats["repeats"]] == [False, True, False]
+
+
+def test_repeated_runs_are_inconclusive_when_one_run_was_inconclusive():
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 5)]
+    routes, sources = correct_routes(cases)
+    baseline = route_fn(routes, sources=sources)
+    candidate = route_fn(routes, sources=sources)
+    state = {"run": 0}
+
+    def flaky_baseline(question, kb_id):
+        if question == cases[0]["id"]:
+            state["run"] += 1
+        if state["run"] == 2 and question == cases[0]["id"]:
+            raise RuntimeError("provider timeout")
+        return baseline(question, kb_id)
+
+    result = evaluate_repeatable_on_benchmark(
+        gate_candidate(), baseline_route_fn=flaky_baseline, candidate_route_fn=candidate, cases=cases, repeats=3
+    )
+
+    assert result.inconclusive is True
+    assert "inconclusive runs: [2]" in result.verdict
+
+
+def test_a_single_repeat_is_exactly_the_plain_evaluation():
+    """``repeats=1`` 逐字节等于既有行为：既有调用方与用例不受影响。"""
+    cases = [gate_case("rag-001")]
+    routes, sources = correct_routes(cases)
+    baseline = route_fn(routes, sources=sources)
+    candidate = route_fn(routes, sources=sources)
+
+    plain = evaluate(gate_candidate(), baseline, candidate, cases)
+    repeatable = evaluate_repeatable_on_benchmark(
+        gate_candidate(), baseline_route_fn=baseline, candidate_route_fn=candidate, cases=cases, repeats=1
+    )
+
+    assert repeatable == plain
+    assert "repeat_summary" not in plain.stats
+
+
+@pytest.mark.parametrize("repeats", [0, -1, 2, 4])
+def test_repeat_counts_must_be_odd_and_positive(repeats):
+    """偶数次没有多数票可谈；0 与负数没有意义。"""
+    cases = [gate_case("rag-001")]
+    routes, sources = correct_routes(cases)
+    fn = route_fn(routes, sources=sources)
+
+    with pytest.raises(ValueError, match="repeat"):
+        evaluate_repeatable_on_benchmark(
+            gate_candidate(), baseline_route_fn=fn, candidate_route_fn=fn, cases=cases, repeats=repeats
+        )
 
 
 def test_thresholds_are_pinned_at_the_acceptance_values():
