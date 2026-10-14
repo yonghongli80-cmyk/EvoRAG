@@ -153,6 +153,7 @@ def filter_chunks_by_permission(
     - 管理员：不过滤
     - 无权限记录：默认拒绝
     - owner / scope='public' / scope='shared' 中的被共享用户：保留
+    - Wiki 知识库分块：当用户拥有该知识库查看权时保留
     - 其他：过滤掉
     """
     if user.get("is_admin"):
@@ -160,19 +161,36 @@ def filter_chunks_by_permission(
 
     from rag.org_auth.repository import OrgRepository, is_org_policy
     if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
+        from rag.org_auth.models import OrgRole
         from rag.org_auth.service import OrgAuthorizationService
-        allowed_ids = OrgAuthorizationService(db).allowed_document_ids(int(user["id"]), kb_id)
-        if not allowed_ids:
-            return []
+        auth_svc = OrgAuthorizationService(db)
+        wiki_allowed = auth_svc.authorize(int(user["id"]), kb_id, OrgRole.READ).allowed
+        allowed_ids = auth_svc.allowed_document_ids(int(user["id"]), kb_id)
         names = {
-            permission["doc_name"] for document_id in allowed_ids
+            permission["doc_name"] for document_id in (allowed_ids or [])
             if (permission := db.get_document_permission_by_id(document_id)) is not None
         }
-        return [chunk for chunk in chunks if chunk.doc_name in names]
+        result = []
+        for chunk in chunks:
+            if getattr(chunk, "chunk_kind", None) == "wiki":
+                if wiki_allowed:
+                    result.append(chunk)
+            elif chunk.doc_name in names:
+                result.append(chunk)
+        return result
 
-    # 批量查询：一次性查出所有 doc_name 的权限记录（避免 N+1）
-    doc_names = list(set(c.doc_name for c in chunks))
-    perm_map = db.get_document_permissions_by_names(doc_names, kb_id)
+    # 校验用户对知识库的访问权限，用于判定 Wiki 分块可见性
+    wiki_allowed = False
+    try:
+        from rag.api_security import require_kb_view
+        require_kb_view(db, kb_id, user)
+        wiki_allowed = True
+    except Exception:
+        wiki_allowed = False
+
+    # 批量查询：一次性查出所有普通文档 doc_name 的权限记录（避免 N+1）
+    doc_names = list(set(c.doc_name for c in chunks if getattr(c, "chunk_kind", None) != "wiki"))
+    perm_map = db.get_document_permissions_by_names(doc_names, kb_id) if doc_names else {}
 
     # 查出用户有权查看的文档名
     allowed_names = db.get_accessible_doc_names(
@@ -183,10 +201,12 @@ def filter_chunks_by_permission(
 
     result = []
     for c in chunks:
-        perm = perm_map.get(c.doc_name)
-        if perm is not None and c.doc_name in allowed_set:
-            # 有权限记录且用户有权查看
-            result.append(c)
-        # else: 无权限记录或用户无权，过滤掉
+        if getattr(c, "chunk_kind", None) == "wiki":
+            if wiki_allowed:
+                result.append(c)
+        else:
+            perm = perm_map.get(c.doc_name)
+            if perm is not None and c.doc_name in allowed_set:
+                result.append(c)
 
     return result

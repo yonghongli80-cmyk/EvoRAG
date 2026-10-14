@@ -34,7 +34,30 @@ def _visible_document_ids(user_db, user, kb_id) -> set[int] | None:
     }
 
 
-def _visible_current_version_ids(user_db, user, kb_id) -> set[int] | None:
+def _can_user_view_kb(user_db, user, kb_id) -> bool:
+    if user is None or user_db is None:
+        return False
+    if user.get("is_admin"):
+        return True
+    try:
+        from rag.api_security import require_kb_view
+        require_kb_view(user_db, kb_id, user)
+        return True
+    except Exception:
+        return False
+
+
+def _get_wiki_store_instance(wiki_store=None):
+    if wiki_store is not None:
+        return wiki_store
+    try:
+        from rag.wiki.store import get_wiki_store
+        return get_wiki_store()
+    except Exception:
+        return None
+
+
+def _visible_current_version_ids(user_db, user, kb_id, wiki_store=None) -> set[int] | None:
     if user is None or user_db is None:
         return set()
     if user.get("is_admin"):
@@ -45,18 +68,29 @@ def _visible_current_version_ids(user_db, user, kb_id) -> set[int] | None:
             perm = user_db.get_document_permission(name, kb_id)
             if perm and perm.get("current_version_id"):
                 ids.add(perm["current_version_id"])
-        return ids
-    document_ids = _visible_document_ids(user_db, user, kb_id)
-    if document_ids is None:
-        return None
-    for document_id in document_ids:
-        perm = user_db.get_document_permission_by_id(document_id)
-        if perm and perm.get("current_version_id"):
-            ids.add(perm["current_version_id"])
+    else:
+        document_ids = _visible_document_ids(user_db, user, kb_id)
+        if document_ids is None:
+            return None
+        for document_id in document_ids:
+            perm = user_db.get_document_permission_by_id(document_id)
+            if perm and perm.get("current_version_id"):
+                ids.add(perm["current_version_id"])
+
+    if _can_user_view_kb(user_db, user, kb_id):
+        w_store = _get_wiki_store_instance(wiki_store)
+        if w_store is not None:
+            try:
+                for page in w_store.list_pages(kb_id=kb_id, limit=10000):
+                    if page.current_revision_id:
+                        ids.add(page.current_revision_id)
+            except Exception:
+                pass
+
     return ids
 
 
-def _visible_historical_version_ids(user_db, user, kb_id) -> set[int] | None:
+def _visible_historical_version_ids(user_db, user, kb_id, wiki_store=None) -> set[int] | None:
     """Visible historical version IDs plus confirmed-outdated current versions."""
     if user is None or user_db is None:
         return set()
@@ -79,6 +113,18 @@ def _visible_historical_version_ids(user_db, user, kb_id) -> set[int] | None:
                 or version["validity_status"] == "confirmed_outdated"
             ):
                 ids.add(version["id"])
+
+    if _can_user_view_kb(user_db, user, kb_id):
+        w_store = _get_wiki_store_instance(wiki_store)
+        if w_store is not None:
+            try:
+                for page in w_store.list_pages(kb_id=kb_id, limit=10000):
+                    for rev in w_store.get_revisions(page.id):
+                        if rev.id != page.current_revision_id:
+                            ids.add(rev.id)
+            except Exception:
+                pass
+
     return ids
 
 
@@ -92,6 +138,7 @@ def retrieve_current_then_history(
     doc_name: str = None,
     tags: list[str] = None,
     weights=None,
+    wiki_store=None,
 ) -> list:
     """Return current valid results first; backfill history only when needed.
 
@@ -105,8 +152,8 @@ def retrieve_current_then_history(
             kwargs["weights"] = weights
         return retriever.retrieve(query, **kwargs)
 
-    current_ids = _visible_current_version_ids(user_db, user, kb_id)
-    historical_ids = _visible_historical_version_ids(user_db, user, kb_id)
+    current_ids = _visible_current_version_ids(user_db, user, kb_id, wiki_store=wiki_store)
+    historical_ids = _visible_historical_version_ids(user_db, user, kb_id, wiki_store=wiki_store)
     if current_ids is not None and historical_ids is not None and not current_ids and not historical_ids:
         return []
 

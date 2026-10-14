@@ -52,14 +52,18 @@ class WikiIndexer:
 
         if old_title and old_title != page.title:
             delete_doc(page.kb_id, old_title)
+        delete_doc(page.kb_id, page.title)
 
         wiki_chunks = self._chunker.chunk_page(page)
         if not wiki_chunks:
-            # If page content is empty or resulted in 0 chunks, purge existing points
-            delete_doc(page.kb_id, page.title)
             return 0
 
-        std_chunks = [wc.to_chunk() for wc in wiki_chunks]
+        std_chunks = [
+            wc.to_chunk(
+                document_version_id=page.current_revision_id,
+            )
+            for wc in wiki_chunks
+        ]
         embed_fn = self._get_embed_fn()
         embeddings = embed_fn([c.text for c in std_chunks])
 
@@ -69,6 +73,7 @@ class WikiIndexer:
             embeddings=embeddings,
             tags=list(page.tags),
             document_id=page.id,
+            document_version_id=page.current_revision_id,
             updated_at=page.updated_at,
         )
         return len(std_chunks)

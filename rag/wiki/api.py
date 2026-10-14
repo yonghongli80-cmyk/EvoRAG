@@ -254,3 +254,33 @@ def rollback_page(
         "page": updated.model_dump(),
         "chunks_indexed": chunks_indexed,
     }
+
+
+@router.get("/pages/{page_id}/revisions/{revision_num}/diff", summary="获取指定版本的 diff 详情")
+def get_revision_diff(
+    request: Request,
+    page_id: int,
+    revision_num: int,
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    store = get_wiki_store()
+    page = store.get_page(page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+
+    db = get_user_db(request)
+    require_kb_view(db, page.kb_id, user)
+
+    rev = store.get_revision_by_num(page_id, revision_num)
+    if not rev:
+        raise HTTPException(status_code=404, detail=f"版本 #{revision_num} 不存在")
+
+    return {
+        "page_id": page_id,
+        "revision_num": revision_num,
+        "delta": rev.delta,
+        "comment": rev.comment,
+        "sha256_hash": rev.sha256_hash,
+        "created_at": rev.created_at,
+    }
+

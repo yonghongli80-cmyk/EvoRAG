@@ -33,6 +33,8 @@ class WikiChunk:
     def to_chunk(
         self,
         doc_permission_id: int | None = None,
+        document_version_id: int | None = None,
+        version_no: int | None = None,
         is_current: bool = True,
         validity_status: str = "valid",
     ) -> Chunk:
@@ -48,12 +50,15 @@ class WikiChunk:
             doc_permission_id=doc_permission_id,
             metadata=dict(self.metadata),
             document_id=self.page_id,
+            document_version_id=document_version_id,
+            version_no=version_no,
             is_current=is_current,
             validity_status=validity_status,
             section_title=self.section_path or None,
             updated_at=updated_at,
             chunk_kind="wiki",
         )
+
 
 
 class MarkdownASTChunker:

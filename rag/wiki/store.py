@@ -173,6 +173,12 @@ class WikiStore:
             if existing:
                 raise ValueError(f"Page with slug '{slug}' already exists in kb '{kb_id}' (Unique constraint)")
 
+            existing_title = self._conn.execute(
+                "SELECT id FROM wiki_pages WHERE kb_id = ? AND title = ?", (kb_id, title)
+            ).fetchone()
+            if existing_title:
+                raise ValueError(f"Page with title '{title}' already exists in kb '{kb_id}' (Unique constraint)")
+
             cursor = self._conn.execute(
                 """
                 INSERT INTO wiki_pages (kb_id, title, slug, content, tags, current_revision_id, created_at, updated_at)
@@ -226,6 +232,14 @@ class WikiStore:
 
             if not new_title:
                 raise ValueError("title cannot be empty")
+
+            if new_title != old_title:
+                existing_title = self._conn.execute(
+                    "SELECT id FROM wiki_pages WHERE kb_id = ? AND title = ? AND id != ?",
+                    (str(cur_row["kb_id"]), new_title, page_id),
+                ).fetchone()
+                if existing_title:
+                    raise ValueError(f"Page with title '{new_title}' already exists in kb '{cur_row['kb_id']}' (Unique constraint)")
 
             tags_json = json.dumps(list(tags), ensure_ascii=False) if tags is not None else cur_row["tags"]
 
@@ -358,6 +372,14 @@ class WikiStore:
                 (page_id,),
             ).fetchall()
             return [self._row_to_revision(r) for r in rows]
+
+    def get_revision_by_num(self, page_id: int, revision_num: int) -> WikiRevision | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM wiki_revisions WHERE page_id = ? AND revision_num = ?",
+                (page_id, revision_num),
+            ).fetchone()
+            return self._row_to_revision(row) if row else None
 
     def get_revision(self, revision_id: int) -> WikiRevision | None:
         with self._lock:

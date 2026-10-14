@@ -219,3 +219,50 @@ def test_list_pages_and_tag_filter(wiki_store):
     other_pages = wiki_store.list_pages(kb_id="kb_other")
     assert len(other_pages) == 1
     assert other_pages[0].title == "其他库文档"
+
+
+def test_title_collision_prevention(wiki_store):
+    """WIKI-01: Disallow duplicate page titles in the same knowledge base."""
+    # 1. Create first page
+    p1 = wiki_store.create_page(
+        kb_id="kb_prod",
+        title="系统架构",
+        content="架构说明",
+        slug="arch-v1",
+    )
+    assert p1.id > 0
+
+    # 2. Attempt to create second page with different slug but duplicate title in same KB -> must fail
+    with pytest.raises(ValueError, match="already exists"):
+        wiki_store.create_page(
+            kb_id="kb_prod",
+            title="系统架构",
+            content="重复架构",
+            slug="arch-v2",
+        )
+
+    # 3. Same title in different KB -> allowed
+    p_other = wiki_store.create_page(
+        kb_id="kb_dev",
+        title="系统架构",
+        content="Dev架构",
+        slug="arch-dev",
+    )
+    assert p_other.id > 0
+
+    # 4. Create another page in kb_prod
+    p2 = wiki_store.create_page(
+        kb_id="kb_prod",
+        title="数据库规范",
+        content="规范说明",
+        slug="db-rules",
+    )
+
+    # 5. Attempt to rename p2 to p1's title -> must fail
+    with pytest.raises(ValueError, match="already exists"):
+        wiki_store.update_page(p2.id, title="系统架构")
+
+    # 6. Update p2 with its own title or content -> succeeds
+    updated = wiki_store.update_page(p2.id, title="数据库规范", content="更新规范")
+    assert updated.content == "更新规范"
+

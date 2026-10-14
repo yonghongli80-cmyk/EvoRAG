@@ -271,3 +271,45 @@ def test_wiki_api_fine_grained_permissions(isolated_api, make_user, monkeypatch,
     assert resp.status_code == 200
 
     store.close()
+
+
+def test_get_revision_diff(api_client):
+    """API-01: GET /wiki/pages/{id}/revisions/{num}/diff returns unified diff."""
+    client: TestClient = api_client["client"]
+
+    # 1. Create page
+    create_resp = client.post(
+        "/wiki/pages",
+        json={
+            "kb_id": "kb_prod",
+            "title": "Redis Cache Guide",
+            "content": "Line 1: Redis is in-memory.\nLine 2: Fast access.",
+        },
+    )
+    assert create_resp.status_code == 201
+    page_id = create_resp.json()["page"]["id"]
+
+    # 2. Update page to produce revision 2
+    update_resp = client.put(
+        f"/wiki/pages/{page_id}",
+        json={
+            "content": "Line 1: Redis is an in-memory store.\nLine 2: Fast access.\nLine 3: Cluster support.",
+            "comment": "Clarified store and added cluster",
+        },
+    )
+    assert update_resp.status_code == 200
+
+    # 3. Call revision 2 diff endpoint
+    diff_resp = client.get(f"/wiki/pages/{page_id}/revisions/2/diff")
+    assert diff_resp.status_code == 200
+    data = diff_resp.json()
+    assert data["page_id"] == page_id
+    assert data["revision_num"] == 2
+    assert data["delta"] is not None
+    assert "+Line 3: Cluster support." in data["delta"]
+    assert data["comment"] == "Clarified store and added cluster"
+
+    # 4. Nonexistent revision returns 404
+    missing_resp = client.get(f"/wiki/pages/{page_id}/revisions/99/diff")
+    assert missing_resp.status_code == 404
+
