@@ -56,6 +56,7 @@ from rag.reliability.api import answers_router
 from rag.reliability.api import router as reliability_router
 from rag.spreadsheets.api import router as spreadsheets_router
 from rag.user_db import UserDB
+from rag.wiki.api import router as wiki_router
 
 # Initialize logging at module level so it is active before any request arrives.
 setup_logging()
@@ -119,6 +120,7 @@ app.include_router(spreadsheets_router)
 app.include_router(reliability_router)
 app.include_router(answers_router)
 app.include_router(organization_router)
+app.include_router(wiki_router)
 
 
 def _versions_root() -> Path:

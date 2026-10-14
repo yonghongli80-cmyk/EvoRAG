@@ -1488,6 +1488,70 @@ def list_gap_tickets(
     return _page(items, page, page_size)
 
 
+class GapTicketRemediateWikiRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_id: int
+    auto_recheck: bool = True
+
+
+@router.post("/gap-tickets/{ticket_id}/remediate/wiki", summary="关联 Wiki 页面并触发闭环复测")
+def remediate_gap_ticket_wiki(
+    ticket_id: int,
+    body: GapTicketRemediateWikiRequest,
+    user: dict = Depends(_admin_user),
+) -> dict:
+    from rag.evolution.gap_remediation import GapRemediationService
+    from rag.wiki.api import get_wiki_store
+
+    store = _open_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="演进数据库未初始化")
+
+    wiki_store = get_wiki_store()
+    service = GapRemediationService(trace_store=store, wiki_store=wiki_store)
+
+    try:
+        link_res = service.link_ticket_to_wiki(
+            ticket_id=ticket_id,
+            page_id=body.page_id,
+            author_id=user.get("username"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    recheck_res = None
+    if body.auto_recheck:
+        recheck_res = service.recheck_ticket(ticket_id=ticket_id)
+
+    return {
+        "ticket_id": ticket_id,
+        "remediation": link_res["remediation"],
+        "recheck": recheck_res,
+    }
+
+
+@router.get("/gap-tickets/{ticket_id}/remediation", summary="获取工单关联的补录资产详情")
+def get_gap_ticket_remediation(
+    ticket_id: int,
+    user: dict = Depends(_admin_user),
+) -> dict:
+    from rag.evolution.gap_remediation import GapRemediationService
+    from rag.wiki.api import get_wiki_store
+
+    store = _open_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="演进数据库未初始化")
+
+    wiki_store = get_wiki_store()
+    service = GapRemediationService(trace_store=store, wiki_store=wiki_store)
+
+    detail = service.get_ticket_remediation(ticket_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="未找到关联资产信息")
+    return detail
+
+
 class ApplyRequest(BaseModel):
     """One administrative action on an already-approved patch."""
 
