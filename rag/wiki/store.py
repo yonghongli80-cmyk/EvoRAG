@@ -28,7 +28,7 @@ class WikiStore:
         self._conn = sqlite3.connect(
             str(self._path),
             check_same_thread=False,
-            autocommit=False,
+            timeout=30.0,
         )
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
@@ -36,7 +36,9 @@ class WikiStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode = WAL;")
             self._conn.execute("PRAGMA foreign_keys = ON;")
+            self._conn.execute("PRAGMA busy_timeout = 30000;")
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS wiki_pages (

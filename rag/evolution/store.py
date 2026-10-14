@@ -213,6 +213,8 @@ class FailureTraceStore:
 
     def _ensure_tables(self) -> None:
         with self._lock:
+            self._conn.execute("PRAGMA journal_mode = WAL;")
+            self._conn.execute("PRAGMA busy_timeout = 30000;")
             self._conn.execute(_OBSERVATIONS_TABLE_SQL)
             self._conn.execute(_CLUSTERS_TABLE_SQL)
             self._conn.execute(_SKIP_LOG_TABLE_SQL)

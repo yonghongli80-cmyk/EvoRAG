@@ -68,6 +68,7 @@ FORBIDDEN_GLOBS: tuple[str, ...] = (
     "rag/auth.py",
     "rag/user_db.py",
     "rag/evolution/**",
+    "rag/wiki/**",
     "tests/**",
     "**/conftest.py",
     "scripts/**",

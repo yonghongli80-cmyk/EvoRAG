@@ -204,3 +204,43 @@ def test_empty_page_cleans_index(isolated_env):
     client = vector_store._get_client()
     records, _ = client.scroll(collection_name=kb_id, limit=10)
     assert len(records) == 0
+
+
+def test_rename_page_purges_old_title_vectors(isolated_env):
+    wiki_store: WikiStore = isolated_env["wiki_store"]
+    indexer: WikiIndexer = isolated_env["indexer"]
+    kb_id = isolated_env["collection"]
+
+    page = wiki_store.create_page(
+        kb_id=kb_id,
+        title="旧标题A",
+        content="# 第一章\n旧标题对应内容。",
+    )
+    indexer.sync_page(page.id)
+
+    client = vector_store._get_client()
+    records, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records) == 1
+    assert records[0].payload["doc_name"] == "旧标题A"
+
+    # Rename page to "新标题B"
+    old_title = page.title
+    wiki_store.update_page(page.id, title="新标题B")
+    indexer.sync_page(page.id, old_title=old_title)
+
+    records_after, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records_after) == 1
+    assert records_after[0].payload["doc_name"] == "新标题B"
+
+    # Verify no ghost points remain for "旧标题A"
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+    old_records, _ = client.scroll(
+        collection_name=kb_id,
+        limit=10,
+        scroll_filter=Filter(
+            must=[FieldCondition(key="doc_name", match=MatchValue(value="旧标题A"))]
+        ),
+        with_payload=True,
+    )
+    assert len(old_records) == 0
+

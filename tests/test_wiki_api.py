@@ -47,6 +47,10 @@ def api_client(tmp_path, monkeypatch):
     from config import settings
     monkeypatch.setattr(settings, "auth_enabled", False)
 
+    db = getattr(app.state, "user_db", None)
+    if db and not db.get_kb_metadata("kb_prod"):
+        db.create_kb_metadata("kb_prod", "Prod KB", 1, "public")
+
     client = TestClient(app)
 
     yield {
@@ -186,3 +190,84 @@ def test_evolution_gap_ticket_wiki_remediation_endpoint(api_client):
     rem_detail = client.get(f"/knowledge-operations/evolution/gap-tickets/{ticket_id}/remediation")
     assert rem_detail.status_code == 200
     assert rem_detail.json()["page_title"] == "BGP路由维护SOP"
+
+
+def test_wiki_api_fine_grained_permissions(isolated_api, make_user, monkeypatch, tmp_path):
+    import rag.wiki.api as wiki_api_module
+    from rag.wiki.indexer import WikiIndexer
+    from rag.wiki.store import WikiStore
+
+    wiki_db = str(tmp_path / "wiki_perm.db")
+    store = WikiStore(db_path=wiki_db)
+    indexer = WikiIndexer(wiki_store=store, embed_fn=lambda texts: [[0.05] * 1024 for _ in texts])
+    monkeypatch.setattr(wiki_api_module, "_wiki_store", store)
+    monkeypatch.setattr(wiki_api_module, "_wiki_indexer", indexer)
+
+    db = isolated_api.app.state.user_db
+    alice, alice_auth = make_user("alice_wiki")
+    bob, bob_auth = make_user("bob_wiki")
+
+    # Alice creates private KB
+    db.create_kb_metadata("kb_private", "Private KB", alice["id"], "private")
+
+    # 1. Bob cannot create page in Alice's private KB (403 or 404)
+    resp = isolated_api.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_private", "title": "Secret Doc", "content": "Initial"},
+        headers=bob_auth,
+    )
+    assert resp.status_code in (403, 404)
+
+    # 2. Alice creates the page successfully
+    resp = isolated_api.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_private", "title": "Secret Doc", "content": "Initial"},
+        headers=alice_auth,
+    )
+    assert resp.status_code == 201
+    page_id = resp.json()["page"]["id"]
+
+    # 3. Bob cannot get page
+    resp = isolated_api.get(f"/wiki/pages/{page_id}", headers=bob_auth)
+    assert resp.status_code in (403, 404)
+
+    # 4. Bob cannot get page history
+    resp = isolated_api.get(f"/wiki/pages/{page_id}/history", headers=bob_auth)
+    assert resp.status_code in (403, 404)
+
+    # 5. Bob cannot update page
+    resp = isolated_api.put(
+        f"/wiki/pages/{page_id}",
+        json={"content": "Hacked content"},
+        headers=bob_auth,
+    )
+    assert resp.status_code in (403, 404)
+
+    # 6. Bob cannot rollback page
+    resp = isolated_api.post(
+        f"/wiki/pages/{page_id}/rollback",
+        json={"revision_num": 1},
+        headers=bob_auth,
+    )
+    assert resp.status_code in (403, 404)
+
+    # 7. Bob cannot delete page
+    resp = isolated_api.delete(f"/wiki/pages/{page_id}", headers=bob_auth)
+    assert resp.status_code in (403, 404)
+
+    # 8. Bob cannot list pages of private KB
+    resp = isolated_api.get("/wiki/pages", params={"kb_id": "kb_private"}, headers=bob_auth)
+    assert resp.status_code in (403, 404)
+
+    # 9. Alice CAN view and update
+    resp = isolated_api.get(f"/wiki/pages/{page_id}", headers=alice_auth)
+    assert resp.status_code == 200
+
+    resp = isolated_api.put(
+        f"/wiki/pages/{page_id}",
+        json={"content": "Alice updated content"},
+        headers=alice_auth,
+    )
+    assert resp.status_code == 200
+
+    store.close()

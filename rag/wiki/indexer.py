@@ -39,7 +39,7 @@ class WikiIndexer:
 
         return embed
 
-    def sync_page(self, page_id: int) -> int:
+    def sync_page(self, page_id: int, old_title: str | None = None) -> int:
         """Chunk, embed, and index a single Wiki page.
 
         Returns the number of chunks indexed.
@@ -49,6 +49,9 @@ class WikiIndexer:
             return 0
 
         _ensure_collection_name(page.kb_id)
+
+        if old_title and old_title != page.title:
+            delete_doc(page.kb_id, old_title)
 
         wiki_chunks = self._chunker.chunk_page(page)
         if not wiki_chunks:

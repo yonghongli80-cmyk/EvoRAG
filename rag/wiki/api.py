@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.api_security import require_user
+from rag.api_security import get_user_db, require_kb_edit, require_kb_view, require_user
 from rag.wiki.indexer import WikiIndexer
 from rag.wiki.store import WikiStore
 
@@ -58,22 +58,46 @@ class RollbackWikiPageRequest(BaseModel):
 
 @router.get("/pages", summary="列出 Wiki 页面")
 def list_pages(
+    request: Request,
     kb_id: str | None = Query(None),
     tag: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     user: dict = Depends(require_user),
 ) -> list[dict[str, Any]]:
+    db = get_user_db(request)
+    if kb_id:
+        require_kb_view(db, kb_id, user)
+
     store = get_wiki_store()
     pages = store.list_pages(kb_id=kb_id, tag=tag, limit=limit, offset=offset)
+
+    if not kb_id and not user.get("is_admin"):
+        filtered = []
+        kb_perm_cache: dict[str, bool] = {}
+        for p in pages:
+            if p.kb_id not in kb_perm_cache:
+                try:
+                    require_kb_view(db, p.kb_id, user)
+                    kb_perm_cache[p.kb_id] = True
+                except HTTPException:
+                    kb_perm_cache[p.kb_id] = False
+            if kb_perm_cache[p.kb_id]:
+                filtered.append(p)
+        pages = filtered
+
     return [p.model_dump() for p in pages]
 
 
 @router.post("/pages", status_code=status.HTTP_201_CREATED, summary="创建 Wiki 页面并同步索引")
 def create_page(
+    request: Request,
     body: CreateWikiPageRequest,
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
+    db = get_user_db(request)
+    require_kb_edit(db, body.kb_id, user)
+
     store = get_wiki_store()
     indexer = get_wiki_indexer()
 
@@ -98,6 +122,7 @@ def create_page(
 
 @router.get("/pages/{page_id}", summary="获取 Wiki 页面详情及双向链接")
 def get_page(
+    request: Request,
     page_id: int,
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
@@ -105,6 +130,9 @@ def get_page(
     page = store.get_page(page_id)
     if not page:
         raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+
+    db = get_user_db(request)
+    require_kb_view(db, page.kb_id, user)
 
     outgoing = store.get_outgoing_links(page_id)
     backlinks = [b.model_dump() for b in store.get_backlinks(page_id)]
@@ -120,12 +148,21 @@ def get_page(
 
 @router.put("/pages/{page_id}", summary="修改 Wiki 页面并生成增量修订版")
 def update_page(
+    request: Request,
     page_id: int,
     body: UpdateWikiPageRequest,
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
     store = get_wiki_store()
     indexer = get_wiki_indexer()
+
+    page = store.get_page(page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+
+    db = get_user_db(request)
+    require_kb_edit(db, page.kb_id, user)
+    old_title = page.title
 
     try:
         updated = store.update_page(
@@ -139,7 +176,7 @@ def update_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chunks_indexed = indexer.sync_page(page_id)
+    chunks_indexed = indexer.sync_page(page_id, old_title=old_title)
     return {
         "page": updated.model_dump(),
         "chunks_indexed": chunks_indexed,
@@ -148,6 +185,7 @@ def update_page(
 
 @router.delete("/pages/{page_id}", summary="删除 Wiki 页面并清除索引")
 def delete_page(
+    request: Request,
     page_id: int,
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
@@ -158,6 +196,9 @@ def delete_page(
     if not page:
         raise HTTPException(status_code=404, detail="Wiki 页面不存在")
 
+    db = get_user_db(request)
+    require_kb_edit(db, page.kb_id, user)
+
     indexer.delete_page(page_id, kb_id=page.kb_id, title=page.title)
     deleted = store.delete_page(page_id)
     return {"deleted": deleted, "id": page_id}
@@ -165,16 +206,25 @@ def delete_page(
 
 @router.get("/pages/{page_id}/history", summary="查看页面修订历史")
 def get_page_history(
+    request: Request,
     page_id: int,
     user: dict = Depends(require_user),
 ) -> list[dict[str, Any]]:
     store = get_wiki_store()
+    page = store.get_page(page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+
+    db = get_user_db(request)
+    require_kb_view(db, page.kb_id, user)
+
     revisions = store.get_revisions(page_id)
     return [r.model_dump() for r in revisions]
 
 
 @router.post("/pages/{page_id}/rollback", summary="秒级回滚页面至指定历史版本")
 def rollback_page(
+    request: Request,
     page_id: int,
     body: RollbackWikiPageRequest,
     user: dict = Depends(require_user),
@@ -182,8 +232,16 @@ def rollback_page(
     store = get_wiki_store()
     indexer = get_wiki_indexer()
 
+    page = store.get_page(page_id)
+    if not page:
+        raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+
+    db = get_user_db(request)
+    require_kb_edit(db, page.kb_id, user)
+    old_title = page.title
+
     try:
-        page = store.rollback_revision(
+        updated = store.rollback_revision(
             page_id=page_id,
             revision_num=body.revision_num,
             author_id=user.get("username"),
@@ -191,8 +249,8 @@ def rollback_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chunks_indexed = indexer.sync_page(page_id)
+    chunks_indexed = indexer.sync_page(page_id, old_title=old_title)
     return {
-        "page": page.model_dump(),
+        "page": updated.model_dump(),
         "chunks_indexed": chunks_indexed,
     }
