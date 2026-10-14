@@ -65,11 +65,11 @@
   - `WikiRevision`（id, page_id, revision_num, content, delta, author_id, comment, sha256_hash, created_at）
   - `WikiStore`：`create_page()`, `update_page()`, `get_page()`, `list_pages()`, `get_history()`, `rollback_revision()`, `extract_links()`
 
-- [ ] **Step 1: Write failing tests**（页面创建与唯一 slug 校验；更新自动生成递增 revision；回滚到历史版本；双向链接 `[[页面名]]` 正向与反向引用提取；跨知识库隔离性测试）
-- [ ] **Step 2: Run and confirm failure**
-- [ ] **Step 3: Implement**（实现 SQLite 表结构与外键级联；Markdown 内部链接提取正则与图谱映射；事务性版本创建与回滚）
-- [ ] **Step 4: Run focused tests**（`pytest tests/test_wiki_store.py` 验证全绿）
-- [ ] **Step 5: Commit**：`feat(wiki): implement hypertext wiki storage and revision model`.
+- [x] **Step 1: Write failing tests**（页面创建与唯一 slug 校验；更新自动生成递增 revision；回滚到历史版本；双向链接 `[[页面名]]` 正向与反向引用提取；跨知识库隔离性测试）
+- [x] **Step 2: Run and confirm failure**
+- [x] **Step 3: Implement**（实现 SQLite 表结构与外键级联；Markdown 内部链接提取正则与图谱映射；事务性版本创建与回滚）
+- [x] **Step 4: Run focused tests**（`pytest tests/test_wiki_store.py` 验证全绿）
+- [x] **Step 5: Commit**：`feat(wiki): implement hypertext wiki storage and revision model`.
 
 ---
 
@@ -86,11 +86,11 @@
   - `chunk_wiki_page(page: WikiPage) -> list[DocumentChunk]`
   - 每个 Chunk 包含：`text`（以 `[Wiki: {page.title} > {section_path}]` 为前缀）、`metadata`（`heading_level`, `section_path`, `links`, `kb_id`, `chunk_index`）
 
-- [ ] **Step 1: Write failing tests**（标题层级嵌套解析验证；表格块禁止中途截断；过长正文在同段落边界智能切分；上下文面包屑自动挂载；空页面与畸形 Markdown 鲁棒性）
-- [ ] **Step 2: Run and confirm failure**
-- [ ] **Step 3: Implement**（集成 `markdown-it-py` 解析 AST Token 流；构建 Heading Stack 维护路径面包屑；表格与代码块原子化保护逻辑）
-- [ ] **Step 4: Run focused tests**（`pytest tests/test_wiki_chunker.py` 验证通过）
-- [ ] **Step 5: Commit**：`feat(wiki): build structure-aware markdown AST chunker`.
+- [x] **Step 1: Write failing tests**（标题层级嵌套解析验证；表格块禁止中途截断；过长正文在同段落边界智能切分；上下文面包屑自动挂载；空页面与畸形 Markdown 鲁棒性）
+- [x] **Step 2: Run and confirm failure**
+- [x] **Step 3: Implement**（集成 `markdown-it-py` 解析 AST Token 流；构建 Heading Stack 维护路径面包屑；表格与代码块原子化保护逻辑）
+- [x] **Step 4: Run focused tests**（`pytest tests/test_wiki_chunker.py` 验证通过）
+- [x] **Step 5: Commit**：`feat(wiki): build structure-aware markdown AST chunker`.
 
 ---
 
@@ -109,11 +109,11 @@
   - `delete_page(page_id: int) -> None`（清理对应向量与关键词记录）
   - `reindex_all(kb_id: str) -> dict`（批量全量同步）
 
-- [ ] **Step 1: Write failing tests**（页面创建同步至双路索引；页面修改只更新受影响块，清理陈旧块；页面物理删除后两路索引彻底清除；ACL 与 kb_id 隔离校验）
-- [ ] **Step 2: Run and confirm failure**
-- [ ] **Step 3: Implement**（将 AST 切块注入已有的 `DocumentChunk` 流程；执行向量嵌入并写入 Qdrant；更新 SQLite BM25 词频倒排）
-- [ ] **Step 4: Run focused tests**（`pytest tests/test_wiki_indexer.py` 验证全绿）
-- [ ] **Step 5: Commit**：`feat(wiki): integrate hybrid vector and BM25 indexing for wiki`.
+- [x] **Step 1: Write failing tests**（页面创建同步至双路索引；页面修改只更新受影响块，清理陈旧块；页面物理删除后两路索引彻底清除；ACL 与 kb_id 隔离校验）
+- [x] **Step 2: Run and confirm failure**
+- [x] **Step 3: Implement**（将 AST 切块注入已有的 `DocumentChunk` 流程；执行向量嵌入并写入 Qdrant；更新 SQLite BM25 词频倒排）
+- [x] **Step 4: Run focused tests**（`pytest tests/test_wiki_indexer.py` 验证全绿）
+- [x] **Step 5: Commit**：`feat(wiki): integrate hybrid vector and BM25 indexing for wiki`.
 
 ---
 
@@ -131,11 +131,11 @@
   - `GapRemediationService`：`link_ticket_to_wiki(ticket_id, page_id)`
   - Worker 5b 步骤扩充：探测已关联录入 Wiki 或 Excel 的 open 工单，若缺失词已达到召回覆盖阈值，自动扭转状态为 `content_added` 并落库留痕。
 
-- [ ] **Step 1: Write failing tests**（工单与 Wiki 页面关联绑定；知识补录入库后 Worker 重检返回 `covered`；工单状态自动由 `open` 推进为 `content_added`；多成员缺失词覆盖度数学判定测试）
-- [ ] **Step 2: Run and confirm failure**
-- [ ] **Step 3: Implement**（在工单记录中持久化关联资产引用；Worker 定期重检逻辑增强，增加对增量 Wiki 内容的召回命中判定；闭环后触发审计日志）
-- [ ] **Step 4: Run focused tests**（`pytest tests/test_gap_remediation.py tests/test_evolution_gaps.py` 零回归）
-- [ ] **Step 5: Commit**：`feat(evolution): close Track B loop with wiki gap remediation`.
+- [x] **Step 1: Write failing tests**（工单与 Wiki 页面关联绑定；知识补录入库后 Worker 重检返回 `covered`；工单状态自动由 `open` 推进为 `content_added`；多成员缺失词覆盖度数学判定测试）
+- [x] **Step 2: Run and confirm failure**
+- [x] **Step 3: Implement**（在工单记录中持久化关联资产引用；Worker 定期重检逻辑增强，增加对增量 Wiki 内容的召回命中判定；闭环后触发审计日志）
+- [x] **Step 4: Run focused tests**（`pytest tests/test_gap_remediation.py tests/test_evolution_gaps.py` 零回归）
+- [x] **Step 5: Commit**：`feat(evolution): close Track B loop with wiki gap remediation`.
 
 ---
 
@@ -157,11 +157,11 @@
   - `POST /wiki/pages/{id}/rollback`（一键回滚指定修订版）
   - `POST /evolution/gap-tickets/{id}/remediate/wiki`（工单一键跳转补录 API）
 
-- [ ] **Step 1: Write failing tests**（API 身份验证与权限守卫；CRUD 全生命周期测试；版本回滚端点测试；工单补录关联端点响应结构测试）
-- [ ] **Step 2: Run and confirm failure**
-- [ ] **Step 3: Implement**（FastAPI 路由组装；依赖注入与异常处理；跨模块端点挂载）
-- [ ] **Step 4: Run focused tests**（`pytest tests/test_wiki_api.py` 全量通过）
-- [ ] **Step 5: Commit**：`feat(api): expose wiki knowledge and gap remediation endpoints`.
+- [x] **Step 1: Write failing tests**（API 身份验证与权限守卫；CRUD 全生命周期测试；版本回滚端点测试；工单补录关联端点响应结构测试）
+- [x] **Step 2: Run and confirm failure**
+- [x] **Step 3: Implement**（FastAPI 路由组装；依赖注入与异常处理；跨模块端点挂载）
+- [x] **Step 4: Run focused tests**（`pytest tests/test_wiki_api.py` 全量通过）
+- [x] **Step 5: Commit**：`feat(api): expose wiki knowledge and gap remediation endpoints`.
 
 ---
 
