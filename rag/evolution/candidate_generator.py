@@ -130,7 +130,7 @@ def _classify_failure(exc: BaseException) -> tuple[str, str]:
     return REASON_INVALID, type(exc).__name__
 
 
-def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = 8000) -> ModelCall:
+def _default_model_call(timeout_seconds: float = 120.0, max_tokens: int = 16000) -> ModelCall:
     """Build an isolated model call for candidate generation at low temperature.
 
     Same discipline as the diagnoser's default call, and for the same reasons:
@@ -149,14 +149,19 @@ def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = 8000) -
             default_headers=generator.deepseek_default_headers(),
         )
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
-        response = client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=clean_msgs,
-            temperature=CANDIDATE_TEMPERATURE,
-            max_tokens=max_tokens,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        return response.choices[0].message.content or "（模型未返回内容）"
+        for _attempt in range(2):
+            response = client.chat.completions.create(
+                model=settings.deepseek_model,
+                messages=clean_msgs,
+                temperature=CANDIDATE_TEMPERATURE,
+                max_tokens=max_tokens,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            content = response.choices[0].message.content
+            if content and content.strip():
+                return content
+            time.sleep(1.0)
+        return "（模型未返回内容）"
 
     return call
 
@@ -401,6 +406,8 @@ def _enforce_diagnosis_scope(
     observation_id: int,
     base_version: str,
     trace_store,
+    *,
+    target: str = "",
 ) -> None:
     """Rule 4: the diagnosis, the cluster and the observation must agree.
 
@@ -426,7 +433,21 @@ def _enforce_diagnosis_scope(
     observation_kb = str(observation.get("kb_id") or "").strip()
     if cluster_kb and observation_kb and observation_kb != cluster_kb:
         raise CandidateUnavailable(REASON_INVALID, "diagnosis kb disagrees with the cluster kb")
-    served_version = str(observation.get("details_jev_question_set_version") or "").strip()
+    meta = observation.get("details_decision_metadata")
+    if not isinstance(meta, Mapping):
+        meta = {}
+    if target == "passages":
+        served_version = str(meta.get("passages_question_set_version") or "").strip()
+        if not served_version:
+            cand_ver = str(observation.get("details_jev_question_set_version") or "").strip()
+            if cand_ver and "passages" in cand_ver:
+                served_version = cand_ver
+    elif target == "preflight":
+        served_version = str(
+            meta.get("question_set_version") or observation.get("details_jev_question_set_version") or ""
+        ).strip()
+    else:
+        served_version = str(observation.get("details_jev_question_set_version") or "").strip()
     if served_version and served_version != base_version:
         raise CandidateUnavailable(
             REASON_INVALID,
@@ -481,7 +502,9 @@ def _enforce_candidate_rules(
         validate_payload(target, payload, base)
     except PayloadBoundaryError as error:
         raise CandidateUnavailable(REASON_INVALID, error.reason) from None
-    _enforce_diagnosis_scope(drafts, cluster, observation_id, base_version, trace_store)
+    _enforce_diagnosis_scope(
+        drafts, cluster, observation_id, base_version, trace_store, target=target
+    )
     rollback_ref = {
         "question_set_version": base_version,
         "payload_sha256": _payload_sha256(payload),
@@ -509,8 +532,8 @@ class CandidateGenerator:
         model_call: ModelCall | None = None,
         *,
         prompt_version: str = CANDIDATE_PROMPT_VERSION,
-        timeout_seconds: float = 90.0,
-        max_tokens: int = 8000,
+        timeout_seconds: float = 120.0,
+        max_tokens: int = 16000,
     ) -> None:
         self._model_call: ModelCall = model_call or _default_model_call(
             timeout_seconds, max_tokens

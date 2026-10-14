@@ -20,7 +20,7 @@
 | 服务 | `http://127.0.0.1:8080`，pid **27988**，`/health` 200（qdrant + sqlite 正常） |
 | 前端 | `frontend/` 构建产物写入 `static/`，由服务在 `/static` 提供（改前端必须重新 build） |
 | 线上代码 | `rag/agent.py`（**#27 + #29**）、`rag/prompt_manager.py`（**#29**）——已随 `d6fa7ad` 提交 |
-| 队列 | 候选 28 条：`stable` 2（**#20 #29**）、`rejected` 20、`rolled_back` 6；**无任何未决候选** |
+| 队列 | 候选 29 条：`stable` 2（**#20 #29**）、`awaiting_verification` 1（**#30**）、`rejected` 20、`rolled_back` 6 |
 | 聚类 | 3 与 30 均 `approved_for_candidate`（准入已解封，open clusters 恢复为 0），另有 4 停靠待判断、3 无草案 |
 | 工单 | 4 张，全部 `open`（要人补资料） |
 | 推送方式 | `origin` 的 https 会被 gitee 拒（`reject by [gitee]` + HTTP 400）⇒ 用 9-28 交接文档第 10 条那把显式密钥 + SSH URL |
@@ -77,6 +77,16 @@
 14. **#15/#16 多数票真实重测（本次接手）**：停服务释放 Qdrant 独占锁，跑真实 44 例 × 3 轮独立回放。
     #15 `[0 passed, 3 failed]`，#16 `[0 passed, 3 failed]`，均稳定发生 Top-5 召回回归，实证确凿，
     彻底证明维持 `rejected` 终态公正无误，无需翻案。服务已重新拉起，`/health` 200。
+15. **聚类 3 全新问题集候选 #30 诞生并全胜通过多数票门禁（本次接手）**：
+    - 修复 `candidate_generator` 长期遗留的残余缺陷：`_enforce_diagnosis_scope` 改造为目标感知（target-aware），通过 `details_decision_metadata` 准确解析 `passages_question_set_version`，彻底解除历史遗留版本校验误阻；
+    - 配置化防截断与超时（`max_tokens=16000`, `timeout=120s`），并增加模型偶发空白输出自动重试；
+    - 成功为聚类 3 生成全新问题集候选 `#30`（`jev_question_set`，48 题包含 12 处改写，改动幅度 $\le 40\%$）；
+    - 在 44 例固定语料上完成 3 轮独立多数票重测：`[3 repeat(s): 3 passed, 0 failed]`！
+      - 路由准确率：$93.18\% \to 95.45\%$（$\Delta = +2.27\text{pp}$，0 退化）；
+      - Top-5 命中率：$95.0\% \to 100.0\%$（$\Delta = +5.0\text{pp}$，0 退化）；
+      - 外部调用减少 6 次（94 vs 100），执行耗时缩短约 18 秒；
+    - 候选 `#30` 顺利通过层 2 基准门禁，正式晋升为 `awaiting_verification`，排入管理员金丝雀灰度队列。服务已恢复运行。
+
 
 ## 2. 明确**没做**的、以及为什么
 

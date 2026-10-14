@@ -665,3 +665,56 @@ def test_default_model_call_uses_an_isolated_client_with_the_configured_limits(m
     assert recorded["temperature"] == CANDIDATE_TEMPERATURE
     assert recorded["max_tokens"] == 8000
     assert recorded["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_passages_target_with_metadata_passages_version_accepted(tmp_path):
+    trace, cluster, member = seeded(
+        tmp_path, observation_version="preflight-v1"
+    )
+    # Add decision_metadata with passages_question_set_version
+    with trace._lock:
+        trace._conn.execute(
+            "UPDATE failure_observations SET details_decision_metadata = ? WHERE id = ?",
+            (json.dumps({"passages_question_set_version": PASSAGE_QUESTION_SET_VERSION}), member["id"]),
+        )
+        trace._conn.commit()
+
+    fake = FakeModel(json.dumps(_passage_answer(), ensure_ascii=False))
+    candidate = _generate(
+        fake,
+        cluster,
+        member,
+        trace,
+        target="passages",
+        base_builder=lambda: build_passage_questions(["c1"]),
+        base_version=PASSAGE_QUESTION_SET_VERSION,
+    )
+    assert candidate.target == "passages"
+    assert candidate.rollback_ref["question_set_version"] == PASSAGE_QUESTION_SET_VERSION
+
+
+def test_passages_target_with_metadata_mismatched_version_refused(tmp_path):
+    trace, cluster, member = seeded(
+        tmp_path, observation_version="preflight-v1"
+    )
+    with trace._lock:
+        trace._conn.execute(
+            "UPDATE failure_observations SET details_decision_metadata = ? WHERE id = ?",
+            (json.dumps({"passages_question_set_version": "passages-v0"}), member["id"]),
+        )
+        trace._conn.commit()
+
+    fake = FakeModel(json.dumps(_passage_answer(), ensure_ascii=False))
+    with pytest.raises(CandidateUnavailable) as excinfo:
+        _generate(
+            fake,
+            cluster,
+            member,
+            trace,
+            target="passages",
+            base_builder=lambda: build_passage_questions(["c1"]),
+            base_version=PASSAGE_QUESTION_SET_VERSION,
+        )
+    assert excinfo.value.reason == "invalid"
+    assert "passages-v0" in excinfo.value.detail
+

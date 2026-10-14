@@ -1053,7 +1053,17 @@ def make_evolution_candidate_step(
         if not enabled or budget <= 0:
             return outcome
         candidates = candidate_store or CandidateStore(store)
-        generator = (generator_factory or CandidateGenerator)()
+        generator = (
+            generator_factory
+            or (
+                lambda: CandidateGenerator(
+                    timeout_seconds=float(
+                        getattr(cfg, "evolution_candidate_timeout_seconds", 120.0)
+                    ),
+                    max_tokens=int(getattr(cfg, "evolution_candidate_max_tokens", 16000)),
+                )
+            )
+        )()
         reader = (retrieval_factory or default_retrieval_factory)()
         try:
             items = _keep_defects(_eligible_question_set_items(store, candidates),

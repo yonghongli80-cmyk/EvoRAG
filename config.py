@@ -196,6 +196,8 @@ class Settings(BaseSettings):
     evolution_candidate_canary_percent: int = Field(default=0, ge=0, le=100)
     # 第 4 阶段层 3 影子对比的默认采样率（每请求的确定性抽样比例）。
     evolution_candidate_shadow_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    evolution_candidate_timeout_seconds: float = Field(default=120.0, ge=1.0)
+    evolution_candidate_max_tokens: int = Field(default=16000, ge=1)
 
     model_config = {
         "env_prefix": "RAG_",

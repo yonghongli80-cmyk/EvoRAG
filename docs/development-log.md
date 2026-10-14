@@ -954,6 +954,24 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
   * **候选 #16**：`[3 repeat(s): 0 passed, 3 failed]`，3 轮全败（Run 1: top-5 -5.0pp; Run 2: top-5 -10.0pp; Run 3: top-5 -5.0pp），稳定回归 `real-009`；
 * **科学结论**：此前的单次 passed 属于偶然噪声；在多数票自洽机制下，**两条候选均确凿存在显著 Top-5 召回回归，维持 `rejected` 终态完全公正**。无需人工干预状态机，疑点彻底澄清。
 
+**六、解决自演化历史残余缺陷，聚类 3 全新问题集候选 #30 诞生并通过多数票门禁晋升（2026-10-14）：**
+* **根因定位与残余缺陷根治**：
+  * 在推进聚类 3 全新问题集生成时，模型生成在校验阶段报 `invalid: observation was served by question_set_version 'preflight-v1', not the current 'passages-v1'`；
+  * 追查发现：该问题正是 `docs/handoff-2026-09-28-self-evolution.md` 明确记录但长期未解的残余缺陷（观测表列 `details_jev_question_set_version` 仅记录 preflight 版本，而 `_enforce_diagnosis_scope` 直接拿它与 `base_version` 比对，导致所有真实 passages 观测在生成候选时均被硬拒绝）；
+  * **修复**：`_enforce_diagnosis_scope` 改造为目标感知（target-aware），优先从 `details_decision_metadata` 中提取当前 `target` 对应的真实服务版本（`passages` 读 `passages_question_set_version`，`preflight` 读 `question_set_version`）；并补齐针对性单元测试；
+  * **防截断配置化增强**：在 `config.py` 与 worker 中新增 `evolution_candidate_timeout_seconds`（120s）与 `evolution_candidate_max_tokens`（16000），防止 48 问长 payload 被截断；模型偶发空白输出自动重试。
+* **全新候选 #30 真实生成**：
+  * 针对聚类 3（观测 91）成功生成全新候选 `#30`（`jev_question_set`，`target=passages`，48 题包含 12 处 `contains_answer_evidence` 改写，单题字符改动率严格 $\le 40\%$）；
+  * 初始状态进入 `candidate_testing`。
+* **真机 44 例固定语料 × 3 轮独立回放（多数票门禁重测）**：
+  * 运行：`scripts/benchmark_candidate_questions.py --candidate-id 30 --kb-id rag_docs --user-id 1 --repeats 3`；
+  * **裁决结果**：`[3 repeat(s): 3 passed, 0 failed]`，全胜通过！
+    * **路由准确率**：$93.18\% \to 95.45\%$（$\Delta = +2.27\text{pp}$，0 例退化，改善 `noanswer-001`）；
+    * **Top-5 命中率**：$95.0\% \to 100.0\%$（$\Delta = +5.0\text{pp}$，0 例退化，改善 `real-025`）；
+    * **调用效率**：外部检索调用从 100 次降至 94 次（$-6$ 次），平均执行耗时减少约 18 秒；
+  * 候选 `#30` 顺利通过层 2 门禁，正式晋升至 `awaiting_verification`，等待管理员发起金丝雀灰度。
+
+
 ## 22. 工程实践清单（这套代码里反复出现的做法）
 
 1. **先定判据，再动手**：每项改动都先写"达标线"（如"生成成功率 ≥80%"），并留下对照数字。
