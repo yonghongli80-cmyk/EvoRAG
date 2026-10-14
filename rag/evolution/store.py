@@ -762,6 +762,31 @@ class FailureTraceStore:
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [_decode_gap_ticket_row(row) for row in rows]
 
+    def get_gap_ticket(self, ticket_id: int) -> dict | None:
+        """Fetch a single knowledge gap ticket by ID."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM knowledge_gap_tickets WHERE id = ?", (int(ticket_id),)
+            ).fetchone()
+            return _decode_gap_ticket_row(row) if row else None
+
+    def update_gap_ticket(self, ticket_id: int, ticket, *, now: float | None = None) -> None:
+        """Update payload and status of an existing ticket."""
+        now_ts = float(time.time() if now is None else now)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE knowledge_gap_tickets SET payload = ?, occurrences = ?, status = ?, "
+                "updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(ticket.to_payload(), ensure_ascii=False),
+                    int(ticket.occurrences),
+                    str(ticket.status),
+                    now_ts,
+                    int(ticket_id),
+                ),
+            )
+            self._conn.commit()
+
     def record_gap_recheck(self, ticket_id: int, ticket, *, now: float) -> None:
         """Write back one re-check: payload, occurrences and status only.
 

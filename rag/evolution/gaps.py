@@ -55,6 +55,8 @@ class KnowledgeGapTicket:
     status: str = "open"
     #: 最近一次复测：``{checked_at, probed, covered_terms, still_missing, verdict}``。
     recheck: dict | None = None
+    #: 知识补录关联资产：``{type: 'wiki'|'excel', asset_id: int, author_id: str|None, linked_at: float}``。
+    remediation: dict | None = None
 
     def to_payload(self) -> dict:
         """The JSON-safe form the store keeps and an endpoint would render."""
@@ -71,7 +73,28 @@ class KnowledgeGapTicket:
             "created_at": self.created_at,
             "status": self.status,
             "recheck": self.recheck,
+            "remediation": self.remediation,
         }
+
+    def with_remediation(
+        self,
+        *,
+        asset_type: str,
+        asset_id: int,
+        author_id: str | None = None,
+        now: float | None = None,
+    ) -> KnowledgeGapTicket:
+        """A copy linking this gap ticket to a remediation asset (e.g. Wiki page)."""
+        now_ts = float(time.time() if now is None else now)
+        return replace(
+            self,
+            remediation={
+                "type": str(asset_type),
+                "asset_id": int(asset_id),
+                "author_id": str(author_id) if author_id is not None else None,
+                "linked_at": now_ts,
+            },
+        )
 
     def with_recheck(
         self,
@@ -159,6 +182,7 @@ def ticket_from_payload(payload: Mapping) -> KnowledgeGapTicket:
         created_at=float(payload.get("created_at") or 0.0),
         status=str(payload.get("status") or "open"),
         recheck=payload.get("recheck"),
+        remediation=payload.get("remediation"),
     )
 
 
