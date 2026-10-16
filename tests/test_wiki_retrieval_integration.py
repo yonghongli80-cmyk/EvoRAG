@@ -130,3 +130,36 @@ def test_visible_current_version_ids_includes_wiki_revisions(tmp_path):
         user_db.close()
         wiki_store.close()
 
+
+def test_visible_current_version_ids_uses_default_store(tmp_path, monkeypatch):
+    """RET-02 Regression: _visible_current_version_ids must resolve default wiki_store when None is passed."""
+    import rag.wiki.store as wiki_store_mod
+    from rag.user_db import UserDB
+    from rag.versioned_retrieval import _visible_current_version_ids
+
+    user_db = UserDB(str(tmp_path / "user.db"))
+    store = wiki_store_mod.WikiStore(db_path=str(tmp_path / "wiki.db"))
+    monkeypatch.setattr(wiki_store_mod, "_default_wiki_store", store)
+
+    try:
+        user_id = user_db.create_user("charlie", "pwd123")
+        user = user_db.get_user_by_id(user_id)
+        kb_id = "kb_wiki_default"
+        user_db.create_kb_metadata(kb_id=kb_id, name="Public Wiki", owner_id=user_id, scope="public")
+
+        page = store.create_page(
+            kb_id=kb_id,
+            title="Overview",
+            content="# System Overview",
+        )
+        assert page.current_revision_id > 0
+
+        # Call WITHOUT passing wiki_store parameter
+        version_ids = _visible_current_version_ids(user_db, user, kb_id)
+        assert version_ids is not None
+        assert page.current_revision_id in version_ids
+    finally:
+        user_db.close()
+        store.close()
+
+

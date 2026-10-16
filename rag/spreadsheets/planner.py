@@ -55,7 +55,7 @@ def plan_spreadsheet_query(question: str, catalog: SpreadsheetCatalog) -> Planni
                 if column.display_name.casefold() in question.casefold() or column.normalized_name.casefold() in question.casefold():
                     matches.append((dataset, sheet, column))
     if not matches:
-        return PlanningResult(kind="clarification_required", intent=intent, clarification=Clarification(code="unknown_field", question="请说明要查询的字段", options=()))
+        return PlanningResult(kind="unsupported", intent=intent)
     numeric_matches = [item for item in matches if item[2].inferred_type in {"integer", "decimal"}]
     group_matches = [item for item in matches if f"各{item[2].display_name}" in question]
     metric_matches = numeric_matches or [item for item in matches if item not in group_matches]

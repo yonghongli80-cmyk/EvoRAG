@@ -433,3 +433,20 @@ class WikiStore:
     def close(self) -> None:
         with self._lock, contextlib.suppress(Exception):
             self._conn.close()
+
+
+_default_wiki_store: WikiStore | None = None
+_store_lock = threading.Lock()
+
+
+def get_wiki_store(db_path: str | Path | None = None) -> WikiStore:
+    """Return the global default WikiStore singleton or a custom instance."""
+    global _default_wiki_store
+    if db_path is not None:
+        return WikiStore(db_path)
+    if _default_wiki_store is None:
+        with _store_lock:
+            if _default_wiki_store is None:
+                _default_wiki_store = WikiStore()
+    return _default_wiki_store
+

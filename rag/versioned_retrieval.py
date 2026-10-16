@@ -51,10 +51,14 @@ def _get_wiki_store_instance(wiki_store=None):
     if wiki_store is not None:
         return wiki_store
     try:
-        from rag.wiki.store import get_wiki_store
+        from rag.wiki.api import get_wiki_store
         return get_wiki_store()
     except Exception:
-        return None
+        try:
+            from rag.wiki.store import get_wiki_store
+            return get_wiki_store()
+        except Exception:
+            return None
 
 
 def _visible_current_version_ids(user_db, user, kb_id, wiki_store=None) -> set[int] | None:

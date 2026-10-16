@@ -19,9 +19,11 @@ _wiki_indexer: WikiIndexer | None = None
 
 def get_wiki_store() -> WikiStore:
     global _wiki_store
-    if _wiki_store is None:
-        _wiki_store = WikiStore()
-    return _wiki_store
+    if _wiki_store is not None:
+        return _wiki_store
+    from rag.wiki.store import get_wiki_store as _default_get_store
+
+    return _default_get_store()
 
 
 def get_wiki_indexer() -> WikiIndexer:

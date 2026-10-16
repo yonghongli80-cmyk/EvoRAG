@@ -33,6 +33,14 @@ class SpreadsheetQueryCoordinator:
         self.datasets_root = Path(datasets_root)
         self._cache: OrderedDict[tuple, SpreadsheetQueryOutcome] = OrderedDict()
 
+    def has_datasets(self, kb_id: str, user: dict | None = None) -> bool:
+        if self.db is None or kb_id is None:
+            return False
+        if user is None:
+            user = {"is_admin": True}
+        catalog = build_authorized_catalog(self.db, self.datasets_root, kb_id, user)
+        return bool(catalog.datasets)
+
     def query(self, question: str, *, kb_id: str, user: dict) -> SpreadsheetQueryOutcome:
         started = time.perf_counter()
         catalog = build_authorized_catalog(self.db, self.datasets_root, kb_id, user)

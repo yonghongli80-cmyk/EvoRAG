@@ -522,7 +522,7 @@ class RAGPipeline:
         )
         context = self._post_rank_acl(self.reranker.rerank(rewritten, candidates), user, effective_kb_id)
         context = self._drop_injected_chunks(context)[:top_k]
-        self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator)
+        self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator, effective_kb_id, user)
         prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request,
@@ -530,11 +530,12 @@ class RAGPipeline:
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
         return prepared, None
 
-    def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator):
+    def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator, effective_kb_id=None, user=None):
         """Queue a non-blocking shadow comparison; never alters the current response."""
         evaluator = getattr(self, "_shadow_evaluator", None)
         if evaluator is None:
             return
+        has_structured = bool(coordinator is not None and effective_kb_id is not None and coordinator.has_datasets(effective_kb_id, user))
         evaluator.submit(ShadowCase(
             question=question,
             query=query,
@@ -543,7 +544,7 @@ class RAGPipeline:
                 (f"{chunk.doc_name}#{chunk.chunk_index}", chunk.rerank_score) for chunk in context
             ),
             candidates=tuple(candidates),
-            capabilities=KbCapabilities(has_structured_data=coordinator is not None),
+            capabilities=KbCapabilities(has_structured_data=has_structured),
         ))
 
     def _prepare_context_with_jev(
@@ -551,7 +552,8 @@ class RAGPipeline:
         enterprise_request, effective_kb_id, coordinator,
     ):
         """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
-        capabilities = KbCapabilities(has_structured_data=coordinator is not None)
+        has_structured = bool(coordinator is not None and coordinator.has_datasets(effective_kb_id, user))
+        capabilities = KbCapabilities(has_structured_data=has_structured)
         started = time.perf_counter()
         route_decision = self._route_with_history_correction(
             question, session_id, capabilities
