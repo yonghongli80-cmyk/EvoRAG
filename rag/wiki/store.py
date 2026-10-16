@@ -450,3 +450,13 @@ def get_wiki_store(db_path: str | Path | None = None) -> WikiStore:
                 _default_wiki_store = WikiStore()
     return _default_wiki_store
 
+
+def reset_wiki_store() -> None:
+    """Close and reset the global default WikiStore singleton."""
+    global _default_wiki_store
+    with _store_lock:
+        if _default_wiki_store is not None:
+            _default_wiki_store.close()
+            _default_wiki_store = None
+
+

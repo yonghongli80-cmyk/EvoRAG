@@ -535,7 +535,8 @@ class RAGPipeline:
         evaluator = getattr(self, "_shadow_evaluator", None)
         if evaluator is None:
             return
-        has_structured = bool(coordinator is not None and effective_kb_id is not None and coordinator.has_datasets(effective_kb_id, user))
+        has_datasets = getattr(coordinator, "has_datasets", None)
+        has_structured = bool(coordinator is not None and (has_datasets(effective_kb_id, user) if has_datasets and effective_kb_id else True))
         evaluator.submit(ShadowCase(
             question=question,
             query=query,
@@ -552,7 +553,8 @@ class RAGPipeline:
         enterprise_request, effective_kb_id, coordinator,
     ):
         """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
-        has_structured = bool(coordinator is not None and coordinator.has_datasets(effective_kb_id, user))
+        has_datasets = getattr(coordinator, "has_datasets", None)
+        has_structured = bool(coordinator is not None and (has_datasets(effective_kb_id, user) if has_datasets else True))
         capabilities = KbCapabilities(has_structured_data=has_structured)
         started = time.perf_counter()
         route_decision = self._route_with_history_correction(
@@ -897,6 +899,9 @@ class RAGPipeline:
     def _attempt_structured_query(self, question, coordinator, user, effective_kb_id):
         """Run the deterministic spreadsheet coordinator; return prepared route or None."""
         if coordinator is None or user is None or effective_kb_id == "rag_docs":
+            return None
+        has_datasets = getattr(coordinator, "has_datasets", None)
+        if has_datasets is not None and not has_datasets(effective_kb_id, user):
             return None
         outcome = coordinator.query(question, kb_id=effective_kb_id, user=user)
         if outcome.kind in {"structured_result", "hybrid_result"}:
