@@ -56,7 +56,7 @@ def delete_unversioned_points(collection_name: str, doc_name: str) -> int:
     without ``document_version_id``; once a versioned write exists those stale points must go
     so retrieval does not return the same chunk twice.
     """
-    with _write_lock.read():
+    with _write_lock.write():
         client = _get_client()
         if not client.collection_exists(collection_name):
             return 0
@@ -546,13 +546,18 @@ def copy_units_to_version(
     return len(points)
 
 
-def delete_doc(collection_name: str, doc_name: str):
+def delete_doc(collection_name: str, doc_name: str, chunk_kind: str | None = None):
     from qdrant_client.models import FieldCondition, MatchValue
 
     with _write_lock.write():
         client = _get_client()
+        if not client.collection_exists(collection_name):
+            return
+        conditions = [FieldCondition(key="doc_name", match=MatchValue(value=doc_name))]
+        if chunk_kind is not None:
+            conditions.append(FieldCondition(key="chunk_kind", match=MatchValue(value=chunk_kind)))
         client.delete(
             collection_name=collection_name,
-            points_selector=Filter(must=[FieldCondition(key="doc_name", match=MatchValue(value=doc_name))]),
+            points_selector=Filter(must=conditions),
         )
     _invalidate_bm25(collection_name)

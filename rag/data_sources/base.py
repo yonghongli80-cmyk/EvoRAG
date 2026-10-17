@@ -3,7 +3,9 @@
 import ipaddress
 import socket
 from abc import ABC, abstractmethod
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
+
+import requests
 
 
 def validate_external_host(hostname: str) -> None:
@@ -34,6 +36,43 @@ def validate_external_url(url: str) -> None:
     if not parsed.hostname:
         raise ValueError("URL 必须包含主机名")
     validate_external_host(parsed.hostname)
+
+
+def safe_requests_get(
+    url: str,
+    headers: dict[str, str] | None = None,
+    timeout: int | float = 10,
+    max_redirects: int = 3,
+    **kwargs,
+) -> requests.Response:
+    """Perform an HTTP GET request with SSRF redirect protection.
+
+    Validates initial URL and all subsequent redirect locations against internal/private IP ranges.
+    """
+    current_url = url
+    redirect_count = 0
+
+    while True:
+        validate_external_url(current_url)
+        resp = requests.get(
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+            **kwargs,
+        )
+        if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+            redirect_count += 1
+            if redirect_count > max_redirects:
+                raise ValueError(f"重定向次数过多（超过 {max_redirects} 次）")
+            location = resp.headers.get("Location")
+            if not location:
+                return resp
+            next_url = urljoin(current_url, location)
+            validate_external_url(next_url)
+            current_url = next_url
+            continue
+        return resp
 
 
 class DataSource(ABC):

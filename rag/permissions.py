@@ -166,16 +166,19 @@ def filter_chunks_by_permission(
         auth_svc = OrgAuthorizationService(db)
         wiki_allowed = auth_svc.authorize(int(user["id"]), kb_id, OrgRole.READ).allowed
         allowed_ids = auth_svc.allowed_document_ids(int(user["id"]), kb_id)
-        names = {
-            permission["doc_name"] for document_id in (allowed_ids or [])
-            if (permission := db.get_document_permission_by_id(document_id)) is not None
+        allowed_id_set = set(allowed_ids or [])
+        candidate_names = list({c.doc_name for c in chunks if getattr(c, "chunk_kind", None) != "wiki"})
+        perm_map = db.get_document_permissions_by_names(candidate_names, kb_id) if candidate_names else {}
+        allowed_names = {
+            doc_name for doc_name, perm in perm_map.items()
+            if perm is not None and perm.get("id") in allowed_id_set
         }
         result = []
         for chunk in chunks:
             if getattr(chunk, "chunk_kind", None) == "wiki":
                 if wiki_allowed:
                     result.append(chunk)
-            elif chunk.doc_name in names:
+            elif chunk.doc_name in allowed_names:
                 result.append(chunk)
         return result
 

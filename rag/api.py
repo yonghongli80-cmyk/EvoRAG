@@ -43,6 +43,7 @@ from rag.evolution.worker import start_evolution_worker, stop_evolution_worker
 from rag.kb_file_store import resolve_stored_path
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.knowledge_base import KnowledgeBaseManager
+from rag.llm_pool import get_llm_pool_router
 from rag.loader import load as load_document
 from rag.logging_config import set_request_id, setup_logging
 from rag.login_throttle import LoginThrottle
@@ -453,10 +454,24 @@ async def request_id_middleware(request, call_next):
 
 
 # Vue Router SPA fallback: browser requests to known frontend paths → serve index.html
-_VUE_ROUTES = {"/files", "/kb", "/analysis", "/analytics", "/operations", "/settings/password", "/mode/file", "/mode/kb", "/mode/analysis"}
+_VUE_ROUTES = {
+    "/files",
+    "/kb",
+    "/analysis",
+    "/analytics",
+    "/operations",
+    "/organization",
+    "/settings/password",
+    "/login",
+    "/wiki",
+    "/mode/file",
+    "/mode/kb",
+    "/mode/analysis",
+}
 _VUE_ROUTE_PREFIXES = {"/kb/", "/operations/"}
 _VUE_ROUTE_PATTERNS = (
     re.compile(r"^/documents/\d+/versions/\d+/spreadsheet$"),
+    re.compile(r"^/wiki/\d+$"),
 )
 
 
@@ -466,8 +481,8 @@ async def spa_fallback_middleware(request, call_next):
     accept = request.headers.get("accept", "")
     # API 请求（带 Authorization header）不走 SPA fallback
     has_auth = "authorization" in {k.lower() for k in request.headers}
-    # Only for GET requests from browsers to known Vue routes (no auth header)
-    if request.method == "GET" and "text/html" in accept and not has_auth:
+    # Only for GET/HEAD requests from browsers to known Vue routes (no auth header)
+    if request.method in {"GET", "HEAD"} and "text/html" in accept and not has_auth:
         is_frontend_route = (
             path in _VUE_ROUTES
             or any(path.startswith(p) for p in _VUE_ROUTE_PREFIXES)
@@ -528,6 +543,8 @@ class StreamQueryRequest(BaseModel):
     doc_name: str | None = None
     tags: list[str] | None = None
     kb_id: str | None = None
+    model: str | None = Field(default=None, description="指定单模型，默认走负载均衡")
+    models: list[str] | None = Field(default=None, description="指定多模型并发对比（Arena 模式）")
 
 
 class SuggestRequest(BaseModel):
@@ -1937,6 +1954,15 @@ async def query(req: QueryRequest, user: dict = Depends(require_user)):
     return QueryResponse(answer=result.answer, sources=result.sources)
 
 
+@app.get("/models", summary="获取可用大模型列表", description="返回当前模型池中所有可用的模型及默认模型")
+async def get_available_models():
+    router = get_llm_pool_router()
+    return {
+        "default_model": router.default_provider_id,
+        "models": router.list_models(),
+    }
+
+
 @app.post("/query/stream", summary="流式查询知识库", description="SSE 流式返回查询结果")
 async def query_stream(
     req: StreamQueryRequest,
@@ -1947,9 +1973,11 @@ async def query_stream(
     if target_kb != "rag_docs":
         require_kb_view(user_db, target_kb, user)
         await asyncio.to_thread(_audit_org_event, user, "answer_requested", target_kb)
-        # 必须走注入工厂：灰度控制器（层 4）与失败记录器只在那里注入，直接构造
-        # RAGPipeline 会让该库的在线请求永远拿不到候选问题集。
-        current_pipeline = await asyncio.to_thread(_make_pipeline, kb_id=target_kb)
+        def _resolve_stream_pipeline():
+            with _pipeline_lock.write():
+                return _get_or_create_pipeline(target_kb)
+
+        current_pipeline = await asyncio.to_thread(_resolve_stream_pipeline)
     else:
         with _pipeline_lock.read():
             if pipeline is None:
@@ -1971,7 +1999,7 @@ async def query_stream(
         try:
             async for event in current_pipeline.query_stream(
                 req.question, top_k=req.top_k, session_id=session_id, doc_name=req.doc_name, tags=req.tags,
-                user=user, kb_id=target_kb,
+                user=user, kb_id=target_kb, model=req.model, models=req.models,
             ):
                 # 从 token 事件中提取 answer 用于持久化
                 if '"type": "token"' in event:

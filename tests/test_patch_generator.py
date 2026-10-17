@@ -698,9 +698,9 @@ def test_target_files_are_ranked_by_diagnosis_relevance_and_truncated(tmp_path):
     assert len(selected) == 3  # one to three files, never the whole package
     assert selected[0].startswith("### 文件 rag/vector_store.py")
     assert VECTOR_STORE_MARKER in prompt
-    # A 558-line file is truncated to the first 400 lines, and says so.
+    vs_lines = len(Path("rag/vector_store.py").read_text(encoding="utf-8").splitlines())
     assert "前 400 行" in prompt
-    assert "共 558 行" in prompt
+    assert f"共 {vs_lines} 行" in prompt
     assert TRUNCATED_AWAY_MARKER not in prompt
 
 

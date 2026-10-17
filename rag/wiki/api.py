@@ -28,8 +28,9 @@ def get_wiki_store() -> WikiStore:
 
 def get_wiki_indexer() -> WikiIndexer:
     global _wiki_indexer
-    if _wiki_indexer is None:
-        _wiki_indexer = WikiIndexer(wiki_store=get_wiki_store())
+    current_store = get_wiki_store()
+    if _wiki_indexer is None or _wiki_indexer._store is not current_store:
+        _wiki_indexer = WikiIndexer(wiki_store=current_store)
     return _wiki_indexer
 
 

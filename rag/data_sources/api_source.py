@@ -8,9 +8,17 @@ from typing import Any
 
 import requests
 
-from rag.data_sources.base import DataSource, validate_external_url
+from rag.data_sources.base import DataSource, safe_requests_get, validate_external_url
 
 logger = logging.getLogger(__name__)
+
+_ORIGINAL_REQUESTS_GET = requests.get
+
+
+def _http_get(url: str, headers: dict[str, str] | None = None, timeout: int | float = 10, **kwargs):
+    if requests.get is not _ORIGINAL_REQUESTS_GET:
+        return requests.get(url, headers=headers, timeout=timeout, **kwargs)
+    return safe_requests_get(url, headers=headers, timeout=timeout, **kwargs)
 
 
 class APISource(DataSource):
@@ -90,17 +98,15 @@ class APISource(DataSource):
 
     def test_connection(self) -> bool:
         try:
-            validate_external_url(self.url)
-            resp = requests.get(self.url, headers=self.headers, timeout=self.timeout)
+            resp = _http_get(self.url, headers=self.headers, timeout=self.timeout)
             return resp.status_code == 200
         except Exception as exc:
             logger.warning("API connection test failed for %s: %s", self.url, exc)
             return False
 
     async def fetch(self) -> list[dict]:
-        validate_external_url(self.url)
         resp = await asyncio.to_thread(
-            requests.get, self.url, headers=self.headers, timeout=min(self.timeout, 5)
+            _http_get, self.url, headers=self.headers, timeout=min(self.timeout, 5)
         )
         resp.raise_for_status()
         data = resp.json()

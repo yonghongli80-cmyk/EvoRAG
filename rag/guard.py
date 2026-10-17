@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-INJECTION_PATTERNS = [
+INJECTION_REGEX_PATTERNS = [
+    re.compile(r"\bDAN\b", re.IGNORECASE),
+    re.compile(r"\bjailbreak\b", re.IGNORECASE),
+    re.compile(r"\broleplay\b", re.IGNORECASE),
+]
+
+INJECTION_PHRASE_PATTERNS = [
     # 中文指令覆盖
     "忽略之前的指令",
     "忽略以上指令",
@@ -36,11 +42,9 @@ INJECTION_PATTERNS = [
     "不受限制的AI",
     "没有限制的AI",
     "没有任何限制",
-    # 越狱
-    "roleplay",
-    "jailbreak",
-    "DAN",
 ]
+
+INJECTION_PATTERNS = INJECTION_PHRASE_PATTERNS + [r"\bDAN\b", r"\bjailbreak\b", r"\broleplay\b"]
 
 MAX_INPUT_LENGTH = 5000
 
@@ -62,9 +66,13 @@ def check_injection(text: str) -> GuardResult:
     if len(text) > MAX_INPUT_LENGTH:
         return GuardResult(blocked=True, reason=f"输入过长（最多 {MAX_INPUT_LENGTH} 字符）")
     lower = text.lower()
-    for pattern in INJECTION_PATTERNS:
+    for pattern in INJECTION_PHRASE_PATTERNS:
         if pattern.lower() in lower:
             logger.warning("注入检测命中: pattern=%s, text_preview=%s", pattern, text[:50])
+            return GuardResult(blocked=True, reason="输入包含不允许的内容")
+    for regex in INJECTION_REGEX_PATTERNS:
+        if regex.search(text):
+            logger.warning("注入检测命中: regex=%s, text_preview=%s", regex.pattern, text[:50])
             return GuardResult(blocked=True, reason="输入包含不允许的内容")
     return GuardResult(blocked=False)
 

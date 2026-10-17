@@ -22,3 +22,32 @@ def test_spreadsheet_deep_link_serves_frontend_entrypoint():
 
     assert response.status_code == 200
     assert '<div id="app"></div>' in response.text
+
+
+def test_organization_route_serves_frontend_entrypoint():
+    client = TestClient(app)
+
+    response = client.get("/organization", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert '<div id="app"></div>' in response.text
+
+
+def test_wiki_route_serves_frontend_entrypoint():
+    client = TestClient(app)
+
+    response = client.get("/wiki", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert '<div id="app"></div>' in response.text
+
+
+def test_wiki_detail_route_serves_frontend_entrypoint():
+    client = TestClient(app)
+
+    response = client.get("/wiki/42", headers={"accept": "text/html"})
+
+    assert response.status_code == 200
+    assert '<div id="app"></div>' in response.text
+
+

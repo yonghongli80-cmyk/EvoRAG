@@ -91,9 +91,8 @@ class RedisCache:
         if redis:
             try:
                 redis.delete(key)
-                return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Redis delete 失败: %s", e)
         self._fallback_delete(key)
 
     def clear(self) -> None:
@@ -109,9 +108,8 @@ class RedisCache:
                         redis.delete(*keys)
                     if cursor == 0:
                         break
-                return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Redis clear 失败: %s", e)
         with self._lock:
             self._fallback.clear()
 

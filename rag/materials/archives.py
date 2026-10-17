@@ -349,11 +349,32 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _extract_entry(source_path: Path, backend: str, entry_name: str, dest: Path) -> None:
+def _copyfileobj_bounded(src, dst, max_bytes: int, chunk_size: int = _CHUNK) -> int:
+    """Copy bytes from src to dst up to max_bytes, aborting if exceeded."""
+    total = 0
+    while True:
+        buf = src.read(chunk_size)
+        if not buf:
+            break
+        total += len(buf)
+        if total > max_bytes:
+            raise ArchiveRejected("entry_size_exceeded", f"extracted stream exceeded {max_bytes} bytes")
+        dst.write(buf)
+    return total
+
+
+def _extract_entry(
+    source_path: Path, backend: str, entry_name: str, dest: Path, max_bytes: int | None = None
+) -> None:
     """Stream one approved archive member to ``dest`` (never ``extractall``)."""
+    copy_fn = (
+        (lambda s, d: _copyfileobj_bounded(s, d, max_bytes, _CHUNK))
+        if max_bytes is not None
+        else (lambda s, d: shutil.copyfileobj(s, d, _CHUNK))
+    )
     if backend == "zip":
         with zipfile.ZipFile(source_path) as zf, zf.open(entry_name) as src, open(dest, "wb") as out:
-            shutil.copyfileobj(src, out, _CHUNK)
+            copy_fn(src, out)
     elif backend == "7z":
         import py7zr
 
@@ -362,12 +383,12 @@ def _extract_entry(source_path: Path, backend: str, entry_name: str, dest: Path)
         stream = data[entry_name]
         stream.seek(0)
         with open(dest, "wb") as out:
-            shutil.copyfileobj(stream, out, _CHUNK)
+            copy_fn(stream, out)
     elif backend == "rar":
         import rarfile
 
         with rarfile.RarFile(source_path) as rf, rf.open(entry_name) as src, open(dest, "wb") as out:
-            shutil.copyfileobj(src, out, _CHUNK)
+            copy_fn(src, out)
     else:
         raise ArchiveConfirmationError("unknown_archive_backend")
 
@@ -459,7 +480,14 @@ def confirm_archive_import(
         for entry in selected:
             staged = work_dir / f"{entry['child_source_key']}.bin"
             try:
-                _extract_entry(source_path, backend, entry["relative_path"], staged)
+                _extract_entry(
+                    source_path, backend, entry["relative_path"], staged, max_bytes=limits.entry_bytes
+                )
+            except ArchiveRejected as exc:
+                rejected_entries.append(
+                    {"id": entry["id"], "relative_path": entry["normalized_path"], "status": "rejected", "reason_code": exc.reason_code}
+                )
+                continue
             except Exception:  # encrypted / damaged member
                 rejected_entries.append(
                     {"id": entry["id"], "relative_path": entry["normalized_path"], "status": "rejected", "reason_code": "extraction_failed"}

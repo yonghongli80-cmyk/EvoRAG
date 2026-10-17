@@ -32,7 +32,8 @@ from rag.reliability.models import AnswerabilityDecision, ConfidenceAssessment
 from rag.reranker import Reranker
 from rag.retriever import Retriever
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
-from rag.vector_store import add, clear
+from rag.vector_store import add, delete_doc
+from rag.vector_store import clear as clear  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class RAGPipeline:
                 unique_set = set(unique_texts)
                 self.chunks = [c for c in self.chunks if c.text in unique_set]
             embeddings = embed([c.text for c in self.chunks])
-            clear()
+            delete_doc("rag_docs", doc_name)
             add(self.chunks, embeddings)
             self.retriever = Retriever(self.chunks)
         self.session_id = session_id or file_path
@@ -1023,7 +1024,18 @@ class RAGPipeline:
             confidence=prepared.get("confidence"),
         )
 
-    async def query_stream(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
+    async def query_stream(
+        self,
+        question: str,
+        top_k: int = 8,
+        session_id: str = None,
+        doc_name: str = None,
+        tags: list[str] = None,
+        user: dict = None,
+        kb_id: str = None,
+        model: str = None,
+        models: list[str] = None,
+    ):
         """流式查询，yield SSE 格式的事件字符串。"""
         sid = session_id or self.session_id or "default"
         start_time = time.time()
@@ -1046,7 +1058,9 @@ class RAGPipeline:
             return
 
         try:
-            async for event in self._stream_prepared(question, prepared, sid, start_time):
+            async for event in self._stream_prepared(
+                question, prepared, sid, start_time, model=model, models=models
+            ):
                 yield event
         except Exception as exc:
             # 流式中途失败：同样先留痕再分类。已准备好的判定统计量与问题集版本照旧写进
@@ -1056,7 +1070,15 @@ class RAGPipeline:
             )
             raise
 
-    async def _stream_prepared(self, question, prepared, sid, start_time):
+    async def _stream_prepared(
+        self,
+        question,
+        prepared,
+        sid,
+        start_time,
+        model: str = None,
+        models: list[str] = None,
+    ):
         """一次已准备完毕的请求的流式输出；异常由 :meth:`query_stream` 兜底留痕。"""
         if prepared["route"] == "cached":
             yield f'data: {_json.dumps({"type": "token", "content": prepared["answer"]}, ensure_ascii=False)}\n\n'
@@ -1086,15 +1108,57 @@ class RAGPipeline:
             yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
             sources = []
             tool_calls = [ToolCall(**c) for c in captured_calls]
+        elif models and len(models) > 1:
+            from rag.llm_pool import get_llm_pool_router
+
+            router = get_llm_pool_router()
+            model_answers: dict[str, str] = {}
+            async for event in router.generate_stream_parallel(prepared["messages"], provider_ids=models):
+                if event.get("type") == "token":
+                    m_id = event.get("model", "")
+                    model_answers[m_id] = model_answers.get(m_id, "") + event.get("content", "")
+                if event.get("type") != "done":
+                    yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+            sources = prepared["sources"]
+            yield f'data: {_json.dumps({"type": "sources", "sources": sources}, ensure_ascii=False)}\n\n'
+
+            # 汇总各模型回答写入对话记忆与执行跟踪，保证多轮对话与审计观测完整
+            combined_answer = "\n\n".join(f"### [{m}]\n{ans}" for m, ans in model_answers.items())
+            total_ms = (time.time() - start_time) * 1000
+            trace = ExecutionTrace(
+                question=question, route="arena", answer=combined_answer,
+                total_ms=total_ms, tool_calls=[], chunk_hashes=prepared.get("chunk_hashes", []),
+                stage_timings=prepared.get("stage_timings") or {},
+                decision_metadata=prepared.get("decision_metadata") or {},
+            )
+            await asyncio.to_thread(self.tracker.save, trace)
+            await asyncio.to_thread(self.memory.add_message, sid, "user", question)
+            await asyncio.to_thread(self.memory.add_message, sid, "assistant", combined_answer)
+            if await asyncio.to_thread(self.memory.should_summarize, sid):
+                await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
+
+            done = {"type": "done"}
+            yield f'data: {_json.dumps(done, ensure_ascii=False)}\n\n'
+            return
         else:
             answer = ""
             decision = prepared.get("decision")
             if decision is not None and decision.kind == "answerable_with_warning":
                 answer = _HISTORICAL_EVIDENCE_WARNING
                 yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
-            async for token in generate_stream(prepared["messages"]):
-                answer += token
-                yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
+
+            from rag.llm_pool import get_llm_pool_router
+
+            router = get_llm_pool_router()
+            if len(router.providers) > 1 or model:
+                async for event in router.generate_stream_balanced(prepared["messages"], preferred_provider_id=model):
+                    token = event.get("content", "")
+                    answer += token
+                    yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+            else:
+                async for token in generate_stream(prepared["messages"]):
+                    answer += token
+                    yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
             sources = prepared["sources"]
             tool_calls = []
 

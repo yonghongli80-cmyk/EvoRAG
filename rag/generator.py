@@ -123,6 +123,7 @@ async def generate_stream(messages: list[dict], temperature: float = 0.3, max_at
     clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
 
     last_exc = None
+    has_yielded = False
     for attempt in range(max_attempts):
         try:
             stream = await _async_client.chat.completions.create(
@@ -134,12 +135,16 @@ async def generate_stream(messages: list[dict], temperature: float = 0.3, max_at
             )
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
+                    has_yielded = True
                     yield chunk.choices[0].delta.content
             _breaker.record_success()
             return  # 成功，退出重试循环
         except (TimeoutError, ConnectionError, OSError) as e:
             last_exc = e
             _breaker.record_failure()
+            if has_yielded:
+                # 已经向客户端发送了部分 token，重试会导致内容从头重复，必须直接抛出
+                raise
             if attempt < max_attempts - 1:
                 import asyncio
                 delay = 1.0 * (2 ** attempt) + random.uniform(0, 0.5)
@@ -151,3 +156,4 @@ async def generate_stream(messages: list[dict], temperature: float = 0.3, max_at
 
     # 所有重试都失败
     raise last_exc
+

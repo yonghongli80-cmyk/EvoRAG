@@ -35,8 +35,11 @@ _SCHEMA_KEY_PREFIX = "chunks_schema:"
 class BM25Store:
     def __init__(self, db_path: str = None):
         db_path = db_path or settings.bm25_db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
         self._lock = threading.Lock()
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=30000")
         self._ensure_table()
 
     def _ensure_table(self):

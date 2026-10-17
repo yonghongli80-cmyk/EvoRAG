@@ -51,8 +51,8 @@ class WikiIndexer:
         _ensure_collection_name(page.kb_id)
 
         if old_title and old_title != page.title:
-            delete_doc(page.kb_id, old_title)
-        delete_doc(page.kb_id, page.title)
+            delete_doc(page.kb_id, old_title, chunk_kind="wiki")
+        delete_doc(page.kb_id, page.title, chunk_kind="wiki")
 
         wiki_chunks = self._chunker.chunk_page(page)
         if not wiki_chunks:
@@ -95,7 +95,7 @@ class WikiIndexer:
                 target_title = target_title or page.title
 
         if target_kb and target_title:
-            delete_doc(target_kb, target_title)
+            delete_doc(target_kb, target_title, chunk_kind="wiki")
 
     def reindex_all(self, kb_id: str) -> dict[str, int]:
         """Reindex all pages in a knowledge base."""

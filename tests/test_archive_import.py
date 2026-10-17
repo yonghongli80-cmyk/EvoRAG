@@ -237,3 +237,13 @@ def test_archive_replacement_diffs_children_atomically(tmp_path, archive_service
     assert sorted(r2.created_children) == ["b.pdf", "c.pdf"]
     assert sorted(archive_service.current_children()) == ["a.pdf", "b.pdf", "c.pdf"]
     assert r2.container_version_id != r1.container_version_id
+
+
+def test_copyfileobj_bounded_rejects_oversized_stream():
+    from rag.materials.archives import ArchiveRejected, _copyfileobj_bounded
+    src = io.BytesIO(b"A" * 1024)
+    dst = io.BytesIO()
+    with pytest.raises(ArchiveRejected) as exc_info:
+        _copyfileobj_bounded(src, dst, max_bytes=500, chunk_size=128)
+    assert exc_info.value.reason_code == "entry_size_exceeded"
+

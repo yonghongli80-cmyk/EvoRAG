@@ -21,7 +21,7 @@ class WikiStore:
         if db_path is None:
             from config import settings
 
-            db_path = getattr(settings, "wiki_db_path", "data/wiki.db")
+            db_path = settings.wiki_db_path
         self._path = Path(db_path)
         if str(self._path) != ":memory:":
             self._path.parent.mkdir(parents=True, exist_ok=True)

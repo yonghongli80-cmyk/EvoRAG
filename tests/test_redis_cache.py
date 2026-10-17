@@ -98,3 +98,18 @@ def test_redis_cache_fallback_ttl():
     # 等待 TTL 过期
     time.sleep(1.1)
     assert cache.get("question") is None
+
+
+def test_redis_cache_clear_and_delete_clears_fallback(cache_with_mock_redis):
+    """clear 和 delete 应无条件清理 _fallback 内存缓存。"""
+    cache, mock_redis = cache_with_mock_redis
+    mock_redis.scan.return_value = (0, [])
+    cache._fallback["test_key"] = ('{"answer": "fallback_ans"}', 9999999999.0)
+    cache.clear()
+    assert len(cache._fallback) == 0
+
+    key = cache._key("test_q")
+    cache._fallback[key] = ('{"answer": "fallback_ans"}', 9999999999.0)
+    cache.delete("test_q")
+    assert key not in cache._fallback
+

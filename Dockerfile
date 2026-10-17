@@ -21,10 +21,11 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     default-jre-headless \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && if [ ! -d /usr/lib/jvm/default-java ]; then ln -s /usr/lib/jvm/java-17-openjdk-* /usr/lib/jvm/default-java; fi
 
-# Java 环境变量
-ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+# Java 环境变量（通用架构，避免硬编码 amd64）
+ENV JAVA_HOME=/usr/lib/jvm/default-java
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # 标记 Docker 环境（start.py 根据此变量决定监听地址）

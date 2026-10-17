@@ -111,3 +111,46 @@ def test_generate_stream_respects_circuit_breaker():
     assert len(tokens) > 0
     assert "系统繁忙" in "".join(tokens)
     _breaker.record_success()
+
+
+def test_generate_stream_does_not_retry_after_yielding_tokens():
+    """一旦已 yield token，发生异常时不可从头重试（避免内容重复）。"""
+    import pytest
+
+    import rag.generator as _gen
+
+    _gen._async_client = None
+    _gen._breaker.record_success()
+
+    call_count = 0
+
+    async def faulty_stream():
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = "第一段"
+        yield chunk
+        raise ConnectionError("network dropped mid-stream")
+
+    mock_client = MagicMock()
+
+    def mock_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _coroutine_wrap(faulty_stream())
+
+    mock_client.chat.completions.create = mock_create
+
+    with patch("rag.generator.AsyncOpenAI", return_value=mock_client):
+        tokens = []
+
+        async def collect():
+            async for token in _gen.generate_stream([{"role": "user", "content": "hi"}], max_attempts=3):
+                tokens.append(token)
+
+        with pytest.raises(ConnectionError):
+            asyncio.run(collect())
+
+    # 必须只调用了 1 次，不可重试从头重复发
+    assert call_count == 1
+    assert tokens == ["第一段"]
+

@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # （例如 x-api-key）。为空时保持标准 Bearer 行为。
     deepseek_auth_header: str = ""
 
+    # 多大模型并发池配置（JSON 格式列表，支持配置多个模型供应商/Key；为空时自动使用 deepseek_*）
+    llm_providers_json: str = "[]"
+    llm_default_model: str = "deepseek"
+
     # 嵌入模型（硅基流动 bge-m3，OpenAI 兼容 API）
     bailian_api_key: str = ""
     bailian_base_url: str = "https://api.siliconflow.cn/v1"
@@ -39,6 +43,7 @@ class Settings(BaseSettings):
     memory_db_path: str = str(Path(__file__).resolve().parent / "data" / "memory.db")
     analysis_db_path: str = str(Path(__file__).resolve().parent / "data" / "analysis.db")
     users_db_path: str = str(Path(__file__).resolve().parent / "data" / "users.db")
+    wiki_db_path: str = str(Path(__file__).resolve().parent / "data" / "wiki.db")
 
     # 鉴权
     auth_enabled: bool = True

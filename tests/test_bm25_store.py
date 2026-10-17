@@ -80,3 +80,15 @@ def test_different_collections_are_independent(tmp_path):
     assert len(store.load_chunks("colA")) == 2
     assert len(store.load_chunks("colB")) == 4
     store.close()
+
+
+def test_bm25_store_pragmas(tmp_path):
+    db = str(tmp_path / "pragmas.db")
+    store = BM25Store(db_path=db)
+    cursor = store._conn.cursor()
+    journal_mode = cursor.execute("PRAGMA journal_mode").fetchone()[0]
+    busy_timeout = cursor.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert journal_mode.lower() == "wal"
+    assert busy_timeout >= 30000
+    store.close()
+

@@ -956,3 +956,25 @@ def test_route_with_history_correction_branches():
         result = pipeline._route_with_history_correction("模糊问题", "s1", None)
         assert result is clarify_decision
 
+
+@patch("rag.pipeline.Reranker")
+@patch("rag.pipeline.delete_doc")
+@patch("rag.pipeline.Retriever")
+@patch("rag.pipeline.add")
+@patch("rag.pipeline.embed")
+@patch("rag.pipeline.chunk")
+@patch("rag.pipeline.load")
+def test_pipeline_indexes_file_preserves_other_docs(
+    mock_load, mock_chunk, mock_embed, mock_add, mock_retriever_cls, mock_delete_doc, mock_reranker_cls
+):
+    mock_load.return_value = "new document text"
+    chunks = [Chunk(text="c1", doc_name="new_doc.txt", chunk_index=0)]
+    mock_chunk.return_value = chunks
+    mock_embed.return_value = [[0.1] * 1024]
+
+    RAGPipeline("new_doc.txt")
+
+    mock_delete_doc.assert_called_once_with("rag_docs", "new_doc.txt")
+    mock_add.assert_called_once_with(chunks, [[0.1] * 1024])
+
+

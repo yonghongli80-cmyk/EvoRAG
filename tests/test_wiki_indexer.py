@@ -244,3 +244,44 @@ def test_rename_page_purges_old_title_vectors(isolated_env):
     )
     assert len(old_records) == 0
 
+
+def test_delete_wiki_page_preserves_identically_named_regular_doc(isolated_env):
+    wiki_store: WikiStore = isolated_env["wiki_store"]
+    indexer: WikiIndexer = isolated_env["indexer"]
+    kb_id = isolated_env["collection"]
+
+    from rag.models import Chunk
+    vector_store._ensure_collection_name(kb_id)
+    # 1. Insert a regular (non-wiki) document with doc_name="guide.md"
+    reg_chunk = Chunk(text="Regular document content", doc_name="guide.md", chunk_index=0)
+    vector_store.add_to_collection(
+        collection_name=kb_id,
+        chunks=[reg_chunk],
+        embeddings=[[0.5] * 1024],
+        document_id=999,
+        document_version_id=1,
+    )
+
+    # 2. Insert a Wiki page with title="guide.md"
+    page = wiki_store.create_page(
+        kb_id=kb_id,
+        title="guide.md",
+        content="# Wiki Guide\nThis is a wiki page with identical title.",
+    )
+    indexer.sync_page(page.id)
+
+    # Both exist
+    client = vector_store._get_client()
+    records, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records) == 2
+
+    # 3. Delete wiki page
+    indexer.delete_page(page.id)
+
+    # 4. Verify regular document still exists
+    remaining, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(remaining) == 1
+    assert remaining[0].payload["doc_name"] == "guide.md"
+    assert remaining[0].payload.get("chunk_kind") != "wiki"
+
+

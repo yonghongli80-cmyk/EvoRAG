@@ -21,6 +21,18 @@ _WRITE_KEYWORDS = re.compile(
 )
 
 
+_RESTRICTED_SQLITE_NAMES = {
+    "users.db",
+    "jwt_secret.txt",
+    "memory.db",
+    "analysis.db",
+    "evolution.db",
+    "wiki.db",
+    "bm25.db",
+    "audit.log",
+}
+
+
 def validate_read_only_sql(query: str) -> None:
     """校验 SQL 仅包含只读语句（必须以 ``SELECT`` 开头，且不含写关键字）。
 
@@ -58,6 +70,8 @@ class DBSource(DataSource):
         self.connection_string = connection_string
         self.query = query
         self._validate_remote_host()
+        if self._parse_scheme() == "sqlite":
+            self._validate_sqlite_path(self._get_sqlite_path())
 
     # -- helpers --------------------------------------------------------------
 
@@ -67,7 +81,24 @@ class DBSource(DataSource):
 
     def _get_sqlite_path(self) -> str:
         """Extract the file path from a ``sqlite:///`` connection string."""
-        return self.connection_string[len("sqlite://") :]
+        raw = self.connection_string[len("sqlite://") :]
+        if raw.startswith("/") and len(raw) >= 3 and raw[1].isalpha() and raw[2] == ":":
+            return raw[1:]
+        return raw
+
+    @staticmethod
+    def _validate_sqlite_path(path: str) -> None:
+        """Validate SQLite database path against directory traversal and sensitive system files."""
+        if not path or path == ":memory:":
+            return
+        clean_parts = path.replace("\\", "/").split("/")
+        if ".." in clean_parts:
+            raise ValueError("禁止访问系统数据库或受限路径")
+
+        from pathlib import Path
+        filename = Path(path).name.lower()
+        if filename in _RESTRICTED_SQLITE_NAMES or filename.endswith((".txt", ".key", ".pem", ".env")):
+            raise ValueError("禁止访问系统数据库或受限路径")
 
     def _validate_remote_host(self) -> None:
         parsed = urlparse(self.connection_string)

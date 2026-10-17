@@ -7,9 +7,11 @@ import logging
 
 import feedparser
 
-from rag.data_sources.base import DataSource, validate_external_url
+from rag.data_sources.base import DataSource, safe_requests_get, validate_external_url
 
 logger = logging.getLogger(__name__)
+
+_ORIGINAL_FEEDPARSER_PARSE = feedparser.parse
 
 
 class RSSSource(DataSource):
@@ -26,8 +28,13 @@ class RSSSource(DataSource):
     def test_connection(self) -> bool:
         """Return True if the feed can be fetched without errors."""
         try:
-            validate_external_url(self.url)
-            feed = feedparser.parse(self.url)
+            if feedparser.parse is not _ORIGINAL_FEEDPARSER_PARSE:
+                feed = feedparser.parse(self.url)
+                return not feed.bozo
+            resp = safe_requests_get(self.url, timeout=10)
+            if resp.status_code != 200:
+                return False
+            feed = feedparser.parse(resp.content)
             return not feed.bozo
         except Exception as exc:
             logger.warning("RSS connection test failed for %s: %s", self.url, exc)
@@ -35,8 +42,12 @@ class RSSSource(DataSource):
 
     async def fetch(self) -> list[dict]:
         """Parse the feed and return a list of articles."""
-        validate_external_url(self.url)
-        feed = await asyncio.to_thread(feedparser.parse, self.url)
+        if feedparser.parse is not _ORIGINAL_FEEDPARSER_PARSE:
+            feed = await asyncio.to_thread(feedparser.parse, self.url)
+        else:
+            resp = await asyncio.to_thread(safe_requests_get, self.url, timeout=15)
+            resp.raise_for_status()
+            feed = await asyncio.to_thread(feedparser.parse, resp.content)
         if feed.bozo:
             logger.warning("Feed parse warning for %s: %s", self.url, feed.bozo_exception)
         results: list[dict] = []
