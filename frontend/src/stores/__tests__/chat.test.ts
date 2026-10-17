@@ -681,4 +681,70 @@ describe('chat store', () => {
     expect(store.currentConversation).toBeDefined()
     expect(store.currentConversation!.id).toBe(10)
   })
+
+  // ── Multi-model & Arena streaming ────────────────────────
+  it('loadAvailableModels fetches models from GET /models', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: {
+        default_model: 'deepseek',
+        models: [
+          { id: 'deepseek', name: 'DeepSeek V3', model: 'deepseek-chat', healthy: true },
+          { id: 'qwen', name: '通义千问', model: 'qwen-plus', healthy: true }
+        ]
+      }
+    } as any)
+
+    const store = useChatStore()
+    await store.loadAvailableModels()
+
+    expect(store.availableModels).toHaveLength(2)
+    expect(store.selectedModel).toBe('deepseek')
+  })
+
+  it('sendMessage in arena mode sends models array and parses multiplexed arenaResponses', async () => {
+    const encoder = new TextEncoder()
+    const mockResponse = {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"token","model":"deepseek","content":"Hello from D"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"token","model":"qwen","content":"Hello from Q"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"model_done","model":"deepseek"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"model_done","model":"qwen"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"done"}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    store.arenaEnabled = true
+    store.arenaModels = ['deepseek', 'qwen']
+
+    await store.sendMessage('compare question', 'file')
+
+    const lastMsg = store.messages.at(-1)
+    expect(lastMsg?.arenaResponses).toBeDefined()
+    expect(lastMsg?.arenaResponses?.deepseek).toBe('Hello from D')
+    expect(lastMsg?.arenaResponses?.qwen).toBe('Hello from Q')
+  })
 })
+

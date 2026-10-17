@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, watch, onMounted } from 'vue'
+import { ref, nextTick, watch, onMounted, computed } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useFilesStore } from '../stores/files'
 import { useAuthStore } from '../stores/auth'
@@ -8,15 +8,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, FolderOpened, Plus, ChatDotRound } from '@element-plus/icons-vue'
 import MessageBubble from '../components/MessageBubble.vue'
 import ChatInput from '../components/ChatInput.vue'
+import ConversationSidebar from '../components/ConversationSidebar.vue'
 import AddToAnalysisDialog from '../components/AddToAnalysisDialog.vue'
 import ArchiveManifestDialog from '../components/ArchiveManifestDialog.vue'
 import OrganizationPreviewDialog from '../components/OrganizationPreviewDialog.vue'
 import RecycleBinDialog from '../components/RecycleBinDialog.vue'
-import ConversationSearch from '../components/ConversationSearch.vue'
 import DocumentCompareDialog from '../components/DocumentCompareDialog.vue'
 import api from '../utils/api'
-
-import { computed } from 'vue'
 
 const chatStore = useChatStore()
 const filesStore = useFilesStore()
@@ -24,6 +22,9 @@ const authStore = useAuthStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 const messagesContainer = ref<HTMLElement>()
 const dragover = ref(false)
+
+const convSidebarCollapsed = ref(false)
+const filePanelCollapsed = ref(false)
 
 // Reload files when user info loads (handles async fetchUser after page refresh)
 watch(() => authStore.user, (newUser) => {
@@ -76,9 +77,16 @@ async function toggleVisibility(fileName: string) {
   }
 }
 
-function getFileIcon(ext: string): string {
-  const icons: Record<string, string> = { '.pdf': '📕', '.docx': '📘', '.xlsx': '📊', '.csv': '📊', '.md': '📝', '.txt': '📄' }
-  return icons[ext] || '📄'
+function getFileTypeClass(ext: string): string {
+  const map: Record<string, string> = {
+    '.pdf': 'badge-pdf',
+    '.docx': 'badge-doc',
+    '.xlsx': 'badge-sheet',
+    '.csv': 'badge-sheet',
+    '.md': 'badge-md',
+    '.txt': 'badge-txt'
+  }
+  return map[ext] || 'badge-file'
 }
 
 const ALLOWED_EXTS = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.csv']
@@ -137,10 +145,6 @@ async function downloadFile(name: string) {
   }
 }
 
-async function onSearchSelect(conversationId: number) {
-  await chatStore.selectConversation(conversationId)
-}
-
 // ── Material lifecycle handlers (archives, recycle, organization) ──────────
 async function onArchiveConfirm(selectedIds: number[]) {
   try {
@@ -189,29 +193,6 @@ async function newConversation() {
   await chatStore.createConversation('file')
 }
 
-async function selectConversation(id: number) {
-  await chatStore.selectConversation(id)
-}
-
-async function deleteConversation(id: number) {
-  try {
-    await ElMessageBox.confirm('确定删除这个对话？删除后不可恢复。', '确认删除', { type: 'warning' })
-    await chatStore.deleteConversation(id)
-  } catch {
-    // User cancelled
-  }
-}
-
-function formatTime(ts: string | number) {
-  if (!ts) return ''
-  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  }
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
-}
-
 function askSuggested(q: string) {
   chatStore.sendMessage(q)
 }
@@ -219,144 +200,146 @@ function askSuggested(q: string) {
 
 <template>
   <div class="file-mode">
-    <!-- Conversation sidebar (left) -->
-    <aside class="conv-sidebar">
-      <div class="conv-sidebar-header">
-        <span class="conv-sidebar-title">对话历史</span>
-        <button class="new-chat-btn" @click="newConversation" aria-label="新建对话">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="8" y1="2" x2="8" y2="14"/>
-            <line x1="2" y1="8" x2="14" y2="8"/>
+    <!-- Reusable Conversation Sidebar (left) -->
+    <ConversationSidebar mode="file" v-model:collapsed="convSidebarCollapsed" />
+
+    <!-- File Management Panel (middle) -->
+    <div :class="['file-panel', { collapsed: filePanelCollapsed }]">
+      <div v-if="filePanelCollapsed" class="file-panel-collapsed-dock">
+        <button class="expand-panel-btn" @click="filePanelCollapsed = false" title="展开文件管理面板">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
           </svg>
-          新建
         </button>
+        <span class="collapsed-count">{{ filteredFiles.length }}</span>
       </div>
 
-      <ConversationSearch @select="onSearchSelect" />
+      <div v-else class="file-panel-content">
+        <div class="file-panel-header">
+          <div class="header-title-box">
+            <h1 class="file-panel-title">文件管理</h1>
+            <span class="file-count-pill">{{ filteredFiles.length }}</span>
+          </div>
 
-      <div class="conv-list">
+          <div class="header-btns">
+            <el-button size="small" :disabled="!comparisonDocuments.length" @click="comparisonVisible = true">
+              资料对比
+            </el-button>
+            <el-upload
+              :show-file-list="false"
+              :before-upload="() => false"
+              :on-change="async (f: any) => { try { await filesStore.uploadFile(f.raw!); ElMessage.success('上传成功') } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '上传失败') } }"
+              accept=".txt,.md,.pdf,.docx,.xlsx,.csv"
+            >
+              <el-button size="small" type="primary">
+                <el-icon><Upload /></el-icon>
+                上传
+              </el-button>
+            </el-upload>
+            <button class="collapse-icon-btn" @click="filePanelCollapsed = true" title="折叠文件面板">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Drop zone -->
         <div
-          v-for="conv in chatStore.conversations"
-          :key="conv.id"
-          :class="['conv-item', { active: conv.id === chatStore.currentConvId }]"
-          @click="selectConversation(conv.id)"
+          class="drop-zone"
+          :class="{ active: dragover }"
+          @dragover.prevent="dragover = true"
+          @dragleave="dragover = false"
+          @drop.prevent="handleDrop($event)"
         >
-          <div class="conv-icon">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M2 3h12v8H4l-2 2V3z"/>
-            </svg>
-          </div>
-          <div class="conv-info">
-            <div class="conv-title">{{ conv.title || '新对话' }}</div>
-            <div class="conv-time">{{ formatTime(conv.created_at) }}</div>
-          </div>
-          <button class="conv-delete" @click.stop="deleteConversation(conv.id)" title="删除" aria-label="删除对话">
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-              <line x1="3" y1="3" x2="11" y2="11"/>
-              <line x1="11" y1="3" x2="3" y2="11"/>
-            </svg>
-          </button>
-        </div>
-
-        <div v-if="!chatStore.conversations.length" class="empty-conv">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-          </svg>
-          <span>暂无对话</span>
-        </div>
-      </div>
-
-      <div class="conv-sidebar-footer">
-        {{ chatStore.conversations.length }} 个对话
-      </div>
-    </aside>
-
-    <!-- File management panel (middle) -->
-    <div class="file-panel">
-      <div class="file-panel-header">
-        <h1 class="file-panel-title">文件管理</h1>
-        <el-button size="small" :disabled="!comparisonDocuments.length" @click="comparisonVisible = true">
-          资料比较
-        </el-button>
-        <el-upload :show-file-list="false" :before-upload="() => false" :on-change="async (f: any) => { try { await filesStore.uploadFile(f.raw!); ElMessage.success('上传成功') } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '上传失败') } }" accept=".txt,.md,.pdf,.docx,.xlsx,.csv">
-          <el-button size="small" type="primary">
+          <div class="drop-icon-wrap">
             <el-icon><Upload /></el-icon>
-            上传
-          </el-button>
-        </el-upload>
-      </div>
-
-      <!-- Drop zone -->
-      <div class="drop-zone" @dragover.prevent="dragover = true" @dragleave="dragover = false" @drop.prevent="handleDrop($event)" :class="{ active: dragover }">
-        <el-icon class="drop-icon"><Upload /></el-icon>
-        <p class="drop-text">拖拽文件到此处上传</p>
-        <p class="drop-hint">支持 txt、md、pdf、docx、xlsx、csv</p>
-      </div>
-
-      <!-- File type filter tabs -->
-      <div class="file-filter-tabs">
-        <button :class="['filter-tab', { active: fileFilter === 'all' }]" @click="fileFilter = 'all'">全部</button>
-        <button :class="['filter-tab', { active: fileFilter === 'default' }]" @click="fileFilter = 'default'">默认</button>
-        <button :class="['filter-tab', { active: fileFilter === 'private' }]" @click="fileFilter = 'private'">私有</button>
-        <button :class="['filter-tab', { active: fileFilter === 'public' }]" @click="fileFilter = 'public'">共享</button>
-      </div>
-
-      <!-- File list -->
-      <div class="file-list">
-        <div :class="['file-item', { selected: !chatStore.selectedFile }]" @click="chatStore.selectFile(null)">
-          <div class="file-item-icon">📁</div>
-          <div class="file-item-info">
-            <div class="file-item-name">全部文件</div>
-            <div class="file-item-size">搜索所有文件</div>
           </div>
+          <p class="drop-text">拖拽文件到此处上传</p>
+          <p class="drop-hint">支持 pdf, docx, xlsx, csv, md, txt</p>
         </div>
-        <div v-for="file in filteredFiles" :key="file.name"
-             :class="['file-item', { selected: chatStore.selectedFile === file.name }]"
-             @click="chatStore.selectFile(file.name)">
-          <div class="file-item-icon">{{ getFileIcon(file.ext) }}</div>
-          <div class="file-item-info">
-            <div class="file-item-name" :title="file.name">{{ file.name }}</div>
-            <div class="file-item-size">{{ file.size_human }}</div>
-          </div>
-          <div class="file-item-actions">
-            <el-dropdown trigger="click" @command="(cmd: string) => handleFileAction(cmd, file.name)" @click.stop>
-              <button class="file-item-more" @click.stop>⋯</button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="download">下载</el-dropdown-item>
-                  <el-dropdown-item v-if="!file.protected" :command="file.is_public ? 'private' : 'public'">
-                    {{ file.is_public ? '切换为私有' : '切换为共享' }}
-                  </el-dropdown-item>
-                  <el-dropdown-item v-if="!file.protected" command="delete" divided>删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </div>
+
+        <!-- Filter tabs -->
+        <div class="file-filter-tabs">
+          <button :class="['filter-tab', { active: fileFilter === 'all' }]" @click="fileFilter = 'all'">全部</button>
+          <button :class="['filter-tab', { active: fileFilter === 'default' }]" @click="fileFilter = 'default'">默认</button>
+          <button :class="['filter-tab', { active: fileFilter === 'private' }]" @click="fileFilter = 'private'">私有</button>
+          <button :class="['filter-tab', { active: fileFilter === 'public' }]" @click="fileFilter = 'public'">共享</button>
         </div>
-        <div v-if="!filteredFiles.length" class="empty-files">
-          <el-icon class="empty-icon"><FolderOpened /></el-icon>
-          <p>暂无文件</p>
+
+        <!-- File list -->
+        <div class="file-list">
+          <div :class="['file-item', { selected: !chatStore.selectedFile }]" @click="chatStore.selectFile(null)">
+            <div class="file-item-badge badge-all">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              </svg>
+            </div>
+            <div class="file-item-info">
+              <div class="file-item-name">全部文件</div>
+              <div class="file-item-size">跨全部文档联合检索</div>
+            </div>
+          </div>
+
+          <div
+            v-for="file in filteredFiles"
+            :key="file.name"
+            :class="['file-item', { selected: chatStore.selectedFile === file.name }]"
+            @click="chatStore.selectFile(file.name)"
+          >
+            <div :class="['file-item-badge', getFileTypeClass(file.ext)]">
+              {{ (file.ext || '').replace('.', '').toUpperCase() || 'DOC' }}
+            </div>
+            <div class="file-item-info">
+              <div class="file-item-name" :title="file.name">{{ file.name }}</div>
+              <div class="file-item-size">{{ file.size_human }}</div>
+            </div>
+            <div class="file-item-actions">
+              <el-dropdown trigger="click" @command="(cmd: string) => handleFileAction(cmd, file.name)" @click.stop>
+                <button class="file-item-more" @click.stop>⋯</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="download">下载源文件</el-dropdown-item>
+                    <el-dropdown-item v-if="!file.protected" :command="file.is_public ? 'private' : 'public'">
+                      {{ file.is_public ? '切换为私有' : '切换为共享' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item v-if="!file.protected" command="delete" divided>删除文件</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </div>
+
+          <div v-if="!filteredFiles.length" class="empty-files">
+            <el-icon class="empty-icon"><FolderOpened /></el-icon>
+            <p>暂无符合筛选的文件</p>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- Chat area (right) -->
+    <!-- Chat Workspace Area (right) -->
     <div class="chat-area">
       <div ref="messagesContainer" class="messages">
         <div v-if="!chatStore.conversations.length" class="empty-chat">
-          <el-icon :size="48" style="color: var(--color-border);"><ChatDotRound /></el-icon>
-          <h3>开始你的第一个对话</h3>
-          <p>上传文档后，向知识库提问</p>
-          <el-button type="primary" @click="newConversation" style="margin-top: 12px;">
+          <div class="empty-hero-icon">
+            <el-icon :size="40"><ChatDotRound /></el-icon>
+          </div>
+          <h3>开启您的智能文档研读</h3>
+          <p>上传文档后即可针对内容进行精确检索与交叉提问</p>
+          <el-button type="primary" class="hero-start-btn" @click="newConversation">
             <el-icon style="margin-right: 6px;"><Plus /></el-icon>
             新建对话
           </el-button>
         </div>
 
         <div v-else-if="!chatStore.messages.length" class="empty-chat">
-          <el-icon :size="48" style="color: var(--color-border);"><ChatDotRound /></el-icon>
-          <h3>开始对话</h3>
-          <p>在下方输入你的问题</p>
+          <div class="empty-hero-icon">
+            <el-icon :size="40"><ChatDotRound /></el-icon>
+          </div>
+          <h3>准备就绪，随时提问</h3>
+          <p>在下方输入您对选中文件的疑问，或勾选多模型 Arena 开启双栏竞技对比</p>
         </div>
 
         <MessageBubble
@@ -376,22 +359,27 @@ function askSuggested(q: string) {
         </div>
       </div>
 
+      <!-- Quick Suggested Questions -->
       <div v-if="chatStore.suggestedQuestions.length" class="suggestions">
         <button v-for="q in chatStore.suggestedQuestions" :key="q" class="suggest-btn" @click="askSuggested(q)">
-          {{ q }}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="suggest-icon">
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+          </svg>
+          <span>{{ q }}</span>
         </button>
       </div>
 
+      <!-- Floating Chat Input -->
       <ChatInput v-if="chatStore.currentConvId" mode="file" />
     </div>
 
+    <!-- Dialogs -->
     <AddToAnalysisDialog
       v-model:visible="dialogVisible"
       :question="dialogQuestion"
       :answer="dialogAnswer"
       @confirm="handleConfirm"
     />
-
     <ArchiveManifestDialog
       v-model:visible="filesStore.archiveVisible"
       :entries="filesStore.archiveEntries"
@@ -419,268 +407,216 @@ function askSuggested(q: string) {
   display: flex;
   height: 100%;
   overflow: hidden;
-}
-
-/* ── Conversation Sidebar ─────────────────────────────── */
-.conv-sidebar {
-  width: 240px;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.conv-sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.conv-sidebar-title {
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  color: var(--color-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.new-chat-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-  border: none;
-  border-radius: var(--radius);
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  font-family: var(--font-body);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
-}
-
-.new-chat-btn:hover {
-  background: var(--color-primary-hover);
-}
-
-.conv-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.conv-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
-}
-
-.conv-item:hover {
-  background: var(--color-surface-2);
-}
-
-.conv-item.active {
-  background: var(--color-accent-light);
-}
-
-.conv-icon {
-  width: 28px;
-  height: 28px;
-  background: var(--color-surface-2);
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-secondary);
-  flex-shrink: 0;
-}
-
-.conv-item.active .conv-icon {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-}
-
-.conv-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.conv-title {
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--color-foreground);
-}
-
-.conv-time {
-  font-size: 10px;
-  color: var(--color-secondary);
-  margin-top: 1px;
-}
-
-.conv-delete {
-  opacity: 0;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: none;
-  color: var(--color-secondary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  flex-shrink: 0;
-}
-
-.conv-item:hover .conv-delete {
-  opacity: 1;
-}
-
-.conv-delete:hover {
-  background: var(--color-destructive-light);
-  color: var(--color-destructive);
-}
-
-.empty-conv {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-8) var(--space-4);
-  color: var(--color-secondary);
-  font-size: var(--text-xs);
-}
-
-.conv-sidebar-footer {
-  padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--color-border);
-  font-size: 11px;
-  color: var(--color-secondary);
+  position: relative;
 }
 
 /* ── File Panel (middle) ───────────────────────────────── */
 .file-panel {
-  width: 320px;
+  width: 300px;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  transition: width var(--duration-normal) var(--ease-out);
+}
+
+.file-panel.collapsed {
+  width: 52px;
+}
+
+.file-panel-collapsed-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 6px;
+  gap: 10px;
+  height: 100%;
+}
+
+.expand-panel-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.expand-panel-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-foreground);
+}
+
+.collapsed-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-muted);
+}
+
+.file-panel-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 300px;
 }
 
 .file-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.header-title-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .file-panel-title {
   font-family: var(--font-heading);
-  font-size: var(--text-xl);
-  font-weight: var(--font-semibold);
+  font-size: 15px;
+  font-weight: 600;
   color: var(--color-foreground);
   margin: 0;
 }
 
+.file-count-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  background: var(--color-surface-2);
+  color: var(--color-secondary);
+  border-radius: var(--radius-full);
+}
+
+.header-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapse-icon-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--color-muted);
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.collapse-icon-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-foreground);
+}
+
+/* ── Modern Drop Zone ─────────────────────────────────── */
 .drop-zone {
-  border: 2px dashed var(--color-border);
-  border-radius: var(--radius);
-  padding: var(--space-4) var(--space-3);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px 12px;
   text-align: center;
-  margin: var(--space-3) var(--space-4);
+  margin: 10px 14px 6px;
   transition: all var(--duration-normal) var(--ease-out);
   cursor: pointer;
+  background: var(--color-background);
 }
 
 .drop-zone:hover, .drop-zone.active {
   border-color: var(--color-primary);
-  background: var(--color-accent-light);
+  background: var(--color-primary-light);
 }
 
-.drop-icon {
-  font-size: 24px;
-  color: var(--color-secondary);
-  margin-bottom: var(--space-1);
+.drop-icon-wrap {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 4px;
+  box-shadow: var(--shadow-xs);
 }
 
 .drop-text {
-  font-size: var(--text-sm);
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--color-foreground);
-  margin-bottom: 2px;
+  margin-bottom: 1px;
 }
 
 .drop-hint {
-  font-size: var(--text-xs);
-  color: var(--color-secondary);
+  font-size: 11px;
+  color: var(--color-muted);
 }
 
-.file-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-2) var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
+/* ── Filter Segmented Tabs ────────────────────────────── */
 .file-filter-tabs {
   display: flex;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--color-border);
+  gap: 4px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 .filter-tab {
-  padding: var(--space-1) var(--space-3);
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
+  flex: 1;
+  padding: 4px 0;
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--color-secondary);
   background: none;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-full);
+  border: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
-  font-family: var(--font-body);
+  transition: all var(--duration-fast);
+  text-align: center;
 }
 
 .filter-tab:hover {
   background: var(--color-surface-2);
-  border-color: var(--color-border-hover);
+  color: var(--color-foreground);
 }
 
 .filter-tab.active {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: var(--color-on-primary);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* ── File List ────────────────────────────────────────── */
+.file-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .file-item {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius);
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
+  transition: all var(--duration-fast);
+  border: 1px solid transparent;
 }
 
 .file-item:hover {
@@ -688,12 +624,61 @@ function askSuggested(q: string) {
 }
 
 .file-item.selected {
-  background: var(--color-accent-light);
+  background: var(--color-primary-light);
+  border-color: rgba(99, 102, 241, 0.2);
 }
 
-.file-item-icon {
-  font-size: 18px;
+.file-item-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.5px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+}
+
+.badge-all {
+  background: var(--color-surface-2);
+  color: var(--color-secondary);
+}
+
+.badge-pdf {
+  background: #fef2f2;
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.badge-sheet {
+  background: #f0fdf4;
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.badge-doc {
+  background: #eff6ff;
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+.badge-md {
+  background: #faf5ff;
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.badge-txt {
+  background: #f8fafc;
+  color: #64748b;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+}
+
+.badge-file {
+  background: var(--color-surface-2);
+  color: var(--color-secondary);
 }
 
 .file-item-info {
@@ -702,43 +687,43 @@ function askSuggested(q: string) {
 }
 
 .file-item-name {
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
+  font-size: 13px;
+  font-weight: 500;
   color: var(--color-foreground);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.file-item.selected .file-item-name {
+  color: var(--color-primary-focus);
+  font-weight: 600;
+}
+
 .file-item-size {
-  font-size: var(--text-xs);
-  color: var(--color-secondary);
-  margin-top: 1px;
+  font-size: 11px;
+  color: var(--color-muted);
 }
 
 .file-item-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
 }
 
 .file-item-more {
   opacity: 0;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-xs);
+  border: none;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: none;
-  background: none;
-  color: var(--color-secondary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+  font-size: 14px;
   transition: all var(--duration-fast);
-  flex-shrink: 0;
-  font-size: 16px;
-  font-weight: bold;
 }
 
 .file-item:hover .file-item-more {
@@ -746,7 +731,7 @@ function askSuggested(q: string) {
 }
 
 .file-item-more:hover {
-  background: var(--color-surface-2);
+  background: var(--color-surface-3);
   color: var(--color-foreground);
 }
 
@@ -754,29 +739,27 @@ function askSuggested(q: string) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-8);
-  color: var(--color-secondary);
+  justify-content: center;
+  padding: 40px 16px;
+  color: var(--color-muted);
+  gap: 8px;
+  font-size: 12.5px;
 }
 
-.empty-icon {
-  font-size: 24px;
-  color: var(--color-border);
-}
-
-/* ── Chat Area (right) ─────────────────────────────────── */
+/* ── Chat Canvas Area ─────────────────────────────────── */
 .chat-area {
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--color-background);
+  position: relative;
 }
 
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-8) 0;
+  padding: 24px 0;
 }
 
 .empty-chat {
@@ -786,66 +769,55 @@ function askSuggested(q: string) {
   justify-content: center;
   height: 100%;
   color: var(--color-secondary);
-  gap: var(--space-3);
+  gap: 12px;
+  text-align: center;
+  padding: 20px;
+}
+
+.empty-hero-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
+  color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 4px;
 }
 
 .empty-chat h3 {
   font-family: var(--font-heading);
-  font-size: var(--text-lg);
-  font-weight: var(--font-semibold);
+  font-size: 18px;
+  font-weight: 700;
   color: var(--color-foreground);
   margin: 0;
 }
 
 .empty-chat p {
-  font-size: var(--text-sm);
+  font-size: 13.5px;
   color: var(--color-secondary);
+  max-width: 360px;
 }
 
-/* ── Typing ───────────────────────────────────────────── */
-.msg {
-  display: flex;
-  gap: var(--space-4);
-  max-width: var(--content-max-width);
-  margin: 0 auto;
-  padding: var(--space-3) var(--space-6);
+.hero-start-btn {
+  margin-top: 8px;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
 }
 
-.msg-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-size: 14px;
-  font-weight: var(--font-bold);
-}
-
-.ai-avatar {
-  background: var(--color-primary);
-  color: var(--color-on-primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
-}
-
-.msg-body {
-  flex: 1;
-  min-width: 0;
-  max-width: 85%;
-}
-
+/* ── Typing Indicator ─────────────────────────────────── */
 .typing {
   display: flex;
   gap: 6px;
-  padding: var(--space-5);
+  padding: 16px;
 }
 
 .typing span {
-  width: 8px;
-  height: 8px;
-  background: var(--color-border);
+  width: 7px;
+  height: 7px;
+  background: var(--color-primary);
+  opacity: 0.6;
   border-radius: 50%;
   animation: bounce 1.4s infinite;
 }
@@ -855,33 +827,36 @@ function askSuggested(q: string) {
 
 @keyframes bounce {
   0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-8px); }
+  30% { transform: translateY(-6px); }
 }
 
 /* ── Suggestions ──────────────────────────────────────── */
 .suggestions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
+  gap: 8px;
   max-width: var(--content-max-width);
   margin: 0 auto;
-  padding: 0 var(--space-6) var(--space-4);
+  padding: 0 24px 10px;
 }
 
 .suggest-btn {
-  padding: var(--space-2) var(--space-4);
+  padding: 6px 14px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-full);
-  font-size: var(--text-sm);
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--color-secondary);
   cursor: pointer;
-  font-family: var(--font-body);
-  transition: all var(--duration-normal) var(--ease-out);
+  transition: all var(--duration-fast);
+  box-shadow: var(--shadow-xs);
 }
 
 .suggest-btn:hover {
   border-color: var(--color-primary);
   color: var(--color-primary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 </style>

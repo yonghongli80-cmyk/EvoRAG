@@ -30,6 +30,8 @@ interface Message {
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
   answerability_kind?: string
+  model?: string
+  arenaResponses?: Record<string, string>
   structuredResult?: {
     kind: 'structured_result' | 'hybrid_result' | 'clarification_required'
     facts: Array<{ label: string; value: string }>
@@ -47,6 +49,10 @@ export const useChatStore = defineStore('chat', () => {
   const suggestedQuestions = ref<string[]>([])
   const selectedFile = ref<string | null>(null)
   const activeMode = ref<ChatMode>('file')
+  const availableModels = ref<Array<{ id: string; name: string; model: string; healthy: boolean }>>([])
+  const selectedModel = ref<string>('deepseek')
+  const arenaEnabled = ref<boolean>(false)
+  const arenaModels = ref<string[]>(['deepseek'])
   const _selectedFilesByConv = new Map<number, string | null>()
 
   const currentConversation = computed(() =>
@@ -167,7 +173,11 @@ export const useChatStore = defineStore('chat', () => {
     suggestedQuestions.value = []
 
     // Add empty assistant message for streaming
-    messages.value.push({ role: 'assistant', content: '' })
+    messages.value.push({
+      role: 'assistant',
+      content: '',
+      arenaResponses: arenaEnabled.value && arenaModels.value.length > 1 ? {} : undefined
+    })
     // Get the reactive proxy from the array (not the plain object)
     const assistantMsg = messages.value[messages.value.length - 1]
 
@@ -182,6 +192,11 @@ export const useChatStore = defineStore('chat', () => {
       }
       if (mode === 'kb' && kbId) {
         payload.kb_id = kbId
+      }
+      if (arenaEnabled.value && arenaModels.value.length > 1) {
+        payload.models = arenaModels.value
+      } else if (selectedModel.value) {
+        payload.model = selectedModel.value
       }
 
       const response = await streamRequest('/query/stream', {
@@ -215,8 +230,16 @@ export const useChatStore = defineStore('chat', () => {
           try {
             const event = JSON.parse(line.slice(6))
             if (event.type === 'token') {
-              answer += event.content
-              assistantMsg.content = answer
+              if (event.model && assistantMsg.arenaResponses) {
+                assistantMsg.arenaResponses[event.model] =
+                  (assistantMsg.arenaResponses[event.model] || '') + (event.content || '')
+                assistantMsg.content = Object.entries(assistantMsg.arenaResponses)
+                  .map(([m, c]) => `### [${m}]\n${c}`)
+                  .join('\n\n')
+              } else {
+                answer += event.content || ''
+                assistantMsg.content = answer
+              }
             } else if (event.type === 'sources') {
               sources = event.sources
             } else if (event.type === 'structured_result') {
@@ -334,6 +357,20 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function loadAvailableModels() {
+    try {
+      const res = await api.get('/models')
+      if (res.data && Array.isArray(res.data.models)) {
+        availableModels.value = res.data.models
+        if (res.data.default_model) {
+          selectedModel.value = res.data.default_model
+        }
+      }
+    } catch {
+      // Fallback: keep defaults
+    }
+  }
+
   return {
     conversations,
     currentConvId,
@@ -343,6 +380,11 @@ export const useChatStore = defineStore('chat', () => {
     suggestedQuestions,
     selectedFile,
     currentConversation,
+    availableModels,
+    selectedModel,
+    arenaEnabled,
+    arenaModels,
+    loadAvailableModels,
     conversationsByMode,
     resetModeState,
     loadConversations,

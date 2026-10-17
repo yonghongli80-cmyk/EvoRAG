@@ -29,7 +29,7 @@ describe('MainLayout', () => {
     const wrapper = mount(MainLayout)
 
     const labels = wrapper.findAll('.nav-label').map((node) => node.text())
-    expect(labels).toEqual(['文件', '知识库', '知识运营', '表格变更', '进化中心', '组织权限'])
+    expect(labels).toEqual(['文件', '知识库', 'Wiki双链', '知识运营', '表格变更', '进化中心', '组织权限'])
     expect(wrapper.get('[aria-label="知识运营"]').classes()).toContain('active')
   })
 
@@ -47,5 +47,13 @@ describe('MainLayout', () => {
     const wrapper = mount(MainLayout)
 
     expect(wrapper.get('[aria-label="文件管理"]').classes()).toContain('active')
+  })
+
+  it('marks wiki active on the wiki route', () => {
+    mockPath = '/wiki'
+
+    const wrapper = mount(MainLayout)
+
+    expect(wrapper.get('[data-test="wiki-nav"]').classes()).toContain('active')
   })
 })

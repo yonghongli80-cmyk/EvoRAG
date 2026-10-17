@@ -89,9 +89,14 @@ onMounted(load)
 <template>
   <div class="operations" data-test="operations-view">
     <div class="page-header">
-      <span>KNOWLEDGE OPERATIONS</span>
+      <div class="header-badge">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        <span>OPERATIONS & GOVERNANCE</span>
+      </div>
       <h2>知识运营</h2>
-      <p>集中查看反馈、处理内容任务，并关注知识质量状态。</p>
+      <p>集中查看用户反馈、处理过期与冲突知识任务，保障组织数据资产的时效性与准确率。</p>
     </div>
 
     <div class="operations-panel">
@@ -210,17 +215,29 @@ onMounted(load)
   background: var(--color-background);
 }
 
-.page-header { margin-bottom: var(--space-5); }
-.page-header > span { display: block; margin-bottom: var(--space-1); color: var(--color-primary); font-size: 10px; font-weight: var(--font-bold); letter-spacing: .1em; }
+.page-header { margin-bottom: var(--space-6); }
+.header-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
 .page-header h2 {
   margin: 0;
   font-family: var(--font-heading);
   font-size: var(--text-2xl);
   color: var(--color-foreground);
 }
-.page-header p { margin: var(--space-1) 0 0; color: var(--color-secondary); font-size: var(--text-sm); }
+.page-header p { margin: var(--space-2) 0 0; color: var(--color-secondary); font-size: var(--text-sm); }
 
-.operations-panel { min-height: 420px; padding: var(--space-5); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-xs); }
+.operations-panel { min-height: 420px; padding: var(--space-6); border: 1px solid var(--color-border); border-radius: var(--radius-xl); background: var(--color-surface); box-shadow: var(--shadow-sm); }
 :deep(.el-tabs__header) { margin-bottom: var(--space-5); }
 :deep(.el-tabs__item) { height: 42px; color: var(--color-secondary); font-weight: var(--font-medium); }
 :deep(.el-tabs__item.is-active) { color: var(--color-primary); }

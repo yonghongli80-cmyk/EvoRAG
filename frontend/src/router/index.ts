@@ -62,7 +62,18 @@ const router = createRouter({
         {
           path: 'organization',
           name: 'organization-admin',
-          component: () => import('../views/OrganizationAdminView.vue')
+          component: () => import('../views/OrganizationAdminView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
+          path: 'wiki',
+          name: 'wiki',
+          component: () => import('../views/WikiModeView.vue')
+        },
+        {
+          path: 'wiki/:id',
+          name: 'wiki-detail',
+          component: () => import('../views/WikiModeView.vue')
         },
         {
           path: 'settings/password',
@@ -82,6 +93,8 @@ router.beforeEach(async (to, _from, next) => {
   if (to.meta.requiresAuth !== false && !authStore.isAuthenticated) {
     next('/login')
   } else if (to.name === 'login' && authStore.isAuthenticated) {
+    next('/')
+  } else if (to.matched.some(record => record.meta.requiresAdmin) && !authStore.user?.is_admin) {
     next('/')
   } else {
     next()

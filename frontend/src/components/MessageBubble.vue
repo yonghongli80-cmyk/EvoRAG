@@ -10,6 +10,8 @@ interface Message {
   feedback?: string
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
+  model?: string
+  arenaResponses?: Record<string, string>
   structuredResult?: {
     kind: string
     facts: Array<{ label: string; value: string }>
@@ -44,25 +46,56 @@ function formatContent(text: string): string {
 function handleAddToAnalysis() {
   emit('add-to-analysis', props.question || '', props.message.content)
 }
+
+function getModelBadgeIcon(modelId: string): string {
+  const m = modelId.toLowerCase()
+  if (m.includes('deepseek')) return '⚡'
+  if (m.includes('qwen')) return '🧠'
+  if (m.includes('gpt') || m.includes('openai')) return '✨'
+  return '🤖'
+}
 </script>
 
 <template>
   <div :class="['msg', message.role]">
     <div v-if="message.role === 'user'" class="msg-avatar user-avatar">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 8a3 3 0 100-6 3 3 0 000 6zm5 6a5 5 0 00-10 0h10z"/>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+        <circle cx="12" cy="7" r="4"/>
       </svg>
     </div>
     <div v-else class="msg-avatar ai-avatar">R</div>
 
     <div class="msg-body">
-      <div class="bubble" v-html="formatContent(message.content)" />
-
-      <div v-if="message.structuredResult?.facts.length" class="structured-result" data-test="structured-facts">
-        <div v-for="fact in message.structuredResult.facts" :key="fact.label" class="structured-fact">
-          <span>{{ fact.label }}</span><strong>{{ fact.value }}</strong>
+      <!-- Arena Multi-Model Side-by-Side Grid -->
+      <div v-if="message.arenaResponses && Object.keys(message.arenaResponses).length > 1" class="arena-container" data-test="arena-grid">
+        <div v-for="(text, modelName) in message.arenaResponses" :key="modelName" class="arena-card">
+          <div class="arena-card-header">
+            <span class="arena-tag">
+              <span class="arena-tag-icon">{{ getModelBadgeIcon(String(modelName)) }}</span>
+              {{ modelName }}
+            </span>
+            <span class="arena-status-dot" title="实时回答已就绪" />
+          </div>
+          <div class="bubble arena-bubble" v-html="formatContent(text)" />
         </div>
-        <small>扫描 {{ message.structuredResult.rowsScanned }} 行</small>
+      </div>
+
+      <!-- Standard Single Model Bubble -->
+      <div v-else class="bubble" v-html="formatContent(message.content)" />
+
+      <!-- Structured Facts Table -->
+      <div v-if="message.structuredResult?.facts.length" class="structured-result" data-test="structured-facts">
+        <div class="structured-header">
+          <span class="structured-title">结构化知识事实</span>
+          <span class="structured-scanned">扫描 {{ message.structuredResult.rowsScanned }} 行</span>
+        </div>
+        <div class="structured-fact-grid">
+          <div v-for="fact in message.structuredResult.facts" :key="fact.label" class="structured-fact">
+            <span class="fact-label">{{ fact.label }}</span>
+            <strong class="fact-value">{{ fact.value }}</strong>
+          </div>
+        </div>
         <div v-if="message.structuredResult.sources.length" class="structured-sources">
           <span v-for="source in message.structuredResult.sources" :key="`${source.dataset_id}-${source.cell_range}`">
             {{ source.sheet_key }} · {{ source.cell_range }}
@@ -73,49 +106,70 @@ function handleAddToAnalysis() {
         {{ message.structuredResult.clarification.question }}
       </div>
 
+      <!-- Reliability Badge -->
       <ReliabilityBadge
         v-if="message.role === 'assistant' && message.confidence_level"
         :level="message.confidence_level"
         :reasons="message.confidence_reasons"
       />
 
-      <!-- Sources -->
+      <!-- Source References -->
       <div v-if="message.sources?.length" class="sources">
         <span v-for="(src, j) in message.sources" :key="j" class="source-chip">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          </svg>
           {{ j + 1 }}. {{ src.doc_name }}
         </span>
       </div>
 
-      <!-- Actions -->
+      <!-- Action Toolbar -->
       <div v-if="message.role === 'assistant' && message.content" class="actions">
         <button
           :class="['action-btn', { active: message.feedback === 'positive' }]"
           @click="chatStore.sendFeedback(index, 'positive')"
-          title="有用"
+          title="回答有用"
+          aria-label="赞同"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M4 13V6L7 2l4 4v7H4z"/>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/>
           </svg>
         </button>
+
         <button
           :class="['action-btn', { active: message.feedback === 'negative' }]"
           @click="chatStore.sendFeedback(index, 'negative')"
-          title="没用"
+          title="回答不准确"
+          aria-label="反对"
         >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M10 1V8L7 12l-4-4V1h7z" transform="rotate(180 7 7)"/>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3zm7-13h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/>
           </svg>
         </button>
-        <button class="action-btn" @click="chatStore.regenerate(index)" :disabled="chatStore.isStreaming" title="重新生成">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-            <path d="M1 7a6 6 0 0111.5-2.3M13 7a6 6 0 01-11.5 2.3"/>
-            <path d="M13 1v4h-4M1 13v-4h4"/>
+
+        <button
+          class="action-btn"
+          @click="chatStore.regenerate(index)"
+          :disabled="chatStore.isStreaming"
+          title="重新生成"
+          aria-label="重新生成"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
           </svg>
         </button>
-        <button class="action-btn action-btn--accent" @click="handleAddToAnalysis" title="添加到分析">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-            <rect x="1" y="1" width="12" height="12" rx="2"/>
-            <path d="M4 7h6M7 4v6"/>
+
+        <button
+          class="action-btn action-btn--accent"
+          @click="handleAddToAnalysis"
+          title="添加到深度分析工作台"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <line x1="12" y1="8" x2="12" y2="16"/>
+            <line x1="8" y1="12" x2="16" y2="12"/>
           </svg>
           <span class="action-label">添加到分析</span>
         </button>
@@ -127,11 +181,11 @@ function handleAddToAnalysis() {
 <style scoped>
 .msg {
   display: flex;
-  gap: var(--space-4);
+  gap: 14px;
   max-width: var(--content-max-width);
   margin: 0 auto;
-  padding: var(--space-3) var(--space-6);
-  animation: slideUp 0.3s var(--ease-out);
+  padding: 12px 24px;
+  animation: slideUp 0.25s var(--ease-out);
 }
 
 .msg.user {
@@ -139,155 +193,283 @@ function handleAddToAnalysis() {
 }
 
 .msg-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: 14px;
-  font-weight: var(--font-bold);
+  font-size: 13.5px;
+  font-weight: 700;
+  box-shadow: var(--shadow-xs);
 }
 
 .user-avatar {
-  background: var(--color-accent-light);
-  color: var(--color-accent);
+  background: var(--color-surface-3);
+  color: var(--color-secondary);
 }
 
 .ai-avatar {
-  background: var(--color-foreground);
-  color: white;
-  font-family: var(--font-mono);
-  font-size: 13px;
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.28);
 }
 
 .msg-body {
   flex: 1;
   min-width: 0;
-  max-width: 85%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .msg.user .msg-body {
-  display: flex;
-  flex-direction: column;
   align-items: flex-end;
 }
 
-/* ── Bubble ───────────────────────────────────────────── */
+/* ── Standard Bubble ──────────────────────────────────── */
 .bubble {
-  padding: var(--space-4) var(--space-5);
-  border-radius: var(--radius-lg);
-  font-size: var(--text-base);
-  line-height: var(--leading-relaxed);
+  padding: 12px 18px;
+  border-radius: var(--radius-xl);
+  font-size: 14.5px;
+  line-height: 1.65;
   word-break: break-word;
+  color: var(--color-foreground);
 }
 
 .msg.user .bubble {
-  background: var(--color-foreground);
-  color: white;
-  border-bottom-right-radius: var(--radius-sm);
+  background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
+  color: #ffffff;
+  border-radius: 18px 18px 4px 18px;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.25);
+  max-width: 80%;
 }
 
 .msg.assistant .bubble {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-bottom-left-radius: var(--radius-sm);
+  border-radius: 4px 18px 18px 18px;
+  box-shadow: var(--shadow-card);
 }
 
 :deep(.ref) {
-  display: inline;
+  display: inline-block;
   padding: 1px 6px;
-  background: var(--color-accent-light);
-  color: var(--color-accent);
-  border-radius: 4px;
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
+  margin: 0 2px;
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-/* ── Sources ──────────────────────────────────────────── */
+/* ── Arena Dual/Multi Column View ─────────────────────── */
+.arena-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 14px;
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.arena-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  box-shadow: var(--shadow-card);
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.arena-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: var(--shadow-md);
+}
+
+.arena-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.arena-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-full);
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  letter-spacing: 0.3px;
+}
+
+.arena-tag-icon {
+  font-size: 13px;
+}
+
+.arena-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.arena-bubble {
+  background: transparent !important;
+  padding: 0 !important;
+  color: inherit;
+  border: none !important;
+  box-shadow: none !important;
+  font-size: 14px;
+}
+
+/* ── Structured Results ───────────────────────────────── */
+.structured-result {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  font-size: 13px;
+}
+
+.structured-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--color-secondary);
+  font-size: 12px;
+}
+
+.structured-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.structured-fact {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--color-surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.fact-label {
+  color: var(--color-secondary);
+}
+
+.structured-sources {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+.structured-clarification {
+  padding: 10px 14px;
+  background: var(--color-warning-light);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  color: #92400e;
+}
+
+/* ── Source Chips ─────────────────────────────────────── */
 .sources {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .source-chip {
-  padding: var(--space-1) var(--space-3);
-  background: var(--color-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
   color: var(--color-secondary);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-full);
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
+  padding: 3px 10px;
+  transition: all var(--duration-fast);
 }
 
 .source-chip:hover {
-  background: var(--color-accent-light);
-  color: var(--color-accent);
+  border-color: var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-foreground);
 }
 
-/* ── Actions ──────────────────────────────────────────── */
+/* ── Action Toolbar ───────────────────────────────────── */
 .actions {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-  opacity: 0;
-  transition: opacity var(--duration-fast);
-}
-
-.msg:hover .actions {
-  opacity: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-full);
+  padding: 2px 6px;
+  align-self: flex-start;
+  box-shadow: var(--shadow-xs);
+  margin-top: 2px;
 }
 
 .action-btn {
+  width: 28px;
   height: 28px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-full);
+  color: var(--color-secondary);
+  cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface);
-  border-radius: var(--radius-sm);
-  color: var(--color-secondary);
-  cursor: pointer;
   transition: all var(--duration-fast) var(--ease-out);
-  padding: 0 var(--space-2);
-  font-family: var(--font-body);
 }
 
-.action-btn:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
+.action-btn:hover:not(:disabled) {
+  background: var(--color-surface-2);
+  color: var(--color-foreground);
 }
 
 .action-btn.active {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  color: white;
+  background: var(--color-primary-light);
+  color: var(--color-primary);
 }
 
 .action-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
 }
 
 .action-btn--accent {
-  border-color: var(--color-accent-subtle);
-  color: var(--color-accent);
-  background: var(--color-accent-light);
+  width: auto;
+  padding: 0 10px;
+  gap: 4px;
+  border-radius: var(--radius-full);
+  color: var(--color-primary);
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
 .action-btn--accent:hover {
-  background: var(--color-accent);
-  color: white;
+  background: var(--color-primary-light);
 }
 
 .action-label {
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 </style>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, watch, computed } from 'vue'
+import { ref, unref, isRef, onMounted, nextTick, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../utils/api'
 import { downloadLibraryFile } from '../api/files'
@@ -8,6 +8,7 @@ import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
 import MessageBubble from '../components/MessageBubble.vue'
 import ChatInput from '../components/ChatInput.vue'
+import ConversationSidebar from '../components/ConversationSidebar.vue'
 import AddToAnalysisDialog from '../components/AddToAnalysisDialog.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -28,9 +29,33 @@ const chatStore = useChatStore()
 const authStore = useAuthStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 
+const isDialogVisible = computed({
+  get: () => {
+    const v = unref(dialogVisible)
+    return typeof v === 'object' && v !== null && 'value' in v ? (v as any).value : Boolean(v)
+  },
+  set: (val: boolean) => {
+    if (isRef(dialogVisible)) {
+      dialogVisible.value = val
+    } else if (dialogVisible && typeof dialogVisible === 'object' && 'value' in dialogVisible) {
+      ;(dialogVisible as any).value = val
+    }
+  }
+})
+const currentDialogQuestion = computed(() => {
+  const q = unref(dialogQuestion)
+  return typeof q === 'object' && q !== null && 'value' in q ? String((q as any).value) : String(q || '')
+})
+const currentDialogAnswer = computed(() => {
+  const a = unref(dialogAnswer)
+  return typeof a === 'object' && a !== null && 'value' in a ? String((a as any).value) : String(a || '')
+})
+
 const getKbId = () => route.params.id as string
 const loading = ref(true)
 const messagesContainer = ref<HTMLElement>()
+const convSidebarCollapsed = ref(false)
+const kbInfoCollapsed = ref(false)
 
 // KB detail data
 const kbName = ref('')
@@ -119,29 +144,6 @@ function goBack() {
 // ── Conversation management ──
 async function newConversation() {
   await chatStore.createConversation('kb')
-}
-
-async function selectConversation(id: number) {
-  await chatStore.selectConversation(id)
-}
-
-async function deleteConversation(id: number) {
-  try {
-    await ElMessageBox.confirm('确定删除这个对话？删除后不可恢复。', '确认删除', { type: 'warning' })
-    await chatStore.deleteConversation(id)
-  } catch {
-    // User cancelled
-  }
-}
-
-function formatTime(ts: string | number) {
-  if (!ts) return ''
-  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts)
-  const now = new Date()
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-  }
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
 function askSuggested(q: string) {
@@ -359,97 +361,82 @@ function parseToc(toc: string | object): any {
 
 <template>
   <div class="kb-detail-layout">
-    <!-- Conversation sidebar (left) -->
-    <aside class="conv-sidebar">
-      <div class="conv-sidebar-header">
-        <span class="conv-sidebar-title">对话历史</span>
-        <button class="new-chat-btn" @click="newConversation">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="8" y1="2" x2="8" y2="14"/>
-            <line x1="2" y1="8" x2="14" y2="8"/>
-          </svg>
-          新建
-        </button>
-      </div>
-
-      <div class="conv-list">
-        <div
-          v-for="conv in chatStore.conversations"
-          :key="conv.id"
-          :class="['conv-item', { active: conv.id === chatStore.currentConvId }]"
-          @click="selectConversation(conv.id)"
-        >
-          <div class="conv-icon">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-              <path d="M2 3h12v8H4l-2 2V3z"/>
-            </svg>
-          </div>
-          <div class="conv-info">
-            <div class="conv-title">{{ conv.title || '新对话' }}</div>
-            <div class="conv-time">{{ formatTime(conv.created_at) }}</div>
-          </div>
-          <button class="conv-delete" @click.stop="deleteConversation(conv.id)" title="删除">
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
-              <line x1="3" y1="3" x2="11" y2="11"/>
-              <line x1="11" y1="3" x2="3" y2="11"/>
-            </svg>
-          </button>
-        </div>
-
-        <div v-if="!chatStore.conversations.length" class="empty-conv">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
-          </svg>
-          <span>暂无对话</span>
-        </div>
-      </div>
-
-      <div class="conv-sidebar-footer">
-        {{ chatStore.conversations.length }} 个对话
-      </div>
-    </aside>
+    <!-- Reusable Conversation Sidebar (left) -->
+    <ConversationSidebar mode="kb" v-model:collapsed="convSidebarCollapsed" />
 
     <!-- KB info panel (middle) -->
-    <div class="kb-info-panel">
-      <!-- Header -->
-      <div class="kb-info-header">
-        <el-button text size="small" @click="goBack">
-          <el-icon style="margin-right: 4px;"><ArrowLeft /></el-icon>
-          返回
-        </el-button>
-        <div class="kb-info-title-row">
-          <h1 class="kb-info-title">{{ kbName }}</h1>
-          <el-dropdown v-if="canManage" trigger="click" v-model:visible="showSettingsMenu">
-            <el-button text size="small" class="settings-btn">
-              <el-icon><Setting /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="openRenameDialog">
-                  <el-icon style="margin-right: 6px;"><Edit /></el-icon>
-                  编辑名称
-                </el-dropdown-item>
-                <el-dropdown-item @click="generateTOC" :loading="generatingToc" :disabled="generatingToc">
-                  <el-icon style="margin-right: 6px;"><Document /></el-icon>
-                  {{ generatingToc ? '生成中...' : '生成目录' }}
-                </el-dropdown-item>
-                <el-dropdown-item @click="generateOverview" :loading="generatingOverview" :disabled="generatingOverview">
-                  <el-icon style="margin-right: 6px;"><Document /></el-icon>
-                  {{ generatingOverview ? '生成中...' : '生成概述' }}
-                </el-dropdown-item>
-                <el-dropdown-item @click="openAddDialog">
-                  <el-icon style="margin-right: 6px;"><Upload /></el-icon>
-                  添加文件
-                </el-dropdown-item>
-                <el-dropdown-item v-if="canAdminister" divided @click="deleteKB" class="danger-item">
-                  <el-icon style="margin-right: 6px;"><Delete /></el-icon>
-                  删除知识库
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
-        </div>
+    <div :class="['kb-info-panel', { collapsed: kbInfoCollapsed }]">
+      <!-- Collapsed mini rail dock -->
+      <div v-if="kbInfoCollapsed" class="kb-panel-collapsed-dock">
+        <button class="expand-panel-btn" @click="kbInfoCollapsed = false" title="展开知识库信息面板">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+          </svg>
+        </button>
+        <span class="collapsed-count" :title="`${documents.length} 个文档`">{{ documents.length }}</span>
       </div>
+
+      <!-- Expanded full panel -->
+      <div v-else class="kb-info-content">
+        <!-- Header -->
+        <div class="kb-info-header">
+          <el-button text size="small" @click="goBack">
+            <el-icon style="margin-right: 4px;"><ArrowLeft /></el-icon>
+            返回
+          </el-button>
+          <div class="kb-info-title-row">
+            <h1 class="kb-info-title">{{ kbName }}</h1>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              data-test="kb-wiki-link-btn"
+              style="margin-left: auto; margin-right: 6px;"
+              @click="router.push(`/wiki?kb_id=${getKbId()}`)"
+            >
+              Wiki 双链
+            </el-button>
+            <el-dropdown v-if="canManage" trigger="click" v-model:visible="showSettingsMenu">
+              <el-button text size="small" class="settings-btn">
+                <el-icon><Setting /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="router.push(`/wiki?kb_id=${getKbId()}`)">
+                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
+                    Wiki 双链词条
+                  </el-dropdown-item>
+                  <el-dropdown-item @click="openRenameDialog">
+                    <el-icon style="margin-right: 6px;"><Edit /></el-icon>
+                    编辑名称
+                  </el-dropdown-item>
+                  <el-dropdown-item @click="generateTOC" :loading="generatingToc" :disabled="generatingToc">
+                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
+                    {{ generatingToc ? '生成中...' : '生成目录' }}
+                  </el-dropdown-item>
+                  <el-dropdown-item @click="generateOverview" :loading="generatingOverview" :disabled="generatingOverview">
+                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
+                    {{ generatingOverview ? '生成中...' : '生成概述' }}
+                  </el-dropdown-item>
+                  <el-dropdown-item @click="openAddDialog">
+                    <el-icon style="margin-right: 6px;"><Upload /></el-icon>
+                    添加文件
+                  </el-dropdown-item>
+                  <el-dropdown-item v-if="canAdminister" divided @click="deleteKB" class="danger-item">
+                    <el-icon style="margin-right: 6px;"><Delete /></el-icon>
+                    删除知识库
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <button class="collapse-icon-btn" @click="kbInfoCollapsed = true" title="折叠信息面板">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+          </div>
+        </div>
 
       <!-- Scrollable content -->
       <div class="kb-info-body">
@@ -534,6 +521,7 @@ function parseToc(toc: string | object): any {
           </div>
         </div>
       </div>
+      </div>
     </div>
 
     <!-- Chat area (right) -->
@@ -576,7 +564,10 @@ function parseToc(toc: string | object): any {
 
       <div v-if="chatStore.suggestedQuestions.length" class="suggestions">
         <button v-for="q in chatStore.suggestedQuestions" :key="q" class="suggest-btn" @click="askSuggested(q)">
-          {{ q }}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="suggest-icon">
+            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+          </svg>
+          <span>{{ q }}</span>
         </button>
       </div>
 
@@ -617,7 +608,7 @@ function parseToc(toc: string | object): any {
       </template>
     </el-dialog>
 
-    <AddToAnalysisDialog v-model:visible="dialogVisible" :question="dialogQuestion" :answer="dialogAnswer" @confirm="handleConfirm" />
+    <AddToAnalysisDialog v-model:visible="isDialogVisible" :question="currentDialogQuestion" :answer="currentDialogAnswer" @confirm="handleConfirm" />
   </div>
 </template>
 
@@ -626,159 +617,6 @@ function parseToc(toc: string | object): any {
   display: flex;
   height: 100%;
   overflow: hidden;
-}
-
-/* ── Conversation Sidebar (left) ──────────────────────── */
-.conv-sidebar {
-  width: 220px;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.conv-sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-}
-
-.conv-sidebar-title {
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  color: var(--color-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.new-chat-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-3);
-  background: var(--color-foreground);
-  color: white;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  font-family: var(--font-body);
-  cursor: pointer;
-  transition: all var(--duration-normal) var(--ease-out);
-}
-
-.new-chat-btn:hover {
-  background: var(--color-primary);
-  transform: translateY(-1px);
-}
-
-.conv-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.conv-item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
-}
-
-.conv-item:hover {
-  background: var(--color-muted);
-}
-
-.conv-item.active {
-  background: var(--color-accent-light);
-}
-
-.conv-icon {
-  width: 28px;
-  height: 28px;
-  background: var(--color-muted);
-  border-radius: var(--radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-secondary);
-  flex-shrink: 0;
-}
-
-.conv-item.active .conv-icon {
-  background: var(--color-accent);
-  color: white;
-}
-
-.conv-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.conv-title {
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--color-foreground);
-}
-
-.conv-time {
-  font-size: 10px;
-  color: var(--color-secondary);
-  margin-top: 1px;
-}
-
-.conv-delete {
-  opacity: 0;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: none;
-  color: var(--color-secondary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  flex-shrink: 0;
-}
-
-.conv-item:hover .conv-delete {
-  opacity: 1;
-}
-
-.conv-delete:hover {
-  background: var(--color-destructive-light);
-  color: var(--color-destructive);
-}
-
-.empty-conv {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-8) var(--space-4);
-  color: var(--color-secondary);
-  font-size: var(--text-xs);
-}
-
-.conv-sidebar-footer {
-  padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--color-border);
-  font-size: 11px;
-  color: var(--color-secondary);
 }
 
 /* ── KB Info Panel (middle) ────────────────────────────── */
@@ -790,6 +628,79 @@ function parseToc(toc: string | object): any {
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  transition: width var(--duration-normal) var(--ease-out);
+  position: relative;
+}
+
+.kb-info-panel.collapsed {
+  width: 52px;
+}
+
+.kb-panel-collapsed-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 6px;
+  gap: 12px;
+  height: 100%;
+}
+
+.expand-panel-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-surface);
+  color: var(--color-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-out);
+}
+
+.expand-panel-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-primary);
+  border-color: var(--color-primary-light);
+}
+
+.collapsed-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-muted);
+  background: var(--color-surface-2);
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+}
+
+.kb-info-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 320px;
+}
+
+.collapse-icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+  padding: 0;
+  margin-left: 4px;
+}
+
+.collapse-icon-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-foreground);
+  border-color: var(--color-border-subtle);
 }
 
 .kb-info-header {
