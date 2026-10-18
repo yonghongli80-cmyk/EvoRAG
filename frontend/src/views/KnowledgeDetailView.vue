@@ -1,27 +1,19 @@
 <script setup lang="ts">
-import { ref, unref, isRef, onMounted, nextTick, watch, computed } from 'vue'
+import { ref, unref, isRef, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../utils/api'
 import { downloadLibraryFile } from '../api/files'
 import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
-import MessageBubble from '../components/MessageBubble.vue'
-import ChatInput from '../components/ChatInput.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
 import AddToAnalysisDialog from '../components/AddToAnalysisDialog.vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import {
-  ArrowLeft,
-  Edit,
-  Check,
-  Delete,
-  Plus,
-  ChatDotRound,
-  Setting,
-  Document,
-  Upload,
-} from '@element-plus/icons-vue'
+import type { KBDocument } from './knowledge/helpers'
+import KnowledgeInfoPanel from './knowledge/KnowledgeInfoPanel.vue'
+import KnowledgeChatArea from './knowledge/KnowledgeChatArea.vue'
+import KnowledgeRenameDialog from './knowledge/KnowledgeRenameDialog.vue'
+import KnowledgeAddFileDialog from './knowledge/KnowledgeAddFileDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -53,7 +45,6 @@ const currentDialogAnswer = computed(() => {
 
 const getKbId = () => route.params.id as string
 const loading = ref(true)
-const messagesContainer = ref<HTMLElement>()
 const convSidebarCollapsed = ref(false)
 const kbInfoCollapsed = ref(false)
 
@@ -61,46 +52,27 @@ const kbInfoCollapsed = ref(false)
 const kbName = ref('')
 const kbDescription = ref('')
 const kbOverview = ref('')
-const documents = ref<any[]>([])
+const documents = ref<KBDocument[]>([])
 const effectiveRole = ref<'read' | 'manage' | 'administer'>('read')
 const canManage = computed(() => effectiveRole.value === 'manage' || effectiveRole.value === 'administer')
 const canAdminister = computed(() => effectiveRole.value === 'administer')
 
 // Overview editing
-const editingOverview = ref(false)
-const overviewDraft = ref('')
 const savingOverview = ref(false)
-
-// Settings menu
-const showSettingsMenu = ref(false)
 
 // Rename KB
 const showRenameDialog = ref(false)
-const renameDraft = ref('')
 const renaming = ref(false)
 
 // Add files dialog
 const showAddDialog = ref(false)
 const availableFiles = ref<any[]>([])
 const loadingFiles = ref(false)
-const selectedFile = ref<any>(null)
 const addingFile = ref(false)
-
-// Remove / delete states
-const removingDoc = ref('')
 
 // TOC / Overview generation
 const generatingToc = ref(false)
 const generatingOverview = ref(false)
-
-// ── Scroll handling ──
-watch(() => chatStore.messages.length, () => {
-  nextTick(() => { messagesContainer.value?.scrollTo({ top: messagesContainer.value.scrollHeight, behavior: 'smooth' }) })
-})
-
-watch(() => chatStore.messages[chatStore.messages.length - 1]?.content, () => {
-  nextTick(() => { messagesContainer.value?.scrollTo({ top: messagesContainer.value.scrollHeight, behavior: 'smooth' }) })
-})
 
 watch(() => route.params.id, () => {
   loadDetail()
@@ -141,25 +113,12 @@ function goBack() {
   router.push('/kb')
 }
 
-// ── Conversation management ──
-async function newConversation() {
-  await chatStore.createConversation('kb')
-}
-
-function askSuggested(q: string) {
-  chatStore.sendMessage(q, 'kb', getKbId())
-}
-
-// ── Settings menu actions ──
+// ── Settings actions ──
 function openRenameDialog() {
-  renameDraft.value = kbName.value
   showRenameDialog.value = true
-  showSettingsMenu.value = false
 }
 
-async function renameKB() {
-  const name = renameDraft.value.trim()
-  if (!name) return ElMessage.warning('请输入名称')
+async function renameKB(name: string) {
   renaming.value = true
   try {
     await api.put(`/knowledge-bases/${getKbId()}/name`, { name })
@@ -174,7 +133,6 @@ async function renameKB() {
 }
 
 async function generateTOC() {
-  showSettingsMenu.value = false
   generatingToc.value = true
   try {
     const res = await api.post(`/knowledge-bases/${getKbId()}/toc/generate`, {})
@@ -194,7 +152,6 @@ async function generateTOC() {
 }
 
 async function generateOverview() {
-  showSettingsMenu.value = false
   generatingOverview.value = true
   try {
     const res = await api.post(`/knowledge-bases/${getKbId()}/overview/generate`, {})
@@ -208,7 +165,6 @@ async function generateOverview() {
 }
 
 async function deleteKB() {
-  showSettingsMenu.value = false
   try {
     await ElMessageBox.confirm(
       `确定删除知识库「${kbName.value}」吗？此操作不可恢复。`,
@@ -226,22 +182,11 @@ async function deleteKB() {
 }
 
 // ── Overview editing ──
-function startEditOverview() {
-  overviewDraft.value = kbOverview.value
-  editingOverview.value = true
-}
-
-function cancelEditOverview() {
-  editingOverview.value = false
-  overviewDraft.value = ''
-}
-
-async function saveOverview() {
+async function saveOverview(newOverview: string) {
   savingOverview.value = true
   try {
-    await api.put(`/knowledge-bases/${getKbId()}/overview`, { overview: overviewDraft.value })
-    kbOverview.value = overviewDraft.value
-    editingOverview.value = false
+    await api.put(`/knowledge-bases/${getKbId()}/overview`, { overview: newOverview })
+    kbOverview.value = newOverview
     ElMessage.success('概述已更新')
   } catch {
     ElMessage.error('保存概述失败')
@@ -251,14 +196,13 @@ async function saveOverview() {
 }
 
 // ── Document management ──
-async function removeFromKB(doc: any) {
+async function removeFromKB(doc: KBDocument) {
   try {
     await ElMessageBox.confirm(
       `确定将「${doc.filename}」从知识库移除？`,
       '从知识库移除',
       { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
     )
-    removingDoc.value = doc.filename
     await api.delete(`/knowledge-bases/${getKbId()}/documents/${encodeURIComponent(doc.filename)}`)
     ElMessage.success('已从知识库移除')
     await loadDetail()
@@ -266,17 +210,12 @@ async function removeFromKB(doc: any) {
     if (err !== 'cancel' && err?.message !== 'cancel') {
       ElMessage.error('移除失败')
     }
-  } finally {
-    removingDoc.value = ''
   }
 }
 
 // ── Add files to KB ──
-async function openAddDialog() {
-  showSettingsMenu.value = false
+function openAddDialog() {
   showAddDialog.value = true
-  selectedFile.value = null
-  await loadAvailableFiles()
 }
 
 async function loadAvailableFiles() {
@@ -294,17 +233,17 @@ async function loadAvailableFiles() {
   }
 }
 
-async function addFileToKB() {
-  if (!selectedFile.value) return
+async function addFileToKB(file: any) {
+  if (!file) return
   addingFile.value = true
   try {
     const formData = new FormData()
     const blob = await downloadLibraryFile(
-      selectedFile.value.name,
+      file.name,
       authStore.getAuthHeaders(),
-      selectedFile.value.version_id
+      file.version_id
     )
-    formData.append('file', blob, selectedFile.value.name)
+    formData.append('file', blob, file.name)
 
     await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
     ElMessage.success('文件已添加到知识库')
@@ -317,46 +256,12 @@ async function addFileToKB() {
   }
 }
 
-function getStatusType(status: string) {
-  switch (status) {
-    case 'indexed': return 'success'
-    case 'pending': return 'warning'
-    case 'error': return 'danger'
-    default: return 'info'
-  }
-}
-
-function getStatusLabel(status: string) {
-  switch (status) {
-    case 'indexed': return '已索引'
-    case 'pending': return '处理中'
-    case 'error': return '错误'
-    default: return status || '未知'
-  }
-}
-
-function isSpreadsheetDocument(doc: { filename?: string; document_id?: number; document_version_id?: number }) {
-  const extension = doc.filename?.split('.').pop()?.toLowerCase()
-  return (extension === 'xlsx' || extension === 'csv')
-    && typeof doc.document_id === 'number'
-    && typeof doc.document_version_id === 'number'
-}
-
 function openSpreadsheet(doc: { document_id: number; document_version_id: number }) {
   router.push({
     name: 'spreadsheet-viewer',
     params: { documentId: doc.document_id, versionId: doc.document_version_id },
   })
 }
-
-function parseToc(toc: string | object): any {
-  if (!toc) return {}
-  if (typeof toc === 'string') {
-    try { return JSON.parse(toc) } catch { return {} }
-  }
-  return toc
-}
-
 </script>
 
 <template>
@@ -365,250 +270,58 @@ function parseToc(toc: string | object): any {
     <ConversationSidebar mode="kb" v-model:collapsed="convSidebarCollapsed" />
 
     <!-- KB info panel (middle) -->
-    <div :class="['kb-info-panel', { collapsed: kbInfoCollapsed }]">
-      <!-- Collapsed mini rail dock -->
-      <div v-if="kbInfoCollapsed" class="kb-panel-collapsed-dock">
-        <button class="expand-panel-btn" @click="kbInfoCollapsed = false" title="展开知识库信息面板">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-          </svg>
-        </button>
-        <span class="collapsed-count" :title="`${documents.length} 个文档`">{{ documents.length }}</span>
-      </div>
-
-      <!-- Expanded full panel -->
-      <div v-else class="kb-info-content">
-        <!-- Header -->
-        <div class="kb-info-header">
-          <el-button text size="small" @click="goBack">
-            <el-icon style="margin-right: 4px;"><ArrowLeft /></el-icon>
-            返回
-          </el-button>
-          <div class="kb-info-title-row">
-            <h1 class="kb-info-title">{{ kbName }}</h1>
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              data-test="kb-wiki-link-btn"
-              style="margin-left: auto; margin-right: 6px;"
-              @click="router.push(`/wiki?kb_id=${getKbId()}`)"
-            >
-              Wiki 双链
-            </el-button>
-            <el-dropdown v-if="canManage" trigger="click" v-model:visible="showSettingsMenu">
-              <el-button text size="small" class="settings-btn">
-                <el-icon><Setting /></el-icon>
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="router.push(`/wiki?kb_id=${getKbId()}`)">
-                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
-                    Wiki 双链词条
-                  </el-dropdown-item>
-                  <el-dropdown-item @click="openRenameDialog">
-                    <el-icon style="margin-right: 6px;"><Edit /></el-icon>
-                    编辑名称
-                  </el-dropdown-item>
-                  <el-dropdown-item @click="generateTOC" :loading="generatingToc" :disabled="generatingToc">
-                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
-                    {{ generatingToc ? '生成中...' : '生成目录' }}
-                  </el-dropdown-item>
-                  <el-dropdown-item @click="generateOverview" :loading="generatingOverview" :disabled="generatingOverview">
-                    <el-icon style="margin-right: 6px;"><Document /></el-icon>
-                    {{ generatingOverview ? '生成中...' : '生成概述' }}
-                  </el-dropdown-item>
-                  <el-dropdown-item @click="openAddDialog">
-                    <el-icon style="margin-right: 6px;"><Upload /></el-icon>
-                    添加文件
-                  </el-dropdown-item>
-                  <el-dropdown-item v-if="canAdminister" divided @click="deleteKB" class="danger-item">
-                    <el-icon style="margin-right: 6px;"><Delete /></el-icon>
-                    删除知识库
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-            <button class="collapse-icon-btn" @click="kbInfoCollapsed = true" title="折叠信息面板">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="15 18 9 12 15 6"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-
-      <!-- Scrollable content -->
-      <div class="kb-info-body">
-        <!-- Overview -->
-        <div class="kb-section">
-          <div class="kb-section-header">
-            <h3 class="kb-section-title">概述</h3>
-            <el-button v-if="canManage && !editingOverview" text size="small" @click="startEditOverview">
-              <el-icon style="margin-right: 4px;"><Edit /></el-icon>
-              编辑
-            </el-button>
-          </div>
-          <div v-if="loading" class="skeleton-line" style="width: 100%; height: 40px;"></div>
-          <div v-else-if="editingOverview" class="kb-overview-edit">
-            <el-input v-model="overviewDraft" type="textarea" :rows="3" placeholder="输入概述..." />
-            <div class="kb-overview-edit-actions">
-              <el-button size="small" @click="cancelEditOverview">取消</el-button>
-              <el-button type="primary" size="small" :loading="savingOverview" @click="saveOverview">保存</el-button>
-            </div>
-          </div>
-          <div v-else>
-            <p v-if="kbOverview" class="kb-overview-text">{{ kbOverview }}</p>
-            <p v-else class="kb-overview-empty">暂无概述</p>
-          </div>
-        </div>
-
-        <!-- Documents -->
-        <div class="kb-section">
-          <div class="kb-section-header">
-            <h3 class="kb-section-title">文档</h3>
-            <el-button v-if="canManage" type="primary" size="small" text @click="openAddDialog">
-              <el-icon style="margin-right: 4px;"><Plus /></el-icon>
-              添加
-            </el-button>
-          </div>
-
-          <div v-if="loading" class="kb-docs-list">
-            <div v-for="i in 3" :key="i" class="skeleton-line" style="height: 32px; margin-bottom: 8px;"></div>
-          </div>
-          <div v-else-if="documents.length === 0" class="kb-docs-empty">
-            <p>暂无文档</p>
-          </div>
-          <div v-else class="kb-docs-list">
-            <div v-for="doc in documents" :key="doc.filename" class="kb-doc-item">
-              <div class="kb-doc-header" @click="doc._showToc = !doc._showToc">
-                <div class="kb-doc-icon">📄</div>
-                <div class="kb-doc-info">
-                  <div class="kb-doc-name">{{ doc.filename }}</div>
-                  <div class="kb-doc-meta">
-                    {{ doc.chunk_count }} 块
-                    <el-tag v-if="doc.status" :type="getStatusType(doc.status)" size="small" effect="plain">
-                      {{ getStatusLabel(doc.status) }}
-                    </el-tag>
-                  </div>
-                </div>
-                <div class="kb-doc-actions">
-                  <el-button
-                    v-if="isSpreadsheetDocument(doc)"
-                    text
-                    size="small"
-                    :data-test="`open-spreadsheet-${doc.document_id}-${doc.document_version_id}`"
-                    @click.stop="openSpreadsheet(doc)"
-                  >打开表格</el-button>
-                  <el-button v-if="canManage" text size="small" @click.stop="removeFromKB(doc)" title="从知识库移除">移除</el-button>
-                  <span v-if="doc.toc" class="toc-toggle">{{ doc._showToc ? '▲' : '▼' }}</span>
-                </div>
-              </div>
-              <!-- TOC 展开区域 -->
-              <div v-if="doc._showToc && doc.toc" class="kb-doc-toc">
-                <div v-if="parseToc(doc.toc).title" class="toc-title">{{ parseToc(doc.toc).title }}</div>
-                <ul v-if="parseToc(doc.toc).sections?.length" class="toc-list">
-                  <li v-for="(section, i) in parseToc(doc.toc).sections" :key="i" class="toc-section">
-                    <span class="toc-section-title">{{ section.title }}</span>
-                    <ul v-if="section.subsections?.length" class="toc-subsections">
-                      <li v-for="(sub, j) in section.subsections" :key="j" class="toc-subsection">{{ sub.title || sub }}</li>
-                    </ul>
-                  </li>
-                </ul>
-                <p v-else class="toc-empty">无目录结构</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      </div>
-    </div>
+    <KnowledgeInfoPanel
+      v-model:collapsed="kbInfoCollapsed"
+      :kb-id="getKbId()"
+      :kb-name="kbName"
+      :kb-overview="kbOverview"
+      :documents="documents"
+      :loading="loading"
+      :can-manage="canManage"
+      :can-administer="canAdminister"
+      :generating-toc="generatingToc"
+      :generating-overview="generatingOverview"
+      :saving-overview="savingOverview"
+      @go-back="goBack"
+      @open-rename="openRenameDialog"
+      @generate-toc="generateTOC"
+      @generate-overview="generateOverview"
+      @open-add-dialog="openAddDialog"
+      @delete-kb="deleteKB"
+      @save-overview="saveOverview"
+      @remove-doc="removeFromKB"
+      @open-spreadsheet="openSpreadsheet"
+    />
 
     <!-- Chat area (right) -->
-    <div class="kb-chat-area">
-      <div ref="messagesContainer" class="messages">
-        <!-- No conversations at all -->
-        <div v-if="!chatStore.conversations.length" class="empty-chat">
-          <el-icon :size="48" style="color: var(--color-border);"><ChatDotRound /></el-icon>
-          <h3>开始在知识库中提问</h3>
-          <p>创建对话后，在此知识库中检索问答</p>
-          <el-button type="primary" @click="newConversation" style="margin-top: 12px;">
-            <el-icon style="margin-right: 6px;"><Plus /></el-icon>
-            新建对话
-          </el-button>
-        </div>
-
-        <!-- Conversation selected but no messages -->
-        <div v-else-if="!chatStore.messages.length" class="empty-chat">
-          <el-icon :size="48" style="color: var(--color-border);"><ChatDotRound /></el-icon>
-          <h3>在此知识库中提问</h3>
-          <p>选择左侧的文档，或直接提问</p>
-        </div>
-
-        <MessageBubble
-          v-for="(msg, i) in chatStore.messages"
-          :key="i"
-          :message="msg"
-          :index="i"
-          :question="i > 0 && chatStore.messages[i - 1]?.role === 'user' ? chatStore.messages[i - 1].content : ''"
-          @add-to-analysis="addToAnalysis"
-        />
-
-        <div v-if="chatStore.isStreaming && !chatStore.messages[chatStore.messages.length - 1]?.content" class="msg assistant">
-          <div class="msg-avatar ai-avatar">R</div>
-          <div class="msg-body">
-            <div class="typing"><span></span><span></span><span></span></div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="chatStore.suggestedQuestions.length" class="suggestions">
-        <button v-for="q in chatStore.suggestedQuestions" :key="q" class="suggest-btn" @click="askSuggested(q)">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="suggest-icon">
-            <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
-          </svg>
-          <span>{{ q }}</span>
-        </button>
-      </div>
-
-      <ChatInput v-if="chatStore.currentConvId" mode="kb" :kb-id="getKbId()" />
-    </div>
+    <KnowledgeChatArea
+      :kb-id="getKbId()"
+      @add-to-analysis="addToAnalysis"
+    />
 
     <!-- Dialogs -->
-    <el-dialog v-model="showRenameDialog" title="重命名知识库" width="420px" :close-on-click-modal="false">
-      <el-input v-model="renameDraft" placeholder="输入知识库名称" maxlength="100" @keyup.enter="renameKB" />
-      <template #footer>
-        <el-button @click="showRenameDialog = false">取消</el-button>
-        <el-button type="primary" :loading="renaming" @click="renameKB">保存</el-button>
-      </template>
-    </el-dialog>
+    <KnowledgeRenameDialog
+      v-model:visible="showRenameDialog"
+      :name="kbName"
+      :renaming="renaming"
+      @rename="renameKB"
+    />
 
-    <el-dialog v-model="showAddDialog" title="添加文件到知识库" width="520px" :close-on-click-modal="false">
-      <div v-if="loadingFiles" class="kb-add-loading"><p>加载中...</p></div>
-      <div v-else-if="availableFiles.length === 0" class="kb-add-empty">
-        <p>暂无可添加的文件</p>
-        <p class="kb-add-hint">请先在「文件管理」页面上传文件</p>
-      </div>
-      <div v-else class="kb-add-list">
-        <div v-for="file in availableFiles" :key="file.name" class="kb-add-item"
-             :class="{ 'kb-add-item--selected': selectedFile?.name === file.name }"
-             @click="selectedFile = file">
-          <div class="kb-add-item-info">
-            <div class="kb-add-item-name">{{ file.name }}</div>
-            <div class="kb-add-item-meta">{{ file.size_human }}</div>
-          </div>
-          <div v-if="selectedFile?.name === file.name" class="kb-add-item-check">
-            <el-icon><Check /></el-icon>
-          </div>
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="showAddDialog = false">取消</el-button>
-        <el-button type="primary" :loading="addingFile" :disabled="!selectedFile" @click="addFileToKB">添加</el-button>
-      </template>
-    </el-dialog>
+    <KnowledgeAddFileDialog
+      v-model:visible="showAddDialog"
+      :available-files="availableFiles"
+      :loading-files="loadingFiles"
+      :adding-file="addingFile"
+      @open="loadAvailableFiles"
+      @add="addFileToKB"
+    />
 
-    <AddToAnalysisDialog v-model:visible="isDialogVisible" :question="currentDialogQuestion" :answer="currentDialogAnswer" @confirm="handleConfirm" />
+    <AddToAnalysisDialog
+      v-model:visible="isDialogVisible"
+      :question="currentDialogQuestion"
+      :answer="currentDialogAnswer"
+      @confirm="handleConfirm"
+    />
   </div>
 </template>
 
@@ -617,548 +330,5 @@ function parseToc(toc: string | object): any {
   display: flex;
   height: 100%;
   overflow: hidden;
-}
-
-/* ── KB Info Panel (middle) ────────────────────────────── */
-.kb-info-panel {
-  width: 320px;
-  background: var(--color-surface);
-  border-right: 1px solid var(--color-border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  overflow: hidden;
-  transition: width var(--duration-normal) var(--ease-out);
-  position: relative;
-}
-
-.kb-info-panel.collapsed {
-  width: 52px;
-}
-
-.kb-panel-collapsed-dock {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 14px 6px;
-  gap: 12px;
-  height: 100%;
-}
-
-.expand-panel-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border-subtle);
-  background: var(--color-surface);
-  color: var(--color-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all var(--duration-fast) var(--ease-out);
-}
-
-.expand-panel-btn:hover {
-  background: var(--color-surface-2);
-  color: var(--color-primary);
-  border-color: var(--color-primary-light);
-}
-
-.collapsed-count {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--color-muted);
-  background: var(--color-surface-2);
-  padding: 2px 6px;
-  border-radius: var(--radius-full);
-}
-
-.kb-info-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  width: 320px;
-}
-
-.collapse-icon-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--color-muted);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  padding: 0;
-  margin-left: 4px;
-}
-
-.collapse-icon-btn:hover {
-  background: var(--color-surface-2);
-  color: var(--color-foreground);
-  border-color: var(--color-border-subtle);
-}
-
-.kb-info-header {
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.kb-info-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: var(--space-2);
-}
-
-.kb-info-title {
-  font-family: var(--font-heading);
-  font-size: var(--text-xl);
-  font-weight: var(--font-semibold);
-  color: var(--color-foreground);
-  margin: 0;
-}
-
-.kb-info-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-4) var(--space-5);
-}
-
-.kb-section {
-  margin-bottom: var(--space-6);
-}
-
-.kb-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: var(--space-3);
-}
-
-.kb-section-title {
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wider);
-  color: var(--color-secondary);
-  margin: 0;
-}
-
-.kb-overview-text {
-  font-size: var(--text-sm);
-  color: var(--color-foreground);
-  line-height: var(--leading-relaxed);
-}
-
-.kb-overview-empty {
-  font-size: var(--text-sm);
-  color: var(--color-secondary);
-  font-style: italic;
-}
-
-.kb-overview-edit {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.kb-overview-edit-actions {
-  display: flex;
-  gap: var(--space-2);
-  justify-content: flex-end;
-}
-
-/* ── Document List ─────────────────────────────────────── */
-.kb-docs-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.kb-doc-item {
-  border-radius: var(--radius);
-  transition: background var(--duration-fast);
-}
-
-.kb-doc-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  cursor: pointer;
-}
-
-.kb-doc-item:hover {
-  background: var(--color-surface-2);
-}
-
-.toc-toggle {
-  font-size: 10px;
-  color: var(--color-secondary);
-  margin-left: var(--space-1);
-}
-
-.kb-doc-toc {
-  padding: var(--space-2) var(--space-3) var(--space-3) calc(var(--space-3) + 18px + var(--space-3));
-  border-top: 1px solid var(--color-border);
-  animation: fadeIn 0.2s ease-out;
-}
-
-.toc-title {
-  font-size: var(--text-xs);
-  font-weight: var(--font-semibold);
-  color: var(--color-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: var(--space-2);
-}
-
-.toc-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-
-.toc-section {
-  margin-bottom: var(--space-1);
-}
-
-.toc-section-title {
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
-  color: var(--color-foreground);
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.toc-section-title::before {
-  content: '•';
-  color: var(--color-primary);
-  font-weight: bold;
-}
-
-.toc-subsections {
-  list-style: none;
-  padding-left: var(--space-4);
-  margin: var(--space-1) 0 0 0;
-}
-
-.toc-subsection {
-  font-size: var(--text-xs);
-  color: var(--color-secondary);
-  padding: 2px 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.toc-subsection::before {
-  content: '◦';
-  color: var(--color-muted);
-}
-
-.toc-empty {
-  font-size: var(--text-xs);
-  color: var(--color-muted);
-  font-style: italic;
-}
-
-.kb-doc-icon {
-  font-size: 18px;
-  flex-shrink: 0;
-}
-
-.kb-doc-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.kb-doc-name {
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
-  color: var(--color-foreground);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.kb-doc-meta {
-  font-size: var(--text-xs);
-  color: var(--color-secondary);
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: 2px;
-}
-
-.kb-doc-actions {
-  display: flex;
-  gap: var(--space-1);
-  opacity: 0;
-  transition: opacity var(--duration-fast);
-}
-
-.kb-doc-item:hover .kb-doc-actions {
-  opacity: 1;
-}
-
-.kb-docs-empty {
-  text-align: center;
-  padding: var(--space-6);
-  color: var(--color-secondary);
-  font-size: var(--text-sm);
-}
-
-/* ── Chat Area (right) ─────────────────────────────────── */
-.kb-chat-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--color-background);
-}
-
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-6) 0;
-}
-
-.empty-chat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: var(--color-secondary);
-  gap: var(--space-2);
-}
-
-.empty-chat h3 {
-  font-family: var(--font-heading);
-  font-size: var(--text-lg);
-  font-weight: var(--font-semibold);
-  color: var(--color-foreground);
-  margin: 0;
-}
-
-.empty-chat p {
-  font-size: var(--text-sm);
-  color: var(--color-secondary);
-}
-
-/* ── Suggestions ──────────────────────────────────────── */
-.suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  padding: 0 var(--space-6) var(--space-3);
-}
-
-.suggest-btn {
-  padding: var(--space-2) var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-full);
-  font-size: var(--text-sm);
-  color: var(--color-secondary);
-  cursor: pointer;
-  font-family: var(--font-body);
-  transition: all var(--duration-fast);
-}
-
-.suggest-btn:hover {
-  border-color: var(--color-accent);
-  color: var(--color-accent);
-}
-
-.kb-detail-title {
-  font-family: var(--font-heading);
-  font-size: var(--text-xl);
-  font-weight: var(--font-bold);
-  color: var(--color-foreground);
-  margin: 0;
-}
-
-.settings-btn {
-  font-size: 18px;
-  color: var(--color-secondary);
-}
-
-.settings-btn:hover {
-  color: var(--color-foreground);
-}
-
-/* ── Typing indicator ─────────────────────────────────── */
-.typing {
-  display: flex;
-  gap: 6px;
-  padding: var(--space-4);
-}
-
-.typing span {
-  width: 8px;
-  height: 8px;
-  background: var(--color-border);
-  border-radius: 50%;
-  animation: bounce 1.4s infinite;
-}
-
-.typing span:nth-child(2) { animation-delay: 0.2s; }
-.typing span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes bounce {
-  0%, 60%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-8px); }
-}
-
-.msg {
-  display: flex;
-  gap: var(--space-4);
-  max-width: var(--content-max-width);
-  margin: 0 auto;
-  padding: var(--space-3) var(--space-6);
-  animation: slideUp 0.3s var(--ease-out);
-}
-
-.msg-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-size: 13px;
-  font-weight: var(--font-bold);
-}
-
-.ai-avatar {
-  background: var(--color-foreground);
-  color: white;
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.msg-body {
-  flex: 1;
-  min-width: 0;
-  max-width: 85%;
-}
-
-/* ── Add file dialog ── */
-.kb-add-loading,
-.kb-add-empty {
-  text-align: center;
-  padding: var(--space-8) var(--space-4);
-  color: var(--color-secondary);
-  font-size: var(--text-sm);
-}
-
-.kb-add-hint {
-  font-size: var(--text-xs);
-  color: var(--color-muted);
-  margin-top: var(--space-2);
-}
-
-.kb-add-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  max-height: 360px;
-  overflow-y: auto;
-}
-
-.kb-add-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: all var(--duration-normal) var(--ease-out);
-}
-
-.kb-add-item:hover {
-  border-color: var(--color-accent);
-  background: var(--color-accent-light);
-}
-
-.kb-add-item--selected {
-  border-color: var(--color-accent);
-  background: var(--color-accent-light);
-}
-
-.kb-add-item-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.kb-add-item-name {
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
-  color: var(--color-foreground);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.kb-add-item-meta {
-  font-size: var(--text-xs);
-  color: var(--color-secondary);
-  margin-top: 2px;
-}
-
-.kb-add-item-check {
-  color: var(--color-accent);
-  font-size: 18px;
-  flex-shrink: 0;
-  margin-left: var(--space-3);
-}
-
-/* ── Danger item in dropdown ── */
-.danger-item {
-  color: var(--color-destructive) !important;
-}
-
-.danger-item:hover {
-  background: var(--color-destructive-light) !important;
-}
-
-/* ── Skeleton ── */
-.skeleton-line {
-  border-radius: var(--radius-sm);
-  background: var(--color-muted);
-  animation: shimmer 1.5s infinite;
-  background-size: 200% 100%;
-  background-image: linear-gradient(90deg, var(--color-muted) 25%, var(--color-border) 50%, var(--color-muted) 75%);
-}
-
-.skeleton-line--title {
-  width: 60%;
-  height: 16px;
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-
-@keyframes slideUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 </style>

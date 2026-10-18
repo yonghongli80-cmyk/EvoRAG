@@ -153,4 +153,61 @@ describe('WikiModeView', () => {
     const saveBtn = wrapper.find('[data-test="save-wiki-btn"]')
     expect(saveBtn.exists()).toBe(true)
   })
+
+  it('sanitizes malicious XSS payload in wikilinks without executing attributes', async () => {
+    get.mockImplementation((url: string) => {
+      if (url === '/knowledge-bases') {
+        return Promise.resolve({
+          data: [{ kb_id: 'kb_1', name: '技术库', doc_count: 1, effective_role: 'manage' }]
+        })
+      }
+      if (url === '/wiki/pages') {
+        return Promise.resolve({
+          data: [{ id: 2, kb_id: 'kb_1', title: 'XSS测试', content: '测试 [[malicious" onmouseover="alert(1)|安全标签]]', tags: [] }]
+        })
+      }
+      if (url === '/wiki/pages/2') {
+        return Promise.resolve({
+          data: {
+            page: {
+              id: 2,
+              kb_id: 'kb_1',
+              title: 'XSS测试',
+              content: '测试 [[malicious" onmouseover="alert(1)|安全标签]]',
+              tags: []
+            },
+            outgoing_links: [],
+            backlinks: [],
+            revision_count: 1
+          }
+        })
+      }
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mount(WikiModeView, {
+      global: {
+        stubs: {
+          'el-select': true,
+          'el-option': true,
+          'el-button': true,
+          'el-input': true,
+          'el-icon': true,
+          'el-tag': true,
+          'el-dialog': true,
+          'el-drawer': true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const renderArea = wrapper.find('.markdown-render-area')
+    expect(renderArea.exists()).toBe(true)
+    const html = renderArea.html()
+    // Verify onmouseover is not an executable attribute
+    expect(html).not.toContain('onmouseover="alert(1)"')
+    expect(html).toContain('wikilink-badge')
+    expect(html).toContain('安全标签')
+  })
 })
