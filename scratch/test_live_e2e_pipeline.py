@@ -307,6 +307,18 @@ def _cleanup(suffix: str) -> None:
     db = app.state.user_db
     person_code = f"P-ADMIN-{suffix}"
     org_code = f"ORG-{suffix}"
+
+    # 数据源要先于账号删除（owner_id 指向它）：2026-10-18 复查时发现两次运行各留下一条
+    # `SecureDB_<suffix>`（config 里带测试口令），而原脚本从不清理。
+    with contextlib.suppress(Exception):
+        target = db.get_user_by_username(f"admin_{suffix}")
+        if target is not None:
+            owner_id = int(target["id"])
+            for source in db.list_data_sources(owner_id):
+                if int(source.get("owner_id") or 0) == owner_id:
+                    db.delete_data_source(int(source["id"]), owner_id)
+                    print(f"  [cleanup] data source {source['id']} ({source.get('name')}) removed")
+
     with contextlib.suppress(Exception), db.locked_transaction() as conn:
         conn.execute("DELETE FROM org_manager_scopes WHERE person_code = ?", (person_code,))
         conn.execute("DELETE FROM org_memberships WHERE person_code = ?", (person_code,))
