@@ -112,7 +112,8 @@ def _bm25_version(collection_name: str) -> tuple[int, int]:
 
 
 class Retriever:
-    def __init__(self, chunks: list[Chunk], collection_name: str = None):
+    def __init__(self, chunks: list[Chunk] | None = None, collection_name: str = None):
+        chunks = chunks or []
         self._bm25_version = _bm25_version(collection_name) if collection_name else None
         if not chunks and collection_name:
             # Check module-level cache first

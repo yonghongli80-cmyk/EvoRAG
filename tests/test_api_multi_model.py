@@ -34,7 +34,7 @@ def test_get_models_endpoint(api_client, monkeypatch):
 
 def test_stream_query_request_accepts_model_and_models(api_client):
     """StreamQueryRequest model schema must accept optional model and models fields."""
-    from rag.api import StreamQueryRequest
+    from rag.routers.query import StreamQueryRequest
 
     req1 = StreamQueryRequest(question="test", model="qwen")
     assert req1.model == "qwen"
@@ -68,7 +68,11 @@ async def test_pipeline_query_stream_parallel_arena():
          patch("rag.pipeline.add"), \
          patch("rag.pipeline.Retriever"), \
          patch("rag.pipeline.Reranker"), \
+         patch("rag.pipeline.get_llm_pool_router", return_value=mock_router), \
          patch("rag.llm_pool.get_llm_pool_router", return_value=mock_router):
+        # 两个目标都要 patch：`rag/pipeline.py` 在 import 时把 `get_llm_pool_router`
+        # **按值**绑定进自己的命名空间，只 patch `rag.llm_pool` 里那个名字到不了 pipeline ——
+        # 2026-10-18 实测：那样写的用例实际发出真实 deepseek 请求，靠网络调用"通过"。
 
         pipe = RAGPipeline("dummy.txt", session_id="s_arena", memory_db_path=":memory:")
         pipe._prepare_context = MagicMock(return_value=({

@@ -18,6 +18,8 @@ def test_client(tmp_path: Path):
 
     with patch("rag.api.user_db", patched_user_db), \
          patch("rag.api._DB_PATH", db_path), \
+         patch("rag.context.user_db", patched_user_db), \
+         patch("rag.context._DB_PATH", db_path), \
          patch.object(app.state, "user_db", patched_user_db), \
          patch("config.settings.auth_enabled", True), \
          patch("rag.vector_store._get_client"):
@@ -46,7 +48,7 @@ def test_generate_toc_endpoint(test_client):
     """POST /knowledge-bases/{id}/toc/generate 应该调用 generate_toc 并保存结果。"""
     client, db_path, headers = test_client
 
-    with patch("rag.api.generate_toc") as mock_generate_toc:
+    with patch("rag.routers.knowledge.generate_toc") as mock_generate_toc:
         mock_generate_toc.return_value = {
             "title": "测试文档",
             "sections": [{"title": "第一章", "subsections": []}],
@@ -67,7 +69,7 @@ def test_generate_toc_endpoint(test_client):
         finally:
             conn.close()
 
-        with patch("rag.api.KnowledgeBaseManager") as mock_kb_cls:
+        with patch("rag.routers.knowledge.KnowledgeBaseManager") as mock_kb_cls:
             mock_manager = MagicMock()
             mock_manager.list_kbs.return_value = [MagicMock(kb_id=kb_id, name="test_toc_gen", doc_count=1)]
             mock_kb_cls.return_value = mock_manager
@@ -124,7 +126,7 @@ def test_generate_toc_llm_failure(test_client):
     """POST /knowledge-bases/{id}/toc/generate 当 LLM 失败时应返回 500。"""
     client, db_path, headers = test_client
 
-    with patch("rag.api.generate_toc") as mock_generate_toc:
+    with patch("rag.routers.knowledge.generate_toc") as mock_generate_toc:
         mock_generate_toc.side_effect = Exception("LLM error")
 
         res = client.post("/knowledge-bases", json={"name": "test_toc_fail", "org_unit_code": "TEST-ROOT"}, headers=headers)
@@ -140,7 +142,7 @@ def test_generate_toc_llm_failure(test_client):
         finally:
             conn.close()
 
-        with patch("rag.api.KnowledgeBaseManager") as mock_kb_cls:
+        with patch("rag.routers.knowledge.KnowledgeBaseManager") as mock_kb_cls:
             mock_manager = MagicMock()
             mock_manager.list_kbs.return_value = [MagicMock(kb_id=kb_id, name="test_toc_fail", doc_count=1)]
             mock_kb_cls.return_value = mock_manager
@@ -163,7 +165,7 @@ def test_generate_overview_endpoint(test_client):
     """POST /knowledge-bases/{id}/overview/generate 应该调用 generate_summary 并保存。"""
     client, db_path, headers = test_client
 
-    with patch("rag.api.generate_summary") as mock_generate_summary:
+    with patch("rag.routers.knowledge.generate_summary") as mock_generate_summary:
         mock_generate_summary.return_value = "这是一个关于RAG系统的知识库，涵盖了检索增强生成的核心概念。"
 
         res = client.post("/knowledge-bases", json={"name": "test_overview_gen", "org_unit_code": "TEST-ROOT"}, headers=headers)
@@ -179,7 +181,7 @@ def test_generate_overview_endpoint(test_client):
         finally:
             conn.close()
 
-        with patch("rag.api.KnowledgeBaseManager") as mock_kb_cls:
+        with patch("rag.routers.knowledge.KnowledgeBaseManager") as mock_kb_cls:
             mock_manager = MagicMock()
             mock_manager.list_kbs.return_value = [MagicMock(kb_id=kb_id, name="test_overview_gen", doc_count=1)]
             mock_kb_cls.return_value = mock_manager

@@ -27,13 +27,15 @@ def api_env(tmp_path, monkeypatch):
     versions_root = tmp_path / "document_versions"
     monkeypatch.setattr(api_module, "user_db", db)
     monkeypatch.setattr(api_module, "DATA_DIR", tmp_path)
+    monkeypatch.setattr("rag.context.user_db", db)
+    monkeypatch.setattr("rag.context.DATA_DIR", tmp_path)
     monkeypatch.setattr(api_module.app.state, "user_db", db)
     monkeypatch.setattr(
         api_module.app.state, "document_versions_root", versions_root, raising=False
     )
 
     with ExitStack() as stack:
-        mock_kb_cls = stack.enter_context(patch("rag.api.KnowledgeBaseManager"))
+        mock_kb_cls = stack.enter_context(patch("rag.routers.documents.KnowledgeBaseManager"))
         stack.enter_context(patch("rag.pipeline.RAGPipeline"))
         stack.enter_context(patch("rag.vector_store.delete_doc"))
         mock_manager = MagicMock()

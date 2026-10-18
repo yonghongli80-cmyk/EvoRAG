@@ -32,6 +32,16 @@ class WikiIndexer:
         self._chunker = chunker or MarkdownASTChunker()
         self._embed_fn = embed_fn
 
+    @property
+    def store(self) -> WikiStore:
+        """The store this indexer is bound to.
+
+        Public so callers can tell whether a cached indexer still points at the current store
+        (the API layer rebuilds it when the wiki singleton is reset) without reaching into
+        ``_store``.
+        """
+        return self._store
+
     def _get_embed_fn(self) -> Callable[[list[str]], list[list[float]]]:
         if self._embed_fn is not None:
             return self._embed_fn

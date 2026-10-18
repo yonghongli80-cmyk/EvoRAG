@@ -13,14 +13,12 @@ from rag.wiki.store import WikiStore
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
 
-_wiki_store: WikiStore | None = None
+#: 只缓存 indexer。store 的单例由 ``rag.wiki.store.get_wiki_store`` 持有（``reset_wiki_store`` 也管它），
+#: 这里曾经另有一个 ``_wiki_store`` 全局，但**从未被赋值**：它看起来像第二层缓存，实际是死代码。
 _wiki_indexer: WikiIndexer | None = None
 
 
 def get_wiki_store() -> WikiStore:
-    global _wiki_store
-    if _wiki_store is not None:
-        return _wiki_store
     from rag.wiki.store import get_wiki_store as _default_get_store
 
     return _default_get_store()
@@ -29,7 +27,7 @@ def get_wiki_store() -> WikiStore:
 def get_wiki_indexer() -> WikiIndexer:
     global _wiki_indexer
     current_store = get_wiki_store()
-    if _wiki_indexer is None or _wiki_indexer._store is not current_store:
+    if _wiki_indexer is None or _wiki_indexer.store is not current_store:
         _wiki_indexer = WikiIndexer(wiki_store=current_store)
     return _wiki_indexer
 

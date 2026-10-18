@@ -52,9 +52,16 @@ def sandbox_api_storage(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(api, "_DB_PATH", sandbox / "users.db")
     monkeypatch.setattr(api, "DATA_DIR", upload_dir)
     monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root)
+    monkeypatch.setattr("rag.context.user_db", db)
+    monkeypatch.setattr("rag.context._DB_PATH", sandbox / "users.db")
+    monkeypatch.setattr("rag.context.DATA_DIR", upload_dir)
+    monkeypatch.setattr("rag.context.KB_FILES_ROOT", kb_files_root)
     monkeypatch.setattr(settings, "qdrant_path", str(sandbox / "qdrant"))
     monkeypatch.setattr(settings, "analysis_db_path", str(sandbox / "analysis.db"))
     monkeypatch.setattr(settings, "memory_db_path", str(sandbox / "memory.db"))
+    # 2026-10-18：这两个默认落在仓库 data/ 里，套件此前直接写生产库（wiki.db、bm25_index.db）。
+    monkeypatch.setattr(settings, "wiki_db_path", str(sandbox / "wiki.db"))
+    monkeypatch.setattr(settings, "bm25_db_path", str(sandbox / "bm25_index.db"))
     monkeypatch.setattr(settings, "document_versions_root", str(versions_root))
     monkeypatch.setattr(settings, "structured_datasets_root", str(structured_root))
     monkeypatch.setattr(api.app.state, "user_db", db)
@@ -64,6 +71,25 @@ def sandbox_api_storage(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(api.app.state, "structured_datasets_root", structured_root)
     yield db
     db.close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_wiki_store():
+    """Reset the wiki store singleton around every test.
+
+    ``rag.wiki.store`` caches one instance bound to whatever ``settings.wiki_db_path`` was when it
+    was first built, so without a reset the first test that touches it decides the database every
+    later test writes to — including, before this fixture, the repository's ``data/wiki.db``.
+    """
+    import contextlib
+
+    from rag.wiki.store import reset_wiki_store
+
+    with contextlib.suppress(Exception):
+        reset_wiki_store()
+    yield
+    with contextlib.suppress(Exception):
+        reset_wiki_store()
 
 
 @pytest.fixture(autouse=True)
@@ -160,6 +186,10 @@ def isolated_api(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "_DB_PATH", tmp_path / "users.db")
     monkeypatch.setattr(api, "DATA_DIR", upload_dir)
     monkeypatch.setattr(api, "KB_FILES_ROOT", kb_files_root, raising=False)
+    monkeypatch.setattr("rag.context.user_db", db)
+    monkeypatch.setattr("rag.context._DB_PATH", tmp_path / "users.db")
+    monkeypatch.setattr("rag.context.DATA_DIR", upload_dir)
+    monkeypatch.setattr("rag.context.KB_FILES_ROOT", kb_files_root, raising=False)
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "qdrant_path", str(tmp_path / "qdrant"))
     monkeypatch.setattr(settings, "document_versions_root", str(document_versions_root), raising=False)

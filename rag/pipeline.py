@@ -1,23 +1,33 @@
+import argparse
 import asyncio
+import hashlib
 import json as _json
 import logging
 import threading
 import time
 import traceback
 from pathlib import Path
-from typing import NamedTuple
+from types import SimpleNamespace
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from config import settings
+from rag import agent as _agent_mod
+from rag import feedback_processor as _feedback_processor_mod
+from rag import gap_analyzer as _gap_analyzer_mod
+from rag import memory as _memory_mod
+from rag import permissions as _permissions_mod
+from rag import versioned_retrieval as _versioned_retrieval_mod
 from rag.chunker import chunk
 from rag.cleaner import clean_document, deduplicate_chunks
 from rag.embedder import embed
 from rag.evolution.models import DiagnosticDetail, NonEvolvableReason
-from rag.evolution.recorder import FailureRecorder
 from rag.generator import generate, generate_stream
 from rag.guard import check_injection, check_output, sanitize_input
+from rag.jev.client import JevClient
 from rag.jev.policy import KbCapabilities
 from rag.jev.service import JevDecisionService
 from rag.jev.shadow import ShadowCase, ShadowComparison, ShadowEvaluator
+from rag.llm_pool import get_llm_pool_router
 from rag.loader import load
 from rag.models import Chunk
 from rag.query_rewriter import rewrite_query
@@ -31,11 +41,38 @@ from rag.reliability import (
 from rag.reliability.models import AnswerabilityDecision, ConfidenceAssessment
 from rag.reranker import Reranker
 from rag.retriever import Retriever
+from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
 from rag.vector_store import add, delete_doc
 from rag.vector_store import clear as clear  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class FailureObserver(Protocol):
+    """可插拔的失败观测器/记录器协议，解除主干链路对演化子系统的直接编译期依赖。"""
+
+    def submit(self, trace: ExecutionTrace, detail: Any = None) -> bool:
+        ...
+
+    def close(self) -> None:
+        ...
+
+
+def _create_default_failure_recorder() -> FailureObserver | None:
+    """按需构建默认的演化失败记录器；解耦主干对演化子系统的直接编译期依赖。"""
+    try:
+        from rag.evolution.recorder import FailureRecorder
+        from rag.evolution.store import FailureTraceStore
+
+        return FailureRecorder(
+            FailureTraceStore(settings.evolution_db_path),
+            max_queue=settings.evolution_queue_limit,
+        )
+    except ImportError:
+        logger.warning("Evolution subsystem not available; failure recording disabled.")
+        return None
 
 _HISTORICAL_EVIDENCE_WARNING = "注意：以下回答仅依据历史版本资料，内容可能已过期。\n\n"
 _RETRIEVAL_OVERSAMPLE = 3
@@ -149,7 +186,7 @@ class RAGPipeline:
         feedback_processor=None,
         gap_analyzer=None,
         jev_service: JevDecisionService | None = None,
-        failure_recorder: FailureRecorder | None = None,
+        failure_recorder: FailureObserver | None = None,
         question_set_rollout=None,
     ):
         if kb_id:
@@ -173,9 +210,7 @@ class RAGPipeline:
             add(self.chunks, embeddings)
             self.retriever = Retriever(self.chunks)
         self.session_id = session_id or file_path
-        from rag.memory import DialogueMemory
-
-        self.memory = DialogueMemory(db_path=memory_db_path, generate_fn=generate)
+        self.memory = _memory_mod.DialogueMemory(db_path=memory_db_path, generate_fn=generate)
         self.reranker = Reranker()
         # Jev 决策服务：仅当模式非 off 时创建默认实例；注入的服务由调用方负责生命周期。
         # 层 4 灰度：控制器既提供每请求的灰度键（下面发布），也提供问题集本身——把它的
@@ -185,8 +220,6 @@ class RAGPipeline:
         if jev_service is not None:
             self.jev = jev_service
         elif settings.jev_mode != "off":
-            from rag.jev.client import JevClient
-
             provider = (
                 question_set_rollout.provide if question_set_rollout is not None else None
             )
@@ -200,20 +233,14 @@ class RAGPipeline:
         if settings.jev_mode == "shadow" and self.jev is not None:
             self._shadow_evaluator = ShadowEvaluator(self.jev, on_comparison=_log_shadow_comparison)
             self._owns_shadow_evaluator = True
-        from rag.agent import RAGAgent
-
-        self.agent = RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
+        self.agent = _agent_mod.RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._owns_feedback_processor = feedback_processor is None
         self._owns_gap_analyzer = gap_analyzer is None
         if feedback_processor is None:
-            from rag.feedback_processor import FeedbackProcessor
-
-            feedback_processor = FeedbackProcessor(memory_db_path)
+            feedback_processor = _feedback_processor_mod.FeedbackProcessor(memory_db_path)
         if gap_analyzer is None:
-            from rag.gap_analyzer import GapAnalyzer
-
-            gap_analyzer = GapAnalyzer(memory_db_path)
+            gap_analyzer = _gap_analyzer_mod.GapAnalyzer(memory_db_path)
         self._feedback_processor = feedback_processor
         self._gap_analyzer = gap_analyzer
         # 观测记录器：注入实例由调用方负责生命周期；自建实例仅在 flag 开启时创建。
@@ -222,13 +249,8 @@ class RAGPipeline:
         if failure_recorder is not None:
             self._failure_recorder = failure_recorder
         elif settings.evolution_enabled:
-            from rag.evolution.store import FailureTraceStore
-
-            self._failure_recorder = FailureRecorder(
-                FailureTraceStore(settings.evolution_db_path),
-                max_queue=settings.evolution_queue_limit,
-            )
-            self._owns_failure_recorder = True
+            self._failure_recorder = _create_default_failure_recorder()
+            self._owns_failure_recorder = self._failure_recorder is not None
         # 层 4 灰度：问题集提供者由 rollout 控制器持有，这里只发布每请求的灰度键
         # （kb + 会话 + 问题），让同一请求的 preflight 与 passages 落入同一个桶。
         # 默认 None：不注入时在线行为零变化，Jev 客户端走静态问题集。
@@ -243,9 +265,6 @@ class RAGPipeline:
         self._enterprise_mode = kb_id is not None
         self._spreadsheet_coordinator = None
         if user_db is not None and kb_id is not None:
-            from pathlib import Path
-
-            from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
             self._spreadsheet_coordinator = SpreadsheetQueryCoordinator(
                 user_db, Path(settings.structured_datasets_root)
             )
@@ -475,7 +494,12 @@ class RAGPipeline:
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
             )
-        prepared, error = self._prepare_context_legacy(
+        prepare_fn = (
+            self._prepare_context_legacy
+            if self._prepare_context_legacy != self._prepare_context_standard
+            else self._prepare_context_standard
+        )
+        prepared, error = prepare_fn(
             question, session_id, doc_name, top_k, tags, user, kb_id,
             enterprise_request, effective_kb_id, coordinator,
         )
@@ -484,17 +508,16 @@ class RAGPipeline:
             prepared.setdefault("decision_metadata", {}).setdefault("jev_mode", settings.jev_mode)
         return prepared, error
 
-    def _prepare_context_legacy(
+    def _prepare_context_standard(
         self, question, session_id, doc_name, top_k, tags, user, kb_id,
         enterprise_request, effective_kb_id, coordinator,
     ):
-        """旧链路：确定性结构化尝试 -> DeepSeek 路由 -> 无条件改写 -> 检索 -> 旧 reranker。"""
+        """基准检索流水线 (Classic RAG)：结构化优先 -> 意图路由 -> 改写 -> 召回 -> 重排 -> 安全/ACL过滤 -> 上下文定稿。"""
         structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
         if structured is not None:
             return structured, None
 
-        from rag.agent import route_question
-        route = route_question(question)
+        route = _agent_mod.route_question(question)
 
         if route == "agent":
             if enterprise_request:
@@ -530,6 +553,9 @@ class RAGPipeline:
         )
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
         return prepared, None
+
+    # 向后兼容别名：供历史代码与测试打桩
+    _prepare_context_legacy = _prepare_context_standard
 
     def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator, effective_kb_id=None, user=None):
         """Queue a non-blocking shadow comparison; never alters the current response."""
@@ -621,12 +647,17 @@ class RAGPipeline:
             return self._attach_jev_stage(prepared, stage), None
 
         elif route_decision.route == "legacy":
-            # 预判低置信度或 Jev 不可用：完整降级到旧路由与旧 reranker。
+            # 预判低置信度或 Jev 不可用：完整降级到基准路由与重排流水线。
             # **降级也留痕**：否则这些请求既没有预判版本也没有判定统计，事后只看到
             # "旧链路作答"，无法解释是谁降级的、为什么，也无法与候选对照
             # （2026-09-30 端到端灰度验证时踩到）。判定阶段确实没跑，故统计量为 0，
             # 由 jev_route="legacy" 与 route_reason 表达降级事实。
-            prepared, error = self._prepare_context_legacy(
+            prepare_fn = (
+                self._prepare_context_legacy
+                if self._prepare_context_legacy != self._prepare_context_standard
+                else self._prepare_context_standard
+            )
+            prepared, error = prepare_fn(
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
             )
@@ -754,9 +785,7 @@ class RAGPipeline:
             return feedback_weight_cache[chunk_hash]
 
         if user is not None and self._user_db is not None:
-            from rag.versioned_retrieval import retrieve_current_then_history
-
-            raw_context = retrieve_current_then_history(
+            raw_context = _versioned_retrieval_mod.retrieve_current_then_history(
                 self.retriever,
                 query,
                 top_k=top_k,
@@ -777,8 +806,7 @@ class RAGPipeline:
             )
         # ACL must run before any external judge so unauthorized text never crosses that boundary.
         if user is not None and self._user_db is not None:
-            from rag.permissions import filter_chunks_by_permission
-            raw_context = filter_chunks_by_permission(
+            raw_context = _permissions_mod.filter_chunks_by_permission(
                 self._user_db, effective_kb_id, raw_context, user
             )
         return raw_context
@@ -786,8 +814,7 @@ class RAGPipeline:
     def _post_rank_acl(self, context: list[Chunk], user: dict | None, effective_kb_id: str) -> list[Chunk]:
         """Preserve the post-rank ACL filter as defense in depth."""
         if user is not None and self._user_db is not None:
-            from rag.permissions import filter_chunks_by_permission
-            return filter_chunks_by_permission(
+            return _permissions_mod.filter_chunks_by_permission(
                 self._user_db, effective_kb_id, context, user
             )
         return context
@@ -812,7 +839,6 @@ class RAGPipeline:
         self, question, session_id, context, top_k, effective_kb_id, *, build_bundle, conflicts=(),
     ):
         """Build messages, sources, feedback weights, and the optional reliability gate."""
-        import hashlib
         if build_bundle and context:
             # 版本边界：版本化 bundle 只能引用带 document_id/document_version_id 的块。
             # BM25 降级快照的块没有这些字段（密集检索抖动时会走到那条路），此前它们会让
@@ -940,12 +966,9 @@ class RAGPipeline:
         """
         if not sources or self._user_db is None:
             return sources
-        from types import SimpleNamespace
-
-        from rag.permissions import filter_chunks_by_permission
 
         proxies = [SimpleNamespace(doc_name=s.get("doc_name")) for s in sources]
-        filtered = filter_chunks_by_permission(self._user_db, kb_id, proxies, user)
+        filtered = _permissions_mod.filter_chunks_by_permission(self._user_db, kb_id, proxies, user)
         allowed_names = {p.doc_name for p in filtered}
         return [s for s in sources if s.get("doc_name") in allowed_names]
 
@@ -1080,6 +1103,13 @@ class RAGPipeline:
         models: list[str] = None,
     ):
         """一次已准备完毕的请求的流式输出；异常由 :meth:`query_stream` 兜底留痕。"""
+        # 轨迹 route 的默认值就是路由决策本身。竞技场（多模型并行）只是 RAG 路由之上的
+        # 一种执行模式——``prepared["route"]`` 仍是 "rag"，轨迹另记 "arena"，让审计能区分
+        # "单模型回答"与"竞技场合并回答"。下游按 route 分支的地方（recorder 的 blocked、
+        # clusterer 的 structured 特判，evidence 的 blocked 排除，metrics 完全不读 route）
+        # 都不会因为多一个 "arena" 取值算错；evolution 的 route 列是自由文本，聚类键里也
+        # 不含 route，所以竞技场观测仍与同名问题的普通 RAG 观测聚在一起。
+        trace_route = prepared["route"]
         if prepared["route"] == "cached":
             yield f'data: {_json.dumps({"type": "token", "content": prepared["answer"]}, ensure_ascii=False)}\n\n'
             yield f'data: {_json.dumps({"type": "sources", "sources": prepared["sources"]}, ensure_ascii=False)}\n\n'
@@ -1109,8 +1139,6 @@ class RAGPipeline:
             sources = []
             tool_calls = [ToolCall(**c) for c in captured_calls]
         elif models and len(models) > 1:
-            from rag.llm_pool import get_llm_pool_router
-
             router = get_llm_pool_router()
             model_answers: dict[str, str] = {}
             async for event in router.generate_stream_parallel(prepared["messages"], provider_ids=models):
@@ -1119,35 +1147,21 @@ class RAGPipeline:
                     model_answers[m_id] = model_answers.get(m_id, "") + event.get("content", "")
                 if event.get("type") != "done":
                     yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+
+            # 汇总各模型回答写入对话记忆与执行跟踪，保证多轮对话与审计观测完整。
+            # 合并回答不再在这里自行落库后提前 return，而是与单模型分支共用下面的统一后处理：
+            # check_output 过滤后的文本才入记忆/落轨迹，失败也照常交给自演化观测。流式已发出的
+            # token 收不回来（见下方后处理处的说明），这一点与单模型分支是同一个固有权衡。
+            answer = "\n\n".join(f"### [{m}]\n{ans}" for m, ans in model_answers.items())
             sources = prepared["sources"]
-            yield f'data: {_json.dumps({"type": "sources", "sources": sources}, ensure_ascii=False)}\n\n'
-
-            # 汇总各模型回答写入对话记忆与执行跟踪，保证多轮对话与审计观测完整
-            combined_answer = "\n\n".join(f"### [{m}]\n{ans}" for m, ans in model_answers.items())
-            total_ms = (time.time() - start_time) * 1000
-            trace = ExecutionTrace(
-                question=question, route="arena", answer=combined_answer,
-                total_ms=total_ms, tool_calls=[], chunk_hashes=prepared.get("chunk_hashes", []),
-                stage_timings=prepared.get("stage_timings") or {},
-                decision_metadata=prepared.get("decision_metadata") or {},
-            )
-            await asyncio.to_thread(self.tracker.save, trace)
-            await asyncio.to_thread(self.memory.add_message, sid, "user", question)
-            await asyncio.to_thread(self.memory.add_message, sid, "assistant", combined_answer)
-            if await asyncio.to_thread(self.memory.should_summarize, sid):
-                await asyncio.to_thread(self.memory.summarize_old_rounds, sid)
-
-            done = {"type": "done"}
-            yield f'data: {_json.dumps(done, ensure_ascii=False)}\n\n'
-            return
+            tool_calls = []
+            trace_route = "arena"
         else:
             answer = ""
             decision = prepared.get("decision")
             if decision is not None and decision.kind == "answerable_with_warning":
                 answer = _HISTORICAL_EVIDENCE_WARNING
                 yield f'data: {_json.dumps({"type": "token", "content": answer}, ensure_ascii=False)}\n\n'
-
-            from rag.llm_pool import get_llm_pool_router
 
             router = get_llm_pool_router()
             if len(router.providers) > 1 or model:
@@ -1164,7 +1178,7 @@ class RAGPipeline:
 
         # 后处理
         # 注意：流式输出时 token 已经逐个发送给客户端，check_output 无法拦截已发送的内容。
-        # 这是流式输出的固有权衡：延迟 vs 安全。过滤后的 answer 仅用于 memory/cache 持久化。
+        # 这是流式输出的固有权衡：延迟 vs 安全。过滤后的 answer 仅用于 memory/trace 持久化。
         # 生产环境可通过内容审核 API 在客户端侧做二次过滤。
         output_check = check_output(answer)
         if output_check.filtered:
@@ -1175,7 +1189,7 @@ class RAGPipeline:
         total_ms = (time.time() - start_time) * 1000
         chunk_hashes = prepared.get("chunk_hashes", [])
         trace = ExecutionTrace(
-            question=question, route=prepared["route"], answer=answer,
+            question=question, route=trace_route, answer=answer,
             total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
             stage_timings=prepared.get("stage_timings") or {},
             decision_metadata=prepared.get("decision_metadata") or {},
@@ -1184,6 +1198,8 @@ class RAGPipeline:
         self._submit_failure_observation(trace, prepared)
 
         # Gap analysis for stream
+        # 竞技场分支同样落在这里：它的 prepared["route"] 是 "rag"（合并回答仍是对 RAG 证据的
+        # 回答），所以低分无证据的竞技场回答也会进入缺口记录，与单模型分支一致。
         if prepared["route"] == "rag" and chunk_hashes:
             def record_gap():
                 weights = prepared.get("weights", {})
@@ -1204,8 +1220,6 @@ class RAGPipeline:
         yield f'data: {_json.dumps(done, ensure_ascii=False)}\n\n'
 
 def main():
-    import argparse
-
     parser = argparse.ArgumentParser(description="RAG Pipeline CLI")
     parser.add_argument("file", help="Path to the document file (.txt, .md)")
     args = parser.parse_args()

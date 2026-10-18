@@ -13,8 +13,17 @@ from rag.llm_pool.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
+# 单例初始化不再做阻塞式探测（见 init_llm_pool_router），因此不再需要 _ROUTER_LOCK：
+# 模块级 asyncio.Lock 是死代码（从未被 await），且它无法在同步函数里守卫惰性初始化，
+# 把锁绑定到“第一个调用者的 loop”还会在跨 loop 复用时炸掉。惰性初始化现在只做纯内存
+# 构造（redis.asyncio 客户端是惰性连接的），并发调用最多多造一个随后被丢弃的客户端对象。
 _ROUTER_SINGLETON: LLMPoolRouter | None = None
-_ROUTER_LOCK = asyncio.Lock()
+
+# 单条 Redis 命令的最长等待时间。async 客户端已经不会阻塞事件循环，但一个“黑洞”式
+# 的慢 Redis 会让每个请求各自卡到 TCP 默认超时（分钟级）；超时即按不可用处理，
+# 由 gate 降级到内存门并进入 30s 冷却。
+_REDIS_CONNECT_TIMEOUT_SECONDS = 1.0
+_REDIS_SOCKET_TIMEOUT_SECONDS = 1.0
 
 
 class LLMPoolRouter:
@@ -173,17 +182,25 @@ class LLMPoolRouter:
 
 
 def init_llm_pool_router(settings: Any) -> LLMPoolRouter:
-    """Construct an LLMPoolRouter instance using global Settings and optional Redis."""
+    """Construct an LLMPoolRouter instance using global Settings and optional Redis.
+
+    使用 ``redis.asyncio`` 客户端：客户端构造本身不建立连接（惰性连接、无网络 I/O），
+    因此这里不再做阻塞式 ``ping()`` 探测，耗时不会超过构造对象的开销。真正的连通性
+    由 gate 在首次命令失败时捕获，降级到内存门并进入 30 秒冷却。
+    """
     redis_client = None
     redis_url = getattr(settings, "redis_url", "")
     if redis_url:
         try:
-            import redis
-            client = redis.from_url(redis_url, decode_responses=True)
-            client.ping()
-            redis_client = client
+            import redis.asyncio as aioredis
+            redis_client = aioredis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=_REDIS_CONNECT_TIMEOUT_SECONDS,
+                socket_timeout=_REDIS_SOCKET_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
-            logger.info("Redis not reachable for LLM pool gate (%s); using in-memory semaphore.", exc)
+            logger.info("Redis not usable for LLM pool gate (%s); using in-memory semaphore.", exc)
 
     gate = DistributedConcurrencyGate(redis_client=redis_client)
     configs = load_provider_configs_from_settings(settings)
@@ -193,7 +210,11 @@ def init_llm_pool_router(settings: Any) -> LLMPoolRouter:
 
 
 def get_llm_pool_router() -> LLMPoolRouter:
-    """Return the process-wide LLMPoolRouter singleton."""
+    """Return the process-wide LLMPoolRouter singleton.
+
+    惰性初始化只做内存构造（Redis 客户端不再做阻塞 ping），首次调用不会卡事件循环，
+    并发竞态最多多构造一个随后被丢弃的 router，因此不挂锁。
+    """
     global _ROUTER_SINGLETON
     if _ROUTER_SINGLETON is None:
         from config import settings

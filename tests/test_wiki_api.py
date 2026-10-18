@@ -35,9 +35,10 @@ def api_client(tmp_path, monkeypatch):
     )
     trace_store = FailureTraceStore(db_path=evo_db)
 
-    # Wire up test overrides
+    # Wire up test overrides：接缝是取 store 的**访问器**。
+    # 以前这里 patch 的是模块全局 `_wiki_store`，而那个全局从未被赋值（死代码，2026-10-18 删除）。
     import rag.wiki.api as wiki_api_module
-    monkeypatch.setattr(wiki_api_module, "_wiki_store", store)
+    monkeypatch.setattr(wiki_api_module, "get_wiki_store", lambda: store)
     monkeypatch.setattr(wiki_api_module, "_wiki_indexer", indexer)
 
     import rag.evolution.api as evo_api_module
@@ -200,7 +201,7 @@ def test_wiki_api_fine_grained_permissions(isolated_api, make_user, monkeypatch,
     wiki_db = str(tmp_path / "wiki_perm.db")
     store = WikiStore(db_path=wiki_db)
     indexer = WikiIndexer(wiki_store=store, embed_fn=lambda texts: [[0.05] * 1024 for _ in texts])
-    monkeypatch.setattr(wiki_api_module, "_wiki_store", store)
+    monkeypatch.setattr(wiki_api_module, "get_wiki_store", lambda: store)
     monkeypatch.setattr(wiki_api_module, "_wiki_indexer", indexer)
 
     db = isolated_api.app.state.user_db

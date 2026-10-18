@@ -76,7 +76,7 @@ def _validated_address(raw_address: str) -> str:
 
 def _validate_patch_value(patch: CellPatch) -> None:
     value = patch.value
-    if isinstance(value, str) and value.startswith("="):
+    if isinstance(value, str) and (value.lstrip().startswith(("=", "@")) or value.startswith(("\t", "\r"))):
         raise WorkbookEditError("formula_injection")
     if patch.value_type == "blank":
         valid = value is None

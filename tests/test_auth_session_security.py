@@ -94,3 +94,24 @@ def test_cookie_authenticated_write_rejects_cross_origin_request(
 
     assert response.status_code == 403
     assert isolated_api.get("/me").status_code == 200
+
+
+def test_cookie_authenticated_write_accepts_https_origin_with_forwarded_proto(
+    isolated_api, make_user
+):
+    make_user("forwarded-user")
+    isolated_api.post(
+        "/login",
+        json={"username": "forwarded-user", "password": "Password-123!"},
+    )
+
+    response = isolated_api.post(
+        "/logout",
+        headers={
+            "Origin": "https://testserver",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert response.status_code == 204
+    assert isolated_api.get("/me").status_code == 401

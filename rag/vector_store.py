@@ -341,6 +341,7 @@ def add_to_collection(
                 payload["document_id"] = c_document_id
             if c_version_id is not None:
                 payload["document_version_id"] = c_version_id
+                payload["version_id"] = c_version_id
             if c_version_no is not None:
                 payload["version_no"] = c_version_no
             if c_section is not None:

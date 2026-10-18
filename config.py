@@ -24,9 +24,22 @@ class Settings(BaseSettings):
     bailian_embed_model: str = "BAAI/bge-m3"
     embed_dimension: int = 1024
 
-    # 百炼 Rerank
-    bailian_rerank_model: str = "gte-rerank-v2"
+    # 重排序引擎（Rerank）配置
+    rerank_provider: str = "siliconflow"
+    rerank_model: str = ""
+    rerank_base_url: str = ""
+    rerank_api_key: str = ""
     rerank_top_k: int = 5
+
+    # 供应商特定默认设置
+    siliconflow_rerank_url: str = "https://api.siliconflow.cn/v1/rerank"
+    siliconflow_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+
+    bailian_rerank_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/reranks"
+    bailian_rerank_model: str = "gte-rerank-v2"
+
+    local_rerank_url: str = "http://127.0.0.1:8000/v1/rerank"
+    local_rerank_model: str = "bge-reranker-large"
 
     # TypeSafe Jev（默认安全关闭；密钥只从被 Git 忽略的 .env 读取）
     typesafe_api_key: str = ""

@@ -249,7 +249,7 @@ def test_query_old_kb_allowed(db):
 # ── API 层权限测试 ─────────────────────────────────────────────────
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_api_delete_kb_requires_administer_role(mock_kb_cls, isolated_api, make_user):
     """Organization content managers cannot delete the knowledge base itself."""
     mock_manager = MagicMock()
@@ -281,7 +281,7 @@ def test_api_delete_kb_requires_administer_role(mock_kb_cls, isolated_api, make_
     ).status_code == 200
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_api_query_organization_kb_rejects_outside_user(
     mock_kb_cls, isolated_api, make_user
 ):
@@ -956,12 +956,14 @@ def test_create_document_permission_default_downloadable(db):
 # ── Task 3.2: 下载端点 ──────────────────────────────────────────────
 
 
-def test_download_requires_auth():
+def test_download_requires_auth(monkeypatch):
     """下载文件需要认证。"""
     from fastapi.testclient import TestClient
 
+    from config import settings
     from rag.api import app
 
+    monkeypatch.setattr(settings, "auth_enabled", True)
     client = TestClient(app)
     res = client.get("/files/test.txt/download")
     assert res.status_code == 401

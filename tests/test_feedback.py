@@ -114,8 +114,7 @@ def test_a_negative_rating_reaches_the_evolution_recorder(client, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        api_mod,
-        "_submit_feedback_observation",
+        "rag.routers.query._submit_feedback_observation",
         lambda user_db, req, user_id: calls.append((req.message_id, user_id)) or True,
     )
 
@@ -138,8 +137,7 @@ def test_a_positive_rating_does_not_reach_the_recorder(client, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        api_mod,
-        "_submit_feedback_observation",
+        "rag.routers.query._submit_feedback_observation",
         lambda user_db, req, user_id: calls.append(req.message_id) or True,
     )
 

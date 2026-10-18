@@ -8,16 +8,21 @@ import json
 import logging
 from collections.abc import Mapping
 
-from fastapi import Header, HTTPException, Request, Security
+from fastapi import Depends, Header, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from config import settings
 from rag.auth import decode_token
+from rag.context import get_user_db as get_user_db
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
 from rag.permissions import check_doc_permission, check_kb_permission
+from rag.repositories.analysis_repo import (
+    _SENSITIVE_CONFIG_HINTS,
+    _mask_url_credentials,
+)
 from rag.user_db import UserDB
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -28,9 +33,13 @@ _SOURCE_SECRET_KEYS = frozenset({
     "access_token", "refresh_token", "connection_string", "dsn",
 })
 
-
-def get_user_db(request: Request) -> UserDB:
-    return request.app.state.user_db
+# Redaction policies for data-source configuration. A secret-named field is
+# replaced as a whole: the user name, host, and database name inside a DSN are
+# part of the credential surface, so ``postgresql://user:***@db/name`` hands an
+# attacker half of the secret. Only credentials embedded inside a *non*-secret
+# URL field keep the partial ``***`` presentation, because the host and path of
+# such a URL are legitimately useful.
+REDACTED = "[REDACTED]"
 
 
 def _user_for_api_key(db: UserDB, api_key: str) -> dict | None:
@@ -89,22 +98,59 @@ def resolve_principal(db: UserDB, authorization: str, api_key: str | None) -> di
     return user
 
 
+def _get_current_user(token: str, db: UserDB | None = None) -> dict | None:
+    """Resolve user from JWT token string."""
+    if db is None:
+        from rag.context import user_db
+        db = user_db
+    return resolve_principal(db, f"Bearer {token}", None)
+
+
+async def _require_auth(authorization: str, db: UserDB | None = None) -> dict:
+    """Require Bearer auth header and return user dict, or raise 401."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未提供认证信息")
+    token = authorization.replace("Bearer ", "")
+    user_dict = await asyncio.to_thread(_get_current_user, token, db)
+    if not user_dict:
+        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    return user_dict
+
+
 async def require_user(
     request: Request,
     authorization: str = Header(default=""),
     api_key: str | None = Security(api_key_header),
 ) -> dict:
+    if authorization or api_key:
+        user = await asyncio.to_thread(resolve_principal, get_user_db(request), authorization, api_key)
+        if not user:
+            raise HTTPException(status_code=401, detail="未提供有效认证信息")
+        return user
+
     if not settings.auth_enabled:
         user = await asyncio.to_thread(get_user_db(request).ensure_development_user)
         return {**user, "auth_mode": "disabled"}
 
-    user = await asyncio.to_thread(resolve_principal, get_user_db(request), authorization, api_key)
-    if not user:
-        raise HTTPException(status_code=401, detail="未提供有效认证信息")
-    return user
+    raise HTTPException(status_code=401, detail="未提供有效认证信息")
 
 
-def require_admin(user: dict) -> dict:
+async def optional_user(
+    request: Request,
+    authorization: str = Header(default=""),
+    api_key: str | None = Security(api_key_header),
+) -> dict | None:
+    if authorization or api_key:
+        return await asyncio.to_thread(resolve_principal, get_user_db(request), authorization, api_key)
+
+    if not settings.auth_enabled:
+        user = await asyncio.to_thread(get_user_db(request).ensure_development_user)
+        return {**user, "auth_mode": "disabled"}
+
+    return None
+
+
+def require_admin(user: dict = Depends(require_user)) -> dict:
     if not user.get("is_admin"):
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
@@ -232,17 +278,54 @@ async def require_data_sources_admin(
     return require_admin(user)
 
 
+def is_secret_config_key(key: object) -> bool:
+    """Return *True* when *key* names a credential-bearing config field.
+
+    Both key vocabularies are honoured: the exact names in
+    :data:`_SOURCE_SECRET_KEYS` (which is what pins ``connection_string`` and
+    ``dsn``) and the compound-name substrings in ``_SENSITIVE_CONFIG_HINTS``
+    (which catch fields such as ``db_password`` or ``auth_token``).
+    """
+    low = str(key).lower()
+    return low in _SOURCE_SECRET_KEYS or any(hint in low for hint in _SENSITIVE_CONFIG_HINTS)
+
+
+def mask_source_config(value: object) -> tuple[object, bool]:
+    """Recursively mask a data-source configuration.
+
+    Returns ``(masked_value, has_secret)``. Secret-named keys are replaced by
+    :data:`REDACTED` as a whole field, including when they hold a DSN; URLs that
+    appear under any *other* key still lose their userinfo and sensitive query
+    parameters, so a credential smuggled into a plain ``url`` field is masked too.
+    """
+    if isinstance(value, Mapping):
+        masked: dict = {}
+        has_secret = False
+        for key, item in value.items():
+            if is_secret_config_key(key) and item not in (None, ""):
+                masked[str(key)] = REDACTED
+                has_secret = True
+                continue
+            sub_masked, sub_has_secret = mask_source_config(item)
+            masked[str(key)] = sub_masked
+            has_secret = has_secret or sub_has_secret
+        return masked, has_secret
+    if isinstance(value, list):
+        items = []
+        has_secret = False
+        for item in value:
+            sub_masked, sub_has_secret = mask_source_config(item)
+            items.append(sub_masked)
+            has_secret = has_secret or sub_has_secret
+        return items, has_secret
+    if isinstance(value, str) and "://" in value:
+        return _mask_url_credentials(value)
+    return value, False
+
+
 def redact_source_config(value: object) -> object:
     """Return a recursively redacted, safe-to-serialize source configuration."""
-    if isinstance(value, Mapping):
-        return {
-            str(key): "[REDACTED]" if str(key).lower() in _SOURCE_SECRET_KEYS
-            else redact_source_config(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_source_config(item) for item in value]
-    return value
+    return mask_source_config(value)[0]
 
 
 def log_security_mode() -> None:

@@ -98,9 +98,9 @@ class TestConfigMasking:
         cfg = sources[0]["config"]
         assert "supersecret" not in json.dumps(cfg)
         assert sources[0]["has_secret"] is True
-        # 主机信息保留，口令被掩掉
-        assert "supersecret" not in cfg.get("connection_string", "")
-        assert "mysql" in cfg.get("connection_string", "")
+        # 密钥类字段**整字段**遮蔽：DSN 里的用户名、主机、库名同属凭据面
+        # （2026-10-18 统一语义：此前这里允许保留 "mysql" 主机名，与安全契约冲突）
+        assert cfg.get("connection_string") == "[REDACTED]"
 
     def test_list_masks_nested_headers_authorization(self, db):
         db.create_data_source(
@@ -111,7 +111,7 @@ class TestConfigMasking:
         )
         sources = db.list_data_sources("A")
         cfg = sources[0]["config"]
-        assert cfg["headers"]["Authorization"] == "***"
+        assert cfg["headers"]["Authorization"] == "[REDACTED]"
         assert sources[0]["has_secret"] is True
 
     def test_list_masks_url_embedded_credentials(self, db):
@@ -152,7 +152,7 @@ class TestConfigMasking:
         sources = db.list_data_sources("A")
         cfg = sources[0]["config"]
         assert "hunter2" not in json.dumps(cfg)
-        assert cfg["password"] == "***"
+        assert cfg["password"] == "[REDACTED]"
         assert sources[0]["has_secret"] is True
 
     def test_get_data_source_returns_full_config_for_sync(self, db):
@@ -168,7 +168,7 @@ class TestConfigMasking:
 
     def test_mask_data_source_config_helper(self):
         cfg, has = mask_data_source_config({"password": "pw", "keep": 1})
-        assert cfg["password"] == "***"
+        assert cfg["password"] == "[REDACTED]"
         assert cfg["keep"] == 1
         assert has is True
 

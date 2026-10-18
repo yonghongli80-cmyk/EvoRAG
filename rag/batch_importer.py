@@ -1,5 +1,6 @@
 """批量导入处理器 — Excel/CSV 结构化数据导入。"""
 import csv
+import io
 import logging
 from pathlib import Path
 
@@ -49,12 +50,13 @@ class BatchImporter:
         raise ValueError(f"不支持的导入模式: {mode}，支持: qa_pair / document / table")
 
     def _read_csv(self, file_path: str) -> list[dict]:
-        rows = []
-        with open(file_path, encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                rows.append(dict(row))
-        return rows
+        from rag.cleaner import detect_and_decode
+
+        with open(file_path, "rb") as f:
+            raw = f.read()
+        text = detect_and_decode(raw)
+        reader = csv.DictReader(io.StringIO(text))
+        return [dict(row) for row in reader]
 
     def _read_excel(self, file_path: str) -> list[dict]:
         import openpyxl
@@ -107,3 +109,178 @@ class BatchImporter:
             )
             text = text[: settings.max_chunk_chars]
         return [Chunk(text=text, doc_name=doc_name, chunk_index=0)]
+
+    def import_file(
+        self,
+        file_path: str,
+        mode: str = "qa_pair",
+        kb_id: str = "rag_docs",
+        user: dict | None = None,
+        user_db=None,
+        config: dict | None = None,
+        doc_name: str | None = None,
+        duplicate_action: str = "overwrite",
+    ) -> dict:
+        """导入单个文件并对齐文档版本树与向量库。"""
+        import time
+        from dataclasses import replace
+
+        from rag.document_sources.upload import UploadDocumentSource
+        from rag.document_version_store import (
+            final_version_path,
+            promote_version,
+            stage_version,
+        )
+        from rag.document_versions import choose_document_name
+        from rag.embedder import embed
+        from rag.vector_store import (
+            _ensure_collection_name,
+            add_to_collection,
+            delete_doc,
+            mark_document_version_current,
+        )
+
+        if user_db is None:
+            from rag.user_db import UserDB
+            user_db = UserDB(settings.users_db_path)
+
+        user = user or {"id": 1, "username": "admin", "is_admin": True, "permission_level": 1}
+        user_id = int(user.get("id", 1))
+
+        filename = doc_name or Path(file_path).name
+        chunks = self.parse(file_path, mode=mode, config=config, doc_name=filename)
+        if not chunks:
+            raise ValueError("解析结果为空")
+
+        final_name = choose_document_name(user_db, kb_id, filename, duplicate_action)
+        existing = user_db.get_document_permission(final_name, kb_id)
+        was_existing = existing is not None
+
+        if not was_existing:
+            document_id = user_db.create_document_permission(final_name, kb_id, user_id, 1, False)
+        else:
+            document_id = existing["id"]
+
+        raw_bytes = Path(file_path).read_bytes()
+        source = UploadDocumentSource.from_bytes(final_name, raw_bytes)
+        versions_root = Path(settings.document_versions_root)
+        stage = stage_version(versions_root, source)
+
+        version_id = None
+        indexed = False
+        try:
+            version_id = user_db.create_document_version(
+                document_id, final_name, str(stage), source.content_hash, user_id
+            )
+            version_record = user_db.get_document_version_by_id(version_id)
+            version_no = version_record["version_no"]
+
+            versioned_chunks = [
+                replace(
+                    c,
+                    document_id=document_id,
+                    document_version_id=version_id,
+                    version_no=version_no,
+                    doc_permission_id=document_id,
+                    is_current=True,
+                )
+                for c in chunks
+            ]
+
+            embeddings = embed([c.text for c in versioned_chunks])
+            _ensure_collection_name(kb_id)
+            add_to_collection(
+                kb_id,
+                versioned_chunks,
+                embeddings,
+                doc_permission_id=document_id,
+                document_id=document_id,
+                document_version_id=version_id,
+                version_no=version_no,
+                is_current=True,
+                updated_at=time.time(),
+            )
+            mark_document_version_current(kb_id, document_id, version_id)
+            indexed = True
+
+            final_path = final_version_path(versions_root, document_id, version_no, final_name)
+            promote_version(stage, final_path)
+            user_db.set_version_file_path(version_id, str(final_path))
+            user_db.activate_document_version(document_id, version_id, kb_id, final_name)
+        except Exception:
+            if indexed and not was_existing:
+                try:
+                    delete_doc(kb_id, final_name)
+                except Exception:
+                    logger.exception("batch import vector rollback failed")
+            if version_id is not None:
+                try:
+                    user_db.delete_document_version(version_id)
+                except Exception:
+                    logger.exception("batch import version row rollback failed")
+            if not was_existing:
+                try:
+                    user_db.delete_document_permission(document_id)
+                except Exception:
+                    logger.exception("batch import permission rollback failed")
+            raise
+        finally:
+            stage.unlink(missing_ok=True)
+
+        return {
+            "status": "imported",
+            "document_id": document_id,
+            "version_id": version_id,
+            "version_no": version_no,
+            "filename": final_name,
+            "chunks": len(chunks),
+            "mode": mode,
+        }
+
+    def process_csv(
+        self,
+        file_path: str,
+        mode: str = "qa_pair",
+        kb_id: str = "rag_docs",
+        user: dict | None = None,
+        user_db=None,
+        config: dict | None = None,
+        doc_name: str | None = None,
+        duplicate_action: str = "overwrite",
+    ) -> dict:
+        """处理 CSV 文件并完成版本化入库。"""
+        return self.import_file(
+            file_path=file_path,
+            mode=mode,
+            kb_id=kb_id,
+            user=user,
+            user_db=user_db,
+            config=config,
+            doc_name=doc_name,
+            duplicate_action=duplicate_action,
+        )
+
+    def import_files(
+        self,
+        file_paths: list[str],
+        mode: str = "qa_pair",
+        kb_id: str = "rag_docs",
+        user: dict | None = None,
+        user_db=None,
+        config: dict | None = None,
+        duplicate_action: str = "overwrite",
+    ) -> list[dict]:
+        """批量导入多个文件并挂载到文档版本树。"""
+        results = []
+        for path in file_paths:
+            res = self.import_file(
+                file_path=path,
+                mode=mode,
+                kb_id=kb_id,
+                user=user,
+                user_db=user_db,
+                config=config,
+                duplicate_action=duplicate_action,
+            )
+            results.append(res)
+        return results

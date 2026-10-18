@@ -39,9 +39,9 @@ def test_kb_upload_record_points_to_existing_file_after_request(
     owner, headers = make_user("owner")
     db = isolated_api.app.state.user_db
     db.create_kb_metadata("kb_ops", "Ops", owner["id"], "private")
-    monkeypatch.setattr("rag.api.load_document", lambda path: "section body")
-    monkeypatch.setattr("rag.api.generate_toc", lambda text: [{"title": "section"}])
-    monkeypatch.setattr("rag.api.generate_summary", lambda text: "summary")
+    monkeypatch.setattr("rag.routers.knowledge.load_document", lambda path: "section body")
+    monkeypatch.setattr("rag.routers.knowledge.generate_toc", lambda text: [{"title": "section"}])
+    monkeypatch.setattr("rag.routers.knowledge.generate_summary", lambda text: "summary")
     monkeypatch.setattr("rag.knowledge_base.KnowledgeBaseManager.add_document", lambda *args, **kwargs: 3)
 
     response = isolated_api.post(
@@ -62,7 +62,7 @@ def test_index_failure_removes_stage_permission_and_pending_record(
     owner, headers = make_user("owner")
     db = isolated_api.app.state.user_db
     db.create_kb_metadata("kb_ops", "Ops", owner["id"], "private")
-    monkeypatch.setattr("rag.api.load_document", lambda path: "body")
+    monkeypatch.setattr("rag.routers.knowledge.load_document", lambda path: "body")
     monkeypatch.setattr(
         "rag.knowledge_base.KnowledgeBaseManager.add_document",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("qdrant unavailable")),
@@ -104,6 +104,7 @@ def test_kb_delete_removes_document_files_before_collection_metadata(
             calls.append(("collection", kb_id))
 
     monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
+    monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", FakeManager)
 
     response = isolated_api.delete("/knowledge-bases/kb_ops", headers=headers)
 
@@ -138,6 +139,7 @@ def test_kb_detail_never_exposes_stored_source_path(isolated_api, make_user, mon
             return [KnowledgeBaseInfo("kb_ops", "Ops", 1, "")]
 
     monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
+    monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", FakeManager)
     response = isolated_api.get("/knowledge-bases/kb_ops", headers=headers)
 
     assert response.status_code == 200
@@ -168,6 +170,7 @@ def test_kb_detail_exposes_document_and_current_version_ids_for_spreadsheets(
             return [KnowledgeBaseInfo("kb_ops", "Ops", 1, "")]
 
     monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
+    monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", FakeManager)
     response = isolated_api.get("/knowledge-bases/kb_ops", headers=headers)
 
     assert response.status_code == 200

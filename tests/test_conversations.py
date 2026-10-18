@@ -3,12 +3,14 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from config import settings
 from rag.user_db import UserDB
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     """Yield a TestClient with a temporary UserDB patched in."""
+    monkeypatch.setattr(settings, "auth_enabled", True)
     db_path = str(tmp_path / "test_users.db")
     import rag.api as api_mod
 

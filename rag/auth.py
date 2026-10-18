@@ -113,10 +113,10 @@ def verify_api_key(api_key: str = Security(api_key_header), authorization: str =
     # Fallback: resolve JWT through the same principal boundary as modern APIs.
     # Import lazily to avoid the api.py -> auth.py import cycle.
     if authorization.startswith("Bearer "):
-        from rag.api import user_db
         from rag.api_security import resolve_principal
+        from rag.context import get_user_db
 
-        user = resolve_principal(user_db, authorization, None)
+        user = resolve_principal(get_user_db(), authorization, None)
         if user:
             return str(user["id"])
     raise HTTPException(status_code=403, detail="认证失败，请提供有效的 API Key 或 JWT Token")

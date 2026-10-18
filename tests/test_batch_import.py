@@ -113,3 +113,26 @@ def test_batch_importer_table_mode():
         assert "李四" in chunks[0].text
     finally:
         os.unlink(csv_path)
+
+
+def test_batch_importer_parses_gbk_encoded_csv():
+    """GBK 编码的 CSV 文件应能自动检测并正确解析。"""
+    import csv
+
+    from rag.batch_importer import BatchImporter
+
+    csv_path = tempfile.mktemp(suffix=".csv")
+    with open(csv_path, "w", newline="", encoding="gbk") as f:
+        writer = csv.writer(f)
+        writer.writerow(["问题", "答案"])
+        writer.writerow(["中文GBK测试问题", "中文GBK测试答案内容"])
+
+    try:
+        importer = BatchImporter()
+        chunks = importer.parse(csv_path, mode="qa_pair", config={"question_col": "问题", "answer_col": "答案"})
+        assert len(chunks) == 1
+        assert "中文GBK测试问题" in chunks[0].text
+        assert "中文GBK测试答案内容" in chunks[0].text
+    finally:
+        os.unlink(csv_path)
+

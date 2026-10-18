@@ -48,13 +48,13 @@ class TestGetCurrentUserReturnsNone:
 
     def test_invalid_token_returns_none(self):
         """_get_current_user('bad_token') should return None."""
-        from rag.api import _get_current_user
+        from rag.api_security import _get_current_user
         result = _get_current_user("bad_token")
         assert result is None
 
     def test_nonexistent_user_returns_none(self):
         """_get_current_user with valid-looking token but nonexistent user_id returns None."""
-        from rag.api import _get_current_user
+        from rag.api_security import _get_current_user
         from rag.auth import create_token
         token = create_token({"user_id": 999999})
         result = _get_current_user(token)
@@ -63,7 +63,7 @@ class TestGetCurrentUserReturnsNone:
     def test_valid_token_returns_user(self, client):
         """_get_current_user with valid token returns user dict."""
         import rag.api as api_mod
-        from rag.api import _get_current_user
+        from rag.api_security import _get_current_user
         from rag.auth import create_token
 
         # Use the temporary user_db from the client fixture

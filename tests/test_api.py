@@ -63,7 +63,7 @@ def test_lifespan_stops_backup_scheduler(monkeypatch):
     assert calls == ["start", "stop"]
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.documents.KnowledgeBaseManager")
 def test_index_adds_to_kb(mock_kb_cls, tmp_path, isolated_api):
     mock_manager = MagicMock()
     mock_manager.add_document.return_value = 5
@@ -94,11 +94,13 @@ def test_query_without_index_returns_400(mock_pipeline_cls):
 
 def test_query_returns_answer():
     import rag.api as api_module
+    from rag.context import set_pipeline
     mock_pipeline = MagicMock()
     mock_pipeline.query.return_value = MagicMock(answer="answer from RAG", sources=[])
 
     # 直接设置全局 pipeline
     api_module.pipeline = mock_pipeline
+    set_pipeline(mock_pipeline)
     try:
         response = client.post(
             "/query",
@@ -109,9 +111,10 @@ def test_query_returns_answer():
         assert response.json()["answer"] == "answer from RAG"
     finally:
         api_module.pipeline = None
+        set_pipeline(None)
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_query_knowledge_base(mock_kb_manager_cls):
     """POST /knowledge-bases/{kb_id}/query should return search results."""
     from rag.models import Chunk
@@ -137,7 +140,7 @@ def test_query_knowledge_base(mock_kb_manager_cls):
     mock_manager.search.assert_called_once_with("kb_abc12345", "what is RAG?", top_k=9)
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_delete_system_collection_returns_400(mock_kb_manager_cls):
     """DELETE /knowledge-bases/rag_docs should return 400 (bad request)."""
     mock_manager = MagicMock()
@@ -270,21 +273,21 @@ def test_list_tags_empty_collection():
 
 def test_query_request_accepts_tags():
     """QueryRequest model should accept tags field."""
-    from rag.api import QueryRequest
+    from rag.routers.query import QueryRequest
     req = QueryRequest(question="test", tags=["finance", "q3"])
     assert req.tags == ["finance", "q3"]
 
 
 def test_query_request_tags_default_none():
     """QueryRequest tags should default to None."""
-    from rag.api import QueryRequest
+    from rag.routers.query import QueryRequest
     req = QueryRequest(question="test")
     assert req.tags is None
 
 
 def test_stream_query_request_accepts_tags():
     """StreamQueryRequest model should accept tags field."""
-    from rag.api import StreamQueryRequest
+    from rag.routers.query import StreamQueryRequest
     req = StreamQueryRequest(question="test", tags=["finance"])
     assert req.tags == ["finance"]
 
@@ -305,7 +308,7 @@ def test_files_endpoint_returns_in_kb_field():
 # ── KB detail endpoint tests ──────────────────────────────────────
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_get_kb_detail(mock_kb_cls, isolated_api):
     """GET /knowledge-bases/{id} 应该返回知识库详情。"""
     mock_manager = MagicMock()
@@ -328,7 +331,7 @@ def test_get_kb_detail(mock_kb_cls, isolated_api):
     assert "name" in data
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_update_kb_overview(mock_kb_cls, isolated_api):
     """PUT /knowledge-bases/{id}/overview 应该更新概述。"""
     mock_manager = MagicMock()
@@ -347,7 +350,7 @@ def test_update_kb_overview(mock_kb_cls, isolated_api):
     assert response.status_code == 200
 
 
-@patch("rag.api.KnowledgeBaseManager")
+@patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_update_doc_toc(mock_kb_cls, isolated_api):
     """PUT /knowledge-bases/{id}/documents/{name}/toc 应该更新目录。"""
     mock_manager = MagicMock()

@@ -19,18 +19,73 @@ RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 
 
 class Reranker:
-    def __init__(self):
+    def __init__(
+        self,
+        provider: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
+        self._explicit_provider = provider
+        self._explicit_model = model
+        self._explicit_url = base_url
+        self._explicit_api_key = api_key
         self._client = None
+
+    @property
+    def provider(self) -> str:
+        prov = self._explicit_provider or settings.rerank_provider
+        return prov.lower().strip()
+
+    @property
+    def model(self) -> str:
+        if self._explicit_model:
+            return self._explicit_model
+        if settings.rerank_model:
+            return settings.rerank_model
+        prov = self.provider
+        if prov == "siliconflow":
+            return settings.siliconflow_rerank_model
+        if prov == "bailian":
+            return settings.bailian_rerank_model
+        if prov == "local":
+            return settings.local_rerank_model
+        raise ValueError(f"不支持的重排序提供商: {prov}")
+
+    @property
+    def url(self) -> str:
+        if self._explicit_url:
+            return self._explicit_url
+        if settings.rerank_base_url:
+            return settings.rerank_base_url
+        prov = self.provider
+        if prov == "siliconflow":
+            return settings.siliconflow_rerank_url
+        if prov == "bailian":
+            return settings.bailian_rerank_url
+        if prov == "local":
+            return settings.local_rerank_url
+        raise ValueError(f"不支持的重排序提供商: {prov}")
+
+    @property
+    def api_key(self) -> str:
+        if self._explicit_api_key:
+            return self._explicit_api_key
+        if settings.rerank_api_key:
+            return settings.rerank_api_key
+        prov = self.provider
+        if prov in ("siliconflow", "bailian"):
+            return settings.bailian_api_key
+        return ""
 
     def _get_client(self):
         if self._client is None:
             self._client = requests.Session()
-            self._client.headers.update(
-                {
-                    "Authorization": f"Bearer {settings.bailian_api_key}",
-                    "Content-Type": "application/json",
-                }
-            )
+            headers = {"Content-Type": "application/json"}
+            key = self.api_key
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            self._client.headers.update(headers)
         return self._client
 
     @retry(
@@ -40,17 +95,40 @@ class Reranker:
     )
     def _call_rerank_api(self, query: str, texts: list[str], top_k: int) -> list[dict]:
         client = self._get_client()
-        payload = {
-            "model": RERANK_MODEL,
-            "query": query,
-            "documents": texts,
-            "top_n": top_k,
-            "return_documents": False,
-        }
-        resp = client.post(RERANK_URL, json=payload, timeout=10)
+        url = self.url
+        model = self.model
+        prov = self.provider
+
+        if prov == "bailian" and "/services/rerank/" in url:
+            payload = {
+                "model": model,
+                "input": {
+                    "query": query,
+                    "documents": texts,
+                },
+                "parameters": {
+                    "top_n": top_k,
+                    "return_documents": False,
+                },
+            }
+        else:
+            payload = {
+                "model": model,
+                "query": query,
+                "documents": texts,
+                "top_n": top_k,
+                "return_documents": False,
+            }
+
+        resp = client.post(url, json=payload, timeout=10)
         resp.raise_for_status()
         try:
-            return resp.json()["results"]
+            data = resp.json()
+            if "results" in data:
+                return data["results"]
+            if "output" in data and "results" in data["output"]:
+                return data["output"]["results"]
+            raise KeyError("results")
         except (KeyError, TypeError) as e:
             raise RuntimeError(f"Unexpected rerank API response: {e}") from e
 

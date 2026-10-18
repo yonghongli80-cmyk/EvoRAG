@@ -46,7 +46,7 @@ def test_persisted_conflict_creates_one_evidence_conflict_task(tmp_path):
 
 
 def test_refusal_recording_attaches_only_an_acl_visible_selected_document(tmp_path):
-    from rag.api import _record_refusal_task
+    from rag.routers.query import _record_refusal_task
 
     db = UserDB(str(tmp_path / "api-tasks.db"))
     reporter_id = db.create_user("reporter", "Password-123!")

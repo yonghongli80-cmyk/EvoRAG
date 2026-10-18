@@ -201,14 +201,15 @@ class TestSyncSource:
         )
         source_id = create_resp.json()["id"]
 
-        with patch("rag.api._sync_source") as mock_sync:
+        with patch("rag.routers.sources._sync_source") as mock_sync:
             mock_sync.return_value = {"synced": 5, "errors": []}
             response = client.post(f"/sources/{source_id}/sync")
             assert response.status_code == 200
             data = response.json()
             assert data["synced"] == 5
             assert data["errors"] == []
-            mock_sync.assert_called_once_with(source_id)
+            # 同步执行体由路由以 `db=<当前 UserDB>` 关键字注入。
+            mock_sync.assert_called_once_with(source_id, db=user_db)
 
     def test_sync_nonexistent(self):
         response = client.post("/sources/99999/sync")
@@ -223,13 +224,15 @@ class TestSyncSource:
         source_id = create_resp.json()["id"]
 
         # Patch the module-level _sync_source so it does the DB updates
-        # without making real HTTP requests.
-        def _fake_sync(sid):
-            user_db.update_data_source_synced(sid)
-            user_db.update_data_source_status(sid, "active")
+        # without making real HTTP requests. The route now injects the active
+        # UserDB as the `db` keyword argument.
+        def _fake_sync(sid, db=None):
+            target_db = db if db is not None else user_db
+            target_db.update_data_source_synced(sid)
+            target_db.update_data_source_status(sid, "active")
             return {"synced": 0, "errors": []}
 
-        with patch("rag.api._sync_source", side_effect=_fake_sync):
+        with patch("rag.routers.sources._sync_source", side_effect=_fake_sync):
             client.post(f"/sources/{source_id}/sync")
 
         # Verify last_synced_at was updated
