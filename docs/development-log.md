@@ -972,7 +972,85 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
   * 候选 `#30` 顺利通过层 2 门禁，正式晋升至 `awaiting_verification`，等待管理员发起金丝雀灰度。
 
 
-## 22. 工程实践清单（这套代码里反复出现的做法）
+## 22. 2026-10-18：接手第三方交付后的审计与收口
+
+**背景**：项目交给另一位 agent 继续，累计 17 个提交（超文本 Wiki 子系统、多模型并发池、前端改版、
+演进链修复），并产出 `docs/PROJECT_INTRODUCTION.md` 白皮书。本轮**不做新功能**：审计 + 收口。
+
+### 22.1 审计发现（按严重度）
+
+1. **架构重构整体未提交**：`HEAD` 仍是 2,834 非空行（物理 3,351）的单体 `rag/api.py`；工作树是
+   632 行装配器 + `rag/context.py`、`rag/routers/`、`rag/repositories/`、`rag/db/`，这些**全部未跟踪**；
+   工作树 92 个路径、**+1,444 / −10,636**。白皮书描述的正是这份未提交状态，却自称"Git main 分支"。
+2. **全量套件红**：**2,200 passed / 9 failed**（35:58）。我逐一定位并归因，且在**干净 HEAD 副本**上
+   跑同样 8 个用例**全绿** ⇒ 红灯由未提交重构引入，不是 main 的问题。
+3. **模块属性 setter 单向失效（真 bug）**：`_ApiModule` 的属性 setter 只把赋值转发到 `rag.context`，
+   **不写回本模块 `__dict__`**，而 `rag/api.py` 自己的函数读的是裸全局 ⇒ `monkeypatch.setattr(rag.api, "user_db", tmp)`
+   看起来成功、内部仍用旧对象。实测后果：启动恢复/素材迁移用例把临时库 patch 进来，
+   `_run_material_metadata_migration()` 却在**真实仓库库**上建表回填（测试污染 + 测试接缝失效）。
+4. **测试与生产数据未隔离**：`conftest` 缺 `wiki_db_path` 与 `bm25_db_path` ⇒ 套件直写生产
+   `data/wiki.db`、`data/bm25_index.db`（也是套件慢到 35 分钟的原因）。
+5. **脱敏语义漂移**：`GET /sources` 的 `connection_string` 从整字段 `[REDACTED]` 退化为
+   `postgresql://user:***@db/name`；而且端点实际走的是 `rag/repositories/` 里那份**重复实现**，
+   其密钥键集合里根本没有 `connection_string`/`dsn`（所以"把分支顺序前移"修不好它）。
+6. **白皮书数字夸大**（逐条实测见 22.4）。
+7. **E2E 脚本写生产且只清理一半**：直接 `TestClient(app)` 连生产库，每次遗留 2 个账号 + 1 个
+   Qdrant 集合 + 1 个 Wiki 页；生产里已积 8 个账号、4 个测试知识库（**在 UI 列表里可见**）、
+   5 个集合目录、3 个 Wiki 页。
+
+### 22.2 收口动作
+
+| # | 动作 | 判据/证据 |
+| --- | --- | --- |
+| 1 | `conftest` 补 `wiki_db_path`/`bm25_db_path`，新增 `isolated_wiki_store` 前后重置单例 | 跑完 `data/wiki.db`、`data/bm25_index.db` 的 mtime **不变**；套件 35:58 → **23:02** |
+| 2 | 脱敏收敛到**一处权威**（`api_security.mask_source_config`）：密钥键整字段 `[REDACTED]`（含 DSN、嵌套），非密钥键里的 URL 仍做 userinfo/query 掩码；`analysis_repo` 变 3 行适配器 | 45 passed；并裁决"单一语义优先"，同步更新 `test_data_source_permissions` 里 4 处更弱的断言 |
+| 3 | `_ApiModule` 每个 setter 增加 `_bind_local()`，同时写回模块 `__dict__` | 子代理判定的 3 个"真 bug"（startup recovery ×2、material migration ×1）**全绿**；24 passed |
+| 4 | 4 个测试按新结构适配（`/regenerate` 改断言路由注册；`StreamQueryRequest` 取自 `routers/query`；tags 直接调 `documents.add_tags_to_file`；sources sync 假函数接受 `db=`） | 18 passed |
+| 5 | **Arena 分支收口**：不再提前 `return`，与单模型分支共用 `check_output` / trace / 失败观测 / gap analysis；`route` 保留 `"arena"`（下游逐处核对安全） | 新增 `tests/test_pipeline_arena.py` 3 条；把旧 `return` 插回则 3 条全红 |
+| 6 | 删 `wiki/api.py` 中**从未赋值**的 `_wiki_store` 全局；`WikiIndexer` 暴露只读 `.store`；测试接缝改为 patch `get_wiki_store` | wiki 测试 16 passed |
+| 7 | 修一条**靠真实网络蒙混过关**的用例：`test_api_multi_model` 只 patch `rag.llm_pool.get_llm_pool_router`，而 pipeline 在 import 时按值绑定 ⇒ 实际发出真实 deepseek 请求；补 patch `rag.pipeline.get_llm_pool_router` | 该用例日志中不再出现外网调用 |
+| 8 | **E2E 加护栏 + 完整清理**：默认拒绝写仓库内路径（exit 2 并打印快照用法），`--allow-production` 才放行；`finally` 回收账号/组织行/Wiki 页/知识库/集合（集合用 Qdrant `delete_collection`；本地模式句柄未及时释放时由分离子进程延时删除） | 隔离快照实测：9 步全绿、exit 0，跑完集合回到内置 **5 个** |
+| 9 | 生产残渣清理：4 个测试知识库走 `DELETE /knowledge-bases`（200）、5 个集合目录、3 个 Wiki 页、停用 4 个测试管理员（`org_people.active=0`） | `kb_metadata` 恢复为 4 个真实库；集合 5 个；wiki 0 页；剩 4 个 `alice_*` 无删除入口 → 报告 |
+| 10 | 并发池 Redis 改 `redis.asyncio` + 全 `await`（子代理完成，我独立复验） | 19 passed；ruff clean |
+
+**顺手纠正两处我自己的判断**（审计要能纠正自己）：
+
+* 我说"仓库没有压测工件"**是错的**：`scripts/locustfile.py` 已入库，`docs/plans/dev-log.md` 记录了
+  真实压测（公网 P99≈9.7s、本地≈36s）。所以"P99<100ms"不是"未测"，是**被仓库自身记录反证两个数量级**。
+* 我说"5 个孤儿集合"**不准确**：其中 4 个在 `kb_metadata` 里**有注册**——它们是 E2E 没删干净的
+  测试知识库（会出现在 UI 列表），只有 `kb_techspecs_7d175f_57dbc1` 是真孤儿。
+
+### 22.3 另一位 agent 做对的部分（不能只记问题）
+
+* 把 `stable` 从"未决"集合里摘掉，解开了我上一份交接里点名的**死锁**（#20 结案后聚类仍被堵）；
+* 把 `repeats` 真正接进**单候选回放**（此前只在 `--apply` 生效，参数被静默忽略），并加
+  `--max-total-runs` 成本上限；
+* 用多数票把 **#15/#16 复测**：各 3 轮全败 ⇒ 此前那次 `passed` 确认是噪声，`rejected` 判定公正；
+* 修掉"观测版本 vs 目标版本"的陈旧缺陷后生成 **#30**，44 例 3 轮全过：
+  **route +2.3pp、Top-5 +5.0pp、外部调用 −6 次**，现处 `awaiting_verification`。
+
+### 22.4 白皮书断言核对表（全部实测）
+
+| 声称 | 实测 |
+| --- | --- |
+| 158 个端点 | **131 path / 141 operation**（`app.openapi()`；HEAD 同为 141） |
+| `rag/routers/` 14 个 Router | **8 个业务模块**；`include_router` 挂载 **15 个** |
+| 拔除 300+ 处函数内延迟导入 | 194 → **196**（HEAD 208）；真实成果是 `import rag.api` **1 → 0** |
+| 4 条 PRAGMA（含 `synchronous`/`cache_size`） | 实有 `journal_mode/busy_timeout/foreign_keys/query_only`；**那两条不存在** |
+| P99 < 100ms、并发 0 阻塞 | 无重构后压测；既有记录 P99≈9.7s/36s ⇒ **被反证** |
+| 组件单测全部通过 | 231 passed，但 3 次运行中 1 次失败（**flaky**） |
+| 路由表里的 `/organization/org-units`、`/spreadsheets/{id}/worksheets`、`/evolution/diagnostics`、`/departments` | **在 openapi 中不存在**（已改为真实前缀） |
+| 类名 `SystemOne`/`EvolutionEngine`/`OrgRepo`、"Python 3.12 静态类型检查" | **代码/工具链中不存在**（仓库无 mypy/pyright） |
+| "实时反映 Git main 分支" | 描述的是**未提交工作树**；main 仍是单体装配 |
+
+### 22.5 收尾数字
+
+* 后端全量：**2,223 passed / 0 failed，23:02**（审计前 2,200/9，35:58）；
+* 前端：`vue-tsc` 通过、Vitest **231 passed**（仍有偶发，见 22.4）、构建成功；
+* `ruff check rag tests scripts scratch`：全绿；
+* 生产残留：`kb_metadata` 4 个真实库、Qdrant 5 个集合、Wiki 0 页。
+
+## 23. 工程实践清单（这套代码里反复出现的做法）
 
 1. **先定判据，再动手**：每项改动都先写"达标线"（如"生成成功率 ≥80%"），并留下对照数字。
 2. **测量先行，且防自欺**：固定样本、串行执行（并行跑两条 A/B 实测触发服务商限流，让一次基线侧 26 次调用失败）。
@@ -983,7 +1061,7 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
 6. **测试防固化**：彩排暴露了"夹具按错误假设塞字段"的问题之后，改为**按真实形态**构造夹具。
 7. **不猜接口**：每个新代码都先读真实签名/表结构/schema，再写。
 
-## 23. 诚实边界（面试时也会被问到）
+## 24. 诚实边界（面试时也会被问到）
 
 * **系统永不自动合入**是设计红线，不是没做完；
 * 黄金回放 fixture 对"触及外部 seam 的补丁"**按设计不可用**（录制描述的是另一份代码），这类补丁只能
@@ -991,7 +1069,7 @@ legacy 侧 Δ+2.5pp ⇒ `passed`。
 * 结构化 `edits` 的 12/12 来自**一个聚类的 6 个观测 × 2 次**，结论强但**不外推**到别的层；
 * 上游供给（真实失败流量）决定这套回路的产出速度 —— 没有流量时它诚实地空转（`scanned=0`）。
 
-## 24. 可复现命令（挑几条）
+## 25. 可复现命令（挑几条）
 
 ```powershell
 python scripts/measure_patch_generation.py --observation-ids 131,151,153,154,155,156 --repeats 2   # 生成成功率基线
