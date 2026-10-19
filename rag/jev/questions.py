@@ -63,9 +63,12 @@ def build_passage_questions(chunk_ids: Sequence[str]) -> dict[str, Question]:
             },
         )
         questions[f"{chunk_id}.contains_answer_evidence"] = Noul(
-            instructions=f"判断 {text_ref} 是否包含支持回答该问题的具体证据。",
+            instructions=(
+                f"判断 {text_ref} 是否包含支持回答该问题的具体证据"
+                "（如型号、参数行等片段即可）。"
+            ),
             criteria={
-                "true": "文本包含可直接支持回答的具体证据。",
+                "true": "文本包含可直接支持回答的具体证据（如型号、参数行）。",
                 "false": "文本没有支持回答的具体证据。",
             },
         )

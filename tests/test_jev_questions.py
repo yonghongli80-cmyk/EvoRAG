@@ -22,6 +22,22 @@ def test_question_ids_are_stable_and_complete():
     }
 
 
+def test_answer_evidence_question_accepts_model_and_parameter_rows():
+    """型号行/参数行算答案证据（2026-10-19 实测：候选 #30 就是这个判据的补丁）。
+
+    实测依据：kb_accessories 的「找一下副厂配件明细」，同一候选池（12 块）下
+    「具体证据」口径只在 7/12 块上命中，其中含答案表的首块 answer_evidence=0.65；
+    判据写明"型号行、参数行等片段即可"后为 11/12、首块 0.83。文档里存在的证据
+    因此没有被误判成"无证据"——这是拒答口径（证据不足才拒答）的执行环节。
+    """
+    question = build_passage_questions(["c0"])["c0.contains_answer_evidence"]
+
+    assert "型号、参数行" in question.instructions
+    assert "型号、参数行" in question.criteria["true"]
+    # The question id, primitive type and both criteria keys are untouched.
+    assert set(question.criteria) == {"true", "false"}
+
+
 def test_internal_models_reject_invalid_probabilities():
     try:
         PassageJudgment(
