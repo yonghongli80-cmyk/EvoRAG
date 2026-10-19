@@ -47,12 +47,21 @@ def test_rerank_with_empty_docs():
         mock_get_client.assert_not_called()
 
 
-def test_rerank_uses_cached_client():
+def test_rerank_uses_cached_client(monkeypatch):
+    """The cached client must carry the configured key — and the test must supply that key itself.
+
+    此前这里断言的是运维本地 `.env` 里的真实 key（`config.py` 从 `config.py` 同目录加载 `.env`，
+    而 `.env` 不进 git）。于是这条用例在主树里"绿"、在 `git clone` 出来的沙箱里红 ——
+    2026-10-19 `tests/test_patch_sandbox.py` 的两条用例正是因此失败：测试依赖了本地环境产物。
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "rerank_api_key", "test-rerank-key")
     reranker = Reranker()
     assert reranker._client is None
     client = reranker._get_client()
     assert client is reranker._get_client()  # cached
-    assert "Authorization" in client.headers
+    assert client.headers["Authorization"] == "Bearer test-rerank-key"
 
 
 def test_rerank_preserves_chunk_metadata():

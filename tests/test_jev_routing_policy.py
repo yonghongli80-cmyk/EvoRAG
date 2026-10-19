@@ -114,4 +114,33 @@ def test_service_route_applies_policy_and_sends_safe_state():
     assert decision.preflight is not None
     sent = client.states[0]
     assert sent["question"] == "年假几天"
-    assert sent["capabilities"] == {"structured_data_available": False, "tools_available": ["calc"]}
+    assert sent["capabilities"] == {
+        "structured_data_available": False,
+        "tools_available": ["calc"],
+        "structured_fields": [],
+    }
+
+
+def test_service_route_sends_the_field_names_the_judge_needs():
+    """判定器要能看出"问题指向表格里的某一列"，否则字段类问题会被判成检索意图。
+
+    2026-10-19 实测：`佳能 EOS R8 的有效像素是多少？` 在只有布尔能力摘要时被判成检索
+    （`retrieval_confident`，confidence 0.83），结构化路由因此进不去；把**已按权限过滤**的字段名
+    放进 state 后同一问题能进结构化路由。字段名不是新暴露的信息：它们来自调用者本就有权读的数据集。
+    """
+    client = FakeJevClient(
+        JevBatchResult(
+            value=preflight("structured_query", 0.9, rewrite_probability=0.1),
+            available=True,
+            duration_ms=1.0,
+        )
+    )
+    service = JevDecisionService(client=client, policy=JevPolicy(route_confidence=0.75))
+    capabilities = KbCapabilities(
+        has_structured_data=True, structured_fields=("有效像素", "连拍速度"),
+    )
+
+    decision = service.route("佳能 EOS R8 的有效像素是多少？", capabilities)
+
+    assert decision.route == "structured"
+    assert client.states[0]["capabilities"]["structured_fields"] == ["有效像素", "连拍速度"]

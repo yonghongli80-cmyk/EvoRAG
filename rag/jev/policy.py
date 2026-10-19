@@ -22,6 +22,12 @@ class KbCapabilities:
 
     has_structured_data: bool = False
     allowed_tools: tuple[str, ...] = ()
+    #: 可读数据集里的字段显示名（已按权限过滤、去重、截断）。
+    #: 判定器此前只看到一个布尔 `structured_data_available`，于是"某型号的有效像素是多少"这类
+    #: **点名了某张表某个字段**的问题会被判成检索意图（实测：intent_confidence 0.83 → retrieval_confident），
+    #: 结构化路由因此进不去（2026-10-19）。字段名是"这个问题指向表格里的列"的直接证据，
+    #: 而它不是新暴露的信息：这些名字都来自调用者本就有权读取的数据集。
+    structured_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

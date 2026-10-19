@@ -514,8 +514,14 @@ class RAGPipeline:
     ):
         """基准检索流水线 (Classic RAG)：结构化优先 -> 意图路由 -> 改写 -> 召回 -> 重排 -> 安全/ACL过滤 -> 上下文定稿。"""
         structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
+        structured_clarification = None
         if structured is not None:
-            return structured, None
+            if not self._is_structured_clarification(structured):
+                return structured, None
+            # 澄清不抢检索（2026-10-19）：问句里出现字段名并不等于表格里就有可直接算出的东西。
+            # "r50相关价格" 会被判成结构化，但规划器只会回一句"请指明字段"，而文档里其实有价格。
+            # 所以先让它走完检索，拿不到来源时再回澄清——顺序反了就是把能答的问题变成反问。
+            structured_clarification = structured
 
         route = _agent_mod.route_question(question)
 
@@ -552,10 +558,48 @@ class RAGPipeline:
             build_bundle=enterprise_request,
         )
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
+        if structured_clarification is not None and not prepared.get("sources"):
+            # 检索也没有来源，才把结构化澄清交给用户（此时它比"没找到"更有用）
+            return structured_clarification, None
         return prepared, None
 
     # 向后兼容别名：供历史代码与测试打桩
     _prepare_context_legacy = _prepare_context_standard
+
+    #: 判定器可见的字段名上限：够它认出"问题指向表格列"即可，再多只会拉长提示词与尾延迟。
+    _STRUCTURED_FIELD_HINT_LIMIT = 40
+
+    def _structured_field_names(self, coordinator, kb_id, user) -> tuple[str, ...]:
+        """Field display names the judge may be shown, or ``()`` when there is nothing to say.
+
+        Reuses ``build_authorized_catalog`` — the very call ``has_datasets`` makes — instead of adding
+        another accessor: everything it returns is already filtered by document permission, so the
+        hint cannot widen what a principal may learn. Placeholder names (``Column 3``) are dropped:
+        they carry no signal and would eat the budget.
+        """
+        db = getattr(coordinator, "db", None)
+        root = getattr(coordinator, "datasets_root", None)
+        if db is None or root is None or not kb_id:
+            return ()
+        try:
+            from rag.spreadsheets.catalog import build_authorized_catalog
+
+            catalog = build_authorized_catalog(db, root, kb_id, user)
+        except Exception:  # noqa: BLE001 - 这只是给判定器的附加证据，取不到就退回只有布尔
+            return ()
+        names: list[str] = []
+        seen: set[str] = set()
+        for dataset in catalog.datasets:
+            for sheet in dataset.sheets:
+                for column in sheet.columns:
+                    name = str(column.display_name or "").strip()
+                    if not name or name in seen or name.lower().startswith("column "):
+                        continue
+                    seen.add(name)
+                    names.append(name)
+                    if len(names) >= self._STRUCTURED_FIELD_HINT_LIMIT:
+                        return tuple(names)
+        return tuple(names)
 
     def _submit_shadow_case(self, question, query, legacy_route, context, candidates, coordinator, effective_kb_id=None, user=None):
         """Queue a non-blocking shadow comparison; never alters the current response."""
@@ -572,7 +616,14 @@ class RAGPipeline:
                 (f"{chunk.doc_name}#{chunk.chunk_index}", chunk.rerank_score) for chunk in context
             ),
             candidates=tuple(candidates),
-            capabilities=KbCapabilities(has_structured_data=has_structured),
+            capabilities=KbCapabilities(
+                has_structured_data=has_structured,
+                structured_fields=(
+                    self._structured_field_names(coordinator, effective_kb_id, user)
+                    if has_structured
+                    else ()
+                ),
+            ),
         ))
 
     def _prepare_context_with_jev(
@@ -582,7 +633,14 @@ class RAGPipeline:
         """Jev 主链路：输入 guard 之后先预判路由，再检索与候选判断。"""
         has_datasets = getattr(coordinator, "has_datasets", None)
         has_structured = bool(coordinator is not None and (has_datasets(effective_kb_id, user) if has_datasets else True))
-        capabilities = KbCapabilities(has_structured_data=has_structured)
+        capabilities = KbCapabilities(
+            has_structured_data=has_structured,
+            structured_fields=(
+                self._structured_field_names(coordinator, effective_kb_id, user)
+                if has_structured
+                else ()
+            ),
+        )
         started = time.perf_counter()
         route_decision = self._route_with_history_correction(
             question, session_id, capabilities
@@ -623,10 +681,14 @@ class RAGPipeline:
             )
             return self._attach_jev_stage(prepared, stage), None
 
+        structured_clarification = None
         if route_decision.route == "structured":
             structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
-            if structured is not None:
+            if structured is not None and not self._is_structured_clarification(structured):
                 return self._attach_jev_stage(structured, stage), None
+            if structured is not None:
+                # 同上：澄清让位于文档检索，检索拿不到来源时才回澄清。
+                structured_clarification = structured
             # 结构化协调器无法处理时退回文档检索
 
         elif route_decision.route == "tool":
@@ -669,6 +731,8 @@ class RAGPipeline:
             question, session_id, doc_name, top_k, tags, user, kb_id,
             enterprise_request, effective_kb_id, route_decision, stage,
         )
+        if structured_clarification is not None and not (prepared or {}).get("sources"):
+            return self._attach_jev_stage(structured_clarification, stage), None
         return prepared, None
 
     def _prepare_rag_with_jev(
@@ -688,6 +752,13 @@ class RAGPipeline:
         stage["rewrites"] = 1 if initial_rewrite else 0
         context: list[Chunk] = []
         conflicts: list[dict] = []
+        # 引用兜底：判定层判为"相关"的块即使没有直接答案证据，对用户仍有引用价值。
+        # 此前只有"找到答案证据"的那一次尝试才把采纳结果带出去，于是每次尝试都没有答案证据时
+        # sources 为空——比旧路径少给了本该给出的来源（2026-10-19 实测 real-025：期望文档被判
+        # rel=0.79/证据 0.40，旧路径排第 1，新路径 0 来源、Top-5 丢召回）。**不因此放宽任何
+        # 阈值**：这些块只进 sources，不进 context、不进证据包，答案照旧是"证据不足"。
+        # 取采纳最多的一次尝试，与上面判定统计量"跨尝试取最大"的口径一致。
+        citation_fallback: list[Chunk] = []
         passages_started = time.perf_counter()
         index = 0
         while index < len(attempts):
@@ -723,6 +794,9 @@ class RAGPipeline:
                 context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
                 context = self._drop_injected_chunks(context)[:top_k]
                 break
+            # 这一次尝试没有答案证据：记下它采纳的相关块做引用兜底（见上面的说明）。
+            if len(selection.accepted) > len(citation_fallback):
+                citation_fallback = list(selection.accepted)
             if not rewrite_used and retrieval_route:
                 # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
                 attempts.append((self._rewrite_for_retrieval(question, session_id), True))
@@ -730,10 +804,17 @@ class RAGPipeline:
                 stage["rewrites"] = 1
             index += 1
         stage["passages_ms"] = (time.perf_counter() - passages_started) * 1000
+        citations: list[Chunk] | None = None
+        if not context and citation_fallback:
+            # ACL 复查与文档注入 guard 在这一层照旧生效：被引用不等于被信任。
+            citations = self._drop_injected_chunks(
+                self._post_rank_acl(citation_fallback, user, effective_kb_id)
+            )[:top_k]
         prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request or not context,
             conflicts=tuple(conflicts),
+            citations=citations,
         )
         return self._attach_jev_stage(prepared, stage), stage
 
@@ -837,8 +918,19 @@ class RAGPipeline:
 
     def _finalize_rag_context(
         self, question, session_id, context, top_k, effective_kb_id, *, build_bundle, conflicts=(),
+        citations=None,
     ):
-        """Build messages, sources, feedback weights, and the optional reliability gate."""
+        """Build messages, sources, feedback weights, and the optional reliability gate.
+
+        ``citations`` names the passages to list as sources when they differ from the answering
+        context: the Jev path cites the passages its judge found relevant even when none of them
+        carried answer evidence and the request is therefore refused. A refusal may not hide the
+        documents that were looked at — the legacy path lists them as sources too, so dropping them
+        made the Jev path lose Top-5 recall (2026-10-19, real-025). Citations are **sources only**:
+        messages, feedback hashes and the evidence bundle keep using ``context``, so the answer
+        itself is still built from (and refused for the lack of) answer evidence. ``None`` keeps the
+        1:1 context→sources mapping every other caller relies on.
+        """
         if build_bundle and context:
             # 版本边界：版本化 bundle 只能引用带 document_id/document_version_id 的块。
             # BM25 降级快照的块没有这些字段（密集检索抖动时会走到那条路），此前它们会让
@@ -862,6 +954,7 @@ class RAGPipeline:
 
         sid = session_id or self.session_id or "default"
         messages = self.memory.build_messages(sid, question, context)
+        cited = list(context) if citations is None else list(citations)
         sources = [
             {
                 "doc_name": c.doc_name,
@@ -873,7 +966,7 @@ class RAGPipeline:
                 "is_historical": c.historical_weight < 1.0,
                 "rank": i,
             }
-            for i, c in enumerate(context)
+            for i, c in enumerate(cited)
         ]
         prepared = {
             "route": "rag", "question": question, "context": context,
@@ -922,6 +1015,18 @@ class RAGPipeline:
             "confidence": confidence,
             "evidence_bundle": bundle,
         }
+
+    @staticmethod
+    def _is_structured_clarification(prepared: dict | None) -> bool:
+        """True when the structured attempt produced only a clarifying question.
+
+        Such an outcome must not preempt retrieval: it asks the user for a field while the documents
+        may already hold the answer (measured 2026-10-19 on ``r50相关价格``-style questions).
+        """
+        if (prepared or {}).get("route") != "structured":
+            return False
+        result = (prepared or {}).get("structured_result") or {}
+        return result.get("kind") == "clarification_required"
 
     def _attempt_structured_query(self, question, coordinator, user, effective_kb_id):
         """Run the deterministic spreadsheet coordinator; return prepared route or None."""

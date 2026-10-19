@@ -42,6 +42,9 @@ class JevDecisionService:
             "capabilities": {
                 "structured_data_available": capabilities.has_structured_data,
                 "tools_available": list(capabilities.allowed_tools),
+                # 字段名让判定器能认出"问题指向表格里的某一列"（见 KbCapabilities 的注释）。
+                # 只列调用者有权读取的数据集字段，且已去重截断。
+                "structured_fields": list(capabilities.structured_fields),
             },
         }
         result: JevBatchResult[PreflightDecision] = self._client.preflight(state)
