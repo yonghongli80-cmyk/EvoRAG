@@ -170,6 +170,56 @@ def test_edit_job_builds_complete_dataset_and_reuses_unchanged_vectors(tmp_path)
     assert db.get_spreadsheet_edit_session(structure.session_id)["status"] == "active"
 
 
+def test_index_job_publishes_the_schema_mirror_without_a_restart(tmp_path):
+    """A worker-created dataset must be visible to the catalog immediately.
+
+    The authorized catalog reads the ``users.db`` mirror, so indexing a version
+    without writing that mirror made the new dataset invisible until the next
+    startup backfill.
+    """
+    db = UserDB(str(tmp_path / "users.sqlite3"))
+    db.create_material_schema()
+    owner_id = db.create_user("owner", "Password-123!")
+    document_id = db.create_document_permission("two-sheets.xlsx", "rag_docs", owner_id)
+    versions_root = tmp_path / "versions"
+    source = final_version_path(versions_root, document_id, 1, "two-sheets.xlsx")
+    source.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    lens = workbook.active
+    lens.title = "镜头"
+    lens.append(["品牌", "售价"])
+    lens.append(["腾龙", 320])
+    body = workbook.create_sheet("机身")
+    body.append(["品牌", "单价"])
+    body.append(["佳能", 399])
+    workbook.save(source)
+    version_id = db.create_document_version(
+        document_id, "two-sheets.xlsx", str(source), "hash-mirror", owner_id
+    )
+    services = WorkerServices(
+        db=db,
+        versions_root=versions_root,
+        structured_datasets_root=tmp_path / "datasets",
+        registry=build_default_format_registry(),
+        vector_store=MemoryVectorStore(),
+        embedder=RecordingEmbedder(),
+    )
+
+    result = process_index_job(
+        {"id": 1, "document_id": document_id, "version_id": version_id}, services
+    )
+
+    assert result.status == "done"
+    dataset = db.get_structured_dataset_for_version(version_id)
+    assert dataset["status"] == "ready"
+    rows = db.list_structured_dataset_schema(int(dataset["id"]))
+    assert {row["sheet_key"] for row in rows} == {"sheet_0001", "sheet_0002"}
+    # Both sheets own a c_0002, which the mirror has to keep distinct.
+    assert sorted(row["column_key"] for row in rows) == ["c_0001", "c_0001", "c_0002", "c_0002"]
+    assert len({(row["sheet_key"], row["column_key"]) for row in rows}) == 4
+    db.close()
+
+
 def test_real_vector_copy_rebinds_unchanged_unit_to_target_dataset(
     tmp_path, monkeypatch
 ):

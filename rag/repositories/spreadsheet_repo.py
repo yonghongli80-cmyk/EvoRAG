@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from rag.repositories.base import BaseRepository, VersionConflict, canonical_json_text
@@ -143,6 +144,91 @@ class SpreadsheetRepository(BaseRepository):
                 (dataset_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def replace_structured_dataset_schema(
+        self, dataset_id: int, sheets: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Rewrite one dataset's mirrored sheet/column manifest atomically.
+
+        The dataset file stays the source of truth, so the whole mirror is
+        replaced inside one transaction (delete then insert) to keep repeated
+        calls idempotent.  ``sheets`` is an ordered sequence of mappings with
+        ``sheet_key``, ``name``, ``ordinal``, ``visibility``, ``header_row``,
+        ``first_data_row``, ``row_count``, ``column_count``,
+        ``merged_range_count``, ``has_formulas`` and ``columns``; each column
+        mapping carries ``column_key``, ``ordinal``, ``display_name``,
+        ``normalized_name``, ``inferred_type``, ``number_format``, ``unit`` and
+        ``sample_values_json``.
+
+        The dataset's ``sheet_count``/``total_rows``/``total_columns`` registry
+        counters are rewritten from the same payload in the same transaction.
+        """
+        with self.cm.transaction(immediate=True) as conn:
+            conn.execute(
+                "DELETE FROM structured_columns WHERE sheet_id IN "
+                "(SELECT id FROM structured_sheets WHERE dataset_id = ?)",
+                (dataset_id,),
+            )
+            conn.execute(
+                "DELETE FROM structured_sheets WHERE dataset_id = ?", (dataset_id,)
+            )
+            sheet_count = 0
+            total_rows = 0
+            total_columns = 0
+            for sheet in sheets:
+                cursor = conn.execute(
+                    "INSERT INTO structured_sheets "
+                    "(dataset_id, sheet_key, name, ordinal, visibility, header_row, "
+                    "first_data_row, row_count, column_count, merged_range_count, "
+                    "has_formulas) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        dataset_id,
+                        sheet["sheet_key"],
+                        sheet["name"],
+                        int(sheet["ordinal"]),
+                        sheet["visibility"],
+                        sheet.get("header_row"),
+                        sheet.get("first_data_row"),
+                        int(sheet.get("row_count", 0)),
+                        int(sheet.get("column_count", 0)),
+                        int(sheet.get("merged_range_count", 0)),
+                        int(bool(sheet.get("has_formulas", False))),
+                    ),
+                )
+                sheet_id = int(cursor.lastrowid)
+                columns = sheet.get("columns", ())
+                conn.executemany(
+                    "INSERT INTO structured_columns "
+                    "(sheet_id, column_key, ordinal, display_name, normalized_name, "
+                    "inferred_type, number_format, unit, sample_values_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            sheet_id,
+                            column["column_key"],
+                            int(column["ordinal"]),
+                            column["display_name"],
+                            column["normalized_name"],
+                            column["inferred_type"],
+                            column.get("number_format", ""),
+                            column.get("unit", ""),
+                            column.get("sample_values_json", "[]"),
+                        )
+                        for column in columns
+                    ],
+                )
+                sheet_count += 1
+                total_rows += int(sheet.get("row_count", 0))
+                total_columns += len(columns)
+            conn.execute(
+                # The material worker records these three counters itself; the
+                # migration and backfill paths only write this mirror, so the
+                # registry has to derive them from the mirror in the same
+                # transaction instead of leaving them at zero.
+                "UPDATE structured_datasets SET sheet_count = ?, total_rows = ?, "
+                "total_columns = ? WHERE id = ?",
+                (sheet_count, total_rows, total_columns, dataset_id),
+            )
 
     def record_structured_query_run(
         self,

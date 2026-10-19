@@ -29,6 +29,35 @@ class DatasetManifest:
     sheets: tuple[DatasetSheetManifest, ...]
 
 
+@dataclass(frozen=True)
+class DatasetColumnSchema:
+    """One persisted column of a dataset, as recorded in ``column_manifest``."""
+
+    column_key: str
+    ordinal: int
+    display_name: str
+    normalized_name: str
+    inferred_type: str
+    number_format: str
+
+
+@dataclass(frozen=True)
+class DatasetSheetSchema:
+    """One persisted sheet of a dataset, as recorded in ``sheet_manifest``."""
+
+    sheet_key: str
+    name: str
+    ordinal: int
+    visibility: str
+    header_row: int | None
+    first_data_row: int | None
+    row_count: int
+    column_count: int
+    merged_range_count: int
+    has_formulas: bool
+    columns: tuple[DatasetColumnSchema, ...]
+
+
 def resolve_dataset_path(root: Path, document_id: int, version_id: int) -> Path:
     """Return the only allowed storage path for an immutable document version."""
     if not isinstance(document_id, int) or document_id <= 0:
@@ -78,6 +107,70 @@ def write_dataset(db_path: Path, workbook: ParsedWorkbook) -> DatasetManifest:
             connection.close()
         staging.unlink(missing_ok=True)
         raise
+
+
+def read_dataset_schema(db_path: Path) -> tuple[DatasetSheetSchema, ...]:
+    """Read back the sheet/column manifest of an existing dataset file.
+
+    The dataset file is the source of truth for schema mirrors; this never
+    re-parses the original workbook.  ``unit`` and ``sample_values_json`` are
+    deliberately absent: the dataset format does not record them.
+    """
+    connection = sqlite3.connect(
+        f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        merged_counts = {
+            row["sheet_key"]: int(row["total"])
+            for row in connection.execute(
+                "SELECT sheet_key, COUNT(*) AS total FROM merged_ranges GROUP BY sheet_key"
+            )
+        }
+        formula_sheets = {
+            row["sheet_key"]
+            for row in connection.execute(
+                "SELECT DISTINCT sheet_key FROM formula_cells"
+            )
+        }
+        columns_by_sheet: dict[str, list[DatasetColumnSchema]] = {}
+        for row in connection.execute(
+            "SELECT sheet_key, column_key, ordinal, display_name, normalized_name, "
+            "inferred_type, number_format FROM column_manifest ORDER BY ordinal"
+        ):
+            columns_by_sheet.setdefault(row["sheet_key"], []).append(
+                DatasetColumnSchema(
+                    column_key=row["column_key"],
+                    ordinal=int(row["ordinal"]),
+                    display_name=row["display_name"],
+                    normalized_name=row["normalized_name"],
+                    inferred_type=row["inferred_type"],
+                    number_format=row["number_format"],
+                )
+            )
+        sheets = []
+        for row in connection.execute(
+            "SELECT sheet_key, name, ordinal, visibility, header_row, first_data_row, "
+            "row_count, column_count FROM sheet_manifest ORDER BY ordinal"
+        ):
+            sheets.append(
+                DatasetSheetSchema(
+                    sheet_key=row["sheet_key"],
+                    name=row["name"],
+                    ordinal=int(row["ordinal"]),
+                    visibility=row["visibility"],
+                    header_row=row["header_row"],
+                    first_data_row=row["first_data_row"],
+                    row_count=int(row["row_count"]),
+                    column_count=int(row["column_count"]),
+                    merged_range_count=merged_counts.get(row["sheet_key"], 0),
+                    has_formulas=row["sheet_key"] in formula_sheets,
+                    columns=tuple(columns_by_sheet.get(row["sheet_key"], ())),
+                )
+            )
+        return tuple(sheets)
+    finally:
+        connection.close()
 
 
 def _create_manifest_schema(connection: sqlite3.Connection) -> None:

@@ -29,6 +29,8 @@ def test_compatible_tables_produce_union_sum_plan():
     assert result.plan.dataset_ids == (1, 2)
     assert result.plan.metrics[0].column_key == "c_0002"
     assert result.plan.metrics[0].function == "sum"
+    # Column keys are only unique inside one sheet, so the plan names its sheet.
+    assert result.plan.sheet_key == "sheet_0001"
 
 
 def test_each_category_maps_to_grouped_sum():

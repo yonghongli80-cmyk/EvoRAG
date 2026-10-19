@@ -30,6 +30,7 @@ from rag.materials.jobs import claim_material_jobs
 from rag.materials.models import ExtractedMaterial, FormatResolution
 from rag.models import Chunk
 from rag.spreadsheets.chunker import DatasetMetadata
+from rag.spreadsheets.migration import dataset_schema_mirror
 from rag.spreadsheets.parser import parse_spreadsheet
 from rag.spreadsheets.store import resolve_dataset_path, write_dataset
 from rag.user_db import UserDB
@@ -355,6 +356,14 @@ def process_index_job(job: dict, services: WorkerServices) -> JobResult:
             services.structured_datasets_root, document_id, version_id
         )
         manifest = write_dataset(spreadsheet_dataset_path, workbook)
+        # The authorized catalog reads the ``users.db`` mirror, not the dataset
+        # file, so a dataset published without mirror rows stays invisible until
+        # the next restart backfill.  Write the mirror in the same step as the
+        # file: the file is the source of truth for it, and publishing a ready
+        # dataset without a mirror would hide every sheet of that version.
+        db.replace_structured_dataset_schema(
+            spreadsheet_dataset_id, dataset_schema_mirror(spreadsheet_dataset_path)
+        )
         # Deferred import breaks the worker -> extractor -> materials-init -> worker cycle.
         from rag.spreadsheets.extractor import workbook_index_material
 

@@ -521,6 +521,10 @@ class UserDB:
     def list_structured_dataset_schema(self, dataset_id: int) -> list[dict[str, Any]]:
         return self.spreadsheet_repo.list_structured_dataset_schema(dataset_id)
 
+    def replace_structured_dataset_schema(self, dataset_id: int, sheets) -> None:
+        """Rewrite the mirrored sheet/column manifest of one dataset."""
+        return self.spreadsheet_repo.replace_structured_dataset_schema(dataset_id, sheets)
+
     def record_structured_query_run(self, user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms) -> int:
         return self.spreadsheet_repo.record_structured_query_run(user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms)
 

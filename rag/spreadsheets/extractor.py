@@ -9,6 +9,7 @@ from pathlib import Path
 
 from rag.materials.models import CitationLocation, ExtractedMaterial, ExtractedUnit
 from rag.spreadsheets.chunker import DatasetMetadata, chunk_workbook
+from rag.spreadsheets.migration import dataset_schema_mirror
 from rag.spreadsheets.parser import ParsedWorkbook
 from rag.spreadsheets.store import DatasetManifest, write_dataset
 from rag.user_db import UserDB
@@ -91,6 +92,12 @@ def extract_spreadsheet_version(context: ExtractionContext) -> ExtractionResult:
     vectors_written = False
     try:
         manifest = write_dataset(context.dataset_path, context.workbook)
+        # The authorized catalog reads the users.db mirror, so the mirror is
+        # written together with the file it mirrors and before anything is
+        # published; a later failure still rolls the whole version back.
+        context.db.replace_structured_dataset_schema(
+            context.dataset_id, dataset_schema_mirror(context.dataset_path)
+        )
         context.write_vectors(context.workbook)
         vectors_written = True
         context.mark_version_current(context.document_version_id)

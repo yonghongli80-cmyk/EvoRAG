@@ -82,6 +82,32 @@ def test_compound_activation_promotes_document_and_dataset_together(tmp_path):
     assert db.get_structured_dataset_for_version(version_id)["status"] == "ready"
 
 
+def test_extraction_publishes_the_dataset_with_its_schema_mirror(tmp_path):
+    """The catalog reads the users.db mirror, so extraction must write both."""
+    db, document_id, _, _, version_id, dataset_id, workbook = _context(tmp_path)
+    context = ExtractionContext(
+        db=db,
+        document_id=document_id,
+        document_version_id=version_id,
+        dataset_id=dataset_id,
+        kb_id="rag_docs",
+        filename="sales.xlsx",
+        dataset_path=tmp_path / "datasets" / "dataset.sqlite3",
+        workbook=workbook,
+        write_vectors=lambda _: None,
+        delete_version_vectors=lambda _: None,
+        mark_version_current=lambda _: None,
+        mark_other_versions_historical=lambda *_: None,
+    )
+
+    extract_spreadsheet_version(context)
+
+    rows = db.list_structured_dataset_schema(dataset_id)
+    assert {row["sheet_key"] for row in rows} == {"sheet_0001"}
+    assert {row["column_key"] for row in rows} == {"c_0001", "c_0002"}
+    assert {row["display_name"] for row in rows} == {"region", "amount"}
+
+
 def test_vector_cleanup_failure_enqueues_repair_after_activation(tmp_path):
     db, document_id, _, _, version_id, dataset_id, workbook = _context(tmp_path)
     context = ExtractionContext(
