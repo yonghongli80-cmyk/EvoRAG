@@ -154,6 +154,10 @@ class AcceptanceCheck:
     name: str
     passed: bool
     detail: str
+    #: True for criteria the profile reports but does not enforce (multi-turn p50/p95/rewrite).
+    #: Rendering must not present them as PASS: a check whose detail says "8875.3ms <= 5415.8ms"
+    #: while being marked PASS reads as "the slower path passed" — measured 2026-10-19.
+    advisory: bool = False
 
 
 @dataclass(frozen=True)
@@ -187,7 +191,12 @@ class BenchmarkReport:
                 "passed": self.verdict.passed,
                 "failures": list(self.verdict.failures),
                 "checks": [
-                    {"name": check.name, "passed": check.passed, "detail": check.detail}
+                    {
+                        "name": check.name,
+                        "passed": check.passed,
+                        "advisory": check.advisory,
+                        "detail": check.detail,
+                    }
                     for check in self.verdict.checks
                 ],
             },
@@ -410,8 +419,16 @@ def evaluate_acceptance(
     executed = old.prep_p50_ms > 0.0 and new.prep_p50_ms > 0.0
 
     def advisory(check: AcceptanceCheck) -> AcceptanceCheck:
-        """Report the number without letting it decide (multi-turn profile only)."""
-        return check if not multi_turn else AcceptanceCheck(f"{check.name} (advisory)", True, check.detail)
+        """Report the number without letting it decide (multi-turn profile only).
+
+        ``passed`` keeps the measured comparison so the JSON stays informative, but ``advisory``
+        marks it as non-deciding and the renderer prints ``[ADVISORY]`` instead of ``[PASS]``. The
+        detail is phrased as "observed vs target" rather than "observed <= target", because the
+        latter states a falsehood whenever the target is missed.
+        """
+        if not multi_turn:
+            return check
+        return AcceptanceCheck(check.name, check.passed, check.detail, advisory=True)
 
     checks = (
         AcceptanceCheck(
@@ -433,35 +450,35 @@ def evaluate_acceptance(
             AcceptanceCheck(
                 "p50",
                 new.prep_p50_ms <= p50_target,
-                f"prep P50 {new.prep_p50_ms:.1f}ms <= {p50_target:.1f}ms (old {old.prep_p50_ms:.1f}ms, need -30%)",
+                f"prep P50 {new.prep_p50_ms:.1f}ms vs target {p50_target:.1f}ms (old {old.prep_p50_ms:.1f}ms, need -30%)",
             )
         ),
         advisory(
             AcceptanceCheck(
                 "p95",
                 new.prep_p95_ms <= p95_target,
-                f"prep P95 {new.prep_p95_ms:.1f}ms <= {p95_target:.1f}ms (old {old.prep_p95_ms:.1f}ms, need -20%)",
+                f"prep P95 {new.prep_p95_ms:.1f}ms vs target {p95_target:.1f}ms (old {old.prep_p95_ms:.1f}ms, need -20%)",
             )
         ),
         advisory(
             AcceptanceCheck(
                 "rewrite",
                 rewrite_ok,
-                f"ordinary rewrite rate {new_ordinary:.3f} <= {rewrite_target:.3f} (old {old_ordinary:.3f}, need -70%; overall {new.rewrite_rate:.3f} vs {old.rewrite_rate:.3f})",
+                f"ordinary rewrite rate {new_ordinary:.3f} vs target {rewrite_target:.3f} (old {old_ordinary:.3f}, need -70%; overall {new.rewrite_rate:.3f} vs {old.rewrite_rate:.3f})",
             )
         ),
         AcceptanceCheck(
             "route",
             new.route_accuracy >= 0.95,
-            f"route accuracy {new.route_accuracy:.3f} >= 0.95",
+            f"route accuracy {new.route_accuracy:.3f} vs required 0.950",
         ),
         AcceptanceCheck(
             "top5",
             new.top5_hit_rate >= top5_floor,
-            f"Top-5 hit rate {new.top5_hit_rate:.3f} >= {top5_floor:.3f} (old {old.top5_hit_rate:.3f}, max loss 2pp)",
+            f"Top-5 hit rate {new.top5_hit_rate:.3f} vs floor {top5_floor:.3f} (old {old.top5_hit_rate:.3f}, max loss 2pp)",
         ),
     )
-    failures = tuple(check.name for check in checks if not check.passed)
+    failures = tuple(check.name for check in checks if not check.passed and not check.advisory)
     return AcceptanceVerdict(passed=not failures, failures=failures, checks=checks)
 
 
@@ -667,7 +684,7 @@ def render_markdown(
             )
     lines.extend(["", "## Acceptance", "", f"verdict: {'PASS' if report.verdict.passed else 'FAIL'}", ""])
     for check in report.verdict.checks:
-        marker = "PASS" if check.passed else "FAIL"
+        marker = "ADVISORY" if check.advisory else ("PASS" if check.passed else "FAIL")
         lines.append(f"- [{marker}] {check.name}: {check.detail}")
     if report.failures:
         lines.extend(["", "## Failed calls", ""])

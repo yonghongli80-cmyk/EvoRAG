@@ -193,6 +193,34 @@ def test_acceptance_route_threshold_is_absolute():
     assert "route" in verdict.failures
 
 
+def test_multi_turn_advisory_checks_never_read_as_pass():
+    """Regression: the multi-turn report used to print a false inequality under [PASS].
+
+    Observed 2026-10-19: ``[PASS] p50 (advisory): prep P50 8875.3ms <= 5415.8ms`` — the measured
+    value was *worse* than the target while the line said PASS, because the advisory wrapper forced
+    ``passed=True`` and kept the assertion-shaped detail. Advisory criteria must be visible as
+    advisory, must not enter ``failures``, and must not assert a comparison they did not satisfy.
+    """
+    verdict = evaluate_acceptance(
+        old=metrics(prep_p50=7736.8, prep_p95=22212.7),
+        new=metrics(prep_p50=8875.3, prep_p95=21781.1),
+        profile="multi_turn",
+    )
+
+    advisory = {check.name: check for check in verdict.checks if check.advisory}
+    assert advisory, "multi-turn profile must mark p50/p95/rewrite as advisory"
+    assert advisory["p50"].detail.count("vs target") == 1
+    assert "<=" not in advisory["p50"].detail
+    assert advisory["p50"].passed is False, "the measured miss is still recorded for the reader"
+    assert verdict.failures == (), "an advisory miss must not fail the run"
+
+
+def test_single_turn_checks_are_not_marked_advisory():
+    verdict = evaluate_acceptance(old=metrics(), new=metrics())
+
+    assert all(not check.advisory for check in verdict.checks)
+
+
 def test_rewrite_rate_threshold_handles_zero_baseline():
     verdict = evaluate_acceptance(
         old=metrics(rewrite_rate=0.0),

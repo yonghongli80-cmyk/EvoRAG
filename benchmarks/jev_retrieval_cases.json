@@ -1,13 +1,15 @@
 {
   "version": "jev-retrieval-cases-v1",
-  "description": "固定问题集：路由与证据标签。category=ordinary 的用例参与「普通问题改写率」验收口径，special 用例全程报告但不参与该口径。检索类用例的期望来源来自本地非敏感 fixture（data/upload/压测.md，知识库 rag_docs）；结构化、工具与含糊类用例需要管理员在实测前确认对应知识库与数据集。本文件不得包含任何密钥。",
+  "description": "固定问题集：路由与证据标签。category=ordinary 的用例参与「普通问题改写率」验收口径，special 用例全程报告但不参与该口径。检索类用例的期望来源来自本地非敏感 fixture（data/upload/压测.md，知识库 rag_docs）；结构化、工具与含糊类用例需要管理员在实测前确认对应知识库与数据集。本文件不得包含任何密钥。 2026-10-19：structured-001..005 原先指向 rag_docs —— 该库只有 md/docx/pdf/txt，不拥有任何结构化数据集，pipeline 也按设计拒绝在 rag_docs 上走结构化路径，因此那五条的期望在构造上就不可能成立（其 notes 亦自述”需先确认知识库与数据集“）。现改为指向真正拥有数据集的kb_accessories / kb_evolab，问题依据数据集文件内 column_manifest 的真实列名改写。",
   "cases": [
     {
       "id": "rag-001",
       "question": "RAG 技术解决了原生大模型的哪三大致命缺陷？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "普通问答",
       "category": "ordinary"
     },
@@ -16,7 +18,9 @@
       "question": "文本切片的六种常见策略是什么？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "普通问答",
       "category": "ordinary"
     },
@@ -25,7 +29,9 @@
       "question": "为什么余弦相似度是 RAG 系统的绝对主流？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "普通问答",
       "category": "ordinary"
     },
@@ -34,7 +40,9 @@
       "question": "大模型幻觉问题的详细成因可分为哪六大类？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "普通问答",
       "category": "ordinary"
     },
@@ -43,53 +51,55 @@
       "question": "RAG 分为哪三代技术架构？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "普通问答",
       "category": "ordinary"
     },
     {
       "id": "structured-001",
-      "question": "上个季度各部门的销售额分别是多少？",
+      "question": "佳能 EOS R8 的有效像素是多少？",
       "expected_route": "structured",
-      "kb_id": "rag_docs",
+      "kb_id": "kb_accessories",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "notes": "结构化：指向真实数据集 camera-parameters-excerpt.xlsx（列含 产品型号/有效像素）",
       "category": "special"
     },
     {
       "id": "structured-002",
-      "question": "2024 年预算执行率最高的是哪个部门？",
+      "question": "哪个产品的连拍速度最快？",
       "expected_route": "structured",
-      "kb_id": "rag_docs",
+      "kb_id": "kb_accessories",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "notes": "结构化：聚合+排序，列含 产品型号/连拍速度",
       "category": "special"
     },
     {
       "id": "structured-003",
-      "question": "统计一下各类资产占总资产的比例。",
+      "question": "遮光罩售价最高的是哪个型号？",
       "expected_route": "structured",
-      "kb_id": "rag_docs",
+      "kb_id": "kb_accessories",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "notes": "结构化：指向 lens-hood-price-redacted.xlsx（列含 型号/遮光罩售价）",
       "category": "special"
     },
     {
       "id": "structured-004",
-      "question": "哪个产品的库存低于安全库存线？",
+      "question": "富士 X-S20 用的是什么影像传感器？",
       "expected_route": "structured",
-      "kb_id": "rag_docs",
+      "kb_id": "kb_accessories",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "notes": "结构化：单元胞查询，列含 产品型号/影像传感器",
       "category": "special"
     },
     {
       "id": "structured-005",
-      "question": "把各区域的人数按从大到小排序。",
+      "question": "产品参数表里一共列了哪些产品型号？",
       "expected_route": "structured",
-      "kb_id": "rag_docs",
+      "kb_id": "kb_evolab",
       "expected_source_names": [],
-      "notes": "表格精确查询；实测前需管理员确认结构化数据集与知识库",
+      "notes": "结构化：指向 sx-product-parameters.xlsx（列含 产品型号）",
       "category": "special"
     },
     {
@@ -169,7 +179,9 @@
       "question": "递归字符分割切片的重叠长度一般设置为多少？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "冲突资料场景；实测前需管理员准备一对互相矛盾的授权文档并更新期望来源",
       "category": "ordinary"
     },
@@ -178,7 +190,9 @@
       "question": "工业级常用嵌入模型的维度有哪些？",
       "expected_route": "rag",
       "kb_id": "rag_docs",
-      "expected_source_names": ["压测.md"],
+      "expected_source_names": [
+        "压测.md"
+      ],
       "notes": "提示注入场景；实测前需管理员准备含注入指令的文档并确认注入块被排除",
       "category": "ordinary"
     }
