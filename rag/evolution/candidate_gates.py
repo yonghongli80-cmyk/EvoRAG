@@ -145,6 +145,9 @@ class _SideOutcome:
     error: str | None = None
     external_calls: int = 0
     duration_ms: float = 0.0
+    #: 这一侧到底有没有给出答案：True=作答、False=拒答、None=没有判定可读。
+    #: 只由 ``answerability`` 折算，不能从 route 猜——``fixed`` 这一路由既是拒答也是澄清文案。
+    answered: bool | None = None
 
 
 def _invalid(kind: str, *, top5_labeled: bool) -> _SideOutcome:
@@ -191,7 +194,20 @@ def _run_side(route_fn: RouteFn, view: _CaseView) -> _SideOutcome:
         top5_labeled=bool(view.expected_sources),
         external_calls=int(calls) if isinstance(calls, int | float) and not isinstance(calls, bool) else 0,
         duration_ms=float(duration) if isinstance(duration, int | float) and not isinstance(duration, bool) else 0.0,
+        answered=_answered_from(outcome.get("answerability")),
     )
+
+
+#: 只有这两种判定算"给出了答案"。``clarification_required``/``permission_limited`` 是没有答案的
+#: 固定文案；``answerable_with_warning`` 是有历史证据时的限定回答，仍算作答。
+_ANSWERED_KINDS = frozenset({"answerable", "answerable_with_warning"})
+
+
+def _answered_from(kind: object) -> bool | None:
+    """Fold one ``decision.kind`` into "did this side answer?"; ``None`` = no decision readable."""
+    if not isinstance(kind, str) or not kind:
+        return None
+    return kind in _ANSWERED_KINDS
 
 
 @dataclass(frozen=True)
@@ -232,6 +248,7 @@ def _side_to_dict(outcome: _SideOutcome) -> dict:
         "external_calls": outcome.external_calls,
         "duration_ms": outcome.duration_ms,
         "error": outcome.error,
+        "answered": outcome.answered,
     }
 
 
@@ -363,6 +380,21 @@ def evaluate_on_benchmark(
     route_ok = route_drop_pp <= ROUTE_DELTA_MAX_PP
     top5_ok = (not top5_applicable) or top5_drop_pp <= TOP5_DELTA_MAX_PP
 
+    # 拒答护栏（2026-10-19，产品口径「证据不足就拒答」）：候选把基线**确实作答了**的问题变成拒答，
+    # 就是一次假拒答，直接判失败。这条不看基准标签，只看两侧行为的差，所以对任何语料都生效。
+    # 反方向（基线拒、候选答）只记录不判死：那可能正是修好了假拒答，也可能是放宽过度，要人看。
+    # 判定读不到的用例（answered is None）两个方向都不计——读不到不是作答，也不能当拒答。
+    refusal_escapes = [
+        view.case_id
+        for view, (baseline, candidate_side) in zip(views, pairs, strict=True)
+        if baseline.answered is True and candidate_side.answered is False
+    ]
+    refusal_misses = [
+        view.case_id
+        for view, (baseline, candidate_side) in zip(views, pairs, strict=True)
+        if baseline.answered is False and candidate_side.answered is True
+    ]
+
     reasons: list[str] = []
     if not route_ok:
         reasons.append(
@@ -373,6 +405,11 @@ def evaluate_on_benchmark(
         reasons.append(
             f"top-5 hit dropped {top5_drop_pp:.1f}pp beyond {-TOP5_DELTA_MAX_PP:.1f}pp "
             f"(regressed cases: {_listed(top5_regressions)})"
+        )
+    if refusal_escapes:
+        reasons.append(
+            f"candidate refused {len(refusal_escapes)} answer(s) the baseline gave "
+            f"(cases: {_listed(refusal_escapes)})"
         )
     if candidate_errors:
         reasons.append(
@@ -406,6 +443,8 @@ def evaluate_on_benchmark(
             and baseline.route != candidate_side.route,
             "route_regressed": baseline.route_correct and not candidate_side.route_correct,
             "route_improved": candidate_side.route_correct and not baseline.route_correct,
+            "refusal_escaped": baseline.answered is True and candidate_side.answered is False,
+            "refusal_recovered": baseline.answered is False and candidate_side.answered is True,
             "top5_regressed": baseline.top5_hit is True and candidate_side.top5_hit is not True,
             "top5_improved": candidate_side.top5_hit is True and baseline.top5_hit is not True,
         }
@@ -420,6 +459,8 @@ def evaluate_on_benchmark(
         "top5_delta_pp": top5_delta_pp,
         "route_regressions": route_regressions,
         "top5_regressions": top5_regressions,
+        "refusal_escapes": refusal_escapes,
+        "refusal_misses": refusal_misses,
         "improvements": improvements,
         "external_calls_delta": candidate_stats.external_calls - baseline_stats.external_calls,
         "thresholds": {

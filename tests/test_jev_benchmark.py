@@ -216,9 +216,18 @@ def test_multi_turn_advisory_checks_never_read_as_pass():
 
 
 def test_single_turn_checks_are_not_marked_advisory():
+    """单轮档的 p50/p95/rewrite/route/top5 都是硬判据。
+
+    ``refusal`` 是唯一例外，而且只在**这批用例没有答案位置标签**时才是 advisory：
+    没测不等于测过且通过。带标签时它是硬判据，见 test_jev_benchmark_position.py。
+    """
     verdict = evaluate_acceptance(old=metrics(), new=metrics())
 
-    assert all(not check.advisory for check in verdict.checks)
+    hard = {check.name for check in verdict.checks if not check.advisory}
+    assert hard == {"executed", "p50", "p95", "rewrite", "route", "top5"}
+    refusal = next(check for check in verdict.checks if check.name == "refusal")
+    assert refusal.advisory is True
+    assert refusal.passed is True
 
 
 def test_rewrite_rate_threshold_handles_zero_baseline():

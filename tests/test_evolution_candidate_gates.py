@@ -43,6 +43,8 @@ PER_CASE_KEYS = {
     "route_improved",
     "top5_regressed",
     "top5_improved",
+    "refusal_escaped",
+    "refusal_recovered",
 }
 SIDE_KEYS = {
     "route",
@@ -52,6 +54,7 @@ SIDE_KEYS = {
     "external_calls",
     "duration_ms",
     "error",
+    "answered",
 }
 STATS_KEYS = {
     "cases",
@@ -61,6 +64,8 @@ STATS_KEYS = {
     "top5_delta_pp",
     "route_regressions",
     "top5_regressions",
+    "refusal_escapes",
+    "refusal_misses",
     "improvements",
     "external_calls_delta",
     "thresholds",
@@ -176,19 +181,27 @@ def gate_case(case_id, *, expected_route="rag", sources=("压测.md",), category
     }
 
 
-def route_fn(routes, *, sources=None, error_on=(), external_calls=0, duration_ms=0.0):
-    """A deterministic route callable shaped like the gate's injection contract."""
+def route_fn(routes, *, sources=None, error_on=(), external_calls=0, duration_ms=0.0, answerability=None):
+    """A deterministic route callable shaped like the gate's injection contract.
+
+    ``answerability`` maps question -> ``prepared["decision"].kind``; a question missing from it
+    reports no decision at all (the legacy path builds no evidence bundle).
+    """
     sources = sources or {}
+    answerability = answerability or {}
 
     def route(question, kb_id):
         if question in error_on:
             raise RuntimeError("jev unavailable")
-        return {
+        outcome = {
             "route": routes[question],
             "sources": list(sources.get(question, ())),
             "external_calls": external_calls,
             "duration_ms": duration_ms,
         }
+        if question in answerability:
+            outcome["answerability"] = answerability[question]
+        return outcome
 
     return route
 
@@ -561,6 +574,75 @@ def test_cases_without_expected_sources_skip_the_top5_check():
     assert by_case["structured-001"]["baseline"]["top5_hit"] is None
     assert by_case["structured-001"]["candidate"]["top5_hit"] is None
     assert by_case["structured-001"]["top5_regressed"] is False
+
+
+def test_a_candidate_that_turns_answers_into_refusals_fails_the_gate():
+    """证据不足就拒答是对的；把能答的问题也拒掉不是。
+
+    这条判据不看基准标签，只看两侧行为的差：基线侧给出了答案（``answerable``），候选侧同一条
+    用例却拒答（``insufficient_evidence``）⇒ 失败。它是候选 #30 那类改动的护栏——候选放宽或
+    收紧 ``contains_answer_evidence`` 的措辞时，最容易的"改善"就是把拒答率调上去。
+    """
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 7)]
+    routes, sources = correct_routes(cases)
+    baseline_answerability = {case["id"]: "answerable" for case in cases}
+    candidate_answerability = dict(baseline_answerability)
+    candidate_answerability["rag-003"] = "insufficient_evidence"
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(routes, sources=sources, answerability=baseline_answerability),
+        route_fn(routes, sources=sources, answerability=candidate_answerability),
+        cases,
+    )
+
+    assert result.passed is False
+    assert result.stats["refusal_escapes"] == ["rag-003"]
+    assert result.stats["refusal_misses"] == []
+    assert "candidate refused 1 answer(s) the baseline gave" in result.verdict
+    assert "rag-003" in result.verdict
+    # 路由与 Top-5 都没动：这条失败**只**由拒答护栏产生，否则测不出它自己的牙。
+    assert result.stats["route_delta_pp"] == 0.0
+    assert result.stats["top5_delta_pp"] == 0.0
+
+
+def test_a_candidate_that_answers_more_than_the_baseline_is_recorded_not_rejected():
+    """候选少拒答一次：可能正是修好了假拒答，也可能放宽过度——记录给人看，不自动判死。"""
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 5)]
+    routes, sources = correct_routes(cases)
+    baseline_answerability = {case["id"]: "insufficient_evidence" for case in cases}
+    candidate_answerability = dict(baseline_answerability)
+    candidate_answerability["rag-002"] = "answerable"
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(routes, sources=sources, answerability=baseline_answerability),
+        route_fn(routes, sources=sources, answerability=candidate_answerability),
+        cases,
+    )
+
+    assert result.passed is True
+    assert result.stats["refusal_misses"] == ["rag-002"]
+    assert result.stats["refusal_escapes"] == []
+
+
+def test_an_unreadable_decision_is_not_counted_as_answering():
+    """没有判定可读（旧路径、或 provider 没回判定）时不能算作"作答了"。"""
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 4)]
+    routes, sources = correct_routes(cases)
+    baseline_answerability = {case["id"]: "answerable" for case in cases}
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(routes, sources=sources, answerability=baseline_answerability),
+        route_fn(routes, sources=sources),  # 候选侧完全没有判定
+        cases,
+    )
+
+    # 读不到 ≠ 给出了答案：不能把它算成"拒答滥用"，也不能算成"候选更少拒答"。
+    assert result.stats["refusal_escapes"] == []
+    assert result.stats["refusal_misses"] == []
+    assert result.passed is True
 
 
 def test_evaluate_requires_a_non_empty_case_set():

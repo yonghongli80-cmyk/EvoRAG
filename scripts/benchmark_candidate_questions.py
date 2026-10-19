@@ -323,11 +323,19 @@ def build_gate_callables(
 
     def route(question: str, kb_id_: str) -> Mapping[str, Any]:
         outcome = jev_prepare(index[question])
+        answerability = outcome.answerability
+        if answerability is None and outcome.route == "structured":
+            # 结构化澄清是"追问"：没有 decision 可读，但设计上就没有给出答案。
+            # 交给门禁一个明确的未作答，而不是让它把读不到的形态当成"答了"。
+            answerability = "clarification_required"
         return {
             "route": outcome.route,
             "sources": list(outcome.source_names),
             "external_calls": outcome.external_calls,
             "duration_ms": outcome.preparation_ms,
+            # 层 2 的拒答护栏要读它：候选是否把基线答得出来的问题变成了拒答。
+            # 这里传的是判定层自己的结论（``decision.kind``），不是从 route 猜的。
+            "answerability": answerability,
         }
 
     def baseline_route(question: str, kb_id_: str) -> Mapping[str, Any]:

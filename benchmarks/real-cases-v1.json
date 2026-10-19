@@ -96,7 +96,8 @@
     "kb_id": "kb_hr",
     "expected_source_names": [],
     "category": "special",
-    "notes": "内容缺口：库内无招聘数据表（与 real-008 同源），因此只计路由。"
+    "expected_position": "refuse",
+    "notes": "内容缺口：库内无招聘数据表（与 real-008 同源），因此只计路由。答案位置：证据不足必须拒答。"
   },
   {
     "id": "real-013",
@@ -132,7 +133,8 @@
     "kb_id": "kb_accessories",
     "expected_source_names": [],
     "category": "ordinary",
-    "notes": "内容缺口：R50 行确实在 accessory-models.xlsx/camera-battery-charger.xlsx，但价格列全部是 <金额> 脱敏占位符，价格不可答，因此只计路由。"
+    "expected_position": "refuse",
+    "notes": "内容缺口：R50 行确实在 accessory-models.xlsx/camera-battery-charger.xlsx，但价格列全部是 <金额> 脱敏占位符，价格不可答，因此只计路由。答案位置：证据不足必须拒答。"
   },
   {
     "id": "real-018",
@@ -141,7 +143,8 @@
     "kb_id": "kb_accessories",
     "expected_source_names": [],
     "category": "ordinary",
-    "notes": "同 real-017（『原厂』限定不改变脱敏事实）。"
+    "expected_position": "refuse",
+    "notes": "同 real-017（『原厂』限定不改变脱敏事实）。答案位置：证据不足必须拒答。"
   },
   {
     "id": "real-019",
@@ -159,7 +162,8 @@
     "kb_id": "kb_accessories",
     "expected_source_names": ["lens-hood-price-redacted.xlsx", "camera-parameters-excerpt.xlsx"],
     "category": "special",
-    "notes": "证据：lens-hood-price-redacted.xlsx 按品牌列第三方（适马/腾龙）遮光罩型号，camera-parameters-excerpt.xlsx#4 有『理光副厂品牌参数镜头』表。2026-09-29 复测：基线对这条答 insufficient_evidence（内容存在却未被采用），是本语料的判别样本。"
+    "expected_position": "answer",
+    "notes": "证据：lens-hood-price-redacted.xlsx 按品牌列第三方（适马/腾龙）遮光罩型号，camera-parameters-excerpt.xlsx#4 有『理光副厂品牌参数镜头』表。2026-09-29 复测：基线对这条答 insufficient_evidence（内容存在却未被采用），是本语料的判别样本。答案位置：内容存在必须作答——假拒答在这里是错误，不是保守。"
   },
   {
     "id": "real-021",

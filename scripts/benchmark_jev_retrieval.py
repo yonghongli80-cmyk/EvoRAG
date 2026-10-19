@@ -33,6 +33,16 @@ ROUTE_EXPECTATIONS = {
     "clarification": "clarification",
 }
 
+#: 答案位置：接住这个请求之后**该不该作答**。与 ``expected_route`` 正交——路由说"哪条链路"，
+#: 位置说"有没有给出答案"。产品口径（2026-10-19）：证据不足就拒答是正确行为；因此
+#: 该作答却拒答（假拒答）与该拒答却作答（幻觉风险）都必须能被记成错，而在此之前
+#: 基准里没有任何一档表达它（``ROUTE_EXPECTATIONS`` 只有四个链路标签）。
+ANSWER_POSITIONS = ("answer", "refuse")
+
+#: 只有这几种判定算"给出了答案"。``clarification_required``/``permission_limited`` 都是
+#: 没有答案的固定文案；``answerable_with_warning`` 是有历史证据时的限定回答，仍算作答。
+_ANSWERED_KINDS = frozenset({"answerable", "answerable_with_warning"})
+
 _REQUIRED_CASE_FIELDS = ("id", "question", "expected_route", "kb_id")
 
 
@@ -45,6 +55,9 @@ class BenchmarkCase:
     expected_source_names: tuple[str, ...] = ()
     notes: str = ""
     category: str = "ordinary"
+    #: 接住请求之后该不该作答：``"answer"`` / ``"refuse"`` / ``""``（不记分）。
+    #: 缺省空串让既有用例逐字节仍然合法；一旦给出，就必须是本模块认识的取值。
+    expected_position: str = ""
     #: 多轮用例的**先行轮次**，按时间顺序：`(("user", "…"), ("assistant", "…"), …)`。
     #: 空元组 = 单轮（既有 20 例全是这种，所以旧用例文件逐字节仍然合法）。
     #: 它测的是"指代补全"：问题本身没有先行词（"它呢？"），能不能答对取决于前面那几轮。
@@ -79,6 +92,9 @@ class PreparationOutcome:
     external_calls: int = 0
     end_to_end_ms: float | None = None
     failure: str | None = None
+    #: ``prepared["decision"].kind``：这条请求最后**有没有给出答案**。``None`` = 没有判定
+    #: （旧路径不建 evidence bundle，崩溃的请求也没有），此时"该不该作答"不记分。
+    answerability: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +111,18 @@ class Sample:
     rewrite_called: bool
     external_calls: int
     failure: str | None
+    #: 该次采样的判定：``answerable`` 等；``None`` = 没有判定可读。
+    answerability: str | None = None
+    #: 用例期望的位置，与 ``BenchmarkCase.expected_position`` 同义，便于聚合时逐条比较。
+    expected_position: str = ""
+    #: 这次请求是否真的给出了答案（由 :attr:`answerability` 折算）。
+    answered: bool = False
+    #: 已知"没有给出答案"、且这是设计上的正确形态（结构化澄清的追问）。
+    #: 它和"判定说 insufficient_evidence"一样不计作答，但必须出现在分母里——否则
+    #: 一次追问会被错误地留在分母之外，把假拒答统计成"没测"。
+    known_unanswered: bool = False
+    #: 用例带 ``expected_position`` 时才有：位置是否与期望一致（否则 ``None``，不进分母）。
+    position_correct: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +151,13 @@ class PathMetrics:
     ordinary_sample_count: int = 0
     end_to_end_p50_ms: float | None = None
     end_to_end_p95_ms: float | None = None
+    #: 带 ``expected_position`` 的采样数。0 = 这批用例没有答案位置标签，位置判据不适用。
+    refusal_case_count: int = 0
+    #: 期望拒答却作答：幻觉风险，一律算错。
+    refusal_escapes: int = 0
+    #: 期望作答却拒答：假拒答，一律算错。
+    refusal_misses: int = 0
+    position_accuracy: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -241,6 +276,10 @@ def _metrics_to_dict(metrics: PathMetrics) -> dict[str, Any]:
         "failed_calls": metrics.failed_calls,
         "end_to_end_p50_ms": metrics.end_to_end_p50_ms,
         "end_to_end_p95_ms": metrics.end_to_end_p95_ms,
+        "refusal_case_count": metrics.refusal_case_count,
+        "refusal_escapes": metrics.refusal_escapes,
+        "refusal_misses": metrics.refusal_misses,
+        "position_accuracy": metrics.position_accuracy,
     }
 
 
@@ -263,6 +302,9 @@ def load_cases(path: str | Path) -> tuple[BenchmarkCase, ...]:
         category = entry.get("category", "ordinary")
         if category not in CASE_CATEGORIES:
             raise ValueError(f"unknown category for {case_id}: {category}")
+        position = entry.get("expected_position") or ""
+        if position and position not in ANSWER_POSITIONS:
+            raise ValueError(f"unknown expected_position for {case_id}: {position}")
         cases.append(
             BenchmarkCase(
                 id=case_id,
@@ -272,6 +314,7 @@ def load_cases(path: str | Path) -> tuple[BenchmarkCase, ...]:
                 expected_source_names=tuple(entry.get("expected_source_names") or ()),
                 notes=entry.get("notes", ""),
                 category=category,
+                expected_position=position,
                 history=_load_history(case_id, entry.get("history")),
             )
         )
@@ -356,6 +399,14 @@ def compute_metrics(samples: Sequence[Sample]) -> PathMetrics:
         by_category.setdefault(sample.category, []).append(sample)
 
     ordinary = [sample for sample in successful if sample.category == "ordinary"]
+    # 答案位置只统计**有判定可读的成功采样**：崩溃的请求已经由 route 判据算错，不能
+    # 再被重复记成"假拒答"；没有判定（旧路径）的采样既不进分子也不进分母。
+    scored_position = [sample for sample in successful if sample.position_correct is not None]
+    # 期望拒答却作答 = 幻觉风险；期望作答却拒答 = 假拒答。两者都必须能被分开看见，
+    # 所以它们由 ``Sample.expected_position`` 与 ``Sample.answered`` 直接比较得出，
+    # 而不是从 "answerability 是否为 None" 反推。
+    escapes = sum(1 for sample in scored_position if sample.expected_position == "refuse" and sample.answered)
+    misses = sum(1 for sample in scored_position if sample.expected_position == "answer" and not sample.answered)
     if preparation:
         latency = summarize(preparation)
         p50_ms, p95_ms = latency.p50_ms, latency.p95_ms
@@ -382,6 +433,10 @@ def compute_metrics(samples: Sequence[Sample]) -> PathMetrics:
         },
         end_to_end_p50_ms=summarize(end_to_end).p50_ms if end_to_end else None,
         end_to_end_p95_ms=summarize(end_to_end).p95_ms if end_to_end else None,
+        refusal_case_count=len(scored_position),
+        refusal_escapes=escapes,
+        refusal_misses=misses,
+        position_accuracy=_rate(sum(1 for s in scored_position if s.position_correct), len(scored_position)),
     )
 
 
@@ -477,13 +532,50 @@ def evaluate_acceptance(
             new.top5_hit_rate >= top5_floor,
             f"Top-5 hit rate {new.top5_hit_rate:.3f} vs floor {top5_floor:.3f} (old {old.top5_hit_rate:.3f}, max loss 2pp)",
         ),
+        _refusal_check(new),
     )
     failures = tuple(check.name for check in checks if not check.passed and not check.advisory)
     return AcceptanceVerdict(passed=not failures, failures=failures, checks=checks)
 
 
+def _refusal_check(new: PathMetrics) -> AcceptanceCheck:
+    """答案位置判据：该拒答却作答、该作答却拒答，都不允许出现。
+
+    产品口径（2026-10-19）是"证据不足就拒答"。这两个计数把这条口径变成可验收的东西，
+    但它们只在用例真的带了 ``expected_position`` 时才有意义：一条都没有时判据是
+    **advisory**（报告里能看到，但不能因为它失败），因为"没测"不等于"测过且通过"。
+    """
+    if new.refusal_case_count == 0:
+        return AcceptanceCheck(
+            "refusal",
+            True,
+            "no case carries expected_position; answer position not scored in this set",
+            advisory=True,
+        )
+    detail = (
+        f"answer position {new.position_accuracy:.3f} over {new.refusal_case_count} sample(s); "
+        f"answered where a refusal was required: {new.refusal_escapes}, "
+        f"refused where an answer was required: {new.refusal_misses}"
+    )
+    return AcceptanceCheck(
+        "refusal",
+        new.refusal_escapes == 0 and new.refusal_misses == 0,
+        detail,
+    )
+
+
+def _answered(answerability: str | None) -> bool:
+    """Did this request actually produce an answer?
+
+    ``clarification_required`` and ``permission_limited`` are fixed copy that give **no** answer,
+    so they are not answering. ``answerable_with_warning`` does answer (with historical evidence).
+    """
+    return answerability in _ANSWERED_KINDS
+
+
 def _sample_from(case: BenchmarkCase, path: str, outcome: PreparationOutcome) -> Sample:
     expected_domain = ROUTE_EXPECTATIONS[case.expected_route]
+    position = case.expected_position
     if outcome.failure is not None:
         return Sample(
             case_id=case.id,
@@ -506,6 +598,20 @@ def _sample_from(case: BenchmarkCase, path: str, outcome: PreparationOutcome) ->
         expected = set(case.expected_source_names)
         top1_hit = bool(names) and names[0] in expected
         top5_hit = any(name in expected for name in names[:5])
+    answered = _answered(outcome.answerability)
+    # 结构化澄清是"追问"：设计上就没有给出答案，但没有 ``decision`` 可读。
+    # 2026-10-19 实测 ``找一下副厂配件明细`` 会落到这里（5 个来源、answerability=None）。
+    # 它是已知的未作答，必须进分母；而"既无判定、又不是已知未作答"的形态读不出来，不进分母。
+    known_unanswered = outcome.answerability is None and outcome.route == "structured"
+    scorable = outcome.answerability is not None or known_unanswered
+    # 没有答案位置标签的用例不记位置；有的用例必须有可读的位置判定，否则"读不到"会被
+    # 悄悄记成"拒答"或"作答"——那正是这类记分最容易出现偏差的地方。
+    if position and not scorable:
+        raise ValueError(
+            f"case {case.id} carries expected_position={position!r} but the path reported "
+            f"no answerability decision and no known-unanswered route (route={outcome.route!r})"
+        )
+    position_correct = (("answer" if answered else "refuse") == position) if (position and scorable) else None
     return Sample(
         case_id=case.id,
         path=path,
@@ -519,6 +625,11 @@ def _sample_from(case: BenchmarkCase, path: str, outcome: PreparationOutcome) ->
         rewrite_called=outcome.rewrite_called,
         external_calls=outcome.external_calls,
         failure=None,
+        answerability=outcome.answerability,
+        expected_position=position,
+        answered=answered,
+        known_unanswered=known_unanswered,
+        position_correct=position_correct,
     )
 
 
@@ -845,6 +956,10 @@ def build_live_preparations(
             source_names=source_names,
             rewrite_called=counters["rewrite"] > 0,
             external_calls=sum(counters.values()),
+            # 判定层的结论本来就在 prepared 上（``_finalize_rag_context`` 写入，SSE 的
+            # ``done.reliability`` 也是它）。基准此前只取走它的路由与来源，把这个"到底有没有
+            # 给出答案"的结论丢掉了，于是"该作答却拒答"在数字里根本不存在。
+            answerability=_answerability_kind(prepared),
         )
 
     def old(
@@ -864,6 +979,19 @@ def build_live_preparations(
         return prepare(case, jev_path=True, session_id=session_id, history_turns=history_turns)
 
     return old, new
+
+
+def _answerability_kind(prepared: dict) -> str | None:
+    """The answerability decision of one prepared request, or ``None`` when none was made.
+
+    Reads the same object the SSE ``done.reliability`` payload is built from, so the benchmark
+    and the endpoint cannot disagree about whether a request was answered. Only the ``rag``
+    preparation path builds an evidence bundle; structured/tool/fixed answers carry no such
+    decision and stay ``None`` rather than being guessed.
+    """
+    decision = (prepared or {}).get("decision")
+    kind = getattr(decision, "kind", None)
+    return kind if isinstance(kind, str) and kind else None
 
 
 def _routing_domain(prepared: dict) -> str:

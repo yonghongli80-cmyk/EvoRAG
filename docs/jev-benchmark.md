@@ -56,10 +56,40 @@ python -m uvicorn rag.api:app --host 127.0.0.1 --port 1102
 | 普通问题 DeepSeek 改写调用 | 减少 ≥ 70% | 按 `category=ordinary` 用例的改写率比较；旧链路基线为无条件改写，整体改写率同时报告 |
 | 路由准确率 | ≥ 95% | 新路径；按期望路由域（rag/structured/tool/clarification）判定，记录的是路由决策而非最终答复形态 |
 | Top-5 证据命中率 | 相对旧链路下降 ≤ 2 个百分点 | 仅统计声明了期望来源的用例 |
+| 答案位置（refusal） | 该拒答却作答 = 0，且该作答却拒答 = 0 | 仅统计声明了 `expected_position` 的用例；一条都没有时该判据为 advisory（"没测"不等于"测过且通过"） |
 | 权限与提示注入测试 | 全部通过 | 由测试套件保证，不属于本基准 |
 | Jev 故障降级测试 | 全部通过 | 由测试套件保证，不属于本基准 |
 
 退出码：全部阈值通过为 0，任一失败为 1。不得下调阈值让报告通过。
+
+### 3.0.1 答案位置：为什么它必须单独记分（2026-10-19）
+
+路由标签只有 `rag/structured/tool/clarification` 四档，`route_correct` 只比较链路。所以一次
+"检索到了、判定说证据不足、于是拒答"**不改变任何路由分**——无论它该发生还是不该发生。
+产品口径是"证据不足就拒答"，但在这条口径下，"该作答却拒答"（假拒答）与"该拒答却作答"
+（幻觉风险）此前都进不了数字。
+
+用例因此多了一个**正交**字段 `expected_position`（`answer` / `refuse` / 缺省不记分）：
+
+```json
+{"id": "real-020", "expected_route": "rag", "expected_position": "answer", ...}
+{"id": "real-017", "expected_route": "rag", "expected_position": "refuse", ...}
+```
+
+记分口径（判定来源是 `prepared["decision"].kind`，与 SSE `done.reliability.answerability_kind` 同源）：
+
+| 判定 | 算"给出了答案"吗 | 理由 |
+| --- | --- | --- |
+| `answerable` | 是 | — |
+| `answerable_with_warning` | 是 | 有历史证据时的限定回答 |
+| `insufficient_evidence` | 否 | 固定拒绝文案 |
+| `clarification_required` / `permission_limited` | 否 | 追问 / 权限提示，都没有答案 |
+| 结构化澄清（`route=structured`、无 `decision`） | 否 | "请指明字段"是追问，记为**已知未作答**并进分母 |
+| 其他"读不到判定"的形态 | — | 带标签时**直接报错**，不替它下结论 |
+
+层 2 候选门禁有同方向的护栏：候选把基线**确实作答了**的用例变成拒答，直接判失败
+（`refusal_escapes`）；反方向（基线拒、候选答）只记录（`refusal_misses`），因为那既可能是
+修好了假拒答，也可能是放宽过度，需要人看。
 
 ## 3.1 本轮实测结论（2026-09-22，20 用例 × 每路径 5 次 + 1 次预热）
 
