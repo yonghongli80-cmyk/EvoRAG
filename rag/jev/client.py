@@ -52,6 +52,10 @@ _PASSAGE_SUFFIXES = (
 # Exceptions that normalize into a failure kind; anything else is a bug and must surface.
 _RECOVERABLE_ERRORS = (TypeSafeError, ValidationError, KeyError, TypeError, AttributeError)
 
+#: 段落判断的"有答案证据"判定线，与 ``JevPolicy.evidence_threshold`` 的默认值一致。
+#: 投票只在这里用它**数票**，不改它：命中与否仍是同一个 0.5 阈值，变的只是"用一次采样还是多数采样"。
+_DEFAULT_EVIDENCE_THRESHOLD = 0.5
+
 
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000.0
@@ -104,19 +108,110 @@ class JevClient:
     def judge_passages(
         self, state: dict, chunk_ids: list[str]
     ) -> JevBatchResult[tuple[PassageJudgment, ...]]:
-        """Judge ACL-visible candidate passages in one batched request."""
+        """Judge ACL-visible candidate passages in one batched request.
+
+        The verdict for each passage is the **majority over repeated samples**, because a single
+        sample is not stable on this model: measured 2026-10-19 on one fixed 12-chunk pool, the
+        decisive passage scored 0.50 / 0.52 / 0.49 / 0.54 / 0.50 against the 0.5 threshold —
+        ±0.03 of noise decided whether the request answered or refused. That is a sampling
+        problem, not a threshold problem: the fix repeats the sample and takes the vote, and it
+        does not touch the threshold.
+
+        An unanimous first round costs exactly one call, so the ordinary case keeps its latency.
+        A tie after the allowed rounds is reported as ``unstable`` instead of being dressed up as
+        a verdict.
+        """
         if not chunk_ids:
             return JevBatchResult(available=False, failure_kind="invalid_response", duration_ms=0.0)
         resolved = self._resolve_question_set("passages", chunk_ids)
         if isinstance(resolved, JevBatchResult):
             return resolved
         questions, version = resolved
-        return self._run(
-            "passages",
-            state,
-            questions,
-            lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms, version),
-        )
+        rounds = max(1, int(settings.jev_vote_rounds))
+        if rounds == 1:
+            return self._run(
+                "passages",
+                state,
+                questions,
+                lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms, version),
+            )
+        return self._run_vote(state, questions, chunk_ids, version, rounds)
+
+    def _run_vote(
+        self,
+        state: dict,
+        questions: Mapping[str, Question],
+        chunk_ids: list[str],
+        version: str,
+        rounds: int,
+    ) -> JevBatchResult[tuple[PassageJudgment, ...]]:
+        """Repeated passage sampling with a majority vote per chunk.
+
+        Votes are counted on the **verdict** of each chunk (does it carry answer evidence), not on
+        the score: averaging sub-threshold scores would silently move the threshold, while voting
+        over the same predicate leaves the threshold exactly where it is.
+
+        * A round that fails does not vote. If every round fails, the whole call fails with the
+          last failure kind — a transient outage must not be recorded as "no evidence".
+        * Sampling stops as soon as one verdict is mathematically decided (no wasted calls). A tie
+          is **not** decided early: it is the "we cannot tell" state, and freezing it would throw
+          away a round that could have settled it.
+        * A chunk still tied when the budget runs out is decided as **not evidence** — the same
+          direction as "refuse when the evidence is short". The product decision (2026-10-19) was
+          to spend one more call rather than return no verdict at all, so this never returns
+          ``unstable``; the tie-break is deterministic (same input, same answer), not a coin toss.
+        * The returned judgments are the **latest round's real scores**; the vote only decides
+          whether that round is representative. Nothing is fabricated: a score is never rewritten
+          to 0.5 or 0.0 to fit the verdict, and a tie-broken chunk is reported in the log.
+        """
+        totals_ms = 0.0
+        failures: list[str] = []
+        yes = [0] * len(chunk_ids)
+        no = [0] * len(chunk_ids)
+        latest: list[PassageJudgment] | None = None
+        unsettled = list(range(len(chunk_ids)))
+        # 预判不占段落投票的预算：``jev_vote_rounds`` 是"段落采样几轮"。
+        # （早期实现按"本请求总采样数"扣减，于是预判一跑就只剩两轮，平票永远投不满第三票。）
+        budget = max(1, rounds)
+        for _round_index in range(budget):
+            result = self._run(
+                "passages",
+                state,
+                questions,
+                lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms, version),
+            )
+            totals_ms += result.duration_ms
+            if not result.available or result.value is None:
+                failures.append(result.failure_kind or "invalid_response")
+                break
+            latest = list(result.value)
+            remaining = budget - _round_index - 1
+            still_open: list[int] = []
+            for index in unsettled:
+                if latest[index].answer_evidence >= _DEFAULT_EVIDENCE_THRESHOLD:
+                    yes[index] += 1
+                else:
+                    no[index] += 1
+                # 剩下的轮次还能翻盘吗？能就继续投；平票同样继续——平票是"拿不准"，
+                # 不是"已定"，提前把它按未命中锁死就等于放弃了本来可以拿到的一票。
+                decided = yes[index] > no[index] + remaining or no[index] > yes[index] + remaining
+                if not decided:
+                    still_open.append(index)
+            unsettled = still_open
+            if not unsettled:
+                break
+        if latest is None:
+            kind = failures[-1] if failures else "service"
+            return JevBatchResult(available=False, failure_kind=kind, duration_ms=totals_ms)
+        tied = [index for index in range(len(chunk_ids)) if yes[index] == no[index]]
+        if tied:
+            # 平票按"未命中"裁决：拿不准就不作答，与"证据不足就拒答"同向。
+            logger.info(
+                "Jev passages: %d/%d chunk(s) tied, decided as no answer evidence",
+                len(tied),
+                len(chunk_ids),
+            )
+        return JevBatchResult(available=True, value=tuple(latest), duration_ms=totals_ms)
 
     def _resolve_question_set(
         self, stage: str, chunk_ids: Sequence[str] | None

@@ -9,7 +9,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 IntentKind = Literal["structured_query", "retrieval_qa", "tool_task", "clarification"]
 ComplexityKind = Literal["simple", "multi_step", "specialist"]
-JevFailureKind = Literal["disabled", "timeout", "rate_limited", "auth", "invalid_response", "service"]
+JevFailureKind = Literal[
+    "disabled",
+    "timeout",
+    "rate_limited",
+    "auth",
+    "invalid_response",
+    "service",
+    # 重复采样没能在轮数内形成多数（平票）：结论本身不稳定，不能拿来当判定。
+    # 它不是故障，是"这一批候选回答不了这个问题"的如实报告，因此不触发熔断。
+    "unstable",
+]
 
 
 class PreflightDecision(BaseModel):

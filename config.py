@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # 1.5s 会让临界响应触发 SDK 重试并放大 P95，故取 3.0s 并保留最多 1 次重试。
     jev_timeout_seconds: float = Field(default=3.0, gt=0.0, le=10.0)
     jev_route_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    # 段落判断的重复采样轮数（1 = 关闭投票）。
+    # 实测（2026-10-19）：同一候选池连判 5 轮，关键块的 answer_evidence 是
+    # 0.50/0.52/0.49/0.54/0.50——抖动只有 ±0.03 却横跨 0.5，于是"有没有答案证据"在同一输入上
+    # 抛硬币。单次调用约 0.3s，三轮投票约 +0.6s。预判**不占**这里的预算。
+    # 注意：投票只消除"同一候选池内的采样抖动"；候选池本身随检索变化时它不负责
+    # （实测「r50原厂电池价格」同一池三轮全为 YES，但跨请求的池不同，结论仍会分叉）。
+    jev_vote_rounds: int = Field(default=3, ge=1, le=9)
     jev_kb_allowlist: str = ""
 
     # Agent
