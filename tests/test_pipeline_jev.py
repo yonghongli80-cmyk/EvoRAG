@@ -272,6 +272,9 @@ def test_structured_clarification_yields_to_retrieval_evidence(active_jev):
     Measured 2026-10-19: `r50相关价格` began routing to the structured path once field names reached
     the judge, and the planner answered with "please name the field" — while the old path returned
     documents that do contain prices. **An answer** wins over the clarification.
+
+    这里必须打桩生成：可答路径会真的调用模型，而沙箱克隆里没有运维本地 `.env`
+    （2026-10-21 实测：不打桩时本用例在主树绿、在 `test_patch_sandbox` 的克隆里红）。
     """
     jev = MagicMock()
     jev.route.return_value = RouteDecision(
@@ -282,10 +285,12 @@ def test_structured_clarification_yields_to_retrieval_evidence(active_jev):
     pipeline = build_pipeline(jev)
     pipeline.retriever.retrieve.return_value = [chunk]
 
-    with patch.object(pipeline, "_attempt_structured_query", return_value=structured_clarification()):
+    with patch.object(pipeline, "_attempt_structured_query", return_value=structured_clarification()), \
+         patch("rag.pipeline.generate", return_value="r50 的价格是 67 元"):
         result = pipeline.query("r50相关价格")
 
     assert [source["doc_name"] for source in result.sources] == ["prices.md"]
+    assert result.answer == "r50 的价格是 67 元"
     assert result.answer != "请指明要统计的字段"
 
 
