@@ -1,6 +1,6 @@
 # RAGv3 统一修复计划（2026-10-21）
 
-> **状态：待评审，未实施。**
+> **状态：待评审，未实施（2026-10-21 16:10 补录：决策、文档审计与现场状态见 §11）。**
 > 本文把 `docs/handoff-2026-10-21-refusal-scoring-and-rewrite-instability.md` §3 的 9 项遗留，
 > 与 2026-10-21 全库审查发现合并成一份可执行清单。基线：`HEAD=89aff32`，工作树干净，
 > 后端收集 2313 个用例、前端 231 个用例通过、`ruff check .` 全绿、`/health` 正常。
@@ -342,3 +342,63 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
   但**在本文评审通过前不会恢复、不会提交**。
 - 恢复方式（评审后由我执行，不建议手工 pop）：
   `git stash pop`，再按 §7 拆成独立提交。
+
+---
+
+## 11. 2026-10-21 16:10 补录：决策、文档审计与现场状态
+
+### 11.1 已拍板 / 待拍板
+
+| 事项 | 状态 | 记录 |
+| --- | --- | --- |
+| Redis | **保留（已拍板）** | 现状：Compose 里是 `redis:7-alpine` + `REDIS_PASSWORD`；`rag/redis_cache.py` 提供 Redis + 内存降级，但**当前没有任何地方实例化 `RedisCache`**；答案缓存 `cached = None` 停用（`pipeline.py:501`）；在线真正用到 Redis 的是 LLM 池的分布式并发门（`rag/llm_pool/router.py:192`）。保留 Redis 不影响本计划；改写缓存默认**进程内**，不替换 Redis。若要跨进程共享改写缓存，可复用 Redis，但会把它变成改写路径的运行时依赖，待定。 |
+| 层 2 门禁 | **保留（按"保留"记录，待确认）** | 指保持"聚合零净变化可通过"的现状，不改 `candidate_gates.py` 的判定；另加逐例回归观察报告。若你的"保留"指别的，请纠正。 |
+| 双路重排 | **未拍板** | 你的口径是**效率优先、省钱不是重点**。据此我改推荐 `below_threshold`：默认单路（与今天同延迟），仅当改写句最高分 < 0.5 时补第二路——额外延迟只落在本来就可能被拒答的请求上。`always` 最稳但每条 RAG +1 次重排（约 +0.3s、2× rerank）。**单路本身不修复问题**（它就是现状）；"只用原问题重排"是零额外调用的替代，但多轮指代会退化，需评测。 |
+| 改写缓存后端 | **待定** | 进程内 LRU：零网络、最快；多 worker 各自缓存（双路重排保证结果不翻转）。Redis：跨进程一致、重启不丢，但每次改写多一跳。默认建议进程内。 |
+| 是否开工 | **暂停** | 阶段 0 文档已提交；阶段 1/2 实现只在 `stash@{0}`，等你确认后再落地。 |
+
+### 11.2 文档事实审计（只读，2026-10-21 16:02）
+
+| # | 文件:行 | 现状 | 事实 | 处理 |
+| --- | --- | --- | --- | --- |
+| 1 | `PROJECT_INTRODUCTION.md:7,403` | 模块化"尚未提交"、HEAD `32f2b7c`、api.py 2,834 行 | 已随 `fb68237` 入库；HEAD `89aff32`；api.py 791 物理 / 652 非空 | 文档修正 |
+| 2 | 同文 `:117` | user_db 3,723 / repositories 3,722 / 门面 521 | 当前 user_db 524 非空 / 713 物理；repositories 3,810 / 4,139 | 改为当前值，历史值标注 `32f2b7c` |
+| 3 | 同文 `:242,375` | 延迟导入 194→196，HEAD 208 | HEAD 实测 198；208 是重构前 | 修正 |
+| 4 | 同文 `:247` | "尚未经全量套件回归验证" | 与同文 `:377`（2,223 passed）自相矛盾 | 修正 |
+| 5 | 同文 `:377` | 2,223 passed 作为本轮核验 | 2026-10-18 旧数；最新交接为 2,313 passed（当前收集同） | 补两行口径 |
+| 6 | 同文 `:405` | 数值口径附录混用快照 | 见 #1–#3 | 重写为"历史/当前"两列 |
+| 7 | `README.md:70` | "上传数据已从 Docker 构建上下文排除" | `.dockerignore` **未排** `data/upload/`、`data/document_versions/`、`data/kb_files/`，而 `Dockerfile` 是 `COPY . .` | **安全项 P1-3**（见 §11.3），先改配置再改措辞 |
+| 8 | `README.md:7` | Node 22（Docker 只需 Compose） | CI 用 22，但 `Dockerfile` 前端阶段是 `node:20-alpine` | 措辞对齐 |
+| 9 | `README.md:42-49` | `ruff check . --select E9,F63,F7,F82` | CI 跑全量 `ruff check .` + `pip-audit`/`npm audit` | 命令与 CI 对齐 |
+| 10 | `docs/README.md:3,22,11/23,29` | 索引停在 08-19；只列 08-06 handoff；`superpowers/plans`（10-17）算当前、`plans`（含 10-19）算历史；归档标注要求未执行 | 实际 10 份 handoff，最新 10-21 未入索引；目录分类与日期倒挂；`docs/plans/` 14 个文件无一标注 | 重写索引与归档约定 |
+| 11 | `deployment.md:3` | "唯一的部署入口" | README 与 PROJECT_INTRODUCTION 也给完整步骤 | 改为"生产部署权威入口" |
+| 12 | `jev-benchmark.md:146-148` | "Top-5 ≥ 单轮基线 98%""判据落路由/改写率/时延" | 脚本无 98% 常量，floor = 旧链路 −2pp；多轮下改写率/时延是 advisory，硬判据是 executed/route/top5 | 与同文 `:188-191` 统一 |
+| 13 | `jev-benchmark.md:63` | "任一失败 exit 1" | advisory 失败不影响退出码 | 改为"硬判据" |
+| 14 | `scratch/README.md:4` | "不在 CI 里跑" | `ruff check .` 会扫 `scratch/*.py` | 改为"不执行但被 lint" |
+| 15 | `handoff-2026-10-21…:10` | "工作树干净（只剩未入库的 scratch/）" | scratch 已随 `89aff32` 全部入库（46 文件） | 修正交接措辞 |
+
+低优先级（未列入上表）：`deployment.md` 之外的引用、`docs/plans/` 逐文件归档标注；这些不与代码正确性冲突，可随文档修正一并处理。
+
+### 11.3 新增 P1-3：Docker 构建上下文可能带入用户数据（安全）
+
+- 事实：`.dockerignore` 排除了 `.env`、`*.db`、`qdrant_data/`、`data/charts/`、`data/structured_datasets/`、
+  `data/jwt_secret.txt`、`data/index_state.json`，但**没有** `data/upload/`、`data/document_versions/`、`data/kb_files/`；
+  `Dockerfile` 用 `COPY . .`。README 第 70 行却声称"上传数据已排除"。
+- 影响：生产 checkout 若残留用户上传件/版本文件，会被打进镜像并随镜像分发；`data/upload/` 目前还有 3 个
+  被 Git 跟踪的压测夹具（`压测.docx/md/pdf`）。
+- 难点：`Dockerfile` 的 `/app/repo_upload` 引导需要 `data/upload/.repo_files` 与 manifest 列出的仓库文件，
+  简单整目录排除会破坏该功能。
+- 可选方案：
+  1. `.dockerignore` 只放行 `.repo_files` + 明确白名单夹具（`!data/upload/.repo_files` 等），其余排除；
+  2. 构建前由部署脚本清理 `data/upload/` 并保留 manifest；
+  3. 取消镜像内的 repo_upload 引导，改为独立种子卷/对象存储。
+- 建议：先做 1（最小改动、保留引导），并把 README 措辞改为事实描述；方案 3 属架构调整，单独立项。
+- 验收：`docker build` 后用 `docker run --rm <image> find /app/data/upload -type f` 确认只剩 manifest/白名单。
+
+### 11.4 现场状态
+
+- `HEAD=ba25573`：仅新增本计划文档；工作树**干净**。
+- 阶段 1（计数修复）与阶段 2 的半成品都在 `stash@{0}`（12 文件 / 247 行），**未提交**；
+  `git stash list` 可见，`git stash show --stat 'stash@{0}'` 可核对（PowerShell 必须加单引号）。
+- 所有子代理已停止（inactive）；没有后台任务在跑。
+- 下一步只等三件事：双路重排模式、改写缓存后端、层 2"保留"的确认；确认后从阶段 1 开始。
