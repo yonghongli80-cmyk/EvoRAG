@@ -96,11 +96,13 @@
 | 基准里 route 0.150、外调 0 次，像系统崩了 | 漏了 `--user-id`：`user_id=None` 会让路由退化成 `clarification` | 跑基准**必须**带 `--user-id 1` |
 | 沙箱用例（`test_patch_sandbox.py`）突然红 | `cloned_repo` 是 `git clone`，**只含 HEAD**；未提交的修复不在克隆里 | 提交后再跑；别在未提交状态下把它当回归 |
 | 测试在主树绿、克隆里红 | 测试读了运维本地 `.env`（gitignored） | 测试自带 key（本轮已修 `test_rerank_uses_cached_client`） |
+| 把测试从"拒答路径"改成"作答路径"后，主树绿、沙箱红 | 作答路径会真的调用模型，克隆里没有 `.env` | 打桩 `rag.pipeline.generate`（2026-10-21 已修 `test_structured_clarification_yields_to_retrieval_evidence`） |
+| 沙箱红，明明已经"提交了" | 沙箱克隆 HEAD，而修的是**测试文件**：先跑沙箱再提交 ⇒ 克隆里还是旧测试 | 顺序必须是**先提交、再跑沙箱**；本轮我在这上面白跑了一轮 |
+| 改了判定措辞，真机仍回"资料不足"，像改动没生效 | 验证脚本复用了同一个 `session_id`，对话记忆把上一轮的拒答上下文带了进来 | 验证一次改动**必须换新 `session_id`**（或独立会话），否则测的是记忆不是改动 |
 | 基准两次跑数字不一样 | 判定器逐轮抖动（同题 confidence 0.19~0.61），基线两侧都会漂 | 看多次运行的**区间**，别拿单次差值当结论 |
 | 基准/沙箱/E2E 报 Qdrant 目录被占用 | Qdrant local 模式独占目录 | **先停服务**；E2E 脚本已加生产守卫（默认 exit 2） |
 | `POST /query` 问企业库只回"证据不足" | `QueryRequest` **没有 `kb_id` 字段**，同步端点按契约只服务 `rag_docs` | 企业问答走 `/query/stream`（`StreamQueryRequest` 才有 `kb_id`）。**我差点改错这个接口**，见 16f29cc |
 | 判断"某个能力坏了"之前 | 本轮两次教训：反链跨库、同步端点 kb_id —— 读接口定义再下结论 | CLAUDE.md 第 1 条：先查文档/签名，再动手 |
-| 改了判定措辞，真机仍回"资料不足"，像改动没生效 | 验证脚本复用了同一个 `session_id`，对话记忆把上一轮的拒答上下文带了进来 | 验证一次改动**必须换新 `session_id`**（或独立会话），否则测的是记忆不是改动 |
 | `ruff check .` 突然报错，但产品代码没动 | `scratch/` 下的临时探查脚本未 gitignore | 要么清理，要么只在提交产品文件时忽略它们；别把"ruff 全绿"当成 `git status` 干净 |
 
 ## 4. 接手验证（约 40 分钟，含全量套件）
