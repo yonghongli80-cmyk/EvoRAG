@@ -157,3 +157,43 @@ answered where a refusal was required: 0, refused where an answer was required: 
    属于新的检索/路由缺陷，不在本计划范围。
 3. **`real-012/018` 的判据在抖动**：三轮里 `insufficient_evidence` 与 `answerable` 交替出现，
    与判定器逐轮抖动是同一个根因。
+
+---
+
+## 6. 后续更正与追加（2026-10-21）
+
+### 6.1 对 §5.5 第 2 条的更正（我的归因错了）
+
+"`real-020` 稳定落到结构化澄清"**不成立**。逐层追踪（`_attempt_structured_query` →
+`_is_structured_clarification` → `_finalize_rag_context` 全部打点）显示：
+
+- `real-020` 的结构化协调器返回 **`not_applicable`**，`_attempt_structured_query` 因此返回
+  `None`——它**根本没有进入**"结构化澄清"这一支；
+- 我在 `diag_escape.py` 里看到的 `route=clarification` 是 **Jev 预判**的澄清路由
+  （`_fixed_decision(clarification_required)`），不是结构化澄清。两者同名不同源，我读错了。
+
+`real-020` 的真实形态是：预判判 `structured` 但置信度不足（0.63~0.67 < 0.75）→ 降级旧链路 →
+检索 → 证据门。实测（服务在跑、完整混合检索）**1 次拒答 / 2 次作答**，不稳定。
+
+### 6.2 顺手查出的三个真缺陷（都已修）
+
+1. **澄清被拒答顶掉**（`89157da`）：丢弃判据是 `not prepared.get("sources")`，而 Jev 路径的拒答
+   **本来就带来源**（引用兜底）⇒ "有来源"被当成"检索赢了"。实测「镜头价格合计」：规划器要求
+   澄清、检索 7 个来源、证据门拒答 ⇒ 用户看到"现有可见资料不足"。改为读 `decision.kind`
+   （`_produced_answer`），两条路径（旧链路与 Jev 主链路）都改。
+2. **`done.reliability` 被路由层吞掉**：`rag/routers/query.py` 读到 `reliability` 后只用于记录拒答
+   工单与落库，随后自己发一个不含它的 `done`。而前端读的正是 `done.reliability.answerability_kind`
+   ——于是浏览器永远说不出"为什么没作答"。
+3. **子串匹配脆弱**：上面那处用 `'"type": "done"' in event` 判断事件类型，依赖 `json.dumps` 的
+   默认空格。改成解析一次再按 `type` 分派；桩用紧凑 JSON 时旧写法会静默丢掉判定结论。
+
+### 6.3 `details_structured_query_kind` 从未被写入
+
+该列只有建表、模型定义与读取端（`rag/evolution/api.py`），**没有任何写入点**，永远为 NULL。
+后果：结构化澄清从未进入自演化观测，这也是这类缺陷此前没被发现的原因之一。未修，留作后续。
+
+### 6.4 验证
+
+- 全量套件：见提交说明；`ruff check config.py rag/ scripts/ tests/ benchmarks/` 全绿；
+- 真机（`/query/stream`）：「镜头价格合计」返回 `structured_result` + `kind=clarification_required`，
+  答案是可执行的澄清文案；`done.reliability.answerability_kind` 已能到达客户端。

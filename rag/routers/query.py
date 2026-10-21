@@ -290,36 +290,34 @@ async def query_stream(
                 model=req.model,
                 models=req.models,
             ):
-                if '"type": "token"' in event:
+                # 解析一次再按 type 分派：原先用子串 `'"type": "done"'` 匹配，依赖
+                # `json.dumps` 的默认空格格式——换个紧凑序列化就静默漏掉 reliability
+                # （2026-10-21 实测：桩用紧凑 JSON 时判定结论整条丢失）。
+                parsed = None
+                if event.startswith("data: "):
                     try:
-                        data = _json.loads(event.removeprefix("data: ").strip())
-                        answer_buffer += data.get("content", "")
+                        parsed = _json.loads(event.removeprefix("data: ").strip())
                     except Exception:
-                        pass
-                elif '"type": "sources"' in event:
-                    try:
-                        data = _json.loads(event.removeprefix("data: ").strip())
-                        for source in data.get("sources", []):
-                            if source.get("document_id") and source.get("document_version_id"):
-                                citation_records.append(
-                                    CitationRecord(
-                                        document_id=source["document_id"],
-                                        document_version_id=source["document_version_id"],
-                                        chunk_index=source.get("chunk_index", 0),
-                                        section_title=source.get("section_title") or "",
-                                        text_preview=source.get("text_preview", "")[:200],
-                                        rank=source.get("rank", 0),
-                                        is_historical=bool(source.get("is_historical", False)),
-                                    )
+                        parsed = None
+                kind = parsed.get("type") if isinstance(parsed, dict) else None
+                if kind == "token":
+                    answer_buffer += parsed.get("content", "")
+                elif kind == "sources":
+                    for source in parsed.get("sources", []):
+                        if source.get("document_id") and source.get("document_version_id"):
+                            citation_records.append(
+                                CitationRecord(
+                                    document_id=source["document_id"],
+                                    document_version_id=source["document_version_id"],
+                                    chunk_index=source.get("chunk_index", 0),
+                                    section_title=source.get("section_title") or "",
+                                    text_preview=source.get("text_preview", "")[:200],
+                                    rank=source.get("rank", 0),
+                                    is_historical=bool(source.get("is_historical", False)),
                                 )
-                    except Exception:
-                        pass
-                elif '"type": "done"' in event:
-                    try:
-                        data = _json.loads(event.removeprefix("data: ").strip())
-                        reliability = data.get("reliability")
-                    except Exception:
-                        reliability = None
+                            )
+                elif kind == "done":
+                    reliability = parsed.get("reliability")
                     continue
                 yield event
         except Exception:
@@ -353,7 +351,13 @@ async def query_stream(
                 )
             else:
                 logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
-        yield f"data: {_json.dumps({'type': 'done', 'assistant_message_id': assistant_message_id})}\n\n"
+        done_payload: dict = {"type": "done", "assistant_message_id": assistant_message_id}
+        if reliability is not None:
+            # 判定层的结论必须转给客户端：前端读的正是 `done.reliability.answerability_kind`
+            # （拒答原因）。此前这里只把 reliability 用于记录拒答工单与落库，随后自己发一个
+            # 不含它的 done，于是浏览器永远说不出"为什么没作答"（2026-10-21 实测）。
+            done_payload["reliability"] = reliability
+        yield f"data: {_json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
