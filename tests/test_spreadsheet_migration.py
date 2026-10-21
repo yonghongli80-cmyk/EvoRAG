@@ -205,3 +205,29 @@ def test_existing_dataset_repairs_missing_mirror_without_recreating(tmp_path):
         "销售额",
     ]
     db.close()
+
+
+def test_backfill_repairs_zero_registry_counters_for_existing_mirror(tmp_path):
+    """Mirror rows from the older path must not leave the catalog at zero tables."""
+    db = UserDB(str(tmp_path / "users.db"))
+    root = tmp_path / "datasets"
+    fixture = _legacy_dataset(db, root, tmp_path)
+    migrate_existing_spreadsheets(db, root)
+
+    # The exact production state observed on 2026-10-21: mirror rows exist,
+    # every registry counter is still zero.
+    with db.locked_transaction(immediate=True) as conn:
+        conn.execute(
+            "UPDATE structured_datasets SET sheet_count=0,total_rows=0,total_columns=0 WHERE id=?",
+            (fixture["dataset_id"],),
+        )
+    before = db.get_structured_dataset_for_version(fixture["version_id"])
+    assert (before["sheet_count"], before["total_rows"], before["total_columns"]) == (0, 0, 0)
+
+    report = migrate_existing_spreadsheets(db, root)
+
+    after = db.get_structured_dataset_for_version(fixture["version_id"])
+    assert report.migrated == 0
+    assert report.mirrored == 0
+    assert (after["sheet_count"], after["total_rows"], after["total_columns"]) == (1, 2, 2)
+    db.close()

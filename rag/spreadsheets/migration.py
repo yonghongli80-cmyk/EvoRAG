@@ -66,6 +66,11 @@ def _mirror_dataset_schema(
 ) -> bool:
     """Write the mirror rows of one ready dataset whose mirror is still empty.
 
+    A dataset that already has mirror rows is left untouched, but its registry
+    counters are recomputed: mirror rows written by an older code path never
+    updated ``sheet_count``/``total_rows``/``total_columns``, so those datasets
+    keep reporting zero tables to the catalog even though the mirror is intact.
+
     Best-effort by contract: the caller decides whether a failure is fatal.
     """
     dataset_id = int(dataset["id"])
@@ -73,6 +78,7 @@ def _mirror_dataset_schema(
     if status is not None and str(status) != "ready":
         return False
     if db.list_structured_dataset_schema(dataset_id):
+        db.recount_structured_dataset(dataset_id)
         return False
     path = (datasets_root / str(dataset["storage_key"])).resolve()
     if path != datasets_root and datasets_root not in path.parents:

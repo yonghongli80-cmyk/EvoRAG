@@ -230,6 +230,27 @@ class SpreadsheetRepository(BaseRepository):
                 (sheet_count, total_rows, total_columns, dataset_id),
             )
 
+    def recount_structured_dataset(self, dataset_id: int) -> None:
+        """Recompute the registry counters from the mirrored manifest.
+
+        The mirror rows were written by an older code path that did not yet
+        maintain ``sheet_count``/``total_rows``/``total_columns``, so datasets
+        mirrored before that change still report zero tables.  The manifest is
+        the authoritative read model, so deriving the counters from it is both
+        cheap and idempotent; it never re-parses the original workbook.
+        """
+        with self.cm.transaction(immediate=True) as conn:
+            conn.execute(
+                "UPDATE structured_datasets SET "
+                "sheet_count = (SELECT COUNT(*) FROM structured_sheets WHERE dataset_id = ?), "
+                "total_rows = (SELECT COALESCE(SUM(row_count), 0) FROM structured_sheets "
+                "WHERE dataset_id = ?), "
+                "total_columns = (SELECT COUNT(*) FROM structured_columns WHERE sheet_id IN "
+                "(SELECT id FROM structured_sheets WHERE dataset_id = ?)) "
+                "WHERE id = ?",
+                (dataset_id, dataset_id, dataset_id, dataset_id),
+            )
+
     def record_structured_query_run(
         self,
         user_id: int,

@@ -525,6 +525,10 @@ class UserDB:
         """Rewrite the mirrored sheet/column manifest of one dataset."""
         return self.spreadsheet_repo.replace_structured_dataset_schema(dataset_id, sheets)
 
+    def recount_structured_dataset(self, dataset_id: int) -> None:
+        """Recompute a dataset's sheet/row/column counters from its mirror rows."""
+        return self.spreadsheet_repo.recount_structured_dataset(dataset_id)
+
     def record_structured_query_run(self, user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms) -> int:
         return self.spreadsheet_repo.record_structured_query_run(user_id, dataset_ids, plan, status, error_code, rows_scanned, duration_ms)
 
