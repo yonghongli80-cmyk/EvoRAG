@@ -333,6 +333,7 @@ class RAGPipeline:
             return None
         if decision.kind == "insufficient_evidence":
             confidence = prepared.get("confidence")
+            metadata = prepared.get("decision_metadata") or {}
             return DiagnosticDetail(
                 kb_id=self._kb_id,
                 failure_stage="generation" if prepared.get("chunk_hashes") else "retrieval",
@@ -340,6 +341,9 @@ class RAGPipeline:
                 confidence_level=confidence.level if confidence is not None else None,
                 chunk_hashes=tuple(prepared.get("chunk_hashes") or ()),
                 best_score=_bundle_top_score(prepared),
+                # 这次请求试过结构化没有、结果是什么。`failed` 尤其重要：它是内部执行错误，
+                # 此前与"没有表格数据"一样都表现为 None，诊断时无法区分。
+                structured_query_kind=metadata.get("structured_query_kind") or None,
             )
         if decision.kind == "permission_limited":
             # 权限不足：同样只计入跳过日志，绝不产生观测。
@@ -532,10 +536,13 @@ class RAGPipeline:
 
     def _prepare_context_standard(
         self, question, session_id, doc_name, top_k, tags, user, kb_id,
-        enterprise_request, effective_kb_id, coordinator,
+        enterprise_request, effective_kb_id, coordinator, stage=None,
     ):
         """基准检索流水线 (Classic RAG)：结构化优先 -> 意图路由 -> 改写 -> 召回 -> 重排 -> 安全/ACL过滤 -> 上下文定稿。"""
-        structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
+        record = stage if stage is not None else {}
+        structured = self._attempt_structured_query(
+            question, coordinator, user, effective_kb_id, record=record
+        )
         structured_clarification = None
         if structured is not None:
             if not self._is_structured_clarification(structured):
@@ -580,6 +587,10 @@ class RAGPipeline:
             build_bundle=enterprise_request,
         )
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
+        # 结构化尝试的种类跟着这次请求走：它解释"为什么结构化没有帮上忙"，
+        # 也是 details_structured_query_kind 唯一的来源（见 _attempt_structured_query）。
+        if "structured_query_kind" in record:
+            prepared["decision_metadata"]["structured_query_kind"] = record["structured_query_kind"]
         if structured_clarification is not None and not _produced_answer(prepared):
             # 检索没有给出**答案**，才把结构化澄清交给用户（此时它比"资料不足"更有用）。
             # 判据不是"有没有来源"：Jev 路径的拒答本来就带来源（引用兜底），
@@ -707,7 +718,9 @@ class RAGPipeline:
 
         structured_clarification = None
         if route_decision.route == "structured":
-            structured = self._attempt_structured_query(question, coordinator, user, effective_kb_id)
+            structured = self._attempt_structured_query(
+                question, coordinator, user, effective_kb_id, record=stage
+            )
             if structured is not None and not self._is_structured_clarification(structured):
                 return self._attach_jev_stage(structured, stage), None
             if structured is not None:
@@ -746,6 +759,9 @@ class RAGPipeline:
             prepared, error = prepare_fn(
                 question, session_id, doc_name, top_k, tags, user, kb_id,
                 enterprise_request, effective_kb_id, coordinator,
+                # stage 必须传进去：结构化尝试的结果种类写在它上面，
+                # 再由 _attach_jev_stage 搬进 decision_metadata（否则这一列永远是 NULL）。
+                stage=stage,
             )
             if prepared is not None:
                 prepared = self._attach_jev_stage(prepared, stage)
@@ -869,6 +885,10 @@ class RAGPipeline:
             "passage_contradicted": stage["passage_contradicted"],
             "passage_injected": stage["passage_injected"],
         }
+        # 结构化尝试的种类（见 _attempt_structured_query）：只有真的试过才有这个键，
+        # 没试过就不写——缺省是"没试"，不是"试了但没结果"。
+        if stage.get("structured_query_kind"):
+            prepared["decision_metadata"]["structured_query_kind"] = stage["structured_query_kind"]
         return prepared
 
     def _retrieve_visible_candidates(
@@ -1054,14 +1074,24 @@ class RAGPipeline:
         result = (prepared or {}).get("structured_result") or {}
         return result.get("kind") == "clarification_required"
 
-    def _attempt_structured_query(self, question, coordinator, user, effective_kb_id):
-        """Run the deterministic spreadsheet coordinator; return prepared route or None."""
+    def _attempt_structured_query(self, question, coordinator, user, effective_kb_id, record=None):
+        """Run the deterministic spreadsheet coordinator; return prepared route or None.
+
+        ``record`` (optional) receives ``{"structured_query_kind": <outcome kind>}`` for **every**
+        attempt, including the ones that return ``None``. Without it the kind is unrecoverable:
+        ``not_applicable`` (coordinator declined), ``unsupported`` (planner could not build a plan)
+        and ``failed`` (internal execution error) all collapsed into the same ``None``, so
+        "structured execution broke" was indistinguishable from "there is no table data" — and
+        ``details_structured_query_kind`` never got written at all.
+        """
         if coordinator is None or user is None or effective_kb_id == "rag_docs":
             return None
         has_datasets = getattr(coordinator, "has_datasets", None)
         if has_datasets is not None and not has_datasets(effective_kb_id, user):
             return None
         outcome = coordinator.query(question, kb_id=effective_kb_id, user=user)
+        if record is not None:
+            record["structured_query_kind"] = outcome.kind
         if outcome.kind in {"structured_result", "hybrid_result"}:
             answer = "\n".join(f"{fact.label}：{fact.value}" for fact in outcome.computed_facts)
             payload = {

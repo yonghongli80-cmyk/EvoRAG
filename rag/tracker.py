@@ -36,6 +36,9 @@ _DECISION_METADATA_KEYS = frozenset(
         "jev_preflight_ms",
         "jev_passages_ms",
         "preparation_ms",
+        # 结构化尝试的结果种类（not_applicable / structured_result / clarification_required /
+        # unsupported / failed）。只是枚举值，不含问题或表格内容。
+        "structured_query_kind",
     }
 )
 
