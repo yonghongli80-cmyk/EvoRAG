@@ -59,6 +59,7 @@ npm audit --omit=dev --audit-level=high
 - `static/`：由 Vite 生成、供 FastAPI 提供的生产前端。
 - `prompts/`：提示词配置。
 - `tests/`：后端测试。
+- [UPGRADE.md](UPGRADE.md)：生产多实例升级路线（Qdrant server / PostgreSQL / Redis / 对象存储 / 可观测性）。
 - `data/`、`qdrant_data/`：运行时数据；不要提交用户数据或密钥。
 
 自动备份默认每 7 天执行并保留最近 8 份；命令、排除项和隔离恢复演练见[部署指南的“数据与备份”章节](docs/deployment.md#数据与备份)。
