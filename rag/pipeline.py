@@ -118,6 +118,28 @@ def _reliability_payload(prepared: dict) -> dict | None:
     }
 
 
+#: 判定层认为"这次请求给出了答案"的取值。与基准的位置记分（``ANSWER_POSITIONS``）同源：
+#: ``clarification_required`` / ``permission_limited`` 都是没有答案的固定文案。
+_ANSWERED_DECISION_KINDS = frozenset({"answerable", "answerable_with_warning"})
+
+
+def _produced_answer(prepared: dict) -> bool:
+    """Did this prepared request actually give the user an answer?
+
+    问的不是"检索有没有返回来源"——Jev 路径的拒答**本来就带来源**（判定为相关但无答案证据的
+    块进 citations 兜底），所以"有来源"曾经被当成"检索赢了"。实测（2026-10-19，
+    kb_accessories「镜头价格合计」）：规划器要求澄清"请选择要计算的字段"，检索找到 7 个来源，
+    证据门判 insufficient_evidence ⇒ 澄清被丢掉，用户看到"现有可见资料不足"——既没有答案，
+    也没有那句本来能让他把问题问清楚的话。
+
+    非企业请求不建 evidence bundle，没有判定可读，退回"有没有来源"这一旧口径。
+    """
+    decision = prepared.get("decision")
+    if decision is None:
+        return bool(prepared.get("sources"))
+    return getattr(decision, "kind", None) in _ANSWERED_DECISION_KINDS
+
+
 def _bundle_top_score(prepared: dict) -> float | None:
     """Best ACL-filtered retrieval score from the reliability bundle, when one was built."""
     metrics = getattr(prepared.get("evidence_bundle"), "retrieval_metrics", None)
@@ -558,8 +580,10 @@ class RAGPipeline:
             build_bundle=enterprise_request,
         )
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
-        if structured_clarification is not None and not prepared.get("sources"):
-            # 检索也没有来源，才把结构化澄清交给用户（此时它比"没找到"更有用）
+        if structured_clarification is not None and not _produced_answer(prepared):
+            # 检索没有给出**答案**，才把结构化澄清交给用户（此时它比"资料不足"更有用）。
+            # 判据不是"有没有来源"：Jev 路径的拒答本来就带来源（引用兜底），
+            # 于是"有来源"曾被当成"检索赢了"，把澄清丢掉、只回一句"现有可见资料不足"。
             return structured_clarification, None
         return prepared, None
 
@@ -731,7 +755,9 @@ class RAGPipeline:
             question, session_id, doc_name, top_k, tags, user, kb_id,
             enterprise_request, effective_kb_id, route_decision, stage,
         )
-        if structured_clarification is not None and not (prepared or {}).get("sources"):
+        if structured_clarification is not None and not _produced_answer(prepared or {}):
+            # 与旧链路同一条判据（见 ``_produced_answer``）：澄清只在检索**没给出答案**时胜出。
+            # 拒答带来源是常态，所以不能用"有没有来源"来判定。
             return self._attach_jev_stage(structured_clarification, stage), None
         return prepared, None
 

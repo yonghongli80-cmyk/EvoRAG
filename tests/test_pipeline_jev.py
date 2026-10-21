@@ -271,14 +271,14 @@ def test_structured_clarification_yields_to_retrieval_evidence(active_jev):
 
     Measured 2026-10-19: `r50相关价格` began routing to the structured path once field names reached
     the judge, and the planner answered with "please name the field" — while the old path returned
-    documents that do contain prices. Retrieval wins whenever it produces sources.
+    documents that do contain prices. **An answer** wins over the clarification.
     """
     jev = MagicMock()
     jev.route.return_value = RouteDecision(
         route="structured", should_rewrite=False, reason="structured_confident", preflight=None,
     )
     chunk = Chunk(text="r50 价格 67 元", doc_name="prices.md", chunk_index=0)
-    jev.select.return_value = relevant_without_evidence(chunk)
+    jev.select.return_value = evidence_selection([chunk])
     pipeline = build_pipeline(jev)
     pipeline.retriever.retrieve.return_value = [chunk]
 
@@ -287,6 +287,33 @@ def test_structured_clarification_yields_to_retrieval_evidence(active_jev):
 
     assert [source["doc_name"] for source in result.sources] == ["prices.md"]
     assert result.answer != "请指明要统计的字段"
+
+
+def test_structured_clarification_beats_a_refusal_that_carries_sources(active_jev):
+    """拒答不等于作答：来源多于 0 不能当成"检索赢了"。
+
+    实测（2026-10-19，kb_accessories「镜头价格合计」）：规划器要求澄清（"请选择要计算的字段"），
+    检索找到 7 个来源，但证据门判 insufficient_evidence。旧判据是"有来源就让检索赢"，于是
+    用户看到的是"现有可见资料不足"——既没得到答案，也没得到那句本来能让他补全问题的话。
+    Jev 路径的拒答**本来就带来源**（引用兜底），所以"有没有来源"从来不是"有没有答案"。
+    """
+    jev = MagicMock()
+    jev.route.return_value = RouteDecision(
+        route="structured", should_rewrite=False, reason="structured_confident", preflight=None,
+    )
+    chunk = Chunk(
+        text="镜头型号 价格 <金额>", doc_name="prices.md", chunk_index=0,
+        document_id=11, document_version_id=12,
+    )
+    jev.select.return_value = relevant_without_evidence(chunk)
+    # 必须给 user_db：企业请求缺它会在入口就变成 permission_limited，根本到不了澄清分支。
+    pipeline = build_pipeline(jev, kb_id="kb1", user_db=MagicMock())
+    pipeline.retriever.retrieve.return_value = [chunk]
+
+    with patch.object(pipeline, "_attempt_structured_query", return_value=structured_clarification()):
+        result = pipeline.query("镜头价格合计", user={"id": 1, "is_admin": True}, kb_id="kb1")
+
+    assert result.answer == "请指明要统计的字段"
 
 
 def test_structured_clarification_is_returned_when_retrieval_finds_nothing(active_jev):
