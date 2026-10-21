@@ -397,8 +397,25 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 
 ### 11.4 现场状态
 
-- `HEAD=ba25573`：仅新增本计划文档；工作树**干净**。
-- 阶段 1（计数修复）与阶段 2 的半成品都在 `stash@{0}`（12 文件 / 247 行），**未提交**；
-  `git stash list` 可见，`git stash show --stat 'stash@{0}'` 可核对（PowerShell 必须加单引号）。
-- 所有子代理已停止（inactive）；没有后台任务在跑。
-- 下一步只等三件事：双路重排模式、改写缓存后端、层 2"保留"的确认；确认后从阶段 1 开始。
+- 2026-10-21 16:10 冻结时：`HEAD=ba25573`，工作树干净；阶段 1/2 半成品在 `stash@{0}`。
+- 2026-10-21 16:40 更新：已确认"先修干净再升级"，选定进程内缓存、`below_threshold` 默认；
+  阶段 1/2/3 已按 §7 提交，见 §12。`stash@{0}` 仍保留最初的 12 文件快照（未再使用）。
+- 所有子代理已停止（inactive）；全量回归在后台运行。
+
+## 12. 实施记录（2026-10-21）
+
+| 阶段 | 提交 | 内容 | 验证 |
+| --- | --- | --- | --- |
+| 0 | `ba25573` / `2916422` | 统一修复计划 + 文档审计与决策补录 | 文档评审 |
+| 1 | `351ac88` | 从镜像重算 `structured_datasets` 三项计数 | 11 个迁移用例；真实库副本：10 个数据集 0 → 镜像值（19/789/192），dataset 9 保持 0 |
+| 2 | `96bb20a` | 改写缓存（进程内 LRU）+ 双路重排（默认 `below_threshold`）+ 诊断/基准脚本适配 | 新增 17 用例；相关 97 passed；ruff 全绿 |
+| 3 | `c105330` | 7 个文档的基线、索引与基准口径修正 | 事实核对 |
+| 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
+
+- 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
+  `RAG_REWRITE_DUAL_RERANK_MODE=below_threshold`（阈值 0.5）。
+- 回滚：`RAG_QUERY_REWRITE_CACHE_ENABLED=false` + `RAG_REWRITE_DUAL_RERANK_MODE=off`，
+  逐字节回到 2026-10-21 之前的行为。
+- 全量套件（含新增用例）：**2337 passed / 0 failed，23:40**（2026-10-21）。
+  真机复现/基准需停 8080 释放 Qdrant，未执行；`scripts/verify_rewrite_stability.py` 已加 `--use-cache`
+  （默认逐轮清缓存），基准脚本已按用例清缓存。
