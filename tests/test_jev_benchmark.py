@@ -9,6 +9,7 @@ from scripts.benchmark_jev_retrieval import (
     BenchmarkCase,
     PathMetrics,
     PreparationOutcome,
+    _routing_domain,
     evaluate_acceptance,
     load_cases,
     percentile,
@@ -638,3 +639,23 @@ def test_a_single_turn_case_still_runs_with_history_turned_off(monkeypatch):
 
     assert pipeline.memory.sessions == {}
     assert settings.query_rewrite_history_turns == before == 0
+
+
+def test_fixed_refusal_is_scored_as_rag_not_clarification():
+    """证据不足的拒答仍属检索链路，不能算成 clarification。"""
+    prepared = {
+        "route": "fixed",
+        "decision": SimpleNamespace(kind="insufficient_evidence"),
+        "decision_metadata": {},
+    }
+    assert _routing_domain(prepared) == "rag"
+
+
+def test_fixed_clarification_keeps_its_domain():
+    for kind in ("clarification_required", "permission_limited"):
+        prepared = {
+            "route": "fixed",
+            "decision": SimpleNamespace(kind=kind),
+            "decision_metadata": {},
+        }
+        assert _routing_domain(prepared) == "clarification", kind

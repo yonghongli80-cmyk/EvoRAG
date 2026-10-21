@@ -1016,9 +1016,14 @@ def _routing_domain(prepared: dict) -> str:
     if legacy_route in ("rag", "structured", "agent"):
         return {"rag": "rag", "structured": "structured", "agent": "tool"}[legacy_route]
     route = prepared.get("route", "")
-    return {"rag": "rag", "structured": "structured", "agent": "tool", "fixed": "clarification"}.get(
-        route, route
-    )
+    if route == "fixed":
+        kind = getattr(prepared.get("decision"), "kind", None)
+        # A refusal after retrieval is still a RAG outcome, not a clarification.
+        # Counting it as "clarification" made correct refusals look like route misses.
+        if kind == "insufficient_evidence":
+            return "rag"
+        return "clarification"
+    return {"rag": "rag", "structured": "structured", "agent": "tool"}.get(route, route)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
