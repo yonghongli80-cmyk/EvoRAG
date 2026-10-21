@@ -19,6 +19,14 @@ data/*.db-shm
 data/*.db-wal
 data/jwt_secret.txt
 data/index_state.json
+# Runtime uploads: keep only the repo bootstrap manifest and its three tracked fixtures.
+data/upload/**
+!data/upload/.repo_files
+!data/upload/压测.docx
+!data/upload/压测.md
+!data/upload/压测.pdf
+data/document_versions/**
+data/kb_files/**
 data/charts/
 data/structured_datasets/
 backups/

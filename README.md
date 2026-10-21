@@ -70,4 +70,4 @@ npm audit --omit=dev --audit-level=high
 
 ## 安全提示
 
-生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、SQLite 数据库与 Qdrant 索引已从版本控制和 Docker 构建上下文中排除；用户上传目录 `data/upload/` 未被 `.gitignore` 或 `.dockerignore` 排除，`data/document_versions/`、`data/kb_files/` 仅从版本控制排除、未从 Docker 构建上下文排除——打镜像前请自行清理本机上传件。
+生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、SQLite 数据库与 Qdrant 索引已从版本控制和 Docker 构建上下文中排除；Docker 构建上下文里的 `data/upload/` 只保留 `.repo_files` 与三个仓库引导夹具，`data/document_versions/`、`data/kb_files/` 也已排除。打镜像前仍建议检查本机 `data/upload/`，不要把额外用户文件留在里面。
