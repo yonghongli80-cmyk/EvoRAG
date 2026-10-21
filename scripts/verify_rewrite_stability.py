@@ -44,7 +44,18 @@ def main() -> int:
         action="store_true",
         help="measure with the rewrite cache enabled (default: clear it before every round)",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="explicitly clear the rewrite cache before every round (this is the default)",
+    )
+    parser.add_argument(
+        "--dual",
+        action="store_true",
+        help="also run the product's original-question second pass and print whether it fired",
+    )
     args = parser.parse_args()
+    use_cache = bool(args.use_cache and not args.no_cache)
 
     from config import settings
     from rag.pipeline import RAGPipeline
@@ -64,11 +75,12 @@ def main() -> int:
 
     rewrites: Counter[str] = Counter()
     top_scores: list[float | None] = []
+    dual_rounds = 0
     try:
         for attempt in range(args.rounds):
             # 这个脚本量的是"改写本身有多不稳定"。缓存会把 6 轮压成 1 轮，
             # 于是默认每轮清一次；要验证缓存命中时加 --use-cache。
-            if not args.use_cache:
+            if not use_cache:
                 cache = getattr(pipeline, "_rewrite_cache", None)
                 lock = getattr(pipeline, "_rewrite_cache_lock", None)
                 if cache is not None and lock is not None:
@@ -82,18 +94,30 @@ def main() -> int:
                 rewritten, top_k=args.top_k, doc_name=None, tags=None,
                 user=user, kb_id=args.kb_id,
             )
-            ranked = pipeline.reranker.rerank(rewritten, candidates)
+            if args.dual:
+                record: dict = {}
+                ranked = pipeline._rerank_for_evidence(  # noqa: SLF001 - diagnostic
+                    args.question, rewritten, candidates, record=record
+                )
+                dual = bool(record.get("rewrite_dual_rerank"))
+                dual_rounds += int(dual)
+            else:
+                ranked = pipeline.reranker.rerank(rewritten, candidates)
+                dual = None
             top = ranked[0].rerank_score if ranked else None
             top_scores.append(top)
             verdict = "answer" if top is not None and top >= settings.reliability_min_score else "refuse"
             shown = "None" if top is None else f"{top:.3f}"
-            print(f"#{attempt} top={shown:>6s} -> {verdict:6s} rewritten={rewritten!r}")
+            extra = "" if dual is None else f" dual={'yes' if dual else 'no'}"
+            print(f"#{attempt} top={shown:>6s} -> {verdict:6s}{extra} rewritten={rewritten!r}")
     finally:
         user_db.close()
 
     print(f"\ndistinct rewrites: {len(rewrites)}/{args.rounds}")
     for text, count in rewrites.most_common():
         print(f"  {count}x {text!r}")
+    if args.dual:
+        print(f"dual rerank fired in {dual_rounds}/{args.rounds} round(s)")
 
     usable = [score for score in top_scores if score is not None]
     if usable:
@@ -104,11 +128,18 @@ def main() -> int:
             f"crosses the {settings.reliability_min_score} threshold on both sides: "
             f"{'YES' if crossed > 1 else 'no'}"
         )
-        if crossed > 1:
+        if crossed > 1 and not args.dual:
             print(
                 "=> the same question produced both answers and refusals; "
                 "the variable is the rewrite, not retrieval or the judge."
             )
+        elif crossed > 1:
+            print(
+                "=> FAIL: even with the original-question second pass the decision crossed the "
+                "threshold; inspect the rewrites and candidate pool."
+            )
+        elif args.dual:
+            print("=> PASS: the original-question second pass kept the decision on one side.")
     return 0
 
 
