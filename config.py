@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # 部分 OpenAI 兼容提供商不用 Authorization: Bearer，而用自定义头携带密钥
     # （例如 x-api-key）。为空时保持标准 Bearer 行为。
     deepseek_auth_header: str = ""
+    # 生成与改写的默认温度。0.0 = 尽量可复现（产品口径：同问同答优先）；
+    # 单次调用仍显式传 temperature 时以调用方为准。
+    generation_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
     # 多大模型并发池配置（JSON 格式列表，支持配置多个模型供应商/Key；为空时自动使用 deepseek_*）
     llm_providers_json: str = "[]"

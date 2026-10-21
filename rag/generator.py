@@ -25,8 +25,10 @@ def deepseek_default_headers() -> dict[str, str] | None:
 
 
 @retry(max_attempts=3, backoff_base=1.0, retryable_exceptions=(TimeoutError, ConnectionError, OSError))
-def generate(messages: list[dict], temperature: float = 0.3) -> str:
+def generate(messages: list[dict], temperature: float | None = None) -> str:
     global client
+    if temperature is None:
+        temperature = settings.generation_temperature
     if not _breaker.allow_request():
         return "系统繁忙，请稍后重试。"
     if client is None:
@@ -105,9 +107,11 @@ _async_client = None
 _async_client_lock = threading.Lock()
 
 
-async def generate_stream(messages: list[dict], temperature: float = 0.3, max_attempts: int = 3):
+async def generate_stream(messages: list[dict], temperature: float | None = None, max_attempts: int = 3):
     """流式生成，逐个 yield token。连接失败时自动重试。"""
     global _async_client
+    if temperature is None:
+        temperature = settings.generation_temperature
     if not _breaker.allow_request():
         yield "系统繁忙，请稍后重试。"
         return

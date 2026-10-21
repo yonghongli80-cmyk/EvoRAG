@@ -59,6 +59,24 @@ def test_generate_accepts_temperature_parameter():
     assert call_kwargs.get("temperature") == 0.7
 
 
+def test_generate_uses_the_configured_default_temperature(monkeypatch):
+    """同一问题优先同答：未显式传温度时使用全局生成温度（默认 0.0）。"""
+    from config import settings
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = "test answer"
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = MagicMock(return_value=mock_response)
+
+    monkeypatch.setattr(settings, "generation_temperature", 0.0, raising=False)
+    with patch("rag.generator.client", mock_client):
+        generate([{"role": "user", "content": "test"}])
+
+    call_kwargs = mock_client.chat.completions.create.call_args[1]
+    assert call_kwargs["temperature"] == 0.0
+
+
 def test_deepseek_default_headers_empty_by_default(monkeypatch):
     """Without configuration the standard Bearer authorization is the only scheme."""
     from config import settings
