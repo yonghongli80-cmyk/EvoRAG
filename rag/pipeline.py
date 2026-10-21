@@ -3,10 +3,12 @@ import asyncio
 import hashlib
 import json as _json
 import logging
+import re
 import threading
 import time
 import traceback
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NamedTuple, Protocol, runtime_checkable
@@ -196,6 +198,32 @@ def _exception_frame(error: BaseException) -> str:
     except ValueError:
         label = Path(frame.filename).name
     return f"{label}:{frame.lineno}:{frame.name}"
+
+
+_PRICE_INTENT_RE = re.compile(r"价格|售价|报价|多少钱|费用|金额|成本|单价|总价")
+_REDACTED_VALUE_RE = re.compile(r"[<＜]金额[>＞]|\[REDACTED\]|\*{3,}")
+
+
+def _drop_redacted_price_evidence(question: str, selection):
+    """A redacted amount is not an answer to a price question.
+
+    Jev can correctly judge a model/parameter row as relevant and still see the price
+    cell as ``<金额>``. Treating that as answer evidence produces a confident answer
+    that cannot contain the asked amount. Keep the chunk for citations, but report no
+    usable evidence so the pipeline refuses instead of inventing a price.
+    """
+    if not selection.has_answer_evidence or not _PRICE_INTENT_RE.search(question):
+        return selection
+    evidence_chunks = [
+        chunk
+        for chunk in selection.accepted
+        if chunk.metadata.get("jev_answer_evidence") == "true"
+    ]
+    if evidence_chunks and all(
+        _REDACTED_VALUE_RE.search(chunk.text) for chunk in evidence_chunks
+    ):
+        return replace(selection, has_answer_evidence=False)
+    return selection
 
 
 def _history_signature(history: list[tuple[str, str]], summary: str | None) -> str:
@@ -930,6 +958,8 @@ class RAGPipeline:
                 context = self._drop_injected_chunks(context)[:top_k]
                 conflicts = []
                 break
+            # 价格类问题里，脱敏占位符不算答案证据：保留引用，但不让模型编金额。
+            selection = _drop_redacted_price_evidence(question, selection)
             conflicts = [self._conflict_payload(item) for item in selection.conflicts]
             stage["passages_question_set_version"] = selection.question_set_version
             # 判定层原始统计量（跨尝试取最大）：末次尝试可能因为改写而候选更少，取最大
