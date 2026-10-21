@@ -17,6 +17,7 @@ RAG 系统极致压测脚本
     locust -f scripts/locustfile.py --host http://localhost:8080 --headless -u 50 -r 10 -t 5m
 """
 
+import os
 import random
 import string
 
@@ -74,7 +75,27 @@ class RAGUser(HttpUser):
     user_id = None
 
     def on_start(self):
-        """用户启动：注册 + 登录。"""
+        """用户启动：优先用既有账号登录，否则尝试注册。
+
+        自注册默认关闭，压测应显式给一个已存在的账号：
+            $env:RAG_LOAD_USERNAME="test_live"
+            $env:RAG_LOAD_PASSWORD="..."
+        """
+        configured_user = os.getenv("RAG_LOAD_USERNAME")
+        configured_password = os.getenv("RAG_LOAD_PASSWORD")
+        if configured_user and configured_password:
+            with self.client.post(
+                "/login",
+                json={"username": configured_user, "password": configured_password},
+                name="POST /login",
+                catch_response=True,
+            ) as resp:
+                if resp.status_code == 200:
+                    self.token = resp.json().get("token")
+                else:
+                    resp.failure(f"登录失败: {resp.status_code}")
+            return
+
         username = f"stress_{random_string(8)}"
         password = "StressTest123"
 
