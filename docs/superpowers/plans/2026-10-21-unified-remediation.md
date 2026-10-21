@@ -417,5 +417,8 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 - 回滚：`RAG_QUERY_REWRITE_CACHE_ENABLED=false` + `RAG_REWRITE_DUAL_RERANK_MODE=off`，
   逐字节回到 2026-10-21 之前的行为。
 - 全量套件（含新增用例）：**2337 passed / 0 failed，23:40**（2026-10-21）。
-  真机复现/基准需停 8080 释放 Qdrant，未执行；`scripts/verify_rewrite_stability.py` 已加 `--use-cache`
-  （默认逐轮清缓存），基准脚本已按用例清缓存。
+- 真机复现（2026-10-21，停 8080 释放 Qdrant 后 `verify_rewrite_stability.py --dual`）：
+  6 轮产生 5 个不同改写，**3 轮触发双路重排**，top 分 **0.531–0.701**，未跨 0.35；
+  最坏改写「如何查询副厂配件明细？」被原问题重排救回 **0.701** → **PASS**。服务已恢复，`/health` healthy。
+- 基准仍未跑（需要真实流量口径与独占 Qdrant）；诊断脚本已加 `--dual` / `--no-cache`，
+  基准脚本已按用例清改写缓存。
