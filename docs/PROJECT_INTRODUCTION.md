@@ -3,8 +3,8 @@
 
 > **版本**：v3.0.0 (Modular Micro-Kernel Architecture)  
 > **定位**：面向高并发、多租户强合规、具备自演进闭环能力的企业级检索增强生成（Enterprise RAG）中枢平台  
-> **运行状态**：实测 **131 个 API path / 141 个 operation**（口径：`app.openapi()` 的 path 数与同一 path 上各 HTTP 方法的展开数）100% 对齐挂载；9 步全链路 E2E 在**隔离快照**上全绿（exit 0）；`ruff check rag/` 零告警。  
-> **代码基线**：本文描述的是**当前工作树**——模块化重构（`rag/context.py`、`rag/routers/*`、`rag/repositories/*`、`rag/db/*`）**已实现但尚未提交**；`main`（HEAD `32f2b7c`）上仍是 2,834 个非空行（物理总行数 3,351）的单体 `rag/api.py`，本文档与 `scratch/test_live_e2e_pipeline.py` 亦均未入库。
+> **运行状态**：实测 **131 个 API path / 141 个 operation**（口径：`app.openapi()` 的 path 数与同一 path 上各 HTTP 方法的展开数）100% 对齐挂载；9 步全链路 E2E 于 2026-10-18 在**隔离快照**上全绿（exit 0，此后未复跑）；`ruff check rag/` 零告警。  
+> **代码基线**：模块化重构（`rag/context.py`、`rag/routers/*`、`rag/repositories/*`、`rag/db/*`）已随提交 `fb68237`（2026-10-18）进入 `main`，`rag/api.py` 已收敛为装配器（791 物理行 / 652 非空行），`rag/user_db.py` 已收敛为门面；当前 `HEAD` 与文件行数以 `git log -1` 和当前工作树为准，本文不再硬编码快照数字。本文档与 `scratch/test_live_e2e_pipeline.py` 均已入库。
 
 ---
 
@@ -114,7 +114,7 @@ flowchart TD
 4. **领域服务层 (Domain Services Layer)**：
    - 封装 RAG 核心算法与业务逻辑：包括分块切分器（Chunker）、嵌入编码器（Embedder）、混合检索器（Hybrid Retriever）、语义重排器（Reranker）、大模型流式响应与素材构建工人（Material Worker）。
 5. **仓储持久化层 (Repository Pattern)**：
-   - 将单体 `rag/user_db.py`（`main` 上实测 3,723 个非空行）解构为专属子仓储（`UserRepository`, `DocRepository`, `ChatRepository`, `MaterialRepository`, `AnalysisRepository`, `SpreadsheetRepository` 等；当前工作树 `rag/repositories/` 合计 3,722 个非空行，`user_db.py` 收敛为 521 行的门面），统一由仓储外观模式（Facade）对外提供语义化数据存取。
+   - 将单体 `rag/user_db.py`（重构前 `32f2b7c` 实测 3,723 个非空行）解构为专属子仓储（`UserRepository`, `DocRepository`, `ChatRepository`, `MaterialRepository`, `AnalysisRepository`, `SpreadsheetRepository` 等；当前 `main` 上 `rag/repositories/` 合计 3,810 个非空行，`user_db.py` 收敛为 524 个非空行 / 713 物理行的门面），统一由仓储外观模式（Facade）对外提供语义化数据存取。
 6. **基础设施层 (Infrastructure Layer)**：
    - **SQLite WAL 读写分离池**：独立管理只读连接池与排他互斥写连接，结合 Qdrant 向量引擎与持久化本地文档存储。
 
@@ -239,12 +239,12 @@ flowchart TD
 
 ### 4.2 无环依赖与单例容器解耦 (`rag/context.py`)
 
-在早期演化过程中，底层子模块因需要访问全局 `user_db` 或 `pipeline` 而反向引用顶层 `rag.api`，形成自底向上的反向依赖。RAGv3 通过下沉单例容器完成依赖拓扑归正，**真实成果是函数内 `import rag.api` 从交接提交（`3a5d4e2`）时的 1 处降到 0 处，反向依赖清零**。需要如实说明的是，函数内延迟导入的**总量并未被批量拔除**：正则 `^\s+(from|import) rag` 实测在 `3a5d4e2` 为 194 处、当前工作树为 196 处（`main`/HEAD 为 208 处）。
+在早期演化过程中，底层子模块因需要访问全局 `user_db` 或 `pipeline` 而反向引用顶层 `rag.api`，形成自底向上的反向依赖。RAGv3 通过下沉单例容器完成依赖拓扑归正，**真实成果是函数内 `import rag.api` 从交接提交（`3a5d4e2`）时的 1 处降到 0 处，反向依赖清零**。需要如实说明的是，函数内延迟导入的**总量并未被批量拔除**：正则 `^\s+(from|import) rag` 实测在 `3a5d4e2` 为 194 处、当前 `main` 为 198 处（重构前的 `32f2b7c` 为 208 处）。
 
 - **单向无环依赖链**：
   $$\text{rag/routers/} \longrightarrow \text{rag/context.py} \longleftarrow \text{rag/api.py (装配器)}$$
 - **完整重导出与打桩兼容性**：
-  [`rag/api.py`](file:///d:/Desktop/RAGv3/rag/api.py) 通过动态 `__setattr__` 将单例属性同步级联至 `rag.context`，保持既有单元测试基于 `rag.api` 的 Monkeypatch 打桩方式可用，并消解了运行时的循环导入风险（**该兼容性尚未经全量套件回归验证，见 7.1**）。
+  [`rag/api.py`](file:///d:/Desktop/RAGv3/rag/api.py) 通过动态 `__setattr__` 将单例属性同步级联至 `rag.context`，保持既有单元测试基于 `rag.api` 的 Monkeypatch 打桩方式可用，并消解了运行时的循环导入风险（**该兼容性已随 2026-10-18 收口后的全量回归验证，见 7.1**）。
 
 ### 4.3 敏感凭据全生命周期脱敏防护 (Credential Masking)
 
@@ -258,8 +258,8 @@ flowchart TD
 
 ### 5.1 环境要求
 - **操作系统**：Linux / macOS / Windows 10+
-- **Python 环境**：Python 3.11 或 Python 3.12+
-- **Node.js 环境**：Node.js 18.0+ / pnpm 或 npm
+- **Python 环境**：Python 3.12+
+- **Node.js 环境**：Node.js 22（CI 与本地验证使用 22；`Dockerfile` 前端构建阶段为 `node:20-alpine`）
 - **向量数据库**：Qdrant (支持本地持久化模式或 Docker 独立部署)
 
 ### 5.2 配置文件准备 (`.env`)
@@ -336,7 +336,7 @@ ruff check rag/
 
 上述测试与自检脚本**不是无副作用的**：项目默认的数据根目录就是仓库内的 `data/`，直接运行会**写入生产数据**。建议在**只读快照**（`git worktree` 或目录副本）上运行，确认无污染后再在本地执行。
 
-- **测试套件会写 `data/`**：`tests/conftest.py` 的 autouse 夹具把 `users.db`、`memory.db`、`analysis.db`、`upload/`、`document_versions/`、Qdrant，以及（2026-10-18 补齐的）`wiki.db`、`bm25_index.db` 全部重定向到 `tmp_path`，并新增 `isolated_wiki_store` 在每个用例前后重置 wiki 单例。**这些修复随本次重构一起提交前**，用 `main` 跑测试仍会写生产 `data/wiki.db` 与 `data/bm25_index.db`。
+- **测试套件会写 `data/`**：`tests/conftest.py` 的 autouse 夹具把 `users.db`、`memory.db`、`analysis.db`、`upload/`、`document_versions/`、Qdrant，以及（2026-10-18 补齐的）`wiki.db`、`bm25_index.db` 全部重定向到 `tmp_path`，并新增 `isolated_wiki_store` 在每个用例前后重置 wiki 单例。**这些隔离修复已随重构提交 `fb68237` 入库**；在此之前用 `main` 跑测试会写生产 `data/wiki.db` 与 `data/bm25_index.db`。
 - **E2E 脚本已加护栏与完整清理**：`scratch/test_live_e2e_pipeline.py` 直接 `from rag.api import app` 做真实 HTTP 调用，不经过 pytest 夹具。现在它**默认拒绝**在仓库自带路径上运行（检测 `qdrant_path` / `users_db_path` / `memory_db_path` / `wiki_db_path` 是否落在仓库内，命中即退出码 2 并打印快照用法），只有显式 `--allow-production` 才会写生产。运行结束在 `finally` 里回收：`admin_*` / `alice_*` 账号与组织行、`kb_techspecs_*` Wiki 页、知识库与 Qdrant 集合（用 Qdrant 自己的 `delete_collection`；本地模式句柄未及时释放时由分离子进程延时删除）。2026-10-18 在隔离快照上实测：9 步全绿、exit 0，跑完后快照集合数回到内置的 5 个。
 - **历史残留已清理**：此前 E2E 直接在生产上跑过 4 次，留下 4 个测试知识库（在 KB 列表里可见）、5 个集合目录、3 个 Wiki 页与 8 个账号。2026-10-18 已用产品自身的 `DELETE /knowledge-bases`、直接删除失去所属库的 Wiki 页、删除集合目录、并停用 4 个测试管理员（`org_people.active=0`）清理完毕；余下 4 个 `alice_*` 普通账号**没有可停用/删除的入口**，需要产品决定是否提供用户删除能力。
 - **不要在生产实例上跑**：如需真实链路验证，请指向独立的开发实例与独立 Qdrant 集合，或先备份 `data/`。
@@ -372,9 +372,9 @@ RAGv3 当前工作树实测 **131 个 path / 141 个 operation**（口径：`app
 
 | 项目 | 核验结论与证据 |
 | :--- | :--- |
-| **反向依赖清零** | 函数内 `import rag.api` 由交接提交 `3a5d4e2` 的 1 处降为 0 处；延迟导入总量 194 → 196（**并非"拔除 300+"**）。 |
+| **反向依赖清零** | 函数内 `import rag.api` 由交接提交 `3a5d4e2` 的 1 处降为 0 处；延迟导入总量 194 → 198（**并非"拔除 300+"**）。 |
 | **端点完整性** | `app.openapi()` 实测 131 path / 141 operation，`include_router` 共 15 个路由器；路由镜像门禁测试 `tests/test_router_parity.py` 已建立。 |
-| **后端全量回归（2026-10-18 收口后）** | **2,223 passed / 0 failed，23:02**（收口前 2,200 passed / 9 failed、35:58；9 个红灯全部定位并修复，其中 3 个是生产缺陷、1 个是模块属性 setter 单向失效，见 development-log 第 22 节）。 |
+| **后端全量回归** | 2026-10-18 收口后：**2,223 passed / 0 failed，23:02**（收口前 2,200 passed / 9 failed、35:58；9 个红灯全部定位并修复，其中 3 个是生产缺陷、1 个是模块属性 setter 单向失效，见 development-log 第 22 节）。2026-10-21 交接记录：**2,313 passed / 0 failed，22:57**；当前 pytest 收集数同为 2,313。 |
 | **测试隔离** | `conftest` 已把 `wiki.db` 与 `bm25_index.db` 一并重定向到 `tmp_path`，并新增 `isolated_wiki_store`；判据是跑完后这两个生产文件的 mtime 不变。套件同时从 35:58 降到 23:02（不再重建生产 BM25 索引）。 |
 | **真实服务链路** | `scratch/test_live_e2e_pipeline.py` 9 步全链路验证在**隔离快照**上全绿、exit 0；脚本已加护栏（默认拒绝写仓库内路径，`--allow-production` 才放行）并补全清理（账号 / Wiki 页 / 知识库 / Qdrant 集合）。 |
 | **代码质量** | `ruff check rag/` 全绿（0 告警）。仓库内**没有** mypy / pyright 配置或依赖，"静态类型检查 0 错误"无实测支撑，已从本文移除。 |
@@ -400,6 +400,6 @@ RAGv3 当前工作树实测 **131 个 path / 141 个 operation**（口径：`app
 3. **Agent 自主检索工作流**：引入 ReAct / Function Calling 框架，支持多步推理、跨库对比与外部工具自主调用。
 
 ---
-*本文档由 RAGv3 系统工程团队与 AI 助手联合编制。它描述的是**当前工作树**：模块化重构（`rag/context.py`、`rag/routers/*`、`rag/repositories/*`、`rag/db/*`）**已实现但尚未提交**，`main` 分支（HEAD `32f2b7c`）上仍是 2,834 行的单体 `rag/api.py`；本文档与 `scratch/test_live_e2e_pipeline.py` 同样未入库。文中不再保留任何无法被实测支撑的指标。*
+*本文档由 RAGv3 系统工程团队与 AI 助手联合编制。它描述的是 `main` 的当前状态（`git log -1` 可查）：模块化重构已随 `fb68237` 入库，`rag/api.py` 为 791 物理行 / 652 非空行的装配器；本文档与 `scratch/test_live_e2e_pipeline.py` 均已入库。*
 
-*生成说明（数值口径与来源）：以下数据于 2026-10-18 在当前工作树（Windows / Python 3.12）实测——**端点** = `app.openapi()` 的 `paths` 条目数与 path×method 展开数（**131 / 141**，HEAD 与工作树同为 141 个 operation）；**路由器** = `rag/api.py` 中 `app.include_router(...)` 计数（**15**），**路由模块** = `rag/routers/*.py` 计数（**8** 个业务模块 + `__init__.py`）；**延迟导入** = 正则 `^\s+(from|import) rag` 的匹配行数（`3a5d4e2` = 194，工作树 = 196，HEAD = 208）；**反向依赖** = `^\s+(from|import) rag\.api` 且非 `rag.api_security` 的匹配行数（1 → 0）；**PRAGMA** = `rag/db/connection.py` 中实际 `execute` 的语句（4 条）；**行数** = **非空行口径**（`line.strip()` 非空；对应 `HEAD:rag/user_db.py` 3,723、`HEAD:rag/api.py` 2,834、工作树 `user_db.py` 521、`rag/repositories/` 合计 3,722；同一文件按物理总行数（含空行）分别为 4,050 / 3,351 / 709 / 4,048，原文"4,000+ 行"即对应物理总行数口径）；**lint** = `ruff check rag/`（全绿）；**E2E 与前端 Vitest 结果**（9 步全绿 exit 0；231 passed，含偶发失败）引自任务方在隔离快照上的独立核验。*
+*生成说明（数值口径与来源）：**端点** = `app.openapi()` 的 `paths` 条目数与 path×method 展开数（**131 / 141**，2026-10-18 实测）；**路由器** = `app.include_router(...)` 计数（**15**），**路由模块** = `rag/routers/*.py`（**8** 个业务模块 + `__init__.py`）；**延迟导入** = 正则 `^\s+(from|import) rag` 的匹配行数（`3a5d4e2` = 194，当前 `main` = 198，重构前 `32f2b7c` = 208）；**反向依赖** = `^\s+(from|import) rag\.api` 且非 `rag.api_security` 的匹配行数（1 → 0）；**PRAGMA** = `rag/db/connection.py` 中实际 `execute` 的语句（4 条）；**行数** = **非空行口径**（`line.strip()` 非空）：当前 `main` 的 `rag/api.py` 652（物理 791）、`user_db.py` 524（物理 713）、`rag/repositories/` 合计 3,810（物理 4,139）；历史 `32f2b7c` 的 `rag/api.py` 2,834（物理 3,351）、`user_db.py` 3,723（物理 4,050）；**lint** = `ruff check rag/`（全绿）；**E2E 与前端 Vitest**（9 步全绿 exit 0，2026-10-18；231 passed，含偶发失败）引自隔离快照上的独立核验。*

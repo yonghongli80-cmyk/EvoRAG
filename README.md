@@ -4,7 +4,7 @@
 
 ## 快速开始
 
-要求：Python 3.12、Node.js 22（Docker 部署只需 Docker Compose）。
+要求：Python 3.12、Node.js 22（CI 与本地验证使用 22；`Dockerfile` 前端构建阶段使用 `node:20-alpine`。Docker 部署只需 Docker Compose）。
 
 ### Docker
 
@@ -41,11 +41,13 @@ python start.py
 
 ```bash
 pytest -q
-ruff check . --select E9,F63,F7,F82
+ruff check .          # 与 CI 一致；不要只跑 E9/F63/F7/F82 子集
 
 cd frontend
-npm test
+npm ci
+npm run test
 npm run build
+npm audit --omit=dev --audit-level=high
 ```
 
 ## 依赖与目录
@@ -67,4 +69,4 @@ npm run build
 
 ## 安全提示
 
-生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、数据库、索引和上传数据均已从版本控制及 Docker 构建上下文中排除。
+生产环境必须保持 `RAG_AUTH_ENABLED=true`，使用强随机 `REDIS_PASSWORD`，并通过反向代理启用 HTTPS。`.env`、SQLite 数据库与 Qdrant 索引已从版本控制和 Docker 构建上下文中排除；用户上传目录 `data/upload/` 未被 `.gitignore` 或 `.dockerignore` 排除，`data/document_versions/`、`data/kb_files/` 仅从版本控制排除、未从 Docker 构建上下文排除——打镜像前请自行清理本机上传件。
