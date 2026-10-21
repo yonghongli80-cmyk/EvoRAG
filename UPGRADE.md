@@ -69,6 +69,9 @@ Client ──TLS──> LB / Reverse Proxy
 
 ### Phase 0：观测基线（1–2 天）
 
+- 2026-10-21 单进程基线（用于后续对照）：RAG `/query` 20 样本 / 5 并发，P50 **10.8s**、
+  P95 **17.0s**、P99 **17.9s**（含生成）；轻接口 `/health` P99 928ms、`/knowledge-bases`
+  P99 318ms（20 并发 × 200 次）。尾延迟主要来自生成，不是检索准备。
 - 给 `scripts/locustfile.py` 补一次可复现的压测档案：固定用户数、思考时间、目标 KB、`--user-id`；
   产出 P50/P95/P99、错误率、RPS。
 - 增加只读 `/metrics`（或 OpenTelemetry exporter）：请求量/延迟、检索/重排/生成分段耗时、

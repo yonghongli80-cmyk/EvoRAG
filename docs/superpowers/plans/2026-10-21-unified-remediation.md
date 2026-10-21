@@ -273,7 +273,7 @@
 | D-1 | 层 2 门禁是否允许"聚合零净变化、逐例有进有退"通过 | 允许，且被测试钉死 | **保持**（它是净质量门，不是逐例回归门）；另加"逐例回归观察"报告，不改判定 |
 | D-2 | 空检索是否要与"检索到但无证据"区分 | 企业模式下两者都落到 `insufficient_evidence`（同一 kind、同一文案）；非企业模式 `build_bundle=False`，直接空上下文生成 | 保持企业模式口径；若要区分，先加只读的 `decision.reasons`，别改文案；**非企业模式的空上下文生成需要单独评估**（幻觉风险） |
 | O-1 | 候选 #30（canary@0%）与 #31（candidate_testing，target=None） | #30 措辞已上线；#31 未决 | #30 保留追溯；#31 人工看 payload 后推进或退回 |
-| O-2 | real-008/022 标签 | real-008 期望 structured 但无 HR 统计表；real-022 期望 clarification | 请产品确认标签；**不要**为标签改检索或路由 |
+| O-2 | real-008/022 标签 | real-008 期望 structured 但无 HR 统计表；real-022 期望 clarification | **已拍板：不改标签。** real-008 的 structured 是产品口径（暴露 HR 统计表缺口）；real-022 的 clarification 正确（系统回答 R50 参数是路由缺陷）。route 失败按真实缺陷记录，不用改标签刷分 |
 | O-3 | P99、观察窗、4 个 `alice_*` | 压测只算 P50/P95；观测 182 条（09-23..10-21）；账号是 E2E 残留 | 跑一次 locust 出 P99；明确 canary 观察窗定义；账号由产品决定删/留 |
 | N-2 | 脱敏价格 | 拒答正确；Jev 曾把 `<金额>` 当证据 | 已加价格意图 + 占位符守卫（P0-3），不改阈值、不改语料 |
 
@@ -416,13 +416,16 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 | 3.2 | `9c2afdc` | Jev 不把脱敏金额当答案证据（引用保留） | 6 个新用例；real-017/018 均为 `fixed/insufficient_evidence`；拒答子集 1.000/3 |
 | 3.3 | `1a626cc` | `.dockerignore` 排除运行期上传/版本目录，保留 bootstrap 白名单 | 单测钉规则；Docker 守护进程未启动，构建上下文实跑未执行 |
 | 3.4 | `838917c` | 钉住 real-017/018 的 `refuse` 标签 | 2 个用例 |
+| 3.5 | `8812348` | 生成温度默认 0.0（同问同答优先） | 12 个生成器用例 |
+| 3.6 | `2e85136` | 基准把 `fixed/insufficient_evidence` 归为 `rag` | 40 个基准用例 |
+| 3.7 | `476e4f0` | locustfile 支持用既有账号登录（`RAG_LOAD_USERNAME`/`RAG_LOAD_PASSWORD`） | locust 2.46.7 已用清华源安装 |
 | 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
 
 - 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
   `RAG_REWRITE_DUAL_RERANK_MODE=below_threshold`（阈值 0.5）。
 - 回滚：`RAG_QUERY_REWRITE_CACHE_ENABLED=false` + `RAG_REWRITE_DUAL_RERANK_MODE=off`，
   逐字节回到 2026-10-21 之前的行为。
-- 全量套件（含新增用例）：**2347 passed / 0 failed，29:36**（2026-10-21；含同步 `/query` 的 `kb_id`、脱敏价格守卫、Docker 规则与标签用例）。
+- 全量套件（含新增用例）：**2350 passed / 0 failed，26:00**（2026-10-21；含 sync `kb_id`、脱敏价格守卫、Docker 规则、标签、温度与路由映射用例）。
 - 真机复现（2026-10-21，停 8080 释放 Qdrant 后 `verify_rewrite_stability.py --dual`）：
   6 轮产生 5 个不同改写，**3 轮触发双路重排**，top 分 **0.531–0.701**，未跨 0.35；
   最坏改写「如何查询副厂配件明细？」被原问题重排救回 **0.701** → **PASS**。服务已恢复，`/health` healthy。
@@ -442,7 +445,21 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
   引用仍保留（6/8 条来源），不再输出金额；旧链路行为不变。HTTP 复核：同步 `/query` 对
   `r50电池价格`、`r50原厂电池价格` 均返回固定拒答 + **5 个来源**。
 - P99：轻接口实测（20 并发 × 200 次，2026-10-21）——`/health` P50 66.7ms / P95 915.5ms /
-  P99 928.3ms；`/knowledge-bases` P50 151.3ms / P95 286.7ms / P99 317.8ms。这是单进程 + 同步
-  端点在高并发下的尾延迟，**不含 RAG 生成**；完整 RAG P99 仍需 `locust`（当前未安装）或更长压测。
-- Docker 构建上下文实跑未执行：`docker` CLI 存在但守护进程未启动；`.dockerignore` 规则由
-  `tests/test_dockerignore_context.py` 钉住，启动 Docker 后可按 §11.3 的验收命令复跑。
+  P99 928.3ms；`/knowledge-bases` P50 151.3ms / P95 286.7ms / P99 317.8ms。RAG 查询 P99
+  追加实测（20 样本、5 并发、含生成）——P50 **10764ms** / P95 **16997ms** / P99 **17878ms**；
+  这说明瓶颈在生成与整条请求，不是检索准备阶段，属于升级 Phase 0 的 SLO 基线。
+- 生成温度：`RAG_GENERATION_TEMPERATURE` 默认 **0.0**；`generate`/`generate_stream` 未显式
+  传温度时使用它（改写与回答都走同一默认），用于“同问同答优先”。12 个生成器用例通过。
+- 基准路由映射修正：`route=fixed` 且 `decision.kind=insufficient_evidence` 归为 `rag`，
+  不再被误算成 clarification；`clarification_required`/`permission_limited` 仍归 clarification。
+  2 个新用例钉住。完整基准未复跑，因此 route 数字仍以修复前那次 0.833 记录。
+- 标签拍板：**不改 real-008/022 标签**。real-008 的 structured 是产品口径（暴露 HR 统计表缺口）；
+  real-022 的 clarification 正确（系统答出 R50 参数是真实路由缺陷）。route 失败按缺陷保留。
+- Docker 构建上下文实跑未执行：`docker` CLI 存在但守护进程未启动；WSL 没有已安装的发行版，
+  Docker Desktop 进程启动后退出，Linux engine 无法就绪。`.dockerignore` 规则由
+  `tests/test_dockerignore_context.py` 钉住，装好 WSL2 发行版并启动 Docker Desktop 后可按
+  §11.3 的验收命令复跑。
+- 压测环境：`locust 2.46.7` 已用清华源安装；`scripts/locustfile.py` 新增
+  `RAG_LOAD_USERNAME` / `RAG_LOAD_PASSWORD`，可直接用既有账号登录（自注册默认关闭）。
+  未跑完整 locust 套件：它的任务包含上传/删除等写操作，避免污染本地数据；本轮 P99 用
+  只读 `/query` 探针测得（见上）。
