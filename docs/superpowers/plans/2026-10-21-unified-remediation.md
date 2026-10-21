@@ -40,6 +40,7 @@
 | ID | 来源 | 现象 | 根因（已核实） | 证据 | 处置 |
 | --- | --- | --- | --- | --- | --- |
 | **P0-1** | 交接 §2 | 同一问题 6 轮 4 拒 2 答 | 经典链路**无条件**用 LLM 改写句做检索与重排；坏改写把"找资料"变成"如何查询资料"，同一候选池重排分从 0.7 掉到 0.03–0.06，跨过 0.35 | [代码] `rag/pipeline.py:573`、`:582`；[交接] 6 轮 6 句、双峰分布 | 代码修复（§3） |
+| **P0-2** | 2026-10-21 链路验证 | 同步 `/query` 忽略 `kb_id`，固定查 `rag_docs`，带知识库的同步问答稳定拒答 | `QueryRequest` 没有 `kb_id` 字段，handler 直接传 `rag_docs`；流式接口有该字段且做权限校验 | [代码] `rag/routers/query.py:48`、`:209`；[实测] 修复前同步拒答/流式作答，修复后同步返回 5 个来源 | 已修（`5004a93`） |
 | **P1-1** | 交接 §3.9 | `structured_datasets` 的 `sheet_count/total_rows/total_columns` 全是 0 | 早期镜像路径只写 `structured_sheets/columns`，不写计数；回填函数看到"已有镜像行"就跳过，计数永远不修 | [实测] 11 个数据集计数全 0，而镜像合计 **19 sheets / 789 rows / 192 cols**（逐数据集 1/2/3/3/3/2/1/1/0/2/1）；[代码] `rag/spreadsheets/migration.py:75` | 数据修复（§4） |
 | **P1-2** | 全库审查 | 文档与代码不一致 | 模块化早已入库，文档仍写"未提交、HEAD 32f2b7c"；scratch 说"不在 CI 跑"但 ruff 会扫；脱敏价格未记为已知限制 | [代码]/[实测] HEAD 89aff32、api.py 791 行；ci.yml 第 18 行 | 文档修复（§5） |
 | **P2-1** | 交接 §3.3 | `details_structured_query_kind` 只有 1 条真机样本 | 生产者已存在且覆盖 `failed`（协调器内部 catch 后返回 failed），缺的是**真机失败样本 + DB 级落库用例**，不是代码 | [代码] `pipeline.py:1092-1094`；[实测] 该列分布 `[(None,181), ('not_applicable',1)]`；测试只断言到 `record`/`detail`，没有写进 `failure_observations` 的用例 | 补一条 DB 级用例 + 文档记录；不改产品代码 |
@@ -410,6 +411,7 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 | 1 | `351ac88` | 从镜像重算 `structured_datasets` 三项计数 | 11 个迁移用例；真实库副本：10 个数据集 0 → 镜像值（19/789/192），dataset 9 保持 0 |
 | 2 | `96bb20a` | 改写缓存（进程内 LRU）+ 双路重排（默认 `below_threshold`）+ 诊断/基准脚本适配 | 新增 17 用例；相关 97 passed；ruff 全绿 |
 | 3 | `c105330` | 7 个文档的基线、索引与基准口径修正 | 事实核对 |
+| 3.1 | `5004a93` | 同步 `/query` 补齐 `kb_id`、权限校验、审计与按库取 pipeline | `tests/test_api.py` 22 passed；真机同步返回 5 个来源 |
 | 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
 
 - 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
@@ -420,5 +422,10 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 - 真机复现（2026-10-21，停 8080 释放 Qdrant 后 `verify_rewrite_stability.py --dual`）：
   6 轮产生 5 个不同改写，**3 轮触发双路重排**，top 分 **0.531–0.701**，未跨 0.35；
   最坏改写「如何查询副厂配件明细？」被原问题重排救回 **0.701** → **PASS**。服务已恢复，`/health` healthy。
+- 链路验证（2026-10-21，重启加载修复后）：登录 → `/me` → 4 个 KB → 同步 `/query` 带 `kb_id`
+  返回 5 个来源；SSE 55 token + 1 source + `done.reliability` answerable；结构化问题返回
+  `c_0006 max：<金额>`（脱敏价格，属已知限制）；员工账号 0 KB 且被拒。
+  轨迹可见 `rewrite_dual_rerank: True/False` 与 `structured_query_kind: structured_result`；
+  在线数据集计数已修复；服务错误日志只有 INFO 级外部 HTTP 调用，无异常。
 - 基准仍未跑（需要真实流量口径与独占 Qdrant）；诊断脚本已加 `--dual` / `--no-cache`，
   基准脚本已按用例清改写缓存。
