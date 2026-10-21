@@ -114,6 +114,27 @@ def test_query_returns_answer():
         set_pipeline(None)
 
 
+def test_sync_query_forwards_the_requested_kb_id():
+    """同步 /query 必须像 /query/stream 一样使用 kb_id，而不是硬编码 rag_docs。"""
+    import rag.routers.query as query_router
+
+    mock_pipeline = MagicMock()
+    mock_pipeline.query.return_value = MagicMock(answer="kb answer", sources=[], decision=None)
+    with patch.object(query_router, "_get_or_create_pipeline", return_value=mock_pipeline), \
+         patch.object(query_router, "require_kb_view") as require_view, \
+         patch.object(query_router, "_audit_org_event"):
+        response = client.post(
+            "/query",
+            json={"question": "q", "kb_id": "kb_accessories"},
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "kb answer"
+    require_view.assert_called_once()
+    assert mock_pipeline.query.call_args.kwargs["kb_id"] == "kb_accessories"
+
+
 @patch("rag.routers.knowledge.KnowledgeBaseManager")
 def test_query_knowledge_base(mock_kb_manager_cls):
     """POST /knowledge-bases/{kb_id}/query should return search results."""

@@ -52,6 +52,7 @@ class QueryRequest(BaseModel):
     conversation_id: int | None = Field(default=None, description="对话 ID")
     doc_name: str | None = Field(default=None, description="限定检索的文档名称")
     tags: list[str] | None = Field(default=None, description="按标签过滤文档")
+    kb_id: str | None = Field(default=None, description="目标知识库；默认 rag_docs")
 
 
 class QueryResponse(BaseModel):
@@ -185,13 +186,24 @@ async def query(
     user: dict = Depends(require_user),
 ):
     db = get_user_db()
-    with get_pipeline_lock().read():
-        current_pipeline = get_pipeline()
-        if current_pipeline is None:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "尚未索引文档，请先调用 POST /index 上传文档"},
-            )
+    target_kb = req.kb_id or "rag_docs"
+    if target_kb != "rag_docs":
+        require_kb_view(db, target_kb, user)
+        await asyncio.to_thread(_audit_org_event, db, user, "answer_requested", target_kb)
+
+        def _resolve_sync_pipeline():
+            with get_pipeline_lock().write():
+                return _get_or_create_pipeline(target_kb)
+
+        current_pipeline = await asyncio.to_thread(_resolve_sync_pipeline)
+    else:
+        with get_pipeline_lock().read():
+            current_pipeline = get_pipeline()
+            if current_pipeline is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "尚未索引文档，请先调用 POST /index 上传文档"},
+                )
 
     session_id = req.session_id
     if user and req.conversation_id is not None:
@@ -206,11 +218,11 @@ async def query(
         doc_name=req.doc_name,
         tags=req.tags,
         user=user,
-        kb_id="rag_docs",
+        kb_id=target_kb,
     )
     if getattr(getattr(result, "decision", None), "kind", None) == "insufficient_evidence":
         await asyncio.to_thread(
-            _record_refusal_task, db, user, req.question, "rag_docs", req.doc_name
+            _record_refusal_task, db, user, req.question, target_kb, req.doc_name
         )
 
     if user and req.conversation_id is not None:
