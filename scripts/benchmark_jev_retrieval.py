@@ -896,6 +896,14 @@ def build_live_preparations(
         settings.jev_kb_allowlist = case.kb_id or kb_id
         counters = {"rewrite": 0, "rerank": 0, "route": 0, "jev": 0}
 
+        # 每个用例从冷缓存开始：改写缓存是产品行为，但基准要测"这次请求真实调了多少次模型"。
+        # 跨用例复用会让 old/new 两侧白拿命中，rewrite 计数与 external_calls 都会失真。
+        cache = getattr(pipeline, "_rewrite_cache", None)
+        cache_lock = getattr(pipeline, "_rewrite_cache_lock", None)
+        if cache is not None and cache_lock is not None:
+            with cache_lock:
+                cache.clear()
+
         # 多轮：把这个用例的先行轮次写进**它自己的会话**，再让改写按这个用例的历史长度去读。
         # 会话 id 由调用方给（每次调用一个），因为同一个会话被反复调用会把上一轮的问答累积进去，
         # 于是"历史"变成"历史 + 上次的答案"，两次调用测的就不是同一个东西了。

@@ -39,6 +39,11 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=6)
     parser.add_argument("--user-id", type=int, default=1)
     parser.add_argument("--top-k", type=int, default=12, help="candidate pool size to rerank")
+    parser.add_argument(
+        "--use-cache",
+        action="store_true",
+        help="measure with the rewrite cache enabled (default: clear it before every round)",
+    )
     args = parser.parse_args()
 
     from config import settings
@@ -61,6 +66,14 @@ def main() -> int:
     top_scores: list[float | None] = []
     try:
         for attempt in range(args.rounds):
+            # 这个脚本量的是"改写本身有多不稳定"。缓存会把 6 轮压成 1 轮，
+            # 于是默认每轮清一次；要验证缓存命中时加 --use-cache。
+            if not args.use_cache:
+                cache = getattr(pipeline, "_rewrite_cache", None)
+                lock = getattr(pipeline, "_rewrite_cache_lock", None)
+                if cache is not None and lock is not None:
+                    with lock:
+                        cache.clear()
             rewritten = pipeline._rewrite_for_retrieval(  # noqa: SLF001 - diagnostic
                 args.question, f"rewrite-stability-{attempt}"
             )

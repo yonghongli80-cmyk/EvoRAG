@@ -39,6 +39,8 @@ _DECISION_METADATA_KEYS = frozenset(
         # 结构化尝试的结果种类（not_applicable / structured_result / clarification_required /
         # unsupported / failed）。只是枚举值，不含问题或表格内容。
         "structured_query_kind",
+        # 这条请求是否用了"原问题 + 改写句"双路重排。布尔值，用于判断改写抖动修复是否生效。
+        "rewrite_dual_rerank",
     }
 )
 

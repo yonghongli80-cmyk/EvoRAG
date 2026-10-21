@@ -160,3 +160,32 @@ class Reranker:
             _breaker.record_failure()
             logger.warning("Rerank failed — falling back to original document order", exc_info=True)
             return [replace(document, rerank_score=None, score_source="unavailable") for document in documents]
+
+
+def merge_ranked_chunks(primary: list[Chunk], secondary: list[Chunk]) -> list[Chunk]:
+    """Merge two rerank passes over the same candidates, keeping the higher score per chunk."""
+
+    def score_of(chunk: Chunk) -> float:
+        return chunk.rerank_score if chunk.rerank_score is not None else float("-inf")
+
+    merged: dict[tuple[str, int, str], Chunk] = {}
+    first_seen: list[tuple[str, int, str]] = []
+    for chunk in (*primary, *secondary):
+        key = (chunk.doc_name, chunk.chunk_index, chunk.text)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = chunk
+            first_seen.append(key)
+        elif score_of(chunk) > score_of(current):
+            merged[key] = chunk
+
+    scored: list[Chunk] = []
+    unscored: list[Chunk] = []
+    for key in first_seen:
+        chunk = merged[key]
+        if chunk.rerank_score is None:
+            unscored.append(chunk)
+        else:
+            scored.append(chunk)
+    scored.sort(key=lambda chunk: -score_of(chunk))
+    return scored + unscored

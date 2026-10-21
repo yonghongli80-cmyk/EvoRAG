@@ -197,6 +197,16 @@ class Settings(BaseSettings):
     #: 检索前改写时带上最近几轮对话（补全"它呢？/那这个多少钱"这类指代）。
     #: **默认 0 = 关闭**，与既有行为逐字节一致；开启后必须先测检索质量再谈提升。
     query_rewrite_history_turns: int = 0
+    #: 改写结果按 (问题, 历史签名) 缓存。只缓存**改变了问题**的非空结果：一次瞬时模型故障
+    #: 返回原句时不会被固化，下次仍会重试。缓存是进程内的，重启即失效。
+    query_rewrite_cache_enabled: bool = True
+    query_rewrite_cache_size: int = Field(default=512, ge=1)
+    #: 双路重排：改写句与原问题各重排一次，按块取较高分（2026-10-21 实测：坏改写会把
+    #: "帮我找资料"变成"如何查询资料"，同一候选池的重排分从 0.7 掉到 0.03，恰好跨过
+    #: reliability_min_score）。always=每条改写请求都做（最稳，多一次重排调用）；
+    #: below_threshold=仅当改写句最高分低于 rewrite_dual_rerank_threshold 时补一次；off=旧行为。
+    rewrite_dual_rerank_mode: Literal["always", "below_threshold", "off"] = "below_threshold"
+    rewrite_dual_rerank_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     evolution_diagnosis_samples: int = Field(default=1, ge=1, le=5)
     # 代码补丁沙箱的**基准回放**用的只读数据快照目录；为空=不给。沙箱子进程会剥掉所有
     # RAG_* 设置以保持隔离，所以回放此前连语料都拿不到、只能报 "replay unavailable"。该目录

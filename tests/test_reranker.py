@@ -2,7 +2,7 @@
 from unittest.mock import MagicMock, patch
 
 from rag.models import Chunk
-from rag.reranker import Reranker
+from rag.reranker import Reranker, merge_ranked_chunks
 
 
 def test_rerank_returns_top_k():
@@ -91,3 +91,66 @@ def test_rerank_preserves_chunk_metadata():
         assert result[0].doc_name == "b.md"
         assert result[1].text == "文档A"
         assert result[1].doc_name == "a.md"
+
+
+def test_merge_keeps_higher_score_from_secondary():
+    primary_chunk = Chunk(text="同一块", doc_name="a.md", chunk_index=0, rerank_score=0.40)
+    secondary_chunk = Chunk(text="同一块", doc_name="a.md", chunk_index=0, rerank_score=0.90)
+
+    result = merge_ranked_chunks([primary_chunk], [secondary_chunk])
+
+    assert len(result) == 1
+    assert result[0] is secondary_chunk
+
+
+def test_merge_unions_disjoint_chunks_in_score_order():
+    primary_top = Chunk(text="主路高分", doc_name="a.md", chunk_index=0, rerank_score=0.50)
+    primary_low = Chunk(text="主路低分", doc_name="a.md", chunk_index=1, rerank_score=0.20)
+    secondary_top = Chunk(text="改路高分", doc_name="b.md", chunk_index=0, rerank_score=0.90)
+    secondary_low = Chunk(text="改路低分", doc_name="b.md", chunk_index=1, rerank_score=0.10)
+
+    result = merge_ranked_chunks([primary_top, primary_low], [secondary_top, secondary_low])
+
+    assert [chunk.text for chunk in result] == ["改路高分", "主路高分", "主路低分", "改路低分"]
+
+
+def test_merge_prefers_scored_chunk_over_none():
+    scored = Chunk(text="有分数", doc_name="a.md", chunk_index=0, rerank_score=0.70)
+    unscored = Chunk(text="有分数", doc_name="a.md", chunk_index=0, rerank_score=None)
+    assert merge_ranked_chunks([unscored], [scored]) == [scored]
+
+    primary_scored = Chunk(text="另一块", doc_name="b.md", chunk_index=0, rerank_score=0.30)
+    secondary_unscored = Chunk(text="另一块", doc_name="b.md", chunk_index=0, rerank_score=None)
+    result = merge_ranked_chunks([primary_scored], [secondary_unscored])
+    assert len(result) == 1
+    assert result[0] is primary_scored
+
+
+def test_merge_both_unscored_keeps_first_seen_order():
+    primary_a = Chunk(text="主路A", doc_name="a.md", chunk_index=0, rerank_score=None)
+    primary_b = Chunk(text="主路B", doc_name="b.md", chunk_index=0, rerank_score=None)
+    secondary_b = Chunk(text="主路B", doc_name="b.md", chunk_index=0, rerank_score=None)
+    secondary_c = Chunk(text="改路C", doc_name="c.md", chunk_index=0, rerank_score=None)
+
+    result = merge_ranked_chunks([primary_a, primary_b], [secondary_b, secondary_c])
+
+    assert [chunk.text for chunk in result] == ["主路A", "主路B", "改路C"]
+    assert result[1] is primary_b
+
+
+def test_merge_empty_inputs():
+    assert merge_ranked_chunks([], []) == []
+
+    only_primary = Chunk(text="只有主路", doc_name="a.md", chunk_index=0, rerank_score=0.50)
+    assert merge_ranked_chunks([only_primary], []) == [only_primary]
+    assert merge_ranked_chunks([], [only_primary]) == [only_primary]
+
+
+def test_merge_equal_scores_keeps_primary_object():
+    primary_chunk = Chunk(text="同分块", doc_name="a.md", chunk_index=0, rerank_score=0.60)
+    secondary_chunk = Chunk(text="同分块", doc_name="a.md", chunk_index=0, rerank_score=0.60)
+
+    result = merge_ranked_chunks([primary_chunk], [secondary_chunk])
+
+    assert len(result) == 1
+    assert result[0] is primary_chunk

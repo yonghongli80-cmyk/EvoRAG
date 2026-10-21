@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NamedTuple, Protocol, runtime_checkable
@@ -39,7 +40,7 @@ from rag.reliability import (
     fixed_decision_copy,
 )
 from rag.reliability.models import AnswerabilityDecision, ConfidenceAssessment
-from rag.reranker import Reranker
+from rag.reranker import Reranker, merge_ranked_chunks
 from rag.retriever import Retriever
 from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
@@ -197,6 +198,23 @@ def _exception_frame(error: BaseException) -> str:
     return f"{label}:{frame.lineno}:{frame.name}"
 
 
+def _history_signature(history: list[tuple[str, str]], summary: str | None) -> str:
+    """Stable key for the conversation context a rewrite was produced from.
+
+    The rewrite is LLM-generated, so two calls with the same question but different history are
+    legitimately different inputs. The signature keeps the cache from serving one turn's rewrite
+    to another turn that only shares the question text.
+    """
+    digest = hashlib.sha256()
+    for role, content in history:
+        digest.update(str(role).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(content).encode("utf-8"))
+        digest.update(b"\0")
+    digest.update(str(summary or "").encode("utf-8"))
+    return digest.hexdigest()
+
+
 class RAGPipeline:
     def __init__(
         self,
@@ -280,6 +298,10 @@ class RAGPipeline:
         self._closed = False
         self._agent_lock = threading.Lock()
         self._async_agent_lock = asyncio.Lock()
+        # 检索前改写的进程内缓存：同一 (问题, 历史签名) 复用一次改写，消掉重复抖动。
+        # 只缓存改变了问题的非空结果（见 _rewrite_cached）。
+        self._rewrite_cache: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self._rewrite_cache_lock = threading.Lock()
 
         # 权限管理：注入 user_db 引用（由 api.py 传入，避免每次查询新建连接）
         self._user_db = user_db
@@ -453,18 +475,95 @@ class RAGPipeline:
         **默认 0 轮 ⇒ 与既有行为逐字节一致**（`rewrite_query(question)` 原样调用）。
         指代补全只在多轮里才有意义（"它呢？"当轮没有先行词），而回答生成那条路**本来**就带上下文
         （`self.memory.build_messages`）—— 缺口只在检索前的改写这一处。
+
+        改写由 LLM 生成，同一问题多次调用会得到不同句子；实测（2026-10-21）其中一种会把
+        "帮我找资料"改写成"如何查询资料"，使同一候选池的重排分从 0.7 掉到 0.03。因此这里
+        按 (问题, 历史签名) 缓存改写结果，减少重复抖动与模型调用（见 ``_rewrite_cached``）。
         """
         turns = int(getattr(settings, "query_rewrite_history_turns", 0) or 0)
         if turns <= 0:
-            return rewrite_query(question)
+            return self._rewrite_cached(question, "", lambda: rewrite_query(question))
         try:
             messages = self.memory.get_recent_messages(session_id, n=turns * 2)
             summary = self.memory.get_summary(session_id)
         except Exception:  # noqa: BLE001 - 记忆读不到就退回既有行为，绝不让改写失败
+            # 不缓存：这是"没有历史"的退化结果，缓存它会让 memory 恢复后仍返回无上下文改写。
             return rewrite_query(question)
-        return rewrite_query(
-            question, history=[(m.role, m.content) for m in messages], summary=summary
+        history = [(m.role, m.content) for m in messages]
+        return self._rewrite_cached(
+            question,
+            _history_signature(history, summary),
+            lambda: rewrite_query(question, history=history, summary=summary),
         )
+
+    def _rewrite_cached(self, question: str, signature: str, produce) -> str:
+        """Return a cached rewrite or produce and cache a new one.
+
+        Only a non-empty rewrite that actually **changed** the question is cached. ``rewrite_query``
+        returns the original question when the model call fails, and freezing that would turn a
+        transient provider error into a permanent loss of recall for that question.
+        """
+        if not getattr(settings, "query_rewrite_cache_enabled", True):
+            return produce()
+        cache = getattr(self, "_rewrite_cache", None)
+        lock = getattr(self, "_rewrite_cache_lock", None)
+        if cache is None or lock is None:
+            # Tests build pipelines with object.__new__ and skip __init__; create lazily.
+            cache = OrderedDict()
+            lock = threading.Lock()
+            self._rewrite_cache = cache
+            self._rewrite_cache_lock = lock
+        key = (question, signature)
+        with lock:
+            cached = cache.get(key)
+            if cached is not None:
+                cache.move_to_end(key)
+                return cached
+        rewritten = produce()
+        if not rewritten or rewritten == question:
+            return rewritten
+        with lock:
+            cache[key] = rewritten
+            cache.move_to_end(key)
+            limit = max(1, int(getattr(settings, "query_rewrite_cache_size", 512) or 512))
+            while len(cache) > limit:
+                cache.popitem(last=False)
+        return rewritten
+
+    def _rerank_for_evidence(self, original_question, retrieval_query, candidates, record=None):
+        """Rerank with the retrieval query, and also with the user's original wording.
+
+        Measured 2026-10-21: an LLM rewrite can turn "find this for me" into "how do I query for
+        this"; the reranker then scores the same relevant document near zero and the request flips
+        to a refusal. Judging both phrasings and keeping the higher score removes the flip without
+        touching the evidence threshold.
+
+        The second pass is deliberately conditional: with ``below_threshold`` (default) it only runs
+        when the rewrite pass is already weak enough to risk a refusal, so the common request keeps
+        its single-rerank latency. A degraded reranker (all scores ``None``) and an unchanged query
+        never trigger it.
+        """
+        if not candidates:
+            return []
+        primary = self.reranker.rerank(retrieval_query, candidates)
+        if record is not None:
+            record["rewrite_dual_rerank"] = False
+        if retrieval_query.strip() == original_question.strip():
+            return primary
+        if not any(chunk.rerank_score is not None for chunk in primary):
+            # 重排器降级（断路器/接口失败）：再调一次只会同样失败。
+            return primary
+        mode = settings.rewrite_dual_rerank_mode
+        if mode == "off":
+            return primary
+        if mode == "below_threshold":
+            best = max(chunk.rerank_score for chunk in primary if chunk.rerank_score is not None)
+            if best >= settings.rewrite_dual_rerank_threshold:
+                return primary
+        secondary = self.reranker.rerank(original_question, candidates)
+        if record is not None:
+            record["rewrite_dual_rerank"] = True
+        return merge_ranked_chunks(primary, secondary) or primary
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
@@ -579,7 +678,11 @@ class RAGPipeline:
             user=user,
             kb_id=kb_id,
         )
-        context = self._post_rank_acl(self.reranker.rerank(rewritten, candidates), user, effective_kb_id)
+        context = self._post_rank_acl(
+            self._rerank_for_evidence(question, rewritten, candidates, record=record),
+            user,
+            effective_kb_id,
+        )
         context = self._drop_injected_chunks(context)[:top_k]
         self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator, effective_kb_id, user)
         prepared = self._finalize_rag_context(
@@ -591,6 +694,8 @@ class RAGPipeline:
         # 也是 details_structured_query_kind 唯一的来源（见 _attempt_structured_query）。
         if "structured_query_kind" in record:
             prepared["decision_metadata"]["structured_query_kind"] = record["structured_query_kind"]
+        if "rewrite_dual_rerank" in record:
+            prepared["decision_metadata"]["rewrite_dual_rerank"] = record["rewrite_dual_rerank"]
         if structured_clarification is not None and not _produced_answer(prepared):
             # 检索没有给出**答案**，才把结构化澄清交给用户（此时它比"资料不足"更有用）。
             # 判据不是"有没有来源"：Jev 路径的拒答本来就带来源（引用兜底），
@@ -818,7 +923,9 @@ class RAGPipeline:
             if selection is None:
                 # Jev 候选判断不可用：旧 reranker 兜底，来源仍标注为 reranker
                 context = self._post_rank_acl(
-                    self.reranker.rerank(query, candidates), user, effective_kb_id
+                    self._rerank_for_evidence(question, query, candidates, record=stage),
+                    user,
+                    effective_kb_id,
                 )
                 context = self._drop_injected_chunks(context)[:top_k]
                 conflicts = []
@@ -889,6 +996,8 @@ class RAGPipeline:
         # 没试过就不写——缺省是"没试"，不是"试了但没结果"。
         if stage.get("structured_query_kind"):
             prepared["decision_metadata"]["structured_query_kind"] = stage["structured_query_kind"]
+        if "rewrite_dual_rerank" in stage:
+            prepared["decision_metadata"]["rewrite_dual_rerank"] = stage["rewrite_dual_rerank"]
         return prepared
 
     def _retrieve_visible_candidates(
