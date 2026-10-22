@@ -70,3 +70,34 @@
    - 全量 `pytest -q`（约 30–40 分钟）
 2. 分 3 个提交：R-1、R-3、R-2；运维/架构文档单独提交。
 3. 不改 D-1 的通过语义、不改标签、不改阈值；R-4/R-5 只产出文档。
+
+---
+
+## 4. 实施结果（2026-10-22）
+
+| 工作流 | 提交 | 结果 | 验证 |
+| --- | --- | --- | --- |
+| A（R-1） | `1c6ad64` | legacy 空上下文改为 `build_bundle=enterprise_request or not context`；新增 3 个用例，最小修改 1 个锁定旧行为的既有用例 | `test_pipeline.py + test_pipeline_empty_context.py` **33 passed**；ruff 通过 |
+| B（R-3） | `b14ff05` | 真实 `FailureRecorder` + 临时 DB 证明 `failed` 会落库；**未改产品代码** | 2 passed；同链路 16 passed |
+| C（R-2） | `28ca6e1` | `stats["net_zero_churn"]` 纯可见性；`passed`/`verdict`/阈值零改动 | 28 passed；ruff 通过 |
+| D（R-4/R-5） | `2d49bf1` | 运维/架构审计 474 行；候选 #30/#31 决策表、账号删除顺序、canary 窗口、Phase 0/1 | 只读审计，DB 的 size/mtime 未变 |
+
+### 4.1 审计发现（需要人拍板/执行）
+
+1. **账号安全（优先）**：4 个 `admin_*` 仍是脚本常量口令 `Password123!` 且 `is_admin=1`；
+   它们目前靠 `org_people.active=0` 在登录口被 `account_inactive` 拦住，属于“靠一个字段兜底”。
+   4 个 `alice_*` **没有 `org_people` 行**，`active` 检查对它们不生效——只要口令正确就能登录。
+   现有 `cleanup_test_artifacts.py` 匹配不到这 8 个账号（只匹配 `_` 前缀）。
+   **本次只审计，未改账号/未写库**；建议立即轮换口令或按 §2.2 顺序删除。
+2. **候选 #30**：状态 `canary@0%`，结构上零样本；`gate_log` 缺层 3 shadow。推荐用
+   `POST /candidates/30/rollback` 明确关闭观察窗（行与轨迹保留），而不是继续挂“在观察”。
+3. **候选 #31**：`code_patch/reranking`，只有 scope 门禁；静态核对显示它改的是 legacy
+   reranker 的 `top_k` 截断，而 Jev 主链路判定不经过该路径，预期效果存疑。推荐先
+   `run_patch_sandbox.py --candidate-id 31 --dry-run`，证伪则 `candidate_testing → rejected`。
+4. **架构**：Phase 0（`/metrics`、`/ready`、可复现压测档案）与 Phase 1（Qdrant server）本周
+   可做；PostgreSQL / 对象存储 / 多副本需要新环境，未实施。
+
+### 4.2 全量回归
+
+`pytest -q -p no:cacheprovider`：**2364 passed / 0 failed，34:26**（2026-10-22）；
+`ruff check .` 全绿。
