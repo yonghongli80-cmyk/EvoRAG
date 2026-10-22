@@ -78,8 +78,8 @@ class RAGUser(HttpUser):
         """用户启动：优先用既有账号登录，否则尝试注册。
 
         自注册默认关闭，压测应显式给一个已存在的账号：
-            $env:RAG_LOAD_USERNAME="test_live"
-            $env:RAG_LOAD_PASSWORD="..."
+            $env:RAG_LOAD_USERNAME="admin"
+            $env:RAG_LOAD_PASSWORD="admin"
         """
         configured_user = os.getenv("RAG_LOAD_USERNAME")
         configured_password = os.getenv("RAG_LOAD_PASSWORD")
