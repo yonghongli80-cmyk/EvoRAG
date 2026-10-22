@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const { mockRequestInterceptorUse, mockInterceptorUse, mockAxiosInstance } = vi.hoisted(() => {
   const mockRequestInterceptorUse = vi.fn()
@@ -128,6 +128,64 @@ describe('api interceptor', () => {
     await expect(responseErrorInterceptor(error)).rejects.toBeDefined()
 
     expect(ElMessage.error).toHaveBeenCalledWith('服务器错误，请稍后重试')
+  })
+
+  it('500 response falls back to data.error when detail is missing', async () => {
+    const error = { response: { status: 500, data: { error: 'LLM 暂不可用' } } }
+
+    await expect(responseErrorInterceptor(error)).rejects.toBeDefined()
+
+    expect(ElMessage.error).toHaveBeenCalledWith('LLM 暂不可用')
+  })
+
+  it('notifies the registered session reset handler on 401 and 403', async () => {
+    const { registerSessionResetHandler } = await import('../api')
+    const onSessionReset = vi.fn()
+    registerSessionResetHandler(onSessionReset)
+
+    try {
+      await expect(responseErrorInterceptor({ response: { status: 401 } })).rejects.toBeDefined()
+      expect(onSessionReset).toHaveBeenCalledTimes(1)
+
+      await expect(responseErrorInterceptor({ response: { status: 403 } })).rejects.toBeDefined()
+      expect(onSessionReset).toHaveBeenCalledTimes(2)
+    } finally {
+      registerSessionResetHandler(null)
+    }
+  })
+})
+
+describe('streamRequest errors', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('surfaces data.error from a non-ok streaming response', async () => {
+    const payload = { error: '对话已失效，请重新登录' }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      clone: () => ({ json: vi.fn().mockResolvedValue(payload) }),
+      json: vi.fn().mockResolvedValue(payload)
+    }))
+
+    const { streamRequest } = await import('../api')
+
+    await expect(streamRequest('/query/stream', { method: 'POST' })).rejects.toThrow('对话已失效，请重新登录')
+  })
+
+  it('still prefers data.detail over data.error', async () => {
+    const payload = { detail: '详细原因', error: '泛化错误' }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      clone: () => ({ json: vi.fn().mockResolvedValue(payload) }),
+      json: vi.fn().mockResolvedValue(payload)
+    }))
+
+    const { streamRequest } = await import('../api')
+
+    await expect(streamRequest('/query/stream', { method: 'POST' })).rejects.toThrow('详细原因')
   })
 })
 

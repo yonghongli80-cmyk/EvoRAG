@@ -15,6 +15,48 @@ const api = axios.create({
   withCredentials: true
 })
 
+export type SessionResetHandler = () => void
+
+let sessionResetHandler: SessionResetHandler | null = null
+
+/**
+ * Register the routine that drops account-scoped client state when the session
+ * becomes invalid. Auth imports this module, so the hook lives here to avoid a
+ * circular dependency with the stores.
+ */
+export function registerSessionResetHandler(handler: SessionResetHandler | null): void {
+  sessionResetHandler = handler
+}
+
+function notifySessionReset(): void {
+  const handler = sessionResetHandler
+  if (!handler) return
+  try {
+    handler()
+  } catch {
+    // A reset failure must never hide the original HTTP error.
+  }
+}
+
+/**
+ * Accept both FastAPI's `detail` and the legacy/hand-written `error` payloads.
+ */
+export function extractApiErrorMessage(data: any, fallback: string): string {
+  const detail = data?.detail
+  if (typeof detail === 'string' && detail) return detail
+
+  const error = data?.error
+  if (typeof error === 'string' && error) return error
+  if (error && typeof error === 'object') {
+    for (const key of ['detail', 'message', 'reason'] as const) {
+      const value = error[key]
+      if (typeof value === 'string' && value) return value
+    }
+  }
+
+  return fallback
+}
+
 export function shouldRedirectToLogin(pathname: string): boolean {
   return pathname !== '/login'
 }
@@ -22,13 +64,16 @@ export function shouldRedirectToLogin(pathname: string): boolean {
 async function rejectRequest(error: any): Promise<never> {
   if (error.response) {
     const { status, data } = error.response
-    if (status === 401 && shouldRedirectToLogin(window.location.pathname)) {
-      window.location.href = '/login'
+    if (status === 401) {
+      notifySessionReset()
+      if (shouldRedirectToLogin(window.location.pathname)) {
+        window.location.href = '/login'
+      }
     } else if (status === 403) {
+      notifySessionReset()
       ElMessage.error('权限不足，无法执行此操作')
     } else if (status >= 500) {
-      const detail = data?.detail || '服务器错误，请稍后重试'
-      ElMessage.error(detail)
+      ElMessage.error(extractApiErrorMessage(data, '服务器错误，请稍后重试'))
     }
   } else if (error.message?.includes('Network Error') || error.code === 'ERR_NETWORK') {
     ElMessage.error('网络连接失败，请检查网络后重试')
@@ -64,7 +109,7 @@ export async function streamRequest(path: string, init: RequestInit): Promise<Re
     } catch {
       data = undefined
     }
-    const error: any = new Error(data?.detail || '请求失败')
+    const error: any = new Error(extractApiErrorMessage(data, '请求失败'))
     error.response = { status: response.status, data }
     return rejectRequest(error)
   }

@@ -207,4 +207,47 @@ describe('files store', () => {
 
     expect(vi.mocked(api.delete).mock.calls[0]).toHaveLength(1)
   })
+
+  // ── reset ───────────────────────────────────────────────
+  it('reset drops the cached file list and forces the next loadFiles to refetch', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      data: { files: [{ name: 'a-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }] }
+    } as any)
+
+    const store = useFilesStore()
+    await store.loadFiles()
+    expect(api.get).toHaveBeenCalledTimes(1)
+    expect(store.files).toHaveLength(1)
+
+    store.reset()
+
+    expect(store.files).toEqual([])
+    expect(store.loading).toBe(false)
+
+    await store.loadFiles()
+    expect(api.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('reset clears archive, recycle and organization state', () => {
+    const store = useFilesStore()
+    store.archiveManifestId = 7
+    store.archiveEntries = [{ id: 1 }]
+    store.archiveVisible = true
+    store.recycleItems = [{ document_id: 3, filename: 'deleted.pdf' }]
+    store.recycleVisible = true
+    store.organizationItems = [{ id: 2, target_path: '财务/发票' }]
+    store.organizationProposalId = 9
+    store.organizationVisible = true
+
+    store.reset()
+
+    expect(store.archiveManifestId).toBeNull()
+    expect(store.archiveEntries).toEqual([])
+    expect(store.archiveVisible).toBe(false)
+    expect(store.recycleItems).toEqual([])
+    expect(store.recycleVisible).toBe(false)
+    expect(store.organizationItems).toEqual([])
+    expect(store.organizationProposalId).toBeNull()
+    expect(store.organizationVisible).toBe(false)
+  })
 })

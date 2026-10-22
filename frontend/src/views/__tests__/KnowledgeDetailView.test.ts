@@ -4,7 +4,9 @@ import { createTestingPinia } from '@pinia/testing'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 vi.mock('../../utils/api', () => ({
-  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }
+  default: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  streamRequest: vi.fn(),
+  registerSessionResetHandler: vi.fn()
 }))
 
 vi.mock('../../composables/useAnalysis', () => ({

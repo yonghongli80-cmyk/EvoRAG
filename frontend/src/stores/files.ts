@@ -127,6 +127,24 @@ export const useFilesStore = defineStore('files', () => {
     organizationVisible.value = false
   }
 
+  /**
+   * Drop all account-scoped state. Called on login/logout and when the API
+   * answers 401/403 so the next account cannot see the previous one's data.
+   */
+  function reset() {
+    files.value = []
+    loading.value = false
+    _loaded = false
+    archiveManifestId.value = null
+    archiveEntries.value = []
+    archiveVisible.value = false
+    recycleItems.value = []
+    recycleVisible.value = false
+    organizationItems.value = []
+    organizationProposalId.value = null
+    organizationVisible.value = false
+  }
+
   async function deleteFile(name: string) {
     await api.delete(`/files/${encodeURIComponent(name)}`)
     await loadFiles(true)
@@ -135,6 +153,7 @@ export const useFilesStore = defineStore('files', () => {
   return {
     files,
     loading,
+    reset,
     loadFiles,
     uploadFile,
     deleteFile,

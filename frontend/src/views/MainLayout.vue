@@ -26,8 +26,13 @@ function handleMenuSelect(index: string) {
 }
 
 async function handleLogout() {
-  await authStore.logout()
-  router.push('/login')
+  try {
+    await authStore.logout()
+  } finally {
+    // logout() already reset the client stores in its finally block; navigate
+    // even if the server call failed so the next account always starts at /login.
+    router.push('/login')
+  }
 }
 </script>
 

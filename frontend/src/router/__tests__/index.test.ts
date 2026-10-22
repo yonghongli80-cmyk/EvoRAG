@@ -5,7 +5,9 @@ import router from '../index'
 import { useAuthStore } from '../../stores/auth'
 
 vi.mock('../../utils/api', () => ({
-  default: { post: vi.fn(), get: vi.fn() }
+  default: { post: vi.fn(), get: vi.fn() },
+  streamRequest: vi.fn(),
+  registerSessionResetHandler: vi.fn()
 }))
 
 import api from '../../utils/api'

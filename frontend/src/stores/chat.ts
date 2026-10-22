@@ -27,6 +27,8 @@ interface Message {
   }>
   feedback?: 'positive' | 'negative'
   assistantMessageId?: number
+  error?: string
+  failed?: boolean
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
   answerability_kind?: string
@@ -73,6 +75,20 @@ export const useChatStore = defineStore('chat', () => {
     currentConvId.value = null
     messages.value = []
     selectedFile.value = null
+  }
+
+  /**
+   * Drop all account-scoped state. Called on login/logout and when the API
+   * answers 401/403 so the next account cannot see the previous one's data.
+   */
+  function reset() {
+    conversations.value = []
+    currentConvId.value = null
+    messages.value = []
+    selectedFile.value = null
+    suggestedQuestions.value = []
+    isStreaming.value = false
+    _selectedFilesByConv.clear()
   }
 
   /**
@@ -217,6 +233,64 @@ export const useChatStore = defineStore('chat', () => {
       let sources: any[] = []
       let buffer = ''
 
+      const handleEvent = (event: any) => {
+        if (event.type === 'token') {
+          if (event.model && assistantMsg.arenaResponses) {
+            assistantMsg.arenaResponses[event.model] =
+              (assistantMsg.arenaResponses[event.model] || '') + (event.content || '')
+            assistantMsg.content = Object.entries(assistantMsg.arenaResponses)
+              .map(([m, c]) => `### [${m}]\n${c}`)
+              .join('\n\n')
+          } else {
+            answer += event.content || ''
+            assistantMsg.content = answer
+          }
+        } else if (event.type === 'sources') {
+          sources = event.sources
+        } else if (event.type === 'structured_result') {
+          assistantMsg.structuredResult = {
+            kind: event.kind,
+            facts: event.facts || [],
+            sources: event.sources || [],
+            rowsScanned: event.rows_scanned || 0,
+            clarification: event.clarification
+          }
+        } else if (event.type === 'error') {
+          // The backend reports mid-stream failures as `{"type":"error","reason":...}`
+          // and then closes the stream. Without this branch the assistant bubble stayed
+          // blank forever and no failure state was surfaced.
+          let errorText = '生成失败，请稍后重试'
+          if (typeof event.reason === 'string' && event.reason) {
+            errorText = event.reason
+          } else if (typeof event.error === 'string' && event.error) {
+            errorText = event.error
+          } else if (typeof event.message === 'string' && event.message) {
+            errorText = event.message
+          }
+          assistantMsg.error = errorText
+          assistantMsg.failed = true
+          if (!assistantMsg.content) assistantMsg.content = errorText
+
+          const messageId = typeof event.assistant_message_id === 'number'
+            ? event.assistant_message_id
+            : (typeof event.message_id === 'number' ? event.message_id : null)
+          if (messageId !== null) {
+            assistantMsg.id = messageId
+            assistantMsg.assistantMessageId = messageId
+          }
+        } else if (event.type === 'done') {
+          if (typeof event.assistant_message_id === 'number') {
+            assistantMsg.id = event.assistant_message_id
+            assistantMsg.assistantMessageId = event.assistant_message_id
+          }
+          if (event.reliability) {
+            assistantMsg.confidence_level = event.reliability.confidence_level
+            assistantMsg.confidence_reasons = event.reliability.confidence_reasons
+            assistantMsg.answerability_kind = event.reliability.answerability_kind
+          }
+        }
+      }
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
@@ -228,39 +302,7 @@ export const useChatStore = defineStore('chat', () => {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           try {
-            const event = JSON.parse(line.slice(6))
-            if (event.type === 'token') {
-              if (event.model && assistantMsg.arenaResponses) {
-                assistantMsg.arenaResponses[event.model] =
-                  (assistantMsg.arenaResponses[event.model] || '') + (event.content || '')
-                assistantMsg.content = Object.entries(assistantMsg.arenaResponses)
-                  .map(([m, c]) => `### [${m}]\n${c}`)
-                  .join('\n\n')
-              } else {
-                answer += event.content || ''
-                assistantMsg.content = answer
-              }
-            } else if (event.type === 'sources') {
-              sources = event.sources
-            } else if (event.type === 'structured_result') {
-              assistantMsg.structuredResult = {
-                kind: event.kind,
-                facts: event.facts || [],
-                sources: event.sources || [],
-                rowsScanned: event.rows_scanned || 0,
-                clarification: event.clarification
-              }
-            } else if (event.type === 'done') {
-              if (typeof event.assistant_message_id === 'number') {
-                assistantMsg.id = event.assistant_message_id
-                assistantMsg.assistantMessageId = event.assistant_message_id
-              }
-              if (event.reliability) {
-                assistantMsg.confidence_level = event.reliability.confidence_level
-                assistantMsg.confidence_reasons = event.reliability.confidence_reasons
-                assistantMsg.answerability_kind = event.reliability.answerability_kind
-              }
-            }
+            handleEvent(JSON.parse(line.slice(6)))
           } catch {}
         }
       }
@@ -271,8 +313,7 @@ export const useChatStore = defineStore('chat', () => {
         for (const line of tail.split('\n')) {
           if (!line.startsWith('data: ')) continue
           try {
-            const event = JSON.parse(line.slice(6))
-            if (event.type === 'sources') sources = event.sources
+            handleEvent(JSON.parse(line.slice(6)))
           } catch {}
         }
       }
@@ -280,8 +321,7 @@ export const useChatStore = defineStore('chat', () => {
       // Process buffer residual (last event without trailing newline)
       if (buffer.startsWith('data: ')) {
         try {
-          const event = JSON.parse(buffer.slice(6))
-          if (event.type === 'sources') sources = event.sources
+          handleEvent(JSON.parse(buffer.slice(6)))
         } catch {}
       }
 
@@ -312,7 +352,15 @@ export const useChatStore = defineStore('chat', () => {
       }
 
     } catch (err: any) {
-      assistantMsg.content = err?.response?.data?.detail || '请求失败，请稍后重试。'
+      // Error bodies are either FastAPI's `detail` or the hand-written `error`
+      // shape used by the streaming endpoint.
+      const data = err?.response?.data
+      const detail = data?.detail
+      const errorText = data?.error
+      assistantMsg.content =
+        (typeof detail === 'string' && detail) ||
+        (typeof errorText === 'string' && errorText) ||
+        '请求失败，请稍后重试。'
     } finally {
       isStreaming.value = false
     }
@@ -387,6 +435,7 @@ export const useChatStore = defineStore('chat', () => {
     loadAvailableModels,
     conversationsByMode,
     resetModeState,
+    reset,
     loadConversations,
     createConversation,
     selectConversation,

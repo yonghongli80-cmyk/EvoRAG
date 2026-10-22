@@ -401,6 +401,20 @@ describe('chat store', () => {
     expect(assistantMsg.content).toBe('请求失败')
   })
 
+  it('sendMessage shows data.error text when the error body has no detail', async () => {
+    const mockResponse = {
+      ok: false,
+      json: vi.fn().mockResolvedValue({ error: '模型暂不可用' })
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(mockResponse as any)
+
+    const store = useChatStore()
+    await store.sendMessage('Hello')
+
+    const assistantMsg = store.messages[1]
+    expect(assistantMsg.content).toBe('模型暂不可用')
+  })
+
   it('sendMessage shows fallback error on network failure', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network error'))
 
@@ -699,6 +713,151 @@ describe('chat store', () => {
 
     expect(store.availableModels).toHaveLength(2)
     expect(store.selectedModel).toBe('deepseek')
+  })
+
+  // ── session reset ────────────────────────────────────────
+  it('reset clears conversation state and per-conversation file selections', async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    store.conversations = [
+      { id: 1, title: 'A private title', mode: 'file', created_at: '2026-01-01' }
+    ]
+    store.currentConvId = 1
+    store.messages = [
+      { role: 'user', content: 'a private question' },
+      { role: 'assistant', content: 'a private answer' }
+    ]
+    store.selectFile('a-private.pdf')
+    store.suggestedQuestions = ['a follow-up']
+    store.isStreaming = true
+
+    // Selecting another conversation stores 1 -> a-private.pdf in the internal map.
+    await store.selectConversation(2)
+
+    store.reset()
+
+    expect(store.conversations).toEqual([])
+    expect(store.currentConvId).toBeNull()
+    expect(store.messages).toEqual([])
+    expect(store.selectedFile).toBeNull()
+    expect(store.suggestedQuestions).toEqual([])
+    expect(store.isStreaming).toBe(false)
+
+    // The previous account's per-conversation file must not come back.
+    await store.selectConversation(1)
+    expect(store.selectedFile).toBeNull()
+  })
+
+  // ── SSE error events ────────────────────────────────────
+  it('turns an SSE error event into a visible failed answer instead of a blank bubble', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"error","reason":"流式生成失败，请稍后重试"}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question')
+
+    const assistantMsg = store.messages.at(-1)!
+    expect(assistantMsg.content).toBe('流式生成失败，请稍后重试')
+    expect(assistantMsg.content).not.toBe('')
+    expect(assistantMsg.error).toBe('流式生成失败，请稍后重试')
+    expect(assistantMsg.failed).toBe(true)
+    expect(store.isStreaming).toBe(false)
+    expect(store.messages).toHaveLength(2)
+  })
+
+  it('keeps a partial answer when the stream fails midway and marks it failed', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"token","content":"Partial answer"}\n')
+            })
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"error","reason":"生成中断，请重试"}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question')
+
+    const assistantMsg = store.messages.at(-1)!
+    expect(assistantMsg.content).toBe('Partial answer')
+    expect(assistantMsg.error).toBe('生成中断，请重试')
+    expect(assistantMsg.failed).toBe(true)
+  })
+
+  it('accepts an SSE error event that only carries an error field', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"error","error":"模型暂不可用"}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question')
+
+    const assistantMsg = store.messages.at(-1)!
+    expect(assistantMsg.content).toBe('模型暂不可用')
+    expect(assistantMsg.error).toBe('模型暂不可用')
+    expect(assistantMsg.failed).toBe(true)
+  })
+
+  it('keeps an assistant message id supplied by an SSE error event', async () => {
+    const encoder = new TextEncoder()
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: vi.fn()
+            .mockResolvedValueOnce({
+              done: false,
+              value: encoder.encode('data: {"type":"error","reason":"生成失败","assistant_message_id":77}\n')
+            })
+            .mockResolvedValueOnce({ done: true, value: undefined })
+        })
+      }
+    } as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question')
+
+    const assistantMsg = store.messages.at(-1)!
+    expect(assistantMsg.id).toBe(77)
+    expect(assistantMsg.assistantMessageId).toBe(77)
   })
 
   it('sendMessage in arena mode sends models array and parses multiplexed arenaResponses', async () => {

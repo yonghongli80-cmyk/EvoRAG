@@ -1,6 +1,8 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import api from '../utils/api'
+import api, { registerSessionResetHandler } from '../utils/api'
+import { useChatStore } from './chat'
+import { useFilesStore } from './files'
 
 interface AuthUser {
   id: number
@@ -15,6 +17,22 @@ interface AuthUser {
   }
 }
 
+/**
+ * Drop every account-scoped client store. Logout and login both funnel through
+ * this routine, and the API layer reuses it for 401/403 responses so a shared
+ * browser cannot leak account A's conversations/files to account B.
+ */
+export function resetClientSession(): void {
+  useChatStore().reset()
+  useFilesStore().reset()
+}
+
+// Registered at module load; auth is imported by the router before any guarded
+// view mounts. The typeof guard keeps partial test mocks of utils/api working.
+if (typeof registerSessionResetHandler === 'function') {
+  registerSessionResetHandler(resetClientSession)
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<AuthUser | null>(null)
   const sessionChecked = ref(false)
@@ -24,6 +42,7 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await api.post('/login', { username, password })
     user.value = null
     sessionChecked.value = false
+    resetClientSession()
     await fetchUser(true)
     return response.data
   }
@@ -49,6 +68,7 @@ export const useAuthStore = defineStore('auth', () => {
     } finally {
       user.value = null
       sessionChecked.value = true
+      resetClientSession()
     }
   }
 
@@ -63,6 +83,7 @@ export const useAuthStore = defineStore('auth', () => {
     login,
     fetchUser,
     logout,
+    resetClientSession,
     getAuthHeaders,
   }
 })
