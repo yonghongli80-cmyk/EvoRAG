@@ -8,6 +8,7 @@ Exception strings and physical paths never leak into responses.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Annotated
@@ -22,6 +23,7 @@ from rag.api_security import (
     require_kb_edit,
     require_user,
 )
+from rag.document_versions import VersionPromotionError, promote_staged_version
 from rag.generator import StructuredOutputError
 from rag.materials.archives import (
     ArchiveConfirmationError,
@@ -46,6 +48,8 @@ from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 _CHUNK = 64 * 1024
 
@@ -240,22 +244,40 @@ async def upload_material(
         }
 
     existing = db.get_document_permission(staged.filename, _kb_id(request))
+    created_document = existing is None
     if existing is None:
         document_id = db.create_document_permission(
             staged.filename, _kb_id(request), user["id"], 1, False
         )
     else:
         document_id = existing["id"]
-    version_id = db.create_document_version(
-        document_id, staged.filename, str(staged.path), staged.sha256, user["id"]
+    # Promote before enqueueing: staging is transient and excluded from
+    # backups, so the committed version row must point at the final path.
+    try:
+        promoted = promote_staged_version(
+            db,
+            _versions_root(request),
+            document_id=document_id,
+            filename=staged.filename,
+            staged_path=staged.path,
+            content_hash=staged.sha256,
+            uploaded_by=user["id"],
+        )
+    except VersionPromotionError as exc:
+        if created_document:
+            try:
+                db.delete_document_permission(document_id)
+            except Exception:
+                logger.exception("material promotion rollback failed")
+        raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
+    enqueue_latest_index_job(
+        db, document_id, promoted.version_id, staged.sha256, time.time()
     )
-    db.set_version_file_path(version_id, str(staged.path))
-    enqueue_latest_index_job(db, document_id, version_id, staged.sha256, time.time())
     _audit_org_material(db, user, "document_uploaded", _kb_id(request))
     return {
         "status": "queued",
         "document_id": document_id,
-        "version_id": version_id,
+        "version_id": promoted.version_id,
         "filename": staged.filename,
         "content_hash": staged.sha256,
     }

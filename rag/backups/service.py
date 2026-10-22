@@ -32,6 +32,10 @@ from rag.backups.models import (
 _MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 _CHECKSUM_PATTERN = re.compile(r"[0-9a-f]{64}\n?\Z")
 _FORMAL_BACKUP_PATTERN = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{12}\Z")
+# Committed version rows written by older material uploads may still point into
+# ``staging``.  Run ``document_versions.migrate_staged_document_versions`` once
+# before the first backup on an existing deployment; otherwise the required-file
+# check below fails closed with ``referenced_file_missing``.
 _TRANSIENT_DIRECTORIES = frozenset({"staging", "quarantine", "archive_work"})
 _EXCLUDED_PAYLOADS = (
     "qdrant",

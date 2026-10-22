@@ -18,6 +18,7 @@ from rag.document_sources.base import SourceObject
 from rag.document_version_store import (
     final_version_path,
     promote_version,
+    resolve_version_path,
     stage_version,
 )
 from rag.knowledge_base import KnowledgeBaseManager
@@ -170,10 +171,174 @@ def ingest_document_version(
 
 
 @dataclass(frozen=True)
+class PromotedVersion:
+    version_id: int
+    version_no: int
+    file_path: Path
+
+
+class VersionPromotionError(Exception):
+    """Raised when a staged upload cannot be committed to its final path."""
+
+
+def promote_staged_version(
+    db: UserDB,
+    root: Path,
+    *,
+    document_id: int,
+    filename: str,
+    staged_path: Path,
+    content_hash: str,
+    uploaded_by: int,
+) -> PromotedVersion:
+    """Reserve a version row and promote an already-staged upload file.
+
+    ``POST /materials/upload`` streams bytes into ``<root>/staging`` before it
+    knows the version number, so the row is reserved first; the file is then
+    moved to :func:`final_version_path` and the row is repointed before the
+    index job is enqueued.  Keeping the database on the immutable final path
+    is what lets backups (which exclude ``staging``) satisfy their
+    ``required_file_keys`` check.
+
+    Any failure rolls the reserved version row back and leaves the upload in
+    ``staging`` (moving it back when only the row update failed), so the
+    caller can report the failure without enqueueing work or losing bytes.
+    The caller owns cleanup of a document permission it created for the
+    attempt.
+    """
+    version_id: int | None = None
+    final_path: Path | None = None
+    promoted = False
+    try:
+        version_id = db.create_document_version(
+            document_id, filename, str(staged_path), content_hash, uploaded_by
+        )
+        version = db.get_document_version_by_id(version_id)
+        if version is None:
+            raise RuntimeError("reserved document version is missing")
+        version_no = int(version["version_no"])
+        final_path = final_version_path(root, document_id, version_no, filename)
+        promote_version(staged_path, final_path)
+        promoted = True
+        db.set_version_file_path(version_id, str(final_path))
+    except Exception as error:
+        if version_id is not None:
+            if promoted and final_path is not None:
+                try:
+                    promote_version(final_path, staged_path)
+                except Exception:
+                    logger.exception("could not restore staged upload after failure")
+            try:
+                db.delete_document_version(version_id)
+            except Exception:
+                logger.exception("could not roll back reserved document version")
+        logger.exception(
+            "staged material promotion failed",
+            extra={"document_id": document_id, "document_filename": filename},
+        )
+        raise VersionPromotionError("staged material promotion failed") from error
+    return PromotedVersion(version_id, version_no, final_path)
+
+
+@dataclass(frozen=True)
 class MigrationReport:
     migrated: int
     missing: int
     unchanged: int
+
+
+@dataclass(frozen=True)
+class StagedVersionMigrationReport:
+    migrated: int
+    unchanged: int
+    missing: int
+    skipped: int
+    conflicts: int
+
+
+def migrate_staged_document_versions(
+    db: UserDB, versions_root: Path
+) -> StagedVersionMigrationReport:
+    """Move committed version files left under ``staging/`` to final paths.
+
+    Older ``POST /materials/upload`` implementations stored
+    ``document_versions.file_path`` as ``<versions_root>/staging/<uuid>-<name>``.
+    Backups exclude that transient directory, so those committed rows make
+    ``create_backup`` fail with ``referenced_file_missing`` forever.  New
+    uploads promote before enqueueing and never need this migration, but an
+    existing deployment must run it once before its next backup.
+
+    Only ``current``/``historical`` rows are touched: a ``staging`` row may
+    still be queued for indexing, and a pending archive manifest reads its
+    quarantined source path for confirmation, so moving either would break
+    live work.  Each version commits independently; a file that is already
+    gone is reported as ``missing`` rather than silently repointed.  The
+    function is idempotent.
+
+    Run once on an existing deployment::
+
+        from pathlib import Path
+        from config import settings
+        from rag.document_versions import migrate_staged_document_versions
+        from rag.user_db import UserDB
+
+        migrate_staged_document_versions(
+            UserDB(settings.user_db_path), Path(settings.document_versions_root)
+        )
+    """
+    staging_root = (versions_root / "staging").resolve()
+    migrated = unchanged = missing = skipped = conflicts = 0
+    for document in db.list_document_permissions_all():
+        for version in db.list_document_versions(document["id"]):
+            if version["status"] not in {"current", "historical"}:
+                skipped += 1
+                continue
+            try:
+                stored = resolve_version_path(versions_root, version["file_path"])
+            except (OSError, ValueError):
+                conflicts += 1
+                continue
+            if not stored.is_relative_to(staging_root):
+                unchanged += 1
+                continue
+            try:
+                final_path = final_version_path(
+                    versions_root,
+                    document["id"],
+                    version["version_no"],
+                    version["original_filename"],
+                )
+                if not stored.is_file():
+                    if final_path.is_file():
+                        # A previous attempt moved the file but did not commit
+                        # the row; repair the pointer without copying bytes.
+                        db.set_version_file_path(version["id"], str(final_path))
+                        migrated += 1
+                    else:
+                        missing += 1
+                    continue
+                if final_path.exists():
+                    conflicts += 1
+                    continue
+                promote_version(stored, final_path)
+                db.set_version_file_path(version["id"], str(final_path))
+                migrated += 1
+            except Exception:
+                logger.exception(
+                    "staging version migration failed",
+                    extra={
+                        "document_id": document["id"],
+                        "document_filename": version["original_filename"],
+                    },
+                )
+                conflicts += 1
+    return StagedVersionMigrationReport(
+        migrated=migrated,
+        unchanged=unchanged,
+        missing=missing,
+        skipped=skipped,
+        conflicts=conflicts,
+    )
 
 
 def migrate_existing_document_versions(
