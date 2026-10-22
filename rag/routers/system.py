@@ -174,7 +174,11 @@ def _probe_redis() -> dict[str, str]:
         client.ping()
     except Exception as exc:
         logger.warning("readiness: redis probe failed (%s)", type(exc).__name__)
-        return {"status": "error", "detail": "redis_unavailable"}
+        # Redis is an optional cache on single-node deployments; it only blocks
+        # readiness when the operator explicitly marks it required (shared
+        # cache/lock deployments).
+        status = "error" if settings.redis_required else "degraded"
+        return {"status": status, "detail": "redis_unavailable"}
     finally:
         if client is not None:
             try:

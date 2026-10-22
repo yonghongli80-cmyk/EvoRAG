@@ -74,6 +74,8 @@ data/index_state.json
 /data/structured_datasets/
 /data/kb_files/
 /data/runtime-*.log
+# Runtime leases/locks created next to the databases
+/data/*.lock
 /logs/
 
 # Backup payloads. The default ../RAGv3-backups sibling is outside this repo;

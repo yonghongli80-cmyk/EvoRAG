@@ -191,10 +191,29 @@ def test_ready_checks_redis_only_when_configured(client, monkeypatch, tmp_path):
     fake.close.assert_called_once()
 
 
-def test_ready_returns_503_when_configured_redis_is_down(client, monkeypatch, tmp_path):
+def test_ready_keeps_redis_optional_when_configured_but_down(client, monkeypatch, tmp_path):
     _sqlite_ready(monkeypatch, tmp_path)
     _qdrant_ready(monkeypatch)
     monkeypatch.setattr(settings, "redis_url", "redis://redis:6379/0")
+    monkeypatch.setattr(settings, "redis_required", False)
+    fake = MagicMock()
+    fake.ping.side_effect = ConnectionError("redis down")
+    monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: fake)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["components"]["redis"] == {"status": "degraded", "detail": "redis_unavailable"}
+    assert "redis down" not in response.text
+
+
+def test_ready_returns_503_when_redis_is_required_and_down(client, monkeypatch, tmp_path):
+    _sqlite_ready(monkeypatch, tmp_path)
+    _qdrant_ready(monkeypatch)
+    monkeypatch.setattr(settings, "redis_url", "redis://redis:6379/0")
+    monkeypatch.setattr(settings, "redis_required", True)
     fake = MagicMock()
     fake.ping.side_effect = ConnectionError("redis down")
     monkeypatch.setattr(redis, "from_url", lambda *args, **kwargs: fake)

@@ -94,6 +94,8 @@ class Settings(BaseSettings):
 
     # Redis 缓存
     redis_url: str = "redis://localhost:6379/0"
+    # 单机/开发环境 Redis 是可选缓存；多副本/共享锁部署时置 true，让 /ready 对 Redis 严格。
+    redis_required: bool = False
 
     # 文档版本存储（可信知识闭环）
     document_versions_root: str = str(Path(__file__).resolve().parent / "data" / "document_versions")

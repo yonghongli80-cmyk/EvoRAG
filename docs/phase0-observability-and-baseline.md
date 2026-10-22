@@ -28,7 +28,7 @@
 | --- | --- | --- |
 | `sqlite` | 数据库文件已存在时执行 `SELECT 1`（不建表、不写业务数据；文件缺失直接判失败，不顺手建库） | `sqlite_unavailable` |
 | `qdrant` | 共享客户端可列举集合（本地模式会暴露目录锁失败；远程模式暴露 server/RPC 失败） | `qdrant_unavailable` |
-| `redis` | 仅当 `RAG_REDIS_URL` 非空时 `PING`（连接/读超时 1s） | `redis_unavailable`；未配置为 `{"status": "skipped", "detail": "not_configured"}` |
+| `redis` | 仅当 `RAG_REDIS_URL` 非空时 `PING`（连接/读超时 1s） | 默认可选：失败返回 `{"status": "degraded", "detail": "redis_unavailable"}`，**不阻塞** `/ready`；`RAG_REDIS_REQUIRED=true` 时返回 `error` 并 503；未配置为 `{"status": "skipped", "detail": "not_configured"}` |
 
 示例（`mode` 来自 `RAG_QDRANT_URL`，不暴露 URL 本身）：
 
@@ -48,9 +48,10 @@
 `/ready` 作为摘流依据。
 
 **本机事实（2026-10-22）**：`RAG_REDIS_URL` 已配置但 6379 无监听（探针返回
-`redis_unavailable`，1s 内超时），SQLite 探针为 `ok`。因此在重启后的进程里调用 `/ready`
-会得到 503（Redis 未监听；本地模式下 Qdrant 目录锁还被运行中的服务持有）。单机不跑
-Redis 时应显式设置 `RAG_REDIS_URL=`（空）让该组件为 `skipped`。
+`degraded / redis_unavailable`，1s 内超时），SQLite 探针为 `ok`。默认 `RAG_REDIS_REQUIRED=false`
+下 `/ready` 仍为 **200**（Redis 降级不阻塞）；多副本/共享锁部署应设
+`RAG_REDIS_REQUIRED=true`，让 Redis 故障返回 503。单机完全不使用 Redis 时可设
+`RAG_REDIS_URL=`（空）让组件为 `skipped`。
 
 ---
 
