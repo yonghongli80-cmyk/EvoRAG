@@ -21,6 +21,22 @@ def test_docker_context_excludes_development_only_directories():
     } <= patterns
 
 
+def test_docker_context_excludes_company_data_backups_and_test_artifacts():
+    """P1-13/F-02: ``COPY . .`` must not put company data into the production image."""
+    patterns = {
+        line.strip().rstrip("/")
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert {
+        "real-case-handoff",
+        "artifacts",
+        "scratch",
+        "tmp_test_dir",
+    } <= patterns
+
+
 def test_docker_context_excludes_runtime_uploads_but_keeps_the_repo_bootstrap():
     """The image bootstrap needs .repo_files + the three fixtures, never user uploads."""
     lines = {

@@ -21,17 +21,50 @@ cp .env.example .env
 - 填写 `RAG_DEEPSEEK_API_KEY` 和 `RAG_BAILIAN_API_KEY`；
 - 保持 `RAG_AUTH_ENABLED=true`；
 - 为 `REDIS_PASSWORD` 设置 URL-safe 的强随机值；
-- 可选设置 `INIT_ADMIN_USERNAME`。
+- 可选设置 `INIT_ADMIN_USERNAME`（仅提升已有账号，空库不能创建，见下）。
+
+空库没有任何可用账号：自注册默认关闭，而 `INIT_ADMIN_USERNAME` 只会把**已存在**的用户提升为管理员，不会创建账号。首次部署应先构建镜像，在启动前创建首个管理员：
+
+```bash
+docker compose build rag-app
+docker compose run --rm rag-app python scripts/bootstrap_admin.py --username admin
+docker compose up -d
+```
+
+脚本会提示输入密码且不回显，并按现有口令强度规则拒绝短于 8 位、缺少大写/小写/数字或 `123456` 这类弱口令；用户名已存在时直接失败，不会提权或覆盖。成功创建后该账号 `is_admin=1`，并带有 active 的 `org_people` 行。首次登录后请立即修改密码。
+
+非 Docker 本地运行时直接执行：
+
+```bash
+python scripts/bootstrap_admin.py --username admin
+```
+
+自动化环境可传 `--password`，但它会进入 shell 历史和进程列表，只应在受控的一次性环境使用，并在首次登录后立刻改密。`INIT_ADMIN_USERNAME` 只能提权既有账号，不能替代本脚本。
 
 启动并检查状态：
 
 ```bash
-docker compose up -d --build
 docker compose ps
 docker compose logs -f rag-app
 ```
 
 服务默认暴露在 <http://服务器地址:8000>，健康检查地址为 `/health`。
+
+## 演示组织种子与远程启动护栏（重要）
+
+`rag.org_auth.seed` 会创建 `demo001`–`demo280` 共 280 个演示账号，初始密码统一为 `123456`（其中 `demo001`、`demo002` 是公司管理员）。`start.py` 在绑定非回环地址时，只要发现任一 **active** 组织账号仍使用 `123456`，就会拒绝启动。Docker 通过 `DOCKER_CONTAINER=1` 固定绑定 `0.0.0.0`，因此：
+
+- **生产环境不要运行 seed**；用上面的 `bootstrap_admin.py` 创建唯一管理员。
+- 空库首次部署后若又执行 seed，容器**下次重启**会因上述检查退出并进入重启循环；只有改掉所有演示账号口令，或显式设置 `RAG_ALLOW_INITIAL_PASSWORDS_REMOTE=true`，才能远程启动。
+- `RAG_ALLOW_INITIAL_PASSWORDS_REMOTE=true` 会关闭唯一的口令护栏。280 个已知口令（含两个管理员）可被网络上任何人直接登录，读取或修改业务数据。**不要在生产环境打开。** 仅限隔离演示环境临时使用；演示结束或改为生产前，必须修改/删除全部演示账号并把该变量恢复为 `false` 后重启。
+
+若确实需要在隔离环境初始化演示组织，可先执行（Docker 内路径为 `/app/data/users.db`）：
+
+```bash
+docker compose run --rm rag-app python -m rag.org_auth.seed --db-path /app/data/users.db --metadata-only
+```
+
+更多组织权限说明见 `docs/organization-authorization-operations.md`。
 
 ## 更新
 

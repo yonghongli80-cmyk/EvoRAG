@@ -39,5 +39,10 @@ tests/
 docs/
 benchmarks/
 tmp/
+tmp_test_dir/
 .superpowers/
 .sdd-test-data/
+# Company data and local artifacts: never ship these in the image context.
+real-case-handoff/
+artifacts/
+scratch/

@@ -25,6 +25,7 @@ anyio==4.14.2
     #   langsmith
     #   openai
     #   starlette
+    #   typesafe-sdk
 attrs==26.1.0
     # via aiohttp
 backports-zstd==1.7.0
@@ -132,7 +133,9 @@ httpx==0.28.1
 httpx-sse==0.4.3
     # via langchain-community
 httpx2==2.12.0
-    # via rag-knowledge-base (pyproject.toml)
+    # via
+    #   rag-knowledge-base (pyproject.toml)
+    #   typesafe-sdk
 hyperframe==6.1.0
     # via h2
 idna==3.19
@@ -270,6 +273,7 @@ packaging==26.3
     #   matplotlib
     #   onnxruntime
     #   pytest
+    #   typesafe-sdk
 pillow==12.3.0
     # via
     #   llama-index-core
@@ -317,8 +321,11 @@ pydantic==2.13.4
     #   openai
     #   pydantic-settings
     #   qdrant-client
+    #   typesafe-sdk
 pydantic-core==2.46.4
-    # via pydantic
+    # via
+    #   pydantic
+    #   typesafe-sdk
 pydantic-settings==2.15.0
     # via
     #   langchain-community
@@ -409,6 +416,7 @@ tenacity==9.1.4
     #   langchain-community
     #   langchain-core
     #   llama-index-core
+    #   typesafe-sdk
 texttable==1.7.0
     # via py7zr
 tiktoken==0.14.0
@@ -427,6 +435,9 @@ truststore==0.10.4
     # via
     #   httpcore2
     #   httpx2
+    #   typesafe-sdk
+typesafe-sdk==0.7.5
+    # via rag-knowledge-base (pyproject.toml)
 typing-extensions==4.16.0
     # via
     #   aiohttp
@@ -448,6 +459,7 @@ typing-extensions==4.16.0
     #   python-pptx
     #   sqlalchemy
     #   starlette
+    #   typesafe-sdk
     #   typing-inspect
     #   typing-inspection
 typing-inspect==0.9.0
