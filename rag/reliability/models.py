@@ -17,6 +17,10 @@ AnswerabilityKind = Literal[
 ]
 ConfidenceLevel = Literal["high", "medium", "low", "unavailable"]
 ScoreSource = Literal["reranker", "jev", "unavailable"]
+#: What a reference is allowed to prove. ``background`` refs are passages the judge found
+#: relevant without answer evidence: they belong in the citation list, never in the
+#: answerability/confidence arithmetic (A-03).
+EvidenceRole = Literal["evidence", "background"]
 
 
 class EvidenceRef(BaseModel):
@@ -38,6 +42,7 @@ class EvidenceRef(BaseModel):
     validity_status: ValidityStatus
     acl_checked: bool
     authority_level: AuthorityLevel = "unknown"
+    role: EvidenceRole = "evidence"
     updated_at: float | None = None
 
     @model_validator(mode="after")
@@ -76,6 +81,20 @@ class EvidenceBundle(BaseModel):
         if any(item.is_current for item in self.historical_evidence):
             raise ValueError("historical_evidence requires historical evidence")
         return self
+
+    @property
+    def current_answer_evidence(self) -> tuple[EvidenceRef, ...]:
+        """Current refs that may count as answer evidence (A-03).
+
+        Background refs are cited but never answered from: they must not raise confidence,
+        satisfy answerability, or unlock the historical-only warning.
+        """
+        return tuple(item for item in self.current_evidence if item.role == "evidence")
+
+    @property
+    def historical_answer_evidence(self) -> tuple[EvidenceRef, ...]:
+        """Historical refs that may count as answer evidence (A-03)."""
+        return tuple(item for item in self.historical_evidence if item.role == "evidence")
 
 
 class AnswerabilityDecision(BaseModel):

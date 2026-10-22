@@ -27,7 +27,7 @@ class FakeVersionRetriever:
         self.current = current
         self.history = history
 
-    def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None):
+    def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None, allowed_wiki_revision_ids=None):
         if validity_statuses is not None and "valid" in validity_statuses:
             return list(self.current)[:top_k]
         return list(self.history)[:top_k]
@@ -87,7 +87,7 @@ class _RecordingRetriever:
     def __init__(self):
         self.allowed_version_ids = []
 
-    def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None):
+    def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None, allowed_wiki_revision_ids=None):
         self.allowed_version_ids.append(allowed_version_ids)
         if validity_statuses is not None and "valid" in validity_statuses:
             return [chunk("current", version_id=2, is_current=True)]

@@ -99,6 +99,38 @@ class JevDecisionService:
             return None
         return select_passages(judged, result.value, policy=self._policy, top_k=top_k)
 
+    def detect_injection(self, texts: Sequence[str]) -> tuple[int, ...] | None:
+        """Semantic injection check over retrieved passage texts (A-05).
+
+        This is the same judge the passage policy uses, asked only for its
+        ``contains_prompt_injection`` verdict and **without** the majority vote: it is a
+        defense-in-depth layer the pipeline can run on any retrieval path, so it must stay a
+        single batched call. ``None`` means unavailable (disabled, outage, or malformed
+        response) — the caller keeps the passages and relies on the deterministic guard.
+        """
+        texts = [str(text or "") for text in texts]
+        if not texts:
+            return ()
+        judged = texts[: self._policy.max_passage_candidates]
+        chunk_ids = [f"c{index}" for index in range(len(judged))]
+        state = {
+            "question": "retrieved passages",
+            "query": "retrieved passages",
+            "passages": {
+                chunk_id: {"text": text}
+                for chunk_id, text in zip(chunk_ids, judged, strict=True)
+            },
+        }
+        result = self._client.judge_injection(state, chunk_ids)
+        if not result.available or result.value is None:
+            return None
+        flagged = [
+            index
+            for index, judgment in enumerate(result.value)
+            if judgment.prompt_injection >= self._policy.injection_threshold
+        ]
+        return tuple(flagged)
+
     def close(self) -> None:
         """Release the underlying adapter client."""
         self._client.close()

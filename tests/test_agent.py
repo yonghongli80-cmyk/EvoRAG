@@ -2,15 +2,24 @@
 from unittest.mock import MagicMock, patch
 
 
-def test_agent_has_four_tools():
-    """Agent should register 4 tools."""
+def test_agent_has_four_tools(tmp_path):
+    """Agent with an explicit SQLite source registers 4 tools (A-07)."""
     from rag.agent import create_agent_tools
-    tools = create_agent_tools(retriever=MagicMock(), db_path=":memory:")
+    db_path = tmp_path / "imported.db"
+    db_path.write_bytes(b"")
+    tools = create_agent_tools(retriever=MagicMock(), db_path=str(db_path))
     tool_names = [t.name for t in tools]
     assert "retrieve" in tool_names
     assert "calculate" in tool_names
     assert "sql_query" in tool_names
     assert "plot_chart" in tool_names
+
+
+def test_agent_without_a_data_source_has_no_sql_tool():
+    """``:memory:`` 不是数据源：没有它就不能给模型一个查不到东西的 SQL 工具（A-07）。"""
+    from rag.agent import create_agent_tools
+    tools = create_agent_tools(retriever=MagicMock(), db_path=":memory:")
+    assert [t.name for t in tools] == ["retrieve", "calculate", "plot_chart"]
 
 
 @patch("langchain_openai.ChatOpenAI")

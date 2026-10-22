@@ -25,7 +25,13 @@ from rag.cleaner import clean_document, deduplicate_chunks
 from rag.embedder import embed
 from rag.evolution.models import DiagnosticDetail, NonEvolvableReason
 from rag.generator import generate, generate_stream
-from rag.guard import check_injection, check_output, sanitize_input
+from rag.guard import (
+    apply_semantic_injection_check,
+    check_document_injection,
+    check_injection,
+    check_output,
+    sanitize_input,
+)
 from rag.jev.client import JevClient
 from rag.jev.policy import KbCapabilities, is_self_contained_lookup
 from rag.jev.service import JevDecisionService
@@ -86,6 +92,15 @@ def _create_default_failure_recorder() -> FailureObserver | None:
 _HISTORICAL_EVIDENCE_WARNING = "注意：以下回答仅依据历史版本资料，内容可能已过期。\n\n"
 _RETRIEVAL_OVERSAMPLE = 3
 
+#: 拒答原因 → 失败阶段（A-10）。原因由 ``decide_answerability`` 给出，明确区分三种情况：
+#: 什么都没检索到（检索缺口）；检索到并打过分、只是没有答案证据（证据门/生成侧）；
+#: 以及分数不可用（评分依赖降级，不是产品缺陷，因此阶段记 unknown 且按瞬时故障跳过诊断）。
+_REFUSAL_FAILURE_STAGES = {
+    "nothing_retrieved": "retrieval",
+    "no_answer_evidence": "generation",
+    "scores_unavailable": "unknown",
+}
+
 #: 传输/供应商侧故障的异常类名：这类失败重试即可，记为跳过而不是观测（设计第 5 节把
 #: 瞬态外部故障排除在诊断之外）。按类名判断，避免 pipeline 直接依赖 provider SDK——
 #: 诊断器在自己的模块里引入 openai 是因为它必须构造客户端，这里只是在分类异常。
@@ -143,6 +158,15 @@ def _degraded_sse_event() -> str:
 #: 判定层认为"这次请求给出了答案"的取值。与基准的位置记分（``ANSWER_POSITIONS``）同源：
 #: ``clarification_required`` / ``permission_limited`` 都是没有答案的固定文案。
 _ANSWERED_DECISION_KINDS = frozenset({"answerable", "answerable_with_warning"})
+
+
+#: 企业模式拒绝 agent/tool 分支时的固定文案。旧文案说"资料存在冲突或范围不明确"，
+#: 但真实原因是"这个问题需要工具执行，而企业问答只基于已授权资料"（A-07）。文案必须说
+#: 清楚真实原因，否则用户会去改时间范围/部门，而问题不会因此变得可答。
+_TOOL_ROUTE_UNAVAILABLE_COPY = (
+    "这个问题需要工具执行或计算，当前知识库问答只基于已授权资料作答。"
+    "请改写为资料查询类问题，或联系管理员开启工具能力。"
+)
 
 
 def _produced_answer(prepared: dict) -> bool:
@@ -275,6 +299,7 @@ class RAGPipeline:
         jev_service: JevDecisionService | None = None,
         failure_recorder: FailureObserver | None = None,
         question_set_rollout=None,
+        semantic_injection_detector=None,
     ):
         if kb_id:
             # 查询已有知识库，不重新索引
@@ -320,6 +345,12 @@ class RAGPipeline:
         if settings.jev_mode == "shadow" and self.jev is not None:
             self._shadow_evaluator = ShadowEvaluator(self.jev, on_comparison=_log_shadow_comparison)
             self._owns_shadow_evaluator = True
+        # 语义注入检测（A-05）：独立的一层，不再跟着 Jev 路由模式走。显式注入的检测器优先；
+        # 否则任何可用的 Jev 服务都提供它（含 shadow/注入式 jev_service），legacy 路径同样生效。
+        # 检测器不可用/报错时 fail-open，见 rag.guard.apply_semantic_injection_check。
+        self._semantic_injection_detector = semantic_injection_detector
+        if self._semantic_injection_detector is None and self.jev is not None:
+            self._semantic_injection_detector = getattr(self.jev, "detect_injection", None)
         self.agent = _agent_mod.RAGAgent(retriever=self.retriever, user_db=user_db, kb_id=kb_id or "rag_docs")
         self.tracker = ExecutionTracker(db_path=memory_db_path)
         self._owns_feedback_processor = feedback_processor is None
@@ -391,6 +422,11 @@ class RAGPipeline:
 
         The question text travels on the execution trace; this helper only decides
         which stored signals describe one diagnosable failure.
+
+        ``failure_stage`` is attributed **from the refusal reasons** (A-10): a request that
+        retrieved nothing, one that retrieved candidates without answer evidence, and one whose
+        scores are unavailable (rerank/scoring dependency degraded) are three different failures
+        and must not all be recorded as retrieval gaps.
         """
         if error is not None or prepared is None:
             # guard 拦截：不产生观测，只计入跳过日志。
@@ -403,13 +439,29 @@ class RAGPipeline:
         if decision.kind == "insufficient_evidence":
             confidence = prepared.get("confidence")
             metadata = prepared.get("decision_metadata") or {}
+            reasons = tuple(getattr(decision, "reasons", ()) or ())
+            stage = next(
+                (
+                    _REFUSAL_FAILURE_STAGES[reason]
+                    for reason in reasons
+                    if reason in _REFUSAL_FAILURE_STAGES
+                ),
+                "generation" if prepared.get("chunk_hashes") else "retrieval",
+            )
             return DiagnosticDetail(
                 kb_id=self._kb_id,
-                failure_stage="generation" if prepared.get("chunk_hashes") else "retrieval",
+                failure_stage=stage,
                 answerability_kind=decision.kind,
                 confidence_level=confidence.level if confidence is not None else None,
                 chunk_hashes=tuple(prepared.get("chunk_hashes") or ()),
                 best_score=_bundle_top_score(prepared),
+                # 评分不可用是重排/评分依赖的瞬时故障（与熔断同类），不是可诊断的产品缺陷：
+                # 记成跳过，绝不把一次依赖降级变成一条"检索缺口"观测。
+                non_evolvable_reason=(
+                    NonEvolvableReason.TRANSIENT_EXTERNAL
+                    if "scores_unavailable" in reasons
+                    else None
+                ),
                 # 这次请求试过结构化没有、结果是什么。`failed` 尤其重要：它是内部执行错误，
                 # 此前与"没有表格数据"一样都表现为 None，诊断时无法区分。
                 structured_query_kind=metadata.get("structured_query_kind") or None,
@@ -716,16 +768,11 @@ class RAGPipeline:
             # 所以先让它走完检索，拿不到来源时再回澄清——顺序反了就是把能答的问题变成反问。
             structured_clarification = structured
 
-        route = _agent_mod.route_question(question)
+        # 企业模式里 agent 路由只有"固定拒答"一个结局（typed evidence 限制），先问一次路由
+        # 模型再拒答等于每条企业问答白付一次模型调用，还放大尾延迟（A-07）。直接走 RAG。
+        route = "rag" if enterprise_request else _agent_mod.route_question(question)
 
         if route == "agent":
-            if enterprise_request:
-                return self._fixed_decision(
-                    question,
-                    effective_kb_id,
-                    "clarification_required",
-                    ("legacy agent route has no typed evidence",),
-                ), None
             prepared = {"route": "agent", "question": question}
             # 透传当前用户/知识库，供 agent 的 retrieve 工具做权限过滤
             if user is not None:
@@ -904,12 +951,14 @@ class RAGPipeline:
 
         elif route_decision.route == "tool":
             if enterprise_request:
-                # 企业模式继续遵守既有 typed-evidence 限制
+                # 企业模式继续遵守既有 typed-evidence 限制；文案要说清"需要工具执行"，
+                # 不能说成"资料冲突/范围不明确"（A-07）。
                 prepared = self._fixed_decision(
                     question,
                     effective_kb_id,
                     "clarification_required",
                     ("jev tool route has no typed evidence",),
+                    answer=_TOOL_ROUTE_UNAVAILABLE_COPY,
                 )
                 return self._attach_jev_stage(prepared, stage), None
             prepared = {"route": "agent", "question": question}
@@ -972,9 +1021,13 @@ class RAGPipeline:
         # 此前只有"找到答案证据"的那一次尝试才把采纳结果带出去，于是每次尝试都没有答案证据时
         # sources 为空——比旧路径少给了本该给出的来源（2026-10-19 实测 real-025：期望文档被判
         # rel=0.79/证据 0.40，旧路径排第 1，新路径 0 来源、Top-5 丢召回）。**不因此放宽任何
-        # 阈值**：这些块只进 sources，不进 context、不进证据包，答案照旧是"证据不足"。
+        # 阈值**：这些块只进 sources（在证据包里是 ``role="background"``，可答性/置信度都不
+        # 统计它们），不进 context、不当答案证据，答案照旧是"证据不足"。
         # 取采纳最多的一次尝试，与上面判定统计量"跨尝试取最大"的口径一致。
         citation_fallback: list[Chunk] = []
+        # 答案证据 / 引用（含背景块）在命中答案证据的那次尝试里定稿（A-03）。
+        citations: list[Chunk] | None = None
+        background: list[Chunk] = []
         passages_started = time.perf_counter()
         index = 0
         while index < len(attempts):
@@ -1011,9 +1064,32 @@ class RAGPipeline:
             stage["passage_contradicted"] = max(stage["passage_contradicted"], selection.contradicted)
             stage["passage_injected"] = max(stage["passage_injected"], selection.injected)
             if selection.has_answer_evidence:
-                context = self._post_rank_acl(list(selection.accepted), user, effective_kb_id)
-                context = self._drop_injected_chunks(context)[:top_k]
-                break
+                # A-03：答案只依据答案证据；判定为"相关但无答案证据"的背景块只进引用。
+                visible = self._drop_injected_chunks(
+                    self._post_rank_acl(list(selection.accepted), user, effective_kb_id),
+                    # 判定层已经给过语义注入结论（并把这些块排除在 accepted 之外），
+                    # 不再为同一批块付第二次模型调用（A-05）。
+                    semantic=False,
+                )[:top_k]
+                evidence_keys = {
+                    (chunk.doc_name, chunk.chunk_index, chunk.text)
+                    for chunk in selection.evidence_chunks()
+                }
+                answer_evidence = [
+                    chunk
+                    for chunk in visible
+                    if (chunk.doc_name, chunk.chunk_index, chunk.text) in evidence_keys
+                ]
+                if answer_evidence:
+                    context = answer_evidence
+                    citations = visible
+                    background = [
+                        chunk
+                        for chunk in visible
+                        if (chunk.doc_name, chunk.chunk_index, chunk.text) not in evidence_keys
+                    ]
+                    break
+                # 证据块全被 ACL/文档 guard 摘掉了：按"没有答案证据"处理，继续兜底。
             # 这一次尝试没有答案证据：记下它采纳的相关块做引用兜底（见上面的说明）。
             if len(selection.accepted) > len(citation_fallback):
                 citation_fallback = list(selection.accepted)
@@ -1024,17 +1100,21 @@ class RAGPipeline:
                 stage["rewrites"] = 1
             index += 1
         stage["passages_ms"] = (time.perf_counter() - passages_started) * 1000
-        citations: list[Chunk] | None = None
         if not context and citation_fallback:
             # ACL 复查与文档注入 guard 在这一层照旧生效：被引用不等于被信任。
             citations = self._drop_injected_chunks(
-                self._post_rank_acl(citation_fallback, user, effective_kb_id)
+                self._post_rank_acl(citation_fallback, user, effective_kb_id),
+                semantic=False,
             )[:top_k]
+            # 引用兜底的块是背景：证据包保留 role=background，拒答原因因此能区分
+            # "没检索到"和"检索到了、只是没有答案证据"（A-10）。
+            background = list(citations)
         prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
             build_bundle=enterprise_request or not context,
             conflicts=tuple(conflicts),
             citations=citations,
+            background=background,
         )
         return self._attach_jev_stage(prepared, stage), stage
 
@@ -1126,11 +1206,18 @@ class RAGPipeline:
             )
         return context
 
-    def _drop_injected_chunks(self, context: list[Chunk]) -> list[Chunk]:
-        """Remove chunks blocked by the deterministic document injection guard."""
+    def _drop_injected_chunks(self, context: list[Chunk], *, semantic: bool = True) -> list[Chunk]:
+        """Remove chunks blocked by the injection guards.
+
+        ``semantic`` runs the optional model-side check on top of the deterministic one. The Jev
+        route passes ``semantic=False`` for judged passages: its judge already produced the
+        ``contains_prompt_injection`` verdict for those chunks, and judging them twice would pay
+        for the same call twice. Every other path (legacy reranker, Jev fallback) opts in, so the
+        semantic layer no longer depends on which route served the request (A-05).
+        """
         safe_context = []
         for candidate in context:
-            document_guard = check_injection(candidate.text)
+            document_guard = check_document_injection(candidate.text)
             if document_guard.blocked:
                 logger.warning(
                     "检索文档注入命中并排除: doc=%s chunk=%s reason=%s",
@@ -1140,11 +1227,24 @@ class RAGPipeline:
                 )
                 continue
             safe_context.append(candidate)
-        return safe_context
+        if not semantic or not safe_context:
+            return safe_context
+        return self._drop_semantically_injected(safe_context)
+
+    def _drop_semantically_injected(self, context: list[Chunk]) -> list[Chunk]:
+        """Apply the optional semantic injection detector; fail-open when it is unavailable."""
+        detector = getattr(self, "_semantic_injection_detector", None)
+        if detector is None:
+            return context
+        result = apply_semantic_injection_check([chunk.text for chunk in context], detector)
+        if not result.checked:
+            return context
+        flagged = set(result.flagged)
+        return [chunk for index, chunk in enumerate(context) if index not in flagged]
 
     def _finalize_rag_context(
         self, question, session_id, context, top_k, effective_kb_id, *, build_bundle, conflicts=(),
-        citations=None,
+        citations=None, background=(),
     ):
         """Build messages, sources, feedback weights, and the optional reliability gate.
 
@@ -1156,6 +1256,10 @@ class RAGPipeline:
         messages, feedback hashes and the evidence bundle keep using ``context``, so the answer
         itself is still built from (and refused for the lack of) answer evidence. ``None`` keeps the
         1:1 context→sources mapping every other caller relies on.
+
+        ``background`` names the citation-only passages that must still reach the evidence bundle
+        as ``role="background"`` refs (A-03): they are visible candidates for metrics and reasons,
+        but they never count as answer evidence.
         """
         if build_bundle and context:
             # 版本边界：版本化 bundle 只能引用带 document_id/document_version_id 的块。
@@ -1175,6 +1279,11 @@ class RAGPipeline:
                     len(context) - len(citable),
                 )
                 context = citable
+        background_chunks = [
+            chunk
+            for chunk in background
+            if chunk.document_id is not None and chunk.document_version_id is not None
+        ] if build_bundle else []
         chunk_hashes = [hashlib.md5(c.text.encode()).hexdigest() for c in context]
         weights = self._feedback_processor.get_weights(chunk_hashes)
 
@@ -1206,6 +1315,7 @@ class RAGPipeline:
                 kb_id=effective_kb_id,
                 acl_checked=True,
                 conflicts=[dict(item) for item in conflicts],
+                background=background_chunks,
             )
             decision = decide_answerability(bundle)
             confidence = assess_confidence(bundle, decision)
@@ -1221,8 +1331,12 @@ class RAGPipeline:
                 prepared["answer"] = fixed_decision_copy(decision.kind)
         return prepared
 
-    def _fixed_decision(self, question, effective_kb_id, kind, reasons, *, permission_limited=False):
-        """Build a fixed refusal without any external call."""
+    def _fixed_decision(self, question, effective_kb_id, kind, reasons, *, permission_limited=False, answer=None):
+        """Build a fixed refusal without any external call.
+
+        ``answer`` overrides the kind's generic copy when the decision has a specific, more
+        accurate explanation (e.g. "this question needs tool execution", A-07).
+        """
         bundle = build_evidence_bundle(
             question,
             [],
@@ -1234,7 +1348,7 @@ class RAGPipeline:
         confidence = assess_confidence(bundle, decision)
         return {
             "route": "fixed",
-            "answer": fixed_decision_copy(decision.kind),
+            "answer": answer if answer is not None else fixed_decision_copy(decision.kind),
             "context": [],
             "sources": [],
             "decision": decision,

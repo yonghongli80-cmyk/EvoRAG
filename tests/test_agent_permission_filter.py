@@ -287,8 +287,13 @@ def test_regenerate_agent_route_passes_user_kb_to_run(tmp_path):
 
 
 @patch("rag.agent._check_answer_quality", return_value={"verdict": "pass", "missing": []})
-def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, tmp_path):
-    """企业 regenerate 的旧 agent 路由在 typed evidence 前固定澄清。"""
+def test_regenerate_enterprise_never_asks_the_legacy_agent_router(mock_check, tmp_path):
+    """A-07：企业 regenerate 不再先问一次路由模型，也不再走"固定澄清"的 agent 分支。
+
+    agent 路由在企业模式里的唯一结局是固定拒答（typed evidence 限制），先调用路由模型只是
+    白付一次调用。跳过之后请求落到证据门：这里检索结果没有可引用的版本证据，因此得到的是
+    "资料不足"的固定拒答，而不是旧文案里那句"资料存在冲突或范围不明确"。
+    """
     from pathlib import Path
 
     from fastapi.testclient import TestClient
@@ -314,14 +319,6 @@ def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, t
 
         p = _make_regenerate_pipeline(db, retriever)
         p.agent._ensure_agent()
-        retrieve_tool = _find_retrieve_tool(p.agent)
-
-        def fake_invoke(messages, config=None):
-            question = messages["messages"][-1].content
-            out = retrieve_tool.func(question)
-            from langchain_core.messages import HumanMessage
-
-            return {"messages": [HumanMessage(content=out)]}
 
         token = create_token({"user_id": low, "username": "low_user"})
         headers = {"Authorization": f"Bearer {token}"}
@@ -333,8 +330,9 @@ def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, t
         api_module.DATA_DIR = Path(tmp_path) / "no_such_dir"  # 让 startup 提前返回
         client = TestClient(api_module.app)
         try:
-            with patch("rag.agent.route_question", return_value="agent"), \
-                 patch.object(p.agent.agent, "invoke", side_effect=fake_invoke) as invoke:
+            with patch("rag.agent.route_question") as router, \
+                 patch("rag.pipeline.rewrite_query", return_value="q"), \
+                 patch.object(p.agent.agent, "invoke") as invoke:
                 resp = client.post(
                     "/regenerate",
                     json={"conversation_id": conv_id, "message_id": assistant_id},
@@ -347,7 +345,9 @@ def test_regenerate_legacy_agent_route_returns_fixed_clarification(mock_check, t
 
         assert resp.status_code == 200
         answer = resp.json()["answer"]
-        assert answer == fixed_decision_copy("clarification_required")
+        assert answer == fixed_decision_copy("insufficient_evidence")
+        assert "冲突" not in answer
+        router.assert_not_called()
         invoke.assert_not_called()
     finally:
         db.close()

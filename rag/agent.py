@@ -2,7 +2,9 @@
 
 import json as _json
 import logging as _logging
+import os as _os
 import re as _re
+import sqlite3 as _sqlite3
 import threading as _threading
 import time as _time
 
@@ -14,8 +16,37 @@ _pm = PromptManager()
 logger = _logging.getLogger(__name__)
 
 
-def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts", permission_filter=None) -> list:
+def resolve_sql_source(db_path: str | None) -> str | None:
+    """The SQLite file the agent may query, or ``None`` when there is no usable source.
+
+    A-07：``:memory:`` 从来不是数据源——每条 SQLite 连接都会打开一个新的空库，
+    绑上去的工具只能永远返回"查询结果为空"，却让模型以为手上有数据可查。只有**显式给出**
+    且**确实存在**的数据库文件才算数据源；否则不注册该工具，模型的工具清单与它真实的
+    能力保持一致。
+    """
+    if not db_path:
+        return None
+    candidate = str(db_path).strip()
+    if not candidate or candidate == ":memory:":
+        return None
+    if not _os.path.isfile(candidate):
+        logger.info("sql tool disabled: data source does not exist: %s", candidate)
+        return None
+    try:
+        # 只验证它是可打开的 SQLite 文件；不要在这里建表/写数据。
+        with _sqlite3.connect(f"file:{candidate}?mode=ro", uri=True) as conn:
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+    except _sqlite3.Error:
+        logger.warning("sql tool disabled: not a readable SQLite database: %s", candidate)
+        return None
+    return candidate
+
+
+def create_agent_tools(retriever, db_path: str | None = None, output_dir: str = "data/charts", permission_filter=None) -> list:
     """Create the list of tools available to the Agent.
+
+    ``db_path`` names the SQLite file the ``sql_query`` tool may read. Without a usable file the
+    tool is **not registered** rather than being bound to an empty ``:memory:`` database (A-07).
 
     ``permission_filter`` is an optional callable ``callable(list[Chunk]) -> list[Chunk]``
     applied to the retrieval results before formatting. It is used by ``RAGAgent``
@@ -24,14 +55,6 @@ def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts",
     from langchain_core.tools import Tool
 
     from rag.tools import calculate, create_sql_tool
-
-    try:
-        sql_tool = create_sql_tool(db_path)
-    except ValueError as exc:
-        logger.warning("sql_tool_init_failed exception=%s", type(exc).__name__)
-
-        def sql_tool(_query: str) -> str:
-            return "SQL 工具初始化失败，无法执行 SQL 查询。"
 
     def _retrieve(q: str) -> str:
         """检索知识库并返回格式化片段，已应用权限过滤。"""
@@ -55,17 +78,25 @@ def create_agent_tools(retriever, db_path: str, output_dir: str = "data/charts",
         description="安全计算数值表达式。输入为数学表达式，如 '(1200 - 1068) / 1068 * 100'。",
         func=calculate,
     )
-    sql_query_tool = Tool(
-        name="sql_query",
-        description="对导入的数据执行 SQL 查询。输入为 SELECT 语句。",
-        func=sql_tool,
-    )
     chart_tool = Tool(
         name="plot_chart",
         description="生成图表。输入格式为 '图表类型|标题|标签逗号分隔|数值逗号分隔'，如 'bar|销量对比|A,B,C|100,200,150'。",
         func=lambda inp: _parse_and_plot(inp, output_dir),
     )
-    return [retrieve_tool, calc_tool, sql_query_tool, chart_tool]
+    tools = [retrieve_tool, calc_tool]
+    sql_source = resolve_sql_source(db_path)
+    if sql_source is not None:
+        tools.append(
+            Tool(
+                name="sql_query",
+                description="对已导入的数据集执行 SQL 查询。输入为 SELECT 语句。",
+                func=create_sql_tool(sql_source),
+            )
+        )
+    else:
+        logger.info("agent sql tool not registered: no explicit SQLite data source")
+    tools.append(chart_tool)
+    return tools
 
 
 def _parse_and_plot(inp: str, output_dir: str) -> str:
@@ -137,17 +168,20 @@ def _extract_chart_paths(messages: list, output_dir: str) -> list[str]:
 class RAGAgent:
     """Wraps a LangChain Agent with tools."""
 
-    def __init__(self, retriever, db_path: str = ":memory:", max_iterations: int = 5, output_dir: str = "data/charts", user: dict = None, kb_id: str = "rag_docs", user_db=None):
+    def __init__(self, retriever, db_path: str | None = None, max_iterations: int = 5, output_dir: str = "data/charts", user: dict = None, kb_id: str = "rag_docs", user_db=None):
         self.max_iterations = max_iterations
         self.output_dir = output_dir
         self.user = user
         self.kb_id = kb_id or "rag_docs"
         self.user_db = user_db
+        # 只有显式配置的、真实存在的 SQLite 文件才会让 sql_query 工具存在（A-07）。
+        # ``:memory:``/缺省都表示"没有可查的数据来源"，工具清单里就不会出现它。
+        self.db_path = resolve_sql_source(db_path)
         # per-invocation 权限上下文：run 时写入线程局部，避免写进共享实例
         self._run_ctx = _threading.local()
         self.tools = [
             _wrap_tool_with_reflection(t, recorder=self._record_tool_call)
-            for t in create_agent_tools(retriever, db_path, output_dir, permission_filter=self._make_permission_filter())
+            for t in create_agent_tools(retriever, self.db_path, output_dir, permission_filter=self._make_permission_filter())
         ]
         self.llm = None
         self.agent = None

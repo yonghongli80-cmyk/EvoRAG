@@ -622,11 +622,13 @@ def test_unscoped_enterprise_query_stops_before_external_calls():
     pipeline.close()
 
 
-def test_enterprise_legacy_agent_route_returns_fixed_clarification():
+def test_enterprise_never_uses_the_legacy_agent_route():
+    """A-07：企业问答不再先问一次路由模型；agent 分支在那里只有固定拒答一个结局。"""
     user = {"id": 7, "permission_level": 1, "is_admin": False}
     with patch("rag.pipeline.Retriever"), \
          patch("rag.pipeline.Reranker"), \
-         patch("rag.agent.route_question", return_value="agent"), \
+         patch("rag.agent.route_question") as route_question, \
+         patch("rag.pipeline.rewrite_query", return_value="计算增长率"), \
          patch("rag.pipeline.generate") as generate:
         pipeline = RAGPipeline(
             kb_id="rag_docs",
@@ -639,7 +641,8 @@ def test_enterprise_legacy_agent_route_returns_fixed_clarification():
             agent_run.return_value = "unexpected agent answer"
             result = pipeline.query("计算增长率", user=user)
 
-    assert result.answer == fixed_decision_copy("clarification_required")
+    assert result.answer == fixed_decision_copy("insufficient_evidence")
+    route_question.assert_not_called()
     agent_run.assert_not_called()
     generate.assert_not_called()
     pipeline.close()

@@ -184,7 +184,12 @@ def get_pipeline_factory():
 
 
 def _get_or_create_pipeline(kb_id: str) -> RAGPipeline:
-    """Return the cached pipeline for a knowledge base (caller holds write lock)."""
+    """Return the cached pipeline for a knowledge base (caller holds write lock).
+
+    The lock is only held for the map update: since A-08 the pipeline's retriever builds its
+    BM25 index lazily on first use (``Retriever._ensure_bm25``, double-checked), so creating a
+    pipeline no longer scrolls/tokenises a whole collection while every knowledge base waits.
+    """
     pipelines = get_pipelines()
     cached = pipelines.get(kb_id)
     cur_pipeline = get_pipeline()

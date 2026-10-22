@@ -125,6 +125,12 @@ class PassageSelection:
     judgments came from (``""`` when the batch named none), so the pipeline can
     stamp a response with the passages version that served it — the preflight
     side already reports its own version through ``PreflightDecision``.
+
+    ``evidence`` / ``background`` split ``accepted`` by what each passage is allowed
+    to prove (A-03): answer evidence may be answered from, background passages (judged
+    relevant without answer evidence) are **citations only**. Both stay ``None`` for
+    callers that build a selection by hand; :meth:`evidence_chunks` then keeps the
+    pre-split behavior, where every accepted passage was treated as evidence.
     """
 
     accepted: tuple[Chunk, ...]
@@ -143,6 +149,19 @@ class PassageSelection:
     with_evidence: int = 0
     contradicted: int = 0
     injected: int = 0
+    #: Accepted passages that may be answered from (``None`` = not split, treat
+    #: ``accepted`` as evidence).
+    evidence: tuple[Chunk, ...] | None = None
+    #: Accepted passages that are citations only (``None`` = not split, no background).
+    background: tuple[Chunk, ...] | None = None
+
+    def evidence_chunks(self) -> tuple[Chunk, ...]:
+        """Passages that may carry an answer; ``accepted`` when the split is absent."""
+        return tuple(self.accepted) if self.evidence is None else self.evidence
+
+    def background_chunks(self) -> tuple[Chunk, ...]:
+        """Citation-only passages; empty when the split is absent."""
+        return () if self.background is None else self.background
 
 
 def choose_route(
@@ -240,17 +259,27 @@ def select_passages(
     accepted.extend(item[2] for item in sorted(background, key=lambda item: item[:2]))
     if top_k is not None:
         accepted = accepted[: max(top_k, 0)]
+    # Split what was accepted by what it may prove: background passages stay in the
+    # citation list but never count as answer evidence (A-03).
+    answer_evidence = tuple(
+        item for item in accepted if item.metadata.get("jev_answer_evidence") == "true"
+    )
+    background_only = tuple(
+        item for item in accepted if item.metadata.get("jev_answer_evidence") != "true"
+    )
     return PassageSelection(
         accepted=tuple(accepted),
         conflicts=tuple(conflicts),
         excluded_ids=tuple(excluded),
-        has_answer_evidence=any(item.metadata.get("jev_answer_evidence") == "true" for item in accepted),
+        has_answer_evidence=bool(answer_evidence),
         question_set_version=version,
         judged=len(candidates),
         relevant=relevant,
         with_evidence=with_evidence,
         contradicted=contradicted,
         injected=injected,
+        evidence=answer_evidence,
+        background=background_only,
     )
 
 

@@ -8,7 +8,7 @@ from config import settings
 from rag.jev.models import PreflightDecision
 from rag.jev.policy import PassageSelection, RouteDecision
 from rag.models import Chunk
-from rag.pipeline import RAGPipeline
+from rag.pipeline import _TOOL_ROUTE_UNAVAILABLE_COPY, RAGPipeline
 from rag.reliability import fixed_decision_copy
 
 
@@ -467,7 +467,9 @@ def test_tool_route_in_enterprise_returns_fixed_clarification(active_jev):
          patch("rag.pipeline.generate") as mock_generate:
         result = pipeline.query("帮我计算增长率", user={"id": 7, "permission_level": 1}, kb_id="kb1")
 
-    assert result.answer == fixed_decision_copy("clarification_required")
+    # A-07：文案说明真实原因（需要工具执行），不再说成"资料冲突/范围不明确"。
+    assert result.answer == _TOOL_ROUTE_UNAVAILABLE_COPY
+    assert "工具" in result.answer
     agent_run.assert_not_called()
     mock_generate.assert_not_called()
 

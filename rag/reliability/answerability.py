@@ -10,8 +10,26 @@ _FIXED_DECISION_COPY = {
 }
 
 
+def _insufficient_reasons(bundle: EvidenceBundle) -> tuple[str, ...]:
+    """Why no answer evidence qualified — three distinct situations (A-10).
+
+    * ``nothing_retrieved``: the retrieval set was empty; a recall/content gap.
+    * ``scores_unavailable``: passages were retrieved but carry no score provenance,
+      i.e. the scoring/rerank dependency degraded — not a retrieval defect.
+    * ``no_answer_evidence``: passages were retrieved and scored, but none carries
+      answer evidence (including the citation-only fallback refusal).
+    """
+    retrieved = bundle.current_evidence + bundle.historical_evidence
+    if not retrieved:
+        return ("nothing_retrieved",)
+    if not any(item.score is not None for item in retrieved):
+        return ("scores_unavailable",)
+    return ("no_answer_evidence",)
+
+
 def decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision:
-    if bundle.retrieval_metrics.permission_limited and not bundle.current_evidence:
+    current_evidence = bundle.current_answer_evidence
+    if bundle.retrieval_metrics.permission_limited and not current_evidence:
         return AnswerabilityDecision(
             kind="permission_limited",
             reasons=("visible evidence is insufficient",),
@@ -23,7 +41,7 @@ def decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision:
         )
     qualified = [
         item
-        for item in bundle.current_evidence
+        for item in current_evidence
         if item.score is not None and item.score >= settings.reliability_min_score
     ]
     if qualified:
@@ -31,14 +49,14 @@ def decide_answerability(bundle: EvidenceBundle) -> AnswerabilityDecision:
             kind="answerable",
             reasons=("current evidence available",),
         )
-    if bundle.historical_evidence:
+    if bundle.historical_answer_evidence:
         return AnswerabilityDecision(
             kind="answerable_with_warning",
             reasons=("historical evidence only",),
         )
     return AnswerabilityDecision(
         kind="insufficient_evidence",
-        reasons=("no qualifying evidence",),
+        reasons=_insufficient_reasons(bundle),
     )
 
 

@@ -125,4 +125,5 @@ def test_enterprise_empty_context_still_refuses(mock_generate, mock_rewrite, moc
     assert result.sources == []
     mock_generate.assert_not_called()
     mock_rewrite.assert_called_once()
-    mock_route.assert_called_once()
+    # A-07：企业模式跳过无条件路由模型调用（agent 分支在这里只有固定拒答一个结局）。
+    mock_route.assert_not_called()

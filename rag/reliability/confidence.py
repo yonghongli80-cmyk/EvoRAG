@@ -31,7 +31,7 @@ def assess_confidence(
 
     qualified = tuple(
         item
-        for item in bundle.current_evidence
+        for item in bundle.current_answer_evidence
         if item.validity_status == "valid"
         and item.score is not None
         and item.score >= settings.reliability_min_score

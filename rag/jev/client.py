@@ -137,6 +137,29 @@ class JevClient:
             )
         return self._run_vote(state, questions, chunk_ids, version, rounds)
 
+    def judge_injection(
+        self, state: dict, chunk_ids: list[str]
+    ) -> JevBatchResult[tuple[PassageJudgment, ...]]:
+        """One single-shot passage sample, used by the semantic injection guard (A-05).
+
+        This path only needs the ``contains_prompt_injection`` answer, so it deliberately
+        skips the majority vote: voting exists to stabilise an *evidence* verdict, and paying
+        up to three calls to confirm an injection flag on every request would tax the whole
+        pipeline for a defense-in-depth check.
+        """
+        if not chunk_ids:
+            return JevBatchResult(value=(), available=True, duration_ms=0.0)
+        resolved = self._resolve_question_set("passages", chunk_ids)
+        if isinstance(resolved, JevBatchResult):
+            return resolved
+        questions, version = resolved
+        return self._run(
+            "passages",
+            state,
+            questions,
+            lambda response, duration_ms: self._map_passages(response, chunk_ids, duration_ms, version),
+        )
+
     def _run_vote(
         self,
         state: dict,

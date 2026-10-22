@@ -1,14 +1,16 @@
 """BM25 倒排索引的 SQLite 持久化。
 
-快照结构分两代：
+快照结构分三代：
 
 * **v1** 只存 ``(collection, text, doc_name, chunk_index)``——块没有版本元数据，在版本化
   链路里**不可引用**（密集检索抖动降级纯 BM25 时会让整条请求失败，2026-09-30 实测）；
 * **v2** 另存引用与版本过滤所需的字段（``document_id``/``document_version_id``/
-  ``version_no``/``validity_status``/``is_current``/``doc_permission_id``）。
+  ``version_no``/``validity_status``/``is_current``/``doc_permission_id``）；
+* **v3** 另存 ``chunk_kind`` 与 ``tags``：前者决定 ACL 分支（wiki 分块按 KB 视图授权，
+  不是按文档权限），后者让 sparse 路径能应用与 dense 相同的 tag 过滤（2026-10-22，A-04）。
 
-v1 快照一律视为**过期**：``has_chunks`` 返回 False，调用方（``Retriever``）于是从向量库
-重建并写入 v2——不需要人工迁移步骤，旧行保留但被忽略。``bm25_meta`` 里的
+旧快照一律视为**过期**：``has_chunks`` 返回 False，调用方（``Retriever``）于是从向量库
+重建并写入当前版本——不需要人工迁移步骤，旧行保留但被忽略。``bm25_meta`` 里的
 ``chunks_schema:<collection>`` 记录该 collection 的快照结构版本。
 """
 import sqlite3
@@ -17,9 +19,9 @@ import threading
 from config import settings
 
 #: 当前快照结构版本；与 ``bm25_meta`` 里记录的值不一致即视为过期。
-SNAPSHOT_SCHEMA_VERSION = "2"
+SNAPSHOT_SCHEMA_VERSION = "3"
 
-#: v2 相对 v1 增加列；``_ensure_table`` 会为既有表补齐（SQLite 支持 ADD COLUMN）。
+#: 各代相对 v1 增加的列；``_ensure_table`` 会为既有表补齐（SQLite 支持 ADD COLUMN）。
 _VERSION_COLUMNS = (
     ("document_id", "INTEGER"),
     ("document_version_id", "INTEGER"),
@@ -27,9 +29,17 @@ _VERSION_COLUMNS = (
     ("validity_status", "TEXT"),
     ("is_current", "INTEGER"),
     ("doc_permission_id", "INTEGER"),
+    # v3：ACL 需要的分块种类，以及 tags 的 JSON 编码（``Chunk.metadata['tags']``）。
+    ("chunk_kind", "TEXT"),
+    ("tags", "TEXT"),
 )
 
 _SCHEMA_KEY_PREFIX = "chunks_schema:"
+
+#: ``Chunk.metadata`` key carrying the tag list; kept in sync with
+#: :data:`rag.retriever.TAGS_METADATA_KEY` (a lazy import would create an import cycle:
+#: the retriever imports this module at load time).
+_TAGS_METADATA_KEY = "tags"
 
 
 class BM25Store:
@@ -56,7 +66,9 @@ class BM25Store:
                 version_no INTEGER,
                 validity_status TEXT,
                 is_current INTEGER,
-                doc_permission_id INTEGER
+                doc_permission_id INTEGER,
+                chunk_kind TEXT,
+                tags TEXT
             )"""
             )
             self._conn.execute(
@@ -94,7 +106,8 @@ class BM25Store:
             self._conn.executemany(
                 "INSERT INTO bm25_chunks (collection, text, doc_name, chunk_index, "
                 "document_id, document_version_id, version_no, validity_status, is_current, "
-                "doc_permission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "doc_permission_id, chunk_kind, tags) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         collection,
@@ -107,6 +120,8 @@ class BM25Store:
                         getattr(c, "validity_status", None),
                         None if getattr(c, "is_current", None) is None else int(c.is_current),
                         getattr(c, "doc_permission_id", None),
+                        getattr(c, "chunk_kind", None),
+                        (getattr(c, "metadata", None) or {}).get(_TAGS_METADATA_KEY),
                     )
                     for c in chunks
                 ],
@@ -126,7 +141,7 @@ class BM25Store:
                 return []
             rows = self._conn.execute(
                 "SELECT text, doc_name, chunk_index, document_id, document_version_id, "
-                "version_no, validity_status, is_current, doc_permission_id "
+                "version_no, validity_status, is_current, doc_permission_id, chunk_kind, tags "
                 "FROM bm25_chunks WHERE collection = ?",
                 (collection,),
             ).fetchall()
@@ -141,6 +156,8 @@ class BM25Store:
                 validity_status=row[6] if row[6] is not None else "valid",
                 is_current=True if row[7] is None else bool(row[7]),
                 doc_permission_id=row[8],
+                chunk_kind=row[9],
+                metadata=({_TAGS_METADATA_KEY: row[10]} if row[10] else {}),
             )
             for row in rows
         ]
