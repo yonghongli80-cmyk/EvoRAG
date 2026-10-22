@@ -27,6 +27,22 @@ _AGGREGATE_INTENT_RE = re.compile(
     r"数量|人数|统计|合计|总计|平均|最高|最低|排名|同比|环比|占比"
 )
 
+#: A question that already names a concrete model and a concrete attribute is specific
+#: enough to retrieve as-is; an LLM rewrite only adds cost and a chance of drifting into
+#: a meta-question ("如何查询…").
+_MODEL_TOKEN_RE = re.compile(r"[A-Za-z]{1,8}\d{1,6}")
+_LOOKUP_ATTRIBUTE_RE = re.compile(
+    r"价格|售价|报价|多少钱|型号|参数|规格|电池|充电器|保修|质保|尺寸|重量|像素|分辨率"
+)
+
+
+def is_self_contained_lookup(question: str) -> bool:
+    """True when the question already has both a model token and an attribute."""
+    text = (question or "").strip()
+    if not text:
+        return False
+    return bool(_MODEL_TOKEN_RE.search(text) and _LOOKUP_ATTRIBUTE_RE.search(text))
+
 
 @dataclass(frozen=True)
 class KbCapabilities:

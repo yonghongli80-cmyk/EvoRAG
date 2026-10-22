@@ -27,7 +27,7 @@ from rag.evolution.models import DiagnosticDetail, NonEvolvableReason
 from rag.generator import generate, generate_stream
 from rag.guard import check_injection, check_output, sanitize_input
 from rag.jev.client import JevClient
-from rag.jev.policy import KbCapabilities
+from rag.jev.policy import KbCapabilities, is_self_contained_lookup
 from rag.jev.service import JevDecisionService
 from rag.jev.shadow import ShadowCase, ShadowComparison, ShadowEvaluator
 from rag.llm_pool import get_llm_pool_router
@@ -697,7 +697,11 @@ class RAGPipeline:
                 prepared["kb_id"] = kb_id
             return prepared, None
 
-        rewritten = self._rewrite_for_retrieval(question, session_id)
+        rewritten = (
+            question
+            if stage is not None and is_self_contained_lookup(question)
+            else self._rewrite_for_retrieval(question, session_id)
+        )
         candidates = self._retrieve_visible_candidates(
             rewritten,
             top_k=top_k * _RETRIEVAL_OVERSAMPLE,
@@ -976,7 +980,7 @@ class RAGPipeline:
             # 这一次尝试没有答案证据：记下它采纳的相关块做引用兜底（见上面的说明）。
             if len(selection.accepted) > len(citation_fallback):
                 citation_fallback = list(selection.accepted)
-            if not rewrite_used and retrieval_route:
+            if not rewrite_used and retrieval_route and not is_self_contained_lookup(question):
                 # 首轮无答案证据：允许一次改写重试；已改写则停止，不再循环。
                 attempts.append((self._rewrite_for_retrieval(question, session_id), True))
                 stage["attempts"] = len(attempts)

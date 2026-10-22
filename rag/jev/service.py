@@ -1,6 +1,7 @@
 """Public Jev decision facade used by the pipeline."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from config import settings
 from rag.jev.client import JevClient
@@ -12,6 +13,7 @@ from rag.jev.policy import (
     RouteDecision,
     choose_route,
     deterministic_route,
+    is_self_contained_lookup,
     select_passages,
 )
 from rag.models import Chunk
@@ -62,7 +64,10 @@ class JevDecisionService:
                 reason=f"preflight_unavailable:{result.failure_kind}",
                 preflight=None,
             )
-        return choose_route(result.value, capabilities=capabilities, policy=self._policy)
+        route = choose_route(result.value, capabilities=capabilities, policy=self._policy)
+        if route.should_rewrite and is_self_contained_lookup(question):
+            return replace(route, should_rewrite=False, reason=f"{route.reason}+specific_lookup")
+        return route
 
     def select(
         self,

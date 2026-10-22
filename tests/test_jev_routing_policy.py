@@ -9,6 +9,7 @@ from rag.jev.policy import (
     RouteDecision,
     choose_route,
     deterministic_route,
+    is_self_contained_lookup,
 )
 from rag.jev.service import JevDecisionService
 
@@ -112,6 +113,48 @@ def test_an_aggregate_question_without_structured_data_is_not_forced():
         "帮我统计7月份的招聘数量",
         KbCapabilities(has_structured_data=False),
     ) is None
+
+
+def test_specific_lookup_detection():
+    assert is_self_contained_lookup("r50电池价格")
+    assert is_self_contained_lookup("富士 X-S20 电池和充电器是什么型号")
+    assert not is_self_contained_lookup("机器哪里发货呢")
+    assert not is_self_contained_lookup("r50")
+    assert not is_self_contained_lookup("人员盘点的范围包括哪些人员？")
+
+
+def test_specific_lookup_suppresses_rewrite():
+    client = FakeJevClient(
+        JevBatchResult(
+            value=preflight("retrieval_qa", 0.95, rewrite_probability=0.9),
+            available=True,
+            duration_ms=1.0,
+        )
+    )
+    service = JevDecisionService(
+        client=client,
+        policy=JevPolicy(route_confidence=0.75, rewrite_probability=0.5),
+    )
+    decision = service.route("r50电池价格", KbCapabilities(has_structured_data=True))
+    assert decision.route == "rag"
+    assert decision.should_rewrite is False
+    assert "specific_lookup" in decision.reason
+
+
+def test_vague_question_keeps_rewrite():
+    client = FakeJevClient(
+        JevBatchResult(
+            value=preflight("retrieval_qa", 0.95, rewrite_probability=0.9),
+            available=True,
+            duration_ms=1.0,
+        )
+    )
+    service = JevDecisionService(
+        client=client,
+        policy=JevPolicy(route_confidence=0.75, rewrite_probability=0.5),
+    )
+    decision = service.route("机器哪里发货呢", KbCapabilities(has_structured_data=True))
+    assert decision.should_rewrite is True
 
 
 class FakeJevClient:
