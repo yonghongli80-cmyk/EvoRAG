@@ -312,3 +312,27 @@ P0 与 P1 已按 7 条工作流并行修复并提交：
 见 `docs/superpowers/plans/2026-10-22-pre-upgrade-remediation-plan.md` §6.2/§6.3。
 
 **结论：P0/P1 门禁已关闭，可以进入架构升级；P2/P3 不阻塞，但应先处理 legacy KB 的组织归属。**
+
+---
+
+## 9. 阶段 2：P2 修复与 Phase 0/1（2026-10-22 晚）
+
+P2 按 7 条工作流并行落地：
+
+| 流 | 提交 | 范围 |
+| --- | --- | --- |
+| S1 | `d4e67a1` | B-03~B-08 + A-06（角色审计、认证统一、错误脱敏、KB 列表、DB 源白名单、BatchImporter、regenerate） |
+| S2 | `a8160d2` | A-03/04/05/07/08/09/10 + wiki/document 版本串权（证据角色、BM25 元数据、注入、锁、拒绝归因） |
+| S3 | `217fa6a` | C-04~C-08、C-10、C-11（快照隔离、canary 守卫、restore clamp、预算/租约、终态重生、ACL 红线、apply 锁） |
+| S4 | `e1c9974` | D-06~D-12 + D 观察（7z 流式、合并区、结构不变式、敏感审计、整理撤销、FTS、CSV） |
+| S5 | `1961ed5` | E-04~E-10（管理员路由、超时/取消、竞态、CAS、切库、上传校验；E-09 partial） |
+| S6 | `77b036e` | F-04、F-06~F-10（信号转发、部署健康门、测试隔离、CI、render 删除、脚本供应链） |
+| S7 | `e5a78a1` | Phase 0 `/ready`+`/metrics`+压测档案；Phase 1 Qdrant URL/Compose 配置面 |
+
+最终验证：**2786 passed / 1 skipped（19:53）**、前端 **298 passed / 39 files**、build 成功、
+全树 ruff 通过、`/health` 200、`/ready` **200**（Redis 未运行但可选，组件 `degraded`）、
+`/metrics` admin 200/匿名 401、`admin` 4 KB、查询 200。
+
+**仍留后续**：E-09 后端无 document_id 引用端点；C-05 shadow gate 无生产写入者（canary 会
+fail-closed 409）；D-10 新列靠运行时幂等 ALTER；F-05 配置字段清理；Docker daemon 不可用，
+Phase 1 未做运行时迁移/双进程验收。P3/架构债不阻塞，随升级继续。
