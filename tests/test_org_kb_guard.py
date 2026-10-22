@@ -11,6 +11,7 @@ from rag.api_security import (
 )
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.service import OrgAuthorizationService
+from rag.routers.knowledge import _uses_org_kb_scope
 from rag.user_db import UserDB
 
 
@@ -82,6 +83,42 @@ def test_visible_knowledge_bases_return_org_metadata(tmp_path):
             "kb_type": "organization", "org_unit": {"code": "TEAM", "name": "协作组"},
             "effective_role": "read", "sensitivity": None,
         }]
+    finally:
+        db.close()
+
+
+def test_admin_with_org_person_keeps_the_global_kb_list(tmp_path):
+    """An admin who also has an org_people row must not lose legacy KBs."""
+    db = UserDB(str(tmp_path / "admin-list.db"))
+    try:
+        user_id = db.create_user("adminx", "Password1")
+        db.set_user_admin(user_id, True)
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P-ADMIN-X',?,'管理员','管理员')",
+                (user_id,),
+            )
+        user = db.get_user_by_id(user_id)
+        assert user["is_admin"] is True
+        assert _uses_org_kb_scope(db, user) is False
+    finally:
+        db.close()
+
+
+def test_non_admin_org_member_uses_the_org_kb_list(tmp_path):
+    db = UserDB(str(tmp_path / "member-list.db"))
+    try:
+        user_id = db.create_user("memberx", "Password1")
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P-MEMBER-X',?,'成员','专员')",
+                (user_id,),
+            )
+        user = db.get_user_by_id(user_id)
+        assert user["is_admin"] is False
+        assert _uses_org_kb_scope(db, user) is True
     finally:
         db.close()
 

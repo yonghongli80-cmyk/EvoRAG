@@ -144,10 +144,21 @@ def _versions_root(request: Request | None = None) -> Path:
     return Path(settings.document_versions_root)
 
 
+def _uses_org_kb_scope(user_db, user: dict) -> bool:
+    """Org-scoped KB listing applies only to non-admin org members.
+
+    An admin who also has an ``org_people`` row must keep the global list; otherwise
+    legacy KBs (no ``kb_org_policies`` row) disappear from the admin's view.
+    """
+    if user.get("is_admin"):
+        return False
+    return OrgRepository(user_db).get_person_for_user(int(user["id"])) is not None
+
+
 @router.get("/knowledge-bases", summary="列出知识库", description="获取所有知识库列表")
 async def list_knowledge_bases(request: Request, user: dict = Depends(require_user)):
     user_db = get_user_db(request)
-    if OrgRepository(user_db).get_person_for_user(int(user["id"])) is not None:
+    if _uses_org_kb_scope(user_db, user):
         return await asyncio.to_thread(OrgAuthorizationService(user_db).visible_knowledge_bases, int(user["id"]))
     manager = KnowledgeBaseManager()
     result = []
