@@ -101,5 +101,5 @@
 
 ### 4.2 全量回归
 
-`pytest -q -p no:cacheprovider`：**2364 passed / 0 failed，34:26**（2026-10-22）；
+`pytest -q -p no:cacheprovider`：**2366 passed / 0 failed，31:39**（2026-10-22）；
 `ruff check .` 全绿。
