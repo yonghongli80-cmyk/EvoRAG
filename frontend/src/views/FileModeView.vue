@@ -6,6 +6,7 @@ import { useAuthStore } from '../stores/auth'
 import { useAnalysis } from '../composables/useAnalysis'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, FolderOpened, Plus, ChatDotRound } from '@element-plus/icons-vue'
+import { validateUploadFile } from '../utils/upload'
 import MessageBubble from '../components/MessageBubble.vue'
 import ChatInput from '../components/ChatInput.vue'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
@@ -89,7 +90,28 @@ function getFileTypeClass(ext: string): string {
   return map[ext] || 'badge-file'
 }
 
-const ALLOWED_EXTS = ['.txt', '.md', '.pdf', '.docx', '.xlsx', '.csv']
+/**
+ * Single upload path for drops and the upload button so both apply the same
+ * validation (E-09).
+ */
+async function uploadOneFile(file?: File) {
+  if (!file) return false
+
+  const rejection = validateUploadFile(file)
+  if (rejection) {
+    if (rejection.code === 'unsupported_type') ElMessage.warning(rejection.message)
+    else ElMessage.error(rejection.message)
+    return false
+  }
+  try {
+    await filesStore.uploadFile(file)
+    ElMessage.success(`文件 ${file.name} 上传成功`)
+    return true
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || `上传失败: ${file.name}`)
+    return false
+  }
+}
 
 async function handleDrop(e: DragEvent) {
   dragover.value = false
@@ -97,17 +119,7 @@ async function handleDrop(e: DragEvent) {
   if (!droppedFiles) return
 
   for (const file of Array.from(droppedFiles)) {
-    const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-    if (!ALLOWED_EXTS.includes(ext)) {
-      ElMessage.warning(`不支持的文件格式: ${file.name}`)
-      continue
-    }
-    try {
-      await filesStore.uploadFile(file)
-      ElMessage.success(`文件 ${file.name} 上传成功`)
-    } catch (err: any) {
-      ElMessage.error(err.response?.data?.detail || `上传失败: ${file.name}`)
-    }
+    await uploadOneFile(file)
   }
 }
 
@@ -146,12 +158,46 @@ async function downloadFile(name: string) {
 }
 
 // ── Material lifecycle handlers (archives, recycle, organization) ──────────
+function materialErrorMessage(err: any, fallback: string) {
+  if (err?.response?.status === 409) return '数据已更新，请刷新后重试'
+  const detail = err?.response?.data?.detail
+  return typeof detail === 'string' && detail ? detail : fallback
+}
+
 async function onArchiveConfirm(selectedIds: number[]) {
   try {
     await filesStore.confirmArchiveImport(selectedIds)
     ElMessage.success('压缩包内容已导入')
   } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '压缩包导入失败')
+    ElMessage.error(materialErrorMessage(err, '压缩包导入失败'))
+  }
+}
+
+async function openRecycleBin() {
+  try {
+    await filesStore.openRecycle()
+  } catch {
+    ElMessage.error('加载回收站失败')
+  }
+}
+
+async function openOrganization() {
+  let instruction: string
+  try {
+    const result = await ElMessageBox.prompt(
+      '描述资料整理指令，例如「把财务发票归档到 财务/发票」',
+      '资料整理',
+      { confirmButtonText: '预览', cancelButtonText: '取消', inputPlaceholder: '整理指令' }
+    )
+    instruction = (result?.value || '').trim()
+  } catch {
+    return
+  }
+  if (!instruction) return
+  try {
+    await filesStore.previewOrganization(instruction)
+  } catch (err: any) {
+    ElMessage.error(materialErrorMessage(err, '整理预览失败'))
   }
 }
 
@@ -160,7 +206,7 @@ async function onOrganizationConfirm(selectedIds: number[]) {
     await filesStore.confirmOrganization(selectedIds)
     ElMessage.success('资料整理完成')
   } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '整理失败')
+    ElMessage.error(materialErrorMessage(err, '整理失败'))
   }
 }
 
@@ -169,7 +215,7 @@ async function onRestoreDocument(documentId: number) {
     await filesStore.restoreDocument(documentId)
     ElMessage.success('已恢复')
   } catch (err: any) {
-    ElMessage.error(err?.response?.data?.detail || '恢复失败')
+    ElMessage.error(materialErrorMessage(err, '恢复失败'))
   }
 }
 
@@ -223,13 +269,19 @@ function askSuggested(q: string) {
           </div>
 
           <div class="header-btns">
+            <el-button size="small" data-test="open-recycle" @click="openRecycleBin">
+              回收站
+            </el-button>
+            <el-button size="small" data-test="open-organization" @click="openOrganization">
+              资料整理
+            </el-button>
             <el-button size="small" :disabled="!comparisonDocuments.length" @click="comparisonVisible = true">
               资料对比
             </el-button>
             <el-upload
               :show-file-list="false"
               :before-upload="() => false"
-              :on-change="async (f: any) => { try { await filesStore.uploadFile(f.raw!); ElMessage.success('上传成功') } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '上传失败') } }"
+              :on-change="(f: any) => uploadOneFile(f.raw)"
               accept=".txt,.md,.pdf,.docx,.xlsx,.csv"
             >
               <el-button size="small" type="primary">

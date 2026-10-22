@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import api, { streamRequest } from '../utils/api'
+import api, { isAbortError, streamRequest } from '../utils/api'
 
 export type ChatMode = 'file' | 'kb' | 'analysis'
 
@@ -29,6 +29,8 @@ interface Message {
   assistantMessageId?: number
   error?: string
   failed?: boolean
+  /** Set when the user stopped the stream; keeps the partial answer visible. */
+  stopped?: boolean
   confidence_level?: 'high' | 'medium' | 'low' | 'unavailable'
   confidence_reasons?: string[]
   answerability_kind?: string
@@ -47,7 +49,14 @@ export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([])
   const currentConvId = ref<number | null>(null)
   const messages = ref<Message[]>([])
-  const isStreaming = ref(false)
+  /**
+   * The streaming flag is derived from the request that owns the stream instead
+   * of being a bare boolean (E-05). A late `finally` from a stopped or
+   * superseded request therefore cannot clear the flag belonging to a newer
+   * one, which used to leave the input locked forever.
+   */
+  const activeRequestId = ref<number | null>(null)
+  const isStreaming = computed(() => activeRequestId.value !== null)
   const suggestedQuestions = ref<string[]>([])
   const selectedFile = ref<string | null>(null)
   const activeMode = ref<ChatMode>('file')
@@ -56,6 +65,73 @@ export const useChatStore = defineStore('chat', () => {
   const arenaEnabled = ref<boolean>(false)
   const arenaModels = ref<string[]>(['deepseek'])
   const _selectedFilesByConv = new Map<number, string | null>()
+
+  let _requestSeq = 0
+  let _activeAbort: AbortController | null = null
+  /** Invalidates in-flight conversation loads so only the newest may land. */
+  let _convRequestSeq = 0
+  let _convLoadAbort: AbortController | null = null
+
+  function beginStreamingRequest() {
+    _requestSeq += 1
+    const controller = new AbortController()
+    activeRequestId.value = _requestSeq
+    _activeAbort = controller
+    return { requestId: _requestSeq, controller }
+  }
+
+  function finishStreamingRequest(requestId: number) {
+    // A superseded request must not clear the flag of the request that owns it.
+    if (activeRequestId.value !== requestId) return
+    activeRequestId.value = null
+    _activeAbort = null
+  }
+
+  /**
+   * Cancel the stream currently rendered in the chat area (E-05). Partial
+   * output stays on screen and is marked with `stopped`.
+   */
+  function stopStreaming() {
+    const controller = _activeAbort
+    _activeAbort = null
+    activeRequestId.value = null
+    if (controller) controller.abort()
+  }
+
+  /**
+   * Drop every account-scoped state. Called on login/logout and when the API
+   * answers 401/403 so the next account cannot see the previous one's data.
+   */
+  function reset() {
+    stopStreaming()
+    invalidateConversationRequests()
+    conversations.value = []
+    currentConvId.value = null
+    messages.value = []
+    selectedFile.value = null
+    suggestedQuestions.value = []
+    _selectedFilesByConv.clear()
+  }
+
+  /**
+   * Cancel pending conversation loads and return the new sequence number.
+   * Any response whose sequence is no longer current is discarded (E-06).
+   */
+  function invalidateConversationRequests(): number {
+    _convRequestSeq += 1
+    const controller = _convLoadAbort
+    _convLoadAbort = null
+    if (controller) controller.abort()
+    return _convRequestSeq
+  }
+
+  /** Forget per-conversation file selections for conversations that vanished. */
+  function pruneSelectedFiles(list: Conversation[]) {
+    const live = new Set(list.map(c => c.id))
+    for (const id of Array.from(_selectedFilesByConv.keys())) {
+      if (!live.has(id)) _selectedFilesByConv.delete(id)
+    }
+  }
 
   const currentConversation = computed(() =>
     conversations.value.find(c => c.id === currentConvId.value)
@@ -71,24 +147,11 @@ export const useChatStore = defineStore('chat', () => {
   function resetModeState(mode: ChatMode) {
     if (activeMode.value === mode) return
     activeMode.value = mode
+    invalidateConversationRequests()
     conversations.value = []
     currentConvId.value = null
     messages.value = []
     selectedFile.value = null
-  }
-
-  /**
-   * Drop all account-scoped state. Called on login/logout and when the API
-   * answers 401/403 so the next account cannot see the previous one's data.
-   */
-  function reset() {
-    conversations.value = []
-    currentConvId.value = null
-    messages.value = []
-    selectedFile.value = null
-    suggestedQuestions.value = []
-    isStreaming.value = false
-    _selectedFilesByConv.clear()
   }
 
   /**
@@ -98,18 +161,23 @@ export const useChatStore = defineStore('chat', () => {
    */
   async function loadConversations(mode?: ChatMode) {
     if (mode) resetModeState(mode)
+    const seq = invalidateConversationRequests()
     try {
       const params: Record<string, string> = {}
       if (mode) params.mode = mode
       const res = await api.get('/conversations', { params })
 
+      // A newer load (mode switch, KB switch, logout) owns the list now.
+      if (seq !== _convRequestSeq) return
+
       // Validate response is an array
       const data = Array.isArray(res.data) ? res.data : []
       conversations.value = data
+      pruneSelectedFiles(data)
 
       // If current conversation is no longer in the list, clear it
       if (currentConvId.value !== null) {
-        const found = res.data.find((c: Conversation) => c.id === currentConvId.value)
+        const found = data.find((c: Conversation) => c.id === currentConvId.value)
         if (!found) {
           currentConvId.value = null
           messages.value = []
@@ -137,11 +205,23 @@ export const useChatStore = defineStore('chat', () => {
 
   async function selectConversation(id: number) {
     const previousId = currentConvId.value
+    // Switching away from a conversation abandons its running stream instead of
+    // letting late tokens (and a late title update) land on the new one.
+    if (id !== previousId) stopStreaming()
     const nextSelectedFile = id === previousId
       ? selectedFile.value
       : (_selectedFilesByConv.get(id) ?? null)
+    // Rapid clicks must not render an older conversation's messages (E-06):
+    // cancel the previous load and only let the newest sequence land.
+    const seq = invalidateConversationRequests()
+    const controller = new AbortController()
+    _convLoadAbort = controller
     try {
-      const res = await api.get(`/conversations/${id}/messages`)
+      const res = await api.get(`/conversations/${id}/messages`, { signal: controller.signal })
+      // Drop superseded responses and any response that arrives after the user
+      // (or a KB switch / logout) already moved to a different conversation.
+      if (seq !== _convRequestSeq) return
+      if (currentConvId.value !== previousId) return
       if (previousId !== null && previousId !== id) {
         _selectedFilesByConv.set(previousId, selectedFile.value)
       }
@@ -158,7 +238,9 @@ export const useChatStore = defineStore('chat', () => {
         answerability_kind: m.answerability_kind
       }))
     } catch {
-      // On failure, don't change currentConvId — keep showing old conversation
+      // On failure (or abort), don't change currentConvId — keep old conversation
+    } finally {
+      if (_convLoadAbort === controller) _convLoadAbort = null
     }
   }
 
@@ -167,9 +249,11 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value = conversations.value.filter(c => c.id !== id)
     _selectedFilesByConv.delete(id)
     if (currentConvId.value === id) {
+      stopStreaming()
       currentConvId.value = null
       messages.value = []
       selectedFile.value = null
+      suggestedQuestions.value = []
     }
   }
 
@@ -178,14 +262,18 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function sendMessage(question: string, mode?: ChatMode, kbId?: string) {
+    // One stream at a time: the stop button (E-05) is the escape hatch, not a
+    // second concurrent generation.
+    if (isStreaming.value) return
+
     // Auto-create conversation if none exists
     if (!currentConvId.value && mode) {
       await createConversation(mode)
     }
+    const conversationId = currentConvId.value
 
     // Add user message
     messages.value.push({ role: 'user', content: question })
-    isStreaming.value = true
     suggestedQuestions.value = []
 
     // Add empty assistant message for streaming
@@ -196,6 +284,9 @@ export const useChatStore = defineStore('chat', () => {
     })
     // Get the reactive proxy from the array (not the plain object)
     const assistantMsg = messages.value[messages.value.length - 1]
+
+    const { requestId, controller } = beginStreamingRequest()
+    const isOwner = () => activeRequestId.value === requestId
 
     try {
       const payload: Record<string, any> = {
@@ -220,7 +311,8 @@ export const useChatStore = defineStore('chat', () => {
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       })
 
       if (!response.body) {
@@ -294,6 +386,11 @@ export const useChatStore = defineStore('chat', () => {
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
+        // The user pressed stop (or a newer request took over): freeze output.
+        if (!isOwner()) {
+          assistantMsg.stopped = true
+          return
+        }
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
@@ -305,6 +402,11 @@ export const useChatStore = defineStore('chat', () => {
             handleEvent(JSON.parse(line.slice(6)))
           } catch {}
         }
+      }
+
+      if (!isOwner()) {
+        assistantMsg.stopped = true
+        return
       }
 
       // Flush remaining bytes from TextDecoder (fixes CJK truncation)
@@ -326,6 +428,13 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       assistantMsg.sources = sources
+
+      // The user moved on to another conversation while this answer finished:
+      // never rename or suggest against the newly selected one.
+      if (currentConvId.value !== conversationId) {
+        assistantMsg.stopped = true
+        return
+      }
 
       // Generate conversation title from first user message
       const currentConv = conversations.value.find(c => c.id === currentConvId.value)
@@ -352,6 +461,15 @@ export const useChatStore = defineStore('chat', () => {
       }
 
     } catch (err: any) {
+      // Deliberate stop (E-05) or a superseded request: keep partial output and
+      // never replace it with a transport error.
+      if (isAbortError(err)) {
+        assistantMsg.stopped = true
+        if (!assistantMsg.content) assistantMsg.content = '已停止生成'
+        return
+      }
+      if (!isOwner()) return
+
       // Error bodies are either FastAPI's `detail` or the hand-written `error`
       // shape used by the streaming endpoint.
       const data = err?.response?.data
@@ -361,8 +479,9 @@ export const useChatStore = defineStore('chat', () => {
         (typeof detail === 'string' && detail) ||
         (typeof errorText === 'string' && errorText) ||
         '请求失败，请稍后重试。'
+      assistantMsg.failed = true
     } finally {
-      isStreaming.value = false
+      finishStreamingRequest(requestId)
     }
   }
 
@@ -390,18 +509,20 @@ export const useChatStore = defineStore('chat', () => {
   async function regenerate(messageIndex: number) {
     const msg = messages.value[messageIndex]
     if (!msg || msg.role !== 'assistant' || !msg.id || !currentConvId.value) return
+    if (isStreaming.value) return
 
-    isStreaming.value = true
+    const { requestId } = beginStreamingRequest()
     try {
       const res = await api.post('/regenerate', {
         conversation_id: currentConvId.value,
         message_id: msg.id
       })
+      if (activeRequestId.value !== requestId) return
       msg.content = res.data.answer
     } catch {
       // Ignore
     } finally {
-      isStreaming.value = false
+      finishStreamingRequest(requestId)
     }
   }
 
@@ -424,7 +545,9 @@ export const useChatStore = defineStore('chat', () => {
     currentConvId,
     currentMode,
     messages,
+    activeRequestId,
     isStreaming,
+    stopStreaming,
     suggestedQuestions,
     selectedFile,
     currentConversation,

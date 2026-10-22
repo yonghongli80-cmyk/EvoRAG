@@ -15,6 +15,13 @@ export interface ArchiveManifest {
   entry_count: number
   expires_at: number
   entries: ArchiveEntry[]
+  /**
+   * Container version the confirmation CAS must match. Older backends omit it;
+   * callers must then let the server apply its own default instead of
+   * hard-coding 0 (E-07).
+   */
+  expected_version?: number
+  container_version_no?: number
 }
 
 export interface MaterialJob {
@@ -31,6 +38,8 @@ export interface RecycleItem {
   deleted_at: number
   deleted_by: number
   restore_until: number
+  /** CAS token required to restore; omitted by older backends (E-07). */
+  metadata_version?: number
 }
 
 export interface OrganizationItem {
@@ -60,13 +69,16 @@ export async function getArchiveManifest(manifestId: number): Promise<ArchiveMan
 export async function confirmArchive(
   manifestId: number,
   selectedEntryIds: number[],
-  expectedVersion: number,
+  expectedVersion: number | undefined,
   idempotencyKey: string
 ): Promise<any> {
-  const res = await api.post(
-    `/materials/archives/${manifestId}/confirm`,
-    { selected_entry_ids: selectedEntryIds, expected_version: expectedVersion, idempotency_key: idempotencyKey }
-  )
+  const body: Record<string, unknown> = {
+    selected_entry_ids: selectedEntryIds,
+    idempotency_key: idempotencyKey
+  }
+  // Never invent a CAS token: only send the version the backend reported.
+  if (typeof expectedVersion === 'number') body.expected_version = expectedVersion
+  const res = await api.post(`/materials/archives/${manifestId}/confirm`, body)
   return res.data
 }
 
@@ -80,11 +92,16 @@ export async function deleteMaterial(documentId: number): Promise<any> {
   return res.data
 }
 
-export async function restoreMaterial(documentId: number, expectedMetadataVersion: number): Promise<any> {
-  const res = await api.post(
-    `/materials/${documentId}/restore`,
-    { expected_metadata_version: expectedMetadataVersion }
-  )
+export async function restoreMaterial(
+  documentId: number,
+  expectedMetadataVersion: number | undefined
+): Promise<any> {
+  const body: Record<string, unknown> = {}
+  // Only send a CAS token the backend actually returned (E-07).
+  if (typeof expectedMetadataVersion === 'number') {
+    body.expected_metadata_version = expectedMetadataVersion
+  }
+  const res = await api.post(`/materials/${documentId}/restore`, body)
   return res.data
 }
 

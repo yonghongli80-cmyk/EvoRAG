@@ -24,9 +24,6 @@ vi.mock('axios', () => ({
   }
 }))
 
-// Mock DOMPurify
-vi.mock('dompurify', () => ({
-  default: {
-    sanitize: vi.fn((html: string) => html)
-  }
-}))
+// NOTE: DOMPurify is deliberately *not* mocked globally (E-10). A pass-through
+// stub made every XSS assertion vacuous: the sanitizer could be deleted and the
+// suite would still pass. Tests now exercise the real sanitiser under jsdom.

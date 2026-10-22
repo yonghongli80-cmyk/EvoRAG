@@ -22,7 +22,14 @@ import api from '../../utils/api'
 // need once, here, off the timed path; the hooks then only exercise the
 // navigation guards. Sequential, not parallel: concurrent loads of the same
 // dependency graph make Vite transform it several times over.
-for (const path of ['/login', '/files', '/organization']) {
+for (const path of [
+  '/login',
+  '/files',
+  '/organization',
+  '/operations',
+  '/operations/evolution',
+  '/operations/spreadsheet-changes'
+]) {
   await loadRouteLocation(router.resolve(path))
 }
 
@@ -56,4 +63,37 @@ describe('router navigation guards', () => {
     await router.push('/organization')
     expect(router.currentRoute.value.path).toBe('/organization')
   })
+
+  // ── E-04: /operations/* admin routes ────────────────────
+  it('marks the evolution center and spreadsheet audit as admin-only', () => {
+    for (const path of ['/operations/evolution', '/operations/spreadsheet-changes']) {
+      expect(router.resolve(path).meta.requiresAdmin).toBe(true)
+    }
+    // The shared knowledge-operations page stays available to regular users.
+    expect(router.resolve('/operations').meta.requiresAdmin).toBeUndefined()
+  })
+
+  it.each(['/operations/evolution', '/operations/spreadsheet-changes'])(
+    'redirects a non-admin away from %s',
+    async (path) => {
+      const authStore = useAuthStore()
+      authStore.user = { id: 1, username: 'regular_user', is_admin: false }
+      authStore.sessionChecked = true
+
+      await router.push(path)
+      expect(router.currentRoute.value.path).toBe('/files')
+    }
+  )
+
+  it.each(['/operations/evolution', '/operations/spreadsheet-changes'])(
+    'allows an admin to reach %s',
+    async (path) => {
+      const authStore = useAuthStore()
+      authStore.user = { id: 2, username: 'admin_user', is_admin: true }
+      authStore.sessionChecked = true
+
+      await router.push(path)
+      expect(router.currentRoute.value.path).toBe(path)
+    }
+  )
 })

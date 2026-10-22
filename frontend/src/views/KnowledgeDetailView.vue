@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../utils/api'
 import { downloadLibraryFile } from '../api/files'
-import { useAuthStore } from '../stores/auth'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
@@ -18,7 +17,6 @@ import KnowledgeAddFileDialog from './knowledge/KnowledgeAddFileDialog.vue'
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
-const authStore = useAuthStore()
 const { addToAnalysis, dialogVisible, dialogQuestion, dialogAnswer, handleConfirm } = useAnalysis()
 
 const isDialogVisible = computed({
@@ -74,18 +72,29 @@ const addingFile = ref(false)
 const generatingToc = ref(false)
 const generatingOverview = ref(false)
 
-watch(() => route.params.id, () => {
-  loadDetail()
-})
-
-onMounted(async () => {
+/**
+ * Rebuild every conversation-scoped piece of state for the KB in the URL.
+ *
+ * The route component is reused when only `:id` changes, so without the reset
+ * the previous knowledge base's conversations, streamed answer and selected
+ * file stayed on screen and leaked into the next KB (E-08).
+ */
+async function enterKnowledgeBase() {
+  chatStore.reset()
   await chatStore.loadConversations('kb')
   // Auto-select the most recent conversation if exists
-  if (chatStore.conversations.length > 0 && !chatStore.currentConvId) {
+  if (chatStore.conversations.length > 0) {
     await chatStore.selectConversation(chatStore.conversations[0].id)
   }
   await loadDetail()
+}
+
+watch(() => route.params.id, (nextId, previousId) => {
+  if (nextId === previousId) return
+  enterKnowledgeBase()
 })
+
+onMounted(enterKnowledgeBase)
 
 async function loadDetail() {
   loading.value = true
@@ -237,12 +246,11 @@ async function addFileToKB(file: any) {
   if (!file) return
   addingFile.value = true
   try {
+    // The backend currently only exposes "upload bytes into a KB", so the
+    // library version is fetched through the shared API client (API base,
+    // cookie auth and the dev-proxy HTML guard) and re-uploaded (E-09).
+    const blob = await downloadLibraryFile(file.name, file.version_id)
     const formData = new FormData()
-    const blob = await downloadLibraryFile(
-      file.name,
-      authStore.getAuthHeaders(),
-      file.version_id
-    )
     formData.append('file', blob, file.name)
 
     await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import { createTestingPinia } from '@pinia/testing'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
@@ -25,11 +26,14 @@ vi.mock('element-plus', () => ({
 }))
 
 import api from '../../utils/api'
+import { useChatStore } from '../../stores/chat'
 import KnowledgeDetailView from '../KnowledgeDetailView.vue'
 
 describe('KnowledgeDetailView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // jsdom does not implement element scrolling; the chat area watchers call it.
+    Element.prototype.scrollTo = vi.fn()
     vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve({
       data: { name: `KB ${url.split('/').pop()}`, documents: [] }
     }) as any)
@@ -142,5 +146,58 @@ describe('KnowledgeDetailView', () => {
 
     expect(wrapper.text()).not.toContain('删除知识库')
     expect(wrapper.text()).toContain('添加文件')
+  })
+
+  // ── E-08: switching knowledge bases clears conversation state ──
+  it('clears the previous knowledge base conversation when the id changes', async () => {
+    vi.mocked(api.get).mockImplementation(((url: string) => Promise.resolve({
+      data: url === '/conversations'
+        ? []
+        : { name: `KB ${url.split('/').pop()}`, documents: [] }
+    })) as any)
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const chatStore = useChatStore()
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/kb/:id', component: KnowledgeDetailView }]
+    })
+    await router.push('/kb/first')
+    await router.isReady()
+
+    mount(KnowledgeDetailView, {
+      global: {
+        plugins: [router, pinia],
+        stubs: {
+          MessageBubble: true, ChatInput: true, AddToAnalysisDialog: true,
+          'el-button': true, 'el-icon': true, 'el-dropdown': true,
+          'el-dropdown-menu': true, 'el-dropdown-item': true,
+          'el-tag': true, 'el-dialog': true, 'el-input': true,
+        }
+      }
+    })
+    await flushPromises()
+
+    // Simulate a conversation that belongs to the first KB.
+    chatStore.messages = [{ role: 'assistant', content: 'first-kb answer' }]
+    chatStore.currentConvId = 11
+    chatStore.suggestedQuestions = ['first-kb follow-up']
+    chatStore.selectedFile = 'first-kb.pdf'
+
+    await router.push('/kb/second')
+    await flushPromises()
+
+    expect(chatStore.messages).toEqual([])
+    expect(chatStore.currentConvId).toBeNull()
+    expect(chatStore.suggestedQuestions).toEqual([])
+    expect(chatStore.selectedFile).toBeNull()
+
+    // Conversations are reloaded for every KB entry, not inherited.
+    const conversationLoads = vi.mocked(api.get).mock.calls
+      .filter(([url]) => url === '/conversations')
+    expect(conversationLoads).toHaveLength(2)
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith('/knowledge-bases/second')
   })
 })

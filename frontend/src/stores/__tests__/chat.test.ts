@@ -8,6 +8,11 @@ vi.mock('../../utils/api', () => ({
     post: vi.fn(),
     delete: vi.fn()
   },
+  isAbortError: (error: any) =>
+    error?.name === 'AbortError' ||
+    error?.name === 'CanceledError' ||
+    error?.code === 'ERR_CANCELED' ||
+    error?.code === 'ABORT_ERR',
   streamRequest: vi.fn(async (path: string, init: RequestInit) => {
     const response = await fetch(`/api${path}`, init)
     if (!response.ok) {
@@ -250,7 +255,10 @@ describe('chat store', () => {
     const store = useChatStore()
     await store.selectConversation(7)
 
-    expect(api.get).toHaveBeenCalledWith('/conversations/7/messages')
+    expect(api.get).toHaveBeenCalledWith(
+      '/conversations/7/messages',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
   })
 
   // ── sendMessage ─────────────────────────────────────────
@@ -730,7 +738,7 @@ describe('chat store', () => {
     ]
     store.selectFile('a-private.pdf')
     store.suggestedQuestions = ['a follow-up']
-    store.isStreaming = true
+    store.activeRequestId = 9
 
     // Selecting another conversation stores 1 -> a-private.pdf in the internal map.
     await store.selectConversation(2)
@@ -904,6 +912,259 @@ describe('chat store', () => {
     expect(lastMsg?.arenaResponses).toBeDefined()
     expect(lastMsg?.arenaResponses?.deepseek).toBe('Hello from D')
     expect(lastMsg?.arenaResponses?.qwen).toBe('Hello from Q')
+  })
+
+  // ── E-05: abortable streaming ───────────────────────────
+  it('passes an AbortController signal to the streaming request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }) }) }
+    } as any)
+
+    const store = useChatStore()
+    await store.sendMessage('question')
+
+    const init = vi.mocked(streamRequest).mock.calls.at(-1)![1] as RequestInit
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(init.signal?.aborted).toBe(false)
+  })
+
+  it('stopStreaming aborts the request and marks the answer stopped', async () => {
+    vi.mocked(streamRequest).mockImplementationOnce(((_path: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        ;(init.signal as AbortSignal).addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+        })
+      })
+    }) as any)
+
+    const store = useChatStore()
+    const pending = store.sendMessage('question')
+    expect(store.isStreaming).toBe(true)
+    expect(store.activeRequestId).not.toBeNull()
+
+    store.stopStreaming()
+    await pending
+
+    const assistant = store.messages.at(-1)!
+    expect(assistant.stopped).toBe(true)
+    expect(assistant.content).toBe('已停止生成')
+    expect(assistant.error).toBeUndefined()
+    expect(store.isStreaming).toBe(false)
+    expect(store.activeRequestId).toBeNull()
+  })
+
+  it('keeps partial output when the user stops mid-stream', async () => {
+    const encoder = new TextEncoder()
+    let capturedSignal: AbortSignal | undefined
+    vi.mocked(streamRequest).mockImplementationOnce(((_path: string, init: RequestInit) => {
+      capturedSignal = init.signal as AbortSignal
+      return Promise.resolve({
+        ok: true,
+        body: {
+          getReader: () => {
+            let first = true
+            return {
+              read: () => {
+                if (first) {
+                  first = false
+                  return Promise.resolve({
+                    done: false,
+                    value: encoder.encode('data: {"type":"token","content":"Partial"}\n')
+                  })
+                }
+                return new Promise((_resolve, reject) => {
+                  capturedSignal!.addEventListener('abort', () => {
+                    reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+                  })
+                })
+              }
+            }
+          }
+        }
+      } as any)
+    }) as any)
+
+    const store = useChatStore()
+    const pending = store.sendMessage('question')
+    await vi.waitFor(() => expect(store.messages.at(-1)?.content).toBe('Partial'))
+
+    store.stopStreaming()
+    await pending
+
+    const assistant = store.messages.at(-1)!
+    expect(capturedSignal?.aborted).toBe(true)
+    expect(assistant.content).toBe('Partial')
+    expect(assistant.stopped).toBe(true)
+    expect(assistant.error).toBeUndefined()
+    expect(assistant.failed).toBeUndefined()
+    expect(store.isStreaming).toBe(false)
+  })
+
+  it('a stopped request cannot unlock the stream that replaced it', async () => {
+    let resolveFirst!: (value: any) => void
+    vi.mocked(streamRequest).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFirst = resolve
+    }) as any)
+
+    const store = useChatStore()
+    const first = store.sendMessage('first')
+    store.stopStreaming()
+
+    vi.mocked(streamRequest).mockImplementationOnce(((_path: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        ;(init.signal as AbortSignal).addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+        })
+      })
+    }) as any)
+    const second = store.sendMessage('second')
+    expect(store.isStreaming).toBe(true)
+
+    // The abandoned request resolves late with an empty stream.
+    resolveFirst({ ok: true, body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }) }) } })
+    await first
+
+    expect(store.isStreaming).toBe(true)
+
+    store.stopStreaming()
+    await second
+    expect(store.isStreaming).toBe(false)
+  })
+
+  it('stops the active stream and never retitles the new conversation on switch', async () => {
+    let finishRead!: () => void
+    const readPromise = new Promise<{ done: boolean }>((resolve) => {
+      finishRead = () => resolve({ done: true })
+    })
+    vi.mocked(streamRequest).mockImplementationOnce((() => Promise.resolve({
+      ok: true,
+      body: { getReader: () => ({ read: () => readPromise }) }
+    })) as any)
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+    vi.mocked(api.post).mockResolvedValue({ data: { title: 'should not be used' } } as any)
+
+    const store = useChatStore()
+    store.conversations = [{ id: 1, title: '', mode: 'file', created_at: '2026-01-01' }]
+    store.currentConvId = 1
+    const pending = store.sendMessage('question')
+
+    await store.selectConversation(2)
+    finishRead()
+    await pending
+
+    expect(store.isStreaming).toBe(false)
+    expect(store.currentConvId).toBe(2)
+    expect(api.post).not.toHaveBeenCalledWith(
+      '/conversations/2/generate-title',
+      expect.anything()
+    )
+  })
+
+  it('ignores a second sendMessage while a stream is active', async () => {
+    vi.mocked(streamRequest).mockImplementationOnce(((_path: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        ;(init.signal as AbortSignal).addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+        })
+      })
+    }) as any)
+
+    const store = useChatStore()
+    const pending = store.sendMessage('first')
+    await store.sendMessage('second')
+
+    expect(store.messages).toHaveLength(2)
+    expect(vi.mocked(streamRequest)).toHaveBeenCalledTimes(1)
+
+    store.stopStreaming()
+    await pending
+  })
+
+  // ── E-06: out-of-order conversation switches ────────────
+  it('drops an out-of-order messages response from a superseded switch', async () => {
+    const pending = new Map<number, (value: any) => void>()
+    vi.mocked(api.get).mockImplementation(((url: string) => new Promise((resolve) => {
+      const id = Number(String(url).split('/')[2])
+      pending.set(id, resolve)
+    })) as any)
+
+    const store = useChatStore()
+    store.currentConvId = 1
+    store.messages = [{ role: 'assistant', content: 'conversation one' }]
+
+    const first = store.selectConversation(2)
+    const second = store.selectConversation(3)
+
+    // The newest click answers first...
+    pending.get(3)!({ data: [{ id: 30, role: 'assistant', content: 'conversation three' }] })
+    await second
+    expect(store.currentConvId).toBe(3)
+    expect(store.messages[0].content).toBe('conversation three')
+
+    // ...and the slow response for conversation 2 must not overwrite it.
+    pending.get(2)!({ data: [{ id: 20, role: 'assistant', content: 'conversation two' }] })
+    await first
+    expect(store.currentConvId).toBe(3)
+    expect(store.messages[0].content).toBe('conversation three')
+  })
+
+  it('discards a conversation response that lands after a session reset', async () => {
+    const pending = new Map<number, (value: any) => void>()
+    vi.mocked(api.get).mockImplementation(((url: string) => new Promise((resolve) => {
+      const id = Number(String(url).split('/')[2])
+      pending.set(id, resolve)
+    })) as any)
+
+    const store = useChatStore()
+    store.currentConvId = 1
+    const selection = store.selectConversation(2)
+
+    store.reset()
+    pending.get(2)!({ data: [{ id: 9, role: 'assistant', content: 'other account history' }] })
+    await selection
+
+    expect(store.currentConvId).toBeNull()
+    expect(store.messages).toEqual([])
+  })
+
+  it('prunes per-conversation file selections for conversations that disappeared', async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+
+    const store = useChatStore()
+    store.currentConvId = 1
+    store.selectFile('one.pdf')
+    await store.selectConversation(2)
+    expect(store.selectedFile).toBeNull()
+
+    // Conversation 1 is gone from the refreshed list: its cached selection is stale.
+    vi.mocked(api.get).mockResolvedValue({
+      data: [{ id: 2, title: 'Two', mode: 'file', created_at: '2026-01-02' }]
+    } as any)
+    await store.loadConversations()
+    store.currentConvId = 2
+
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+    await store.selectConversation(1)
+
+    expect(store.selectedFile).toBeNull()
+  })
+
+  it('drops the cached file selection when its conversation is deleted', async () => {
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+    vi.mocked(api.delete).mockResolvedValue({} as any)
+
+    const store = useChatStore()
+    store.currentConvId = 1
+    store.selectFile('secret.pdf')
+    await store.selectConversation(2)
+
+    await store.deleteConversation(1)
+
+    vi.mocked(api.get).mockResolvedValue({ data: [] } as any)
+    await store.selectConversation(1)
+
+    expect(store.selectedFile).toBeNull()
   })
 })
 

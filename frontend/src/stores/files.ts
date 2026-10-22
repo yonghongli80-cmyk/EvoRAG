@@ -34,11 +34,31 @@ export const useFilesStore = defineStore('files', () => {
   const archiveManifestId = ref<number | null>(null)
   const archiveEntries = ref<any[]>([])
   const archiveVisible = ref(false)
+  /**
+   * Container version the archive CAS must match, as reported by the backend
+   * (E-07). Null means "not reported"; the request then omits the field and the
+   * server default applies instead of a hard-coded 0.
+   */
+  const archiveExpectedVersion = ref<number | null>(null)
   const recycleItems = ref<any[]>([])
   const recycleVisible = ref(false)
   const organizationItems = ref<any[]>([])
   const organizationProposalId = ref<number | null>(null)
   const organizationVisible = ref(false)
+
+  /** metadata_version seen in backend responses, keyed by document id. */
+  const _metadataVersions = new Map<number, number>()
+
+  function rememberMetadataVersion(documentId: unknown, version: unknown) {
+    if (typeof documentId !== 'number' || typeof version !== 'number') return
+    _metadataVersions.set(documentId, version)
+  }
+
+  function reportedMetadataVersion(documentId: number): number | undefined {
+    const item = recycleItems.value.find(entry => entry?.document_id === documentId)
+    if (typeof item?.metadata_version === 'number') return item.metadata_version
+    return _metadataVersions.get(documentId)
+  }
 
   async function loadFiles(force = false) {
     if (_loaded && !force) return
@@ -76,15 +96,20 @@ export const useFilesStore = defineStore('files', () => {
   async function loadArchiveManifest(manifestId: number) {
     const data = await getArchiveManifest(manifestId)
     archiveEntries.value = data.entries || []
+    // Prefer the CAS token the backend reports for the container version.
+    const reported = (data as any).expected_version ?? (data as any).container_version_no
+    archiveExpectedVersion.value = typeof reported === 'number' ? reported : null
     return data
   }
 
   async function confirmArchiveImport(selectedIds: number[]) {
     if (archiveManifestId.value == null) return
-    const key = `arc-${Date.now()}`
-    await confirmArchive(archiveManifestId.value, selectedIds, 0, key)
+    const manifestId = archiveManifestId.value
+    const key = `arc-${Date.now()}-${manifestId}`
+    await confirmArchive(manifestId, selectedIds, archiveExpectedVersion.value ?? undefined, key)
     archiveVisible.value = false
     archiveManifestId.value = null
+    archiveExpectedVersion.value = null
     archiveEntries.value = []
     await loadFiles(true)
   }
@@ -100,8 +125,18 @@ export const useFilesStore = defineStore('files', () => {
   }
 
   async function restoreDocument(documentId: number) {
-    const expected = 0
-    await restoreMaterial(documentId, expected)
+    const expected = reportedMetadataVersion(documentId)
+    try {
+      const result = await restoreMaterial(documentId, expected)
+      rememberMetadataVersion(documentId, result?.metadata_version)
+    } catch (err: any) {
+      // A stale CAS token means the list on screen is out of date: refresh it
+      // so the next click starts from server state (E-07).
+      if (err?.response?.status === 409) {
+        await openRecycle().catch(() => {})
+      }
+      throw err
+    }
     await openRecycle()
     await loadFiles(true)
   }
@@ -138,11 +173,13 @@ export const useFilesStore = defineStore('files', () => {
     archiveManifestId.value = null
     archiveEntries.value = []
     archiveVisible.value = false
+    archiveExpectedVersion.value = null
     recycleItems.value = []
     recycleVisible.value = false
     organizationItems.value = []
     organizationProposalId.value = null
     organizationVisible.value = false
+    _metadataVersions.clear()
   }
 
   async function deleteFile(name: string) {

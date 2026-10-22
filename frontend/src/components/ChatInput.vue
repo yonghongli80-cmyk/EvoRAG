@@ -123,16 +123,29 @@ function getModelIcon(modelId: string): string {
       />
 
       <button
+        v-if="chatStore.isStreaming"
+        class="stop-btn"
+        data-test="stop-streaming"
+        aria-label="停止生成"
+        title="停止生成"
+        @click="chatStore.stopStreaming()"
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <rect x="5" y="5" width="14" height="14" rx="2" />
+        </svg>
+        <span class="stop-btn-label">停止</span>
+      </button>
+      <button
+        v-else
         class="send-btn"
-        :disabled="!inputText.trim() || chatStore.isStreaming"
+        :disabled="!inputText.trim()"
         @click="handleSend"
         aria-label="发送消息"
       >
-        <svg v-if="!chatStore.isStreaming" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <line x1="12" y1="19" x2="12" y2="5"/>
           <polyline points="5 12 12 5 19 12"/>
         </svg>
-        <div v-else class="streaming-spinner" />
       </button>
     </div>
 
@@ -381,17 +394,32 @@ function getModelIcon(modelId: string): string {
   cursor: not-allowed;
 }
 
-.streaming-spinner {
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #ffffff;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+.stop-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-foreground);
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all var(--duration-fast) var(--ease-out);
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.stop-btn:hover {
+  background: var(--color-surface-3);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.stop-btn-label {
+  line-height: 1;
 }
 
 /* ── Bottom Hint ──────────────────────────────────────── */

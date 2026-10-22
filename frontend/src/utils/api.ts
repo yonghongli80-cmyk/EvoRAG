@@ -7,13 +7,36 @@ export function resolveApiBase(configured: string | undefined, isDev: boolean): 
 
 const API_BASE = resolveApiBase(import.meta.env.VITE_API_BASE, import.meta.env.DEV)
 
+/**
+ * Every non-streaming request is bounded so a hung backend can never lock the
+ * UI (E-05). Streaming requests use an explicit AbortController instead: a
+ * whole-stream timeout would kill legitimately long generations.
+ */
+export const REQUEST_TIMEOUT_MS = 30_000
+
 // Remove bearer tokens left by releases that stored browser sessions in JS.
 if (typeof localStorage !== 'undefined') localStorage.removeItem('rag_token')
 
 const api = axios.create({
   baseURL: API_BASE,
-  withCredentials: true
+  withCredentials: true,
+  timeout: REQUEST_TIMEOUT_MS
 })
+
+/**
+ * True for both `fetch` aborts (AbortError) and axios cancellation
+ * (CanceledError / ERR_CANCELED). Callers must treat these as a deliberate
+ * user action, never as a failed request.
+ */
+export function isAbortError(error: any): boolean {
+  if (!error) return false
+  return (
+    error.name === 'AbortError' ||
+    error.name === 'CanceledError' ||
+    error.code === 'ERR_CANCELED' ||
+    error.code === 'ABORT_ERR'
+  )
+}
 
 export type SessionResetHandler = () => void
 
@@ -62,6 +85,10 @@ export function shouldRedirectToLogin(pathname: string): boolean {
 }
 
 async function rejectRequest(error: any): Promise<never> {
+  // A deliberate abort (stop button, conversation switch, logout) is not a
+  // transport failure: surface no toast and never bounce the user to /login.
+  if (isAbortError(error)) throw error
+
   if (error.response) {
     const { status, data } = error.response
     if (status === 401) {
@@ -97,6 +124,9 @@ export async function streamRequest(path: string, init: RequestInit): Promise<Re
   try {
     response = await fetch(url, requestInit)
   } catch (error: any) {
+    // Keep aborts distinguishable from network failures so callers can end a
+    // stopped stream quietly instead of showing an error (E-05).
+    if (isAbortError(error)) throw error
     if (!error.code) error.code = 'ERR_NETWORK'
     return rejectRequest(error)
   }

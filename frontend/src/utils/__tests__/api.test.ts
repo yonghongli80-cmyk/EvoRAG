@@ -57,7 +57,14 @@ describe('api base URL', () => {
     expect(axios.create).toHaveBeenCalledWith({
       baseURL: '/api',
       withCredentials: true,
+      timeout: 30_000,
     })
+  })
+
+  it('bounds every non-streaming request with a 30s timeout', async () => {
+    const { REQUEST_TIMEOUT_MS } = await import('../api')
+
+    expect(REQUEST_TIMEOUT_MS).toBe(30_000)
   })
 
   it('routes streaming fetches through the same base URL', async () => {
@@ -153,6 +160,33 @@ describe('api interceptor', () => {
       registerSessionResetHandler(null)
     }
   })
+
+  // ── E-05: timeout and abort handling ────────────────────
+  it('shows a timeout message for ECONNABORTED', async () => {
+    const error = { code: 'ECONNABORTED', message: 'timeout of 30000ms exceeded' }
+
+    await expect(responseErrorInterceptor(error)).rejects.toBe(error)
+
+    expect(ElMessage.error).toHaveBeenCalledWith('请求超时，请稍后重试')
+  })
+
+  it('never reports a deliberate abort as a network failure', async () => {
+    const error = { name: 'CanceledError', code: 'ERR_CANCELED' }
+
+    await expect(responseErrorInterceptor(error)).rejects.toBe(error)
+
+    expect(ElMessage.error).not.toHaveBeenCalled()
+  })
+
+  it('recognises fetch aborts and axios cancellations', async () => {
+    const { isAbortError } = await import('../api')
+
+    expect(isAbortError({ name: 'AbortError' })).toBe(true)
+    expect(isAbortError({ name: 'CanceledError' })).toBe(true)
+    expect(isAbortError({ code: 'ERR_CANCELED' })).toBe(true)
+    expect(isAbortError({ code: 'ERR_NETWORK' })).toBe(false)
+    expect(isAbortError(null)).toBe(false)
+  })
 })
 
 describe('streamRequest errors', () => {
@@ -186,6 +220,17 @@ describe('streamRequest errors', () => {
     const { streamRequest } = await import('../api')
 
     await expect(streamRequest('/query/stream', { method: 'POST' })).rejects.toThrow('详细原因')
+  })
+
+  it('rethrows an aborted stream without converting it into a network error', async () => {
+    const abortError = Object.assign(new Error('aborted'), { name: 'AbortError' })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(abortError))
+
+    const { streamRequest } = await import('../api')
+
+    await expect(streamRequest('/query/stream', { method: 'POST' })).rejects.toBe(abortError)
+    expect(abortError).not.toHaveProperty('code')
+    expect(ElMessage.error).not.toHaveBeenCalled()
   })
 })
 

@@ -16,11 +16,8 @@ vi.mock('../../stores/chat', () => ({
   })
 }))
 
-vi.mock('dompurify', () => ({
-  default: {
-    sanitize: vi.fn((html: string) => html)
-  }
-}))
+// DOMPurify is intentionally NOT mocked here: the sanitiser must be exercised
+// for the XSS regression tests below to mean anything (E-10).
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -346,9 +343,9 @@ describe('MessageBubble', () => {
     expect(wrapper.find('.bubble').html()).toContain('<span class="ref">Source 1</span>')
   })
 
-  it('calls DOMPurify.sanitize on formatted content', async () => {
-    const DOMPurify = await import('dompurify')
-    const spy = vi.mocked(DOMPurify.default.sanitize)
+  it('calls the real DOMPurify.sanitize on formatted content', async () => {
+    const DOMPurify = (await import('dompurify')).default
+    const spy = vi.spyOn(DOMPurify, 'sanitize')
 
     mount(MessageBubble, {
       props: {
@@ -358,7 +355,47 @@ describe('MessageBubble', () => {
     })
 
     expect(spy).toHaveBeenCalled()
-    spy.mockClear()
+    spy.mockRestore()
+  })
+
+  // ── E-10: XSS payloads must not reach the DOM ───────────
+  it('neutralises an XSS payload instead of rendering it', () => {
+    const payload = [
+      '<img src=x onerror="alert(1)">',
+      '<script>alert(2)</script>',
+      '<svg onload=alert(3)></svg>',
+      '[<iframe srcdoc="<script>alert(4)</script>">]'
+    ].join('\n')
+
+    const wrapper = mount(MessageBubble, {
+      props: { message: { role: 'assistant', content: payload }, index: 1 }
+    })
+    const bubble = wrapper.find('.bubble')
+
+    expect(bubble.element.querySelectorAll('script, img, svg, iframe')).toHaveLength(0)
+    expect(bubble.html()).not.toContain('<img')
+    expect(bubble.html()).not.toContain('<script')
+    expect(bubble.html()).not.toContain('<svg')
+    expect(bubble.html()).not.toContain('<iframe')
+    // The dangerous text stays visible as text.
+    expect(bubble.text()).toContain('<script>alert(2)</script>')
+  })
+
+  it('cannot smuggle an event handler through the [ref] marker', () => {
+    const wrapper = mount(MessageBubble, {
+      props: {
+        message: { role: 'assistant', content: '[x" onmouseover="alert(1)]' },
+        index: 1
+      }
+    })
+    const bubble = wrapper.find('.bubble')
+
+    expect(bubble.element.querySelectorAll('[onmouseover]')).toHaveLength(0)
+    expect(bubble.element.querySelectorAll('*[onload]')).toHaveLength(0)
+    // Only the allowed span.ref wrapper is produced; the payload stays text.
+    expect(bubble.html()).toContain('<span class="ref">')
+    expect(bubble.element.querySelectorAll('span.ref')).toHaveLength(1)
+    expect(bubble.element.querySelectorAll('span.ref')[0].attributes).toHaveLength(1)
   })
 
   // ── Regenerate disabled during streaming ──────────────────

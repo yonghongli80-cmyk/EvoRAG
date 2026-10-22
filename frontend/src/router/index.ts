@@ -47,12 +47,14 @@ const router = createRouter({
         {
           path: 'operations/spreadsheet-changes',
           name: 'spreadsheet-changes',
-          component: () => import('../views/SpreadsheetChangesView.vue')
+          component: () => import('../views/SpreadsheetChangesView.vue'),
+          meta: { requiresAdmin: true }
         },
         {
           path: 'operations/evolution',
           name: 'evolution-center',
-          component: () => import('../views/EvolutionCenterView.vue')
+          component: () => import('../views/EvolutionCenterView.vue'),
+          meta: { requiresAdmin: true }
         },
         {
           path: 'analysis',
