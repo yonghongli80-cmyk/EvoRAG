@@ -24,6 +24,17 @@ Two repository fixtures are used:
 
 The benchmark replay is injected through the sandbox's child-process seam, so no
 test ever calls a model, a vector store, or the live pipeline.
+
+Two boundaries are pinned explicitly because they are easy to get wrong:
+
+* **C-01 (security)** — the worktree isolates *git state*, not the candidate's
+  code from this host. The sandbox is fail-closed unless the process carries a
+  real isolation marker or the operator opted in; these tests opt in, and one
+  test turns that off to pin the refusal.
+* **C-02 (evidence)** — a replay fixture is evidence only for the exact code and
+  corpus it recorded. Staleness is computed on both worktrees with the *real*
+  corpus fingerprint, missing seam hashes are stale, and a diff that touches a
+  seam module never gets a fixture verdict.
 """
 
 from __future__ import annotations
@@ -38,12 +49,15 @@ from pathlib import Path
 
 import pytest
 
+from config import settings
 from rag.evolution import sandbox as sandbox_module
 from rag.evolution.candidate_gates import ROUTE_DELTA_MAX_PP, TOP5_DELTA_MAX_PP
 from rag.evolution.code_patches import CodePatchCandidate
 from rag.evolution.sandbox import (
     GATE_NAME,
     REGRESSION_TEST_PATHS,
+    SANDBOX_ISOLATION_ENV,
+    SANDBOX_UNAVAILABLE,
     SandboxReport,
     run_patch_sandbox,
     sandbox_gate_outcome,
@@ -52,6 +66,18 @@ from rag.evolution.sandbox import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_COMMIT = "a" * 40
 PROBE_COMMENT = "# sandbox probe (comment only)"
+
+
+@pytest.fixture(autouse=True)
+def _explicit_unisolated_sandbox(monkeypatch):
+    """Every test here opts in to the non-isolated worktree sandbox explicitly.
+
+    These tests exercise the VCS-isolation machinery, not a security boundary. C-01 made the
+    default fail-closed, so the opt-in is the fixture and the one refusal test turns it back off.
+    """
+    monkeypatch.setattr(settings, "evolution_sandbox_allow_unisolated", True)
+    monkeypatch.delenv(SANDBOX_ISOLATION_ENV, raising=False)
+
 
 #: The real repository's lightweight, fully offline test module.
 REAL_TARGET = "rag/reranker.py"
@@ -97,6 +123,25 @@ def non_applying_diff(path: str) -> str:
         ' """second preimage line that is not in the file"""\n'
         ' """third preimage line that is not in the file"""\n'
         "+# line the patch tries to add\n"
+    )
+
+
+def new_module_diff(path: str, content: str = '"""probe module (sandbox fixture)."""\n') -> str:
+    """A real diff that creates a file: a legitimate patch that touches no seam."""
+    return "".join(
+        difflib.unified_diff(
+            [], content.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{path}"
+        )
+    )
+
+
+def make_harmless_candidate(repo_root: Path) -> CodePatchCandidate:
+    """A valid ``code``-layer candidate that creates ``rag/chunker.py`` (not a seam)."""
+    return make_candidate(
+        repo_root,
+        layer="code",
+        paths=("rag/chunker.py",),
+        diff=new_module_diff("rag/chunker.py"),
     )
 
 
@@ -483,6 +528,58 @@ def test_the_target_tests_run_the_patched_copy_not_the_main_tree(cloned_repo: Pa
     assert "-document.rerank_score)[:top_k]" in (cloned_repo / REAL_TARGET).read_text(
         encoding="utf-8"
     )
+
+
+# ------------------------------------------------------------------
+# C-01: the worktree is VCS isolation, not a security boundary.
+# ------------------------------------------------------------------
+
+
+def test_the_sandbox_refuses_to_execute_candidate_code_without_isolation(
+    sandbox_repo: Path, make_runner, monkeypatch
+):
+    """默认 fail-closed：没有隔离标记、也没显式开关时，一个子进程都不许起。"""
+    monkeypatch.setattr(settings, "evolution_sandbox_allow_unisolated", False)
+    runner = make_runner()
+
+    report = run_patch_sandbox(make_candidate(sandbox_repo), repo_root=sandbox_repo)
+
+    assert report.applied is False
+    assert report.tests_passed is None
+    assert report.environment is True
+    assert report.error.startswith(SANDBOX_UNAVAILABLE)
+    assert "not a security boundary" in report.error
+    assert ".env" in report.error
+    # 候选代码没有被执行：连 git status / worktree add 都没有发生。
+    assert runner.calls == []
+    # 环境类报告不许移动候选状态。
+    assert sandbox_gate_outcome(report) is None
+
+
+def test_the_isolation_marker_replaces_the_unsafe_opt_in(
+    sandbox_repo: Path, make_runner, monkeypatch
+):
+    """真实隔离启动器在边界内设置的标记就够：开关仍关着也能跑。"""
+    monkeypatch.setattr(settings, "evolution_sandbox_allow_unisolated", False)
+    monkeypatch.setenv(SANDBOX_ISOLATION_ENV, "1")
+    make_runner()
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo), repo_root=sandbox_repo, run_benchmark=False
+    )
+
+    assert report.applied is True
+    assert report.tests_passed is True
+    assert report.error == ""
+
+
+def test_the_unsafe_opt_in_is_off_by_default(monkeypatch):
+    """新开关默认关闭：默认部署不得悄悄以宿主权限执行候选代码。"""
+    monkeypatch.delenv("RAG_EVOLUTION_SANDBOX_ALLOW_UNISOLATED", raising=False)
+
+    from config import Settings
+
+    assert Settings(_env_file=None).evolution_sandbox_allow_unisolated is False
 
 
 # ------------------------------------------------------------------
@@ -1042,6 +1139,13 @@ def test_an_environmental_refusal_writes_no_status():
     )
     assert sandbox_gate_outcome(timed_out) is None
 
+    # 没有隔离边界同样不是候选的问题：即使报告没带 environment 标志，前缀也足以判"不移动"。
+    unavailable = SandboxReport(
+        applied=False,
+        tests_passed=None,
+        error=f"{SANDBOX_UNAVAILABLE}: the candidate was not executed",
+    )
+    assert sandbox_gate_outcome(unavailable) is None
 
 def test_the_write_back_refuses_an_environmental_report():
     """写回函数在环境类报告上也必须拒绝写入，并说清为什么。"""
@@ -1310,13 +1414,46 @@ def test_the_replay_command_can_bound_its_repetitions():
 # ------------------------------------------------------------------
 
 
-def _fresh_fixture(tmp_path, worktree: Path) -> Path:
+def _write_seam_modules(worktree: Path) -> None:
+    """Write the five recorded seam modules as plain files.
+
+    ``seam_hashes`` reads the worktree, never imports it, so the fixture can describe a tree that
+    is not a working Python package. The fifth seam (``rag.jev.client``) is included because a
+    fixture that does not record all five is stale by C-02's fail-closed rule.
+    """
+    for relative in (
+        "rag/embedder.py",
+        "rag/reranker.py",
+        "rag/agent.py",
+        "rag/query_rewriter.py",
+        "rag/jev/client.py",
+    ):
+        target = worktree / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x = 1\n", encoding="utf-8")
+
+
+def _save_fixture(
+    tmp_path: Path,
+    worktree: Path,
+    *,
+    corpus: str = "corpus",
+    seams: Mapping[str, str] | None = None,
+    name: str = "fixture.json",
+) -> Path:
+    """A fixture whose seam hashes describe ``worktree`` (or the hashes given)."""
     from rag.evolution.replay_fixture import ReplayFixture, seam_hashes
 
-    path = tmp_path / "fixture.json"
+    path = tmp_path / name
     ReplayFixture(
-        embeddings={}, reranks={}, routes={}, rewrites={},
-        corpus="corpus", base_commit="a" * 40, seams=seam_hashes(worktree), created_at=1.0,
+        embeddings={},
+        reranks={},
+        routes={},
+        rewrites={},
+        corpus=corpus,
+        base_commit="a" * 40,
+        seams=dict(seam_hashes(worktree) if seams is None else seams),
+        created_at=1.0,
     ).save(path)
     return path
 
@@ -1325,16 +1462,31 @@ def test_the_replay_env_carries_the_fixture_and_the_staleness_check_accepts_it(t
     from rag.evolution.sandbox import _replay_env, fixture_staleness
 
     worktree = tmp_path / "wt"
-    (worktree / "rag").mkdir(parents=True)
-    for name in ("embedder", "reranker", "agent", "query_rewriter"):
-        (worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
-    fixture = _fresh_fixture(tmp_path, worktree)
+    _write_seam_modules(worktree)
+    fixture = _save_fixture(tmp_path, worktree)
 
-    assert fixture_staleness(str(fixture), worktree) == ""
+    # corpus 是回放**实际会读到**的那份语料的指纹，不是 fixture 自己记的那个值。
+    assert fixture_staleness(str(fixture), worktree, corpus="corpus") == ""
     env = _replay_env(worktree, None, str(fixture))
     assert env["RAG_EVOLUTION_REPLAY_FIXTURE"] == str(fixture)
     # 不配置时不注入：默认部署的回放行为（方案 C）不变。
     assert "RAG_EVOLUTION_REPLAY_FIXTURE" not in _replay_env(worktree, None)
+
+
+def test_the_fixture_staleness_uses_the_replay_corpus_not_the_recorded_one(tmp_path):
+    """C-02：语料指纹取**回放读的那份**；取 fixture 自己的值等于拿录制跟自己比，永远相等。"""
+    from rag.evolution.sandbox import fixture_staleness
+
+    worktree = tmp_path / "wt"
+    _write_seam_modules(worktree)
+    fixture = _save_fixture(tmp_path, worktree, corpus="recorded-corpus")
+
+    assert fixture_staleness(str(fixture), worktree, corpus="recorded-corpus") == ""
+    changed = fixture_staleness(str(fixture), worktree, corpus="a-different-corpus")
+    assert "corpus changed" in changed
+    # 回放语料指纹不可得（例如没配 data-snapshot）⇒ fail-closed，绝不用 fixture 自己的值顶上。
+    unavailable = fixture_staleness(str(fixture), worktree)
+    assert "corpus fingerprint is unavailable" in unavailable
 
 
 def test_a_patched_seam_makes_the_fixture_stale(tmp_path):
@@ -1342,16 +1494,126 @@ def test_a_patched_seam_makes_the_fixture_stale(tmp_path):
     from rag.evolution.sandbox import fixture_staleness
 
     worktree = tmp_path / "wt"
-    (worktree / "rag").mkdir(parents=True)
-    for name in ("embedder", "reranker", "agent", "query_rewriter"):
-        (worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
-    fixture = _fresh_fixture(tmp_path, worktree)
+    _write_seam_modules(worktree)
+    fixture = _save_fixture(tmp_path, worktree)
 
     (worktree / "rag" / "reranker.py").write_text("x = 2  # patched\n", encoding="utf-8")
 
-    reason = fixture_staleness(str(fixture), worktree)
+    reason = fixture_staleness(str(fixture), worktree, corpus="corpus")
     assert "seam modules changed" in reason and "reranker" in reason
-    assert fixture_staleness(str(tmp_path / "absent.json"), worktree) == "fixture file not found"
+    assert (
+        fixture_staleness(str(tmp_path / "absent.json"), worktree, corpus="corpus")
+        == "fixture file not found"
+    )
+
+
+def test_a_fixture_missing_a_recorded_seam_hash_is_stale(tmp_path):
+    """C-02：fixture 少记一个 seam 就等于对那个模块**没有证据**，必须判过期。"""
+    from rag.evolution.replay_fixture import seam_hashes
+    from rag.evolution.sandbox import fixture_staleness
+
+    worktree = tmp_path / "wt"
+    _write_seam_modules(worktree)
+    seams = dict(seam_hashes(worktree))
+    seams.pop("rag.jev.client")
+    fixture = _save_fixture(tmp_path, worktree, seams=seams)
+
+    reason = fixture_staleness(str(fixture), worktree, corpus="corpus")
+    assert "no seam hash" in reason and "rag.jev.client" in reason
+
+
+def test_seam_modules_touched_reads_both_the_declared_paths_and_the_diff(sandbox_repo: Path):
+    """C-02：``candidate.paths`` 与 diff 的 ``+++`` 行任一命中 seam 都算触碰。"""
+    from rag.evolution.sandbox import seam_modules_touched
+
+    declared = make_candidate(sandbox_repo)
+    assert seam_modules_touched(declared) == ("rag/reranker.py",)
+
+    disguised = make_candidate(
+        sandbox_repo,
+        paths=("rag/chunker.py",),
+        diff=comment_diff(sandbox_repo, PROBE_TARGET),
+    )
+    assert seam_modules_touched(disguised) == ("rag/reranker.py",)
+
+    harmless = make_candidate(
+        sandbox_repo,
+        paths=("tests/test_probe.py",),
+        diff=comment_diff(sandbox_repo, "tests/test_probe.py"),
+    )
+    assert seam_modules_touched(harmless) == ()
+
+
+def test_a_seam_patch_never_gets_a_fixture_verdict(
+    sandbox_repo: Path, make_runner, tmp_path, monkeypatch
+):
+    """C-02 集成反例：补丁触碰 seam ⇒ 回放**根本不跑**，更不会签出 ``passed +0.0pp``。"""
+    from rag.evolution.sandbox import sandbox_gate_metrics, sandbox_gate_outcome
+
+    runner = make_runner(benchmark=_benchmark_payload())
+    fixture = _save_fixture(tmp_path, sandbox_repo)
+    # 只留下"补丁触碰 seam"这一个拒绝理由，确保断言命中的是本次修复而不是哈希副作用。
+    monkeypatch.setattr(sandbox_module, "_replay_corpus_fingerprint", lambda *_: "corpus")
+    monkeypatch.setattr(sandbox_module, "fixture_staleness", lambda *args, **kwargs: "")
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        replay_fixture=str(fixture),
+    )
+
+    assert report.applied is True
+    assert report.tests_passed is True
+    assert report.benchmark is None
+    assert "touches a recorded seam module" in report.error
+    assert runner.of("benchmark_jev_retrieval.py") == []
+
+    metrics = sandbox_gate_metrics(report)
+    assert "verdict" not in metrics and metrics["verdict_unavailable"] is True
+    status, detail = sandbox_gate_outcome(report)
+    assert status == "awaiting_verification"
+    assert "replay unavailable" in detail
+
+
+def test_staleness_is_checked_on_both_worktrees(sandbox_repo: Path, make_runner, tmp_path, monkeypatch):
+    """C-02：干净侧与打补丁侧都要算；任何一侧不过即拒，不做"单边新鲜"的比较。"""
+    fixture = _save_fixture(tmp_path, sandbox_repo)
+    monkeypatch.setattr(sandbox_module, "_replay_corpus_fingerprint", lambda *_: "corpus")
+
+    report = run_patch_sandbox(
+        make_harmless_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        replay_fixture=str(fixture),
+    )
+
+    assert report.benchmark is None
+    assert "patched worktree:" in report.error
+    assert "clean worktree:" in report.error
+
+
+def test_a_fresh_fixture_still_injects_and_compares(
+    sandbox_repo: Path, make_runner, tmp_path, monkeypatch
+):
+    """修好证据链不等于关掉回放：新鲜 fixture 仍被注入两侧并给出逐侧结论。"""
+    runner = make_runner(benchmark=_benchmark_payload())
+    fixture = _save_fixture(tmp_path, sandbox_repo)
+    monkeypatch.setattr(sandbox_module, "_replay_corpus_fingerprint", lambda *_: "corpus")
+    monkeypatch.setattr(sandbox_module, "fixture_staleness", lambda *args, **kwargs: "")
+
+    report = run_patch_sandbox(
+        make_harmless_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        replay_fixture=str(fixture),
+    )
+
+    assert report.benchmark is not None and report.benchmark["passed"] is True
+    replays = runner.of("benchmark_jev_retrieval.py")
+    assert [call.cwd.name for call in replays] == ["baseline", "worktree"]
+    for replay in replays:
+        assert replay.env["RAG_EVOLUTION_REPLAY_FIXTURE"] == str(fixture)
 
 
 def test_a_stale_fixture_makes_the_replay_unavailable_rather_than_passing(
@@ -1361,10 +1623,8 @@ def test_a_stale_fixture_makes_the_replay_unavailable_rather_than_passing(
     from rag.evolution.sandbox import sandbox_gate_outcome
 
     run_worktree = sandbox_repo  # fixture 的 seam 哈希取自这里，随后故意改一个模块
-    (run_worktree / "rag").mkdir(exist_ok=True)
-    for name in ("embedder", "reranker", "agent", "query_rewriter"):
-        (run_worktree / "rag" / f"{name}.py").write_text("x = 1\n", encoding="utf-8")
-    fixture = _fresh_fixture(tmp_path, run_worktree)
+    _write_seam_modules(run_worktree)
+    fixture = _save_fixture(tmp_path, run_worktree)
     (run_worktree / "rag" / "reranker.py").write_text("x = 2\n", encoding="utf-8")
 
     make_runner(benchmark=_benchmark_payload())

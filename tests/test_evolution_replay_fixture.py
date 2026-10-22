@@ -18,12 +18,14 @@ import pytest
 
 from rag.evolution.replay_fixture import (
     FIXTURE_VERSION,
+    SEAM_MODULES,
     FixtureMiss,
     ReplayFixture,
     corpus_fingerprint,
     install,
     normalize,
     seam_hashes,
+    snapshot_corpus_fingerprint,
 )
 
 
@@ -31,6 +33,11 @@ class _Chunk:
     def __init__(self, doc_name, text=""):
         self.doc_name = doc_name
         self.text = text
+
+
+def _seams() -> dict[str, str]:
+    """A complete, matching seam record: C-02 treats a missing one as stale."""
+    return {name: f"hash-{index}" for index, name in enumerate(SEAM_MODULES)}
 
 
 def _fixture(**overrides) -> ReplayFixture:
@@ -41,7 +48,7 @@ def _fixture(**overrides) -> ReplayFixture:
         rewrites={normalize("年假是多少"): "年假有多少天"},
         corpus="corpus-hash",
         base_commit="a" * 40,
-        seams={"rag.reranker": "hash-1"},
+        seams=_seams(),
         created_at=123.0,
         version=FIXTURE_VERSION,
     )
@@ -130,12 +137,49 @@ def test_a_non_strict_install_falls_back_to_the_original_seam(monkeypatch):
 
 def test_staleness_covers_version_corpus_and_seam_drift():
     fixture = _fixture()
+    seams = _seams()
 
-    assert fixture.stale_reason(corpus="corpus-hash", seams={"rag.reranker": "hash-1"}) == ""
-    assert "corpus changed" in fixture.stale_reason(corpus="other", seams={"rag.reranker": "hash-1"})
-    changed = fixture.stale_reason(corpus="corpus-hash", seams={"rag.reranker": "hash-2"})
-    assert "seam modules changed" in changed and "rag.reranker" in changed
+    assert fixture.stale_reason(corpus="corpus-hash", seams=seams) == ""
+    assert "corpus changed" in fixture.stale_reason(corpus="other", seams=seams)
+    changed = dict(seams, **{"rag.reranker": "hash-2"})
+    reason = fixture.stale_reason(corpus="corpus-hash", seams=changed)
+    assert "seam modules changed" in reason and "rag.reranker" in reason
     assert "format" in _fixture(version=99).stale_reason(corpus="corpus-hash", seams={})
+
+
+def test_staleness_is_fail_closed_when_a_seam_hash_is_missing_or_unavailable():
+    """C-02：少一条 seam 记录、或任一侧报 "unavailable"，都等于**没有证据** ⇒ 过期。"""
+    fixture = _fixture()
+    seams = _seams()
+
+    partial = dict(seams)
+    partial.pop("rag.jev.client")
+    assert "no seam hash" in _fixture(seams=partial).stale_reason(
+        corpus="corpus-hash", seams=seams
+    )
+
+    recorded_unavailable = dict(seams, **{"rag.reranker": "unavailable"})
+    assert "unavailable" in _fixture(seams=recorded_unavailable).stale_reason(
+        corpus="corpus-hash", seams=seams
+    )
+
+    actual_unavailable = dict(seams, **{"rag.agent": "unavailable"})
+    assert "unavailable" in fixture.stale_reason(
+        corpus="corpus-hash", seams=actual_unavailable
+    )
+
+    actual_missing = dict(seams)
+    actual_missing.pop("rag.embedder")
+    assert "unavailable" in fixture.stale_reason(corpus="corpus-hash", seams=actual_missing)
+
+
+def test_staleness_refuses_a_fixture_or_replay_without_a_corpus_fingerprint():
+    """C-02：语料指纹缺失（fixture 没记或回放侧算不出）一律过期，绝不默认相等。"""
+    fixture = _fixture()
+    seams = _seams()
+
+    assert "no corpus" in _fixture(corpus="").stale_reason(corpus="corpus-hash", seams=seams)
+    assert "unavailable" in fixture.stale_reason(corpus="", seams=seams)
 
 
 def test_corpus_fingerprint_notices_a_changed_snapshot():
@@ -145,6 +189,38 @@ def test_corpus_fingerprint_notices_a_changed_snapshot():
 
     assert a == b
     assert a != c
+
+
+def test_snapshot_corpus_fingerprint_reproduces_the_recorded_one(tmp_path):
+    """C-02：沙箱从只读快照算出**真实**语料指纹，才能与 fixture 记的那个比较。"""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import Distance, PointStruct, VectorParams
+
+    snapshot = tmp_path / "snapshot"
+    qdrant_dir = snapshot / "qdrant_data"
+    client = QdrantClient(path=str(qdrant_dir))
+    client.create_collection(
+        collection_name="kb1", vectors_config=VectorParams(size=2, distance=Distance.COSINE)
+    )
+    client.upsert(
+        collection_name="kb1",
+        points=[
+            PointStruct(id=1, vector=[0.1, 0.2], payload={"doc_name": "a.md"}),
+            PointStruct(id=2, vector=[0.3, 0.4], payload={"doc_name": "b.md"}),
+            PointStruct(id=3, vector=[0.5, 0.6], payload={"doc_name": "a.md"}),
+        ],
+    )
+    client.close()
+
+    expected = corpus_fingerprint([_Chunk("a.md"), _Chunk("b.md"), _Chunk("a.md")])
+    # 快照目录既是 `qdrant_data/` 的父目录，也可以是语料目录本身（与 _replay_env 同一规则）。
+    assert snapshot_corpus_fingerprint(str(snapshot), "kb1") == expected
+    assert snapshot_corpus_fingerprint(str(qdrant_dir), "kb1") == expected
+
+    # 读不到 ⇒ 空串（调用方必须判过期），绝不是一个"相等"的指纹。
+    assert snapshot_corpus_fingerprint(str(snapshot), "missing_collection") == ""
+    assert snapshot_corpus_fingerprint(str(tmp_path / "absent"), "kb1") == ""
+    assert snapshot_corpus_fingerprint("", "kb1") == ""
 
 
 def test_seam_hashes_describe_the_code_that_is_running():

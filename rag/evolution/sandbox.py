@@ -46,6 +46,24 @@ recorded failure — leaves both sides reporting identical metrics, and identica
 metrics would otherwise read as the one conclusion a gate must never invent:
 "no regression".
 
+**The worktree is VCS isolation, not a security boundary** (C-01, 2026-10-22).
+Everything above keeps the *repository* safe: the patch never lands in the main
+tree. It does **not** keep the *host* safe: the target tests and the replay run
+as the service's user, inherit its network, and can read every file that user can
+read (``.env``, ``data/users.db``, the backup root). This module therefore
+refuses to execute a candidate at all unless one of two explicit statements is
+present — a real isolation marker exported by a container/low-privilege launcher
+(:data:`SANDBOX_ISOLATION_ENV`), or the operator's documented opt-in
+(``evolution_sandbox_allow_unisolated``). Neither ships isolation; the first is a
+contract with a launcher, the second is informed consent. See
+:func:`sandbox_unavailable_reason`.
+
+The replay fixture's freshness is part of the evidence chain (C-02): it is
+computed on **both** worktrees with the fingerprint of the corpus the replay
+actually reads, a missing or unavailable seam hash is stale, and a diff that
+touches a seam module gets no fixture verdict at all — a recording can only
+describe the code that was running when it was recorded.
+
 The module stops at the report. Turning one into a candidate-status move is the
 caller's job, and :func:`sandbox_gate_outcome` is the seam for it: it returns the
 exact ``(status, gate_detail)`` pair to write back with ``gate="sandbox"``, which
@@ -97,6 +115,15 @@ BENCHMARK_SCRIPT = "scripts/benchmark_jev_retrieval.py"
 #: path. They are *not* baseline and patched — the patch's effect is the same side measured
 #: in the clean worktree and in the patched one.
 REPLAY_SIDES = (("old", "legacy"), ("new", "jev"))
+
+#: The marker a **real** isolation launcher (a container, a low-privilege job runner, a jail)
+#: exports in the process that runs the sandbox, *inside* the boundary. This repository does not
+#: provision such a boundary itself, so the marker is a contract with the launcher, not a claim
+#: this module can verify. It is stripped from every child like every other ``RAG_*`` value.
+SANDBOX_ISOLATION_ENV = "RAG_EVOLUTION_SANDBOX_ISOLATED"
+#: Prefix of the report error when a run is refused for lacking isolation. The prefix is the
+#: stable part a caller (CLI, tests) matches on; the sentence after it says what to do.
+SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 
 #: Repository-owned verification the sandbox always runs beside the candidate's
 #: own targets. Layer 1 refuses any diff that touches ``tests/**`` or a
@@ -353,7 +380,43 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     return env
 
 
-def fixture_staleness(fixture_path: str, worktree: Path) -> str:
+def sandbox_isolation_declared() -> bool:
+    """Whether the process was started inside an isolation boundary that says so.
+
+    The marker is set by the launcher *inside* the boundary — a container, a low-privilege user
+    with no network — and stripped from every sandbox child by :func:`_sandbox_env` like every
+    other ``RAG_*`` value, so the candidate's own tests cannot inherit the claim.
+
+    This module does not create the boundary and cannot verify it: the honest reading of a ``1``
+    is "a launcher this deployment trusts declared isolation". That is why the explicit unsafe
+    opt-in exists beside it rather than a fallback that guesses.
+    """
+    return str(os.environ.get(SANDBOX_ISOLATION_ENV, "")).strip() == "1"
+
+
+def sandbox_unavailable_reason() -> str:
+    """Why the sandbox must not execute a candidate, or ``""`` when it may.
+
+    There are exactly two ways to proceed, both explicit statements about the *host*: the process
+    carries the isolation marker, or the operator set ``evolution_sandbox_allow_unisolated``.
+    Absent both, running a candidate would execute arbitrary diff content with the service user's
+    files, credentials and network reach — which is what a review sandbox must not do by default.
+    """
+    if sandbox_isolation_declared():
+        return ""
+    if bool(getattr(settings, "evolution_sandbox_allow_unisolated", False)):
+        return ""
+    return (
+        f"{SANDBOX_UNAVAILABLE}: the worktree sandbox is VCS isolation, not a security boundary. "
+        "Its children run as this user, can reach the network and can read every file this user "
+        "can (including .env and data/). "
+        f"No isolation marker ({SANDBOX_ISOLATION_ENV}=1) is set and "
+        "evolution_sandbox_allow_unisolated is off, so the candidate was not executed. "
+        "Run the sandbox inside a real boundary, or set the opt-in explicitly to accept the risk."
+    )
+
+
+def fixture_staleness(fixture_path: str, worktree: Path, *, corpus: str = "") -> str:
     """Why the recorded fixture must not be replayed in ``worktree``, or ``""``.
 
     A fixture records the answers four seams gave, so it is evidence about the code that was
@@ -361,6 +424,11 @@ def fixture_staleness(fixture_path: str, worktree: Path) -> str:
     one) makes the recording describe the wrong code, and a replay that used it anyway would report
     a verdict about behaviour nobody measured. The check reads the worktree's own files, so it
     never imports anything from the tree under test.
+
+    ``corpus`` must be the fingerprint of the corpus the replay **actually reads**
+    (:func:`rag.evolution.replay_fixture.snapshot_corpus_fingerprint`), never the fixture's own
+    value: passing the recording's value back would compare the fixture with itself, which is
+    exactly how a stale corpus used to pass. An empty ``corpus`` is stale, not equal.
     """
     from rag.evolution.replay_fixture import ReplayFixture, seam_hashes
 
@@ -371,7 +439,57 @@ def fixture_staleness(fixture_path: str, worktree: Path) -> str:
         fixture = ReplayFixture.load(path)
     except (OSError, ValueError) as error:
         return f"fixture unreadable: {type(error).__name__}"
-    return fixture.stale_reason(corpus=fixture.corpus, seams=seam_hashes(worktree))
+    return fixture.stale_reason(corpus=corpus, seams=seam_hashes(worktree))
+
+
+def _candidate_paths(candidate: CodePatchCandidate) -> set[str]:
+    """Every repository path a candidate's diff claims to touch, in POSIX form.
+
+    Both sources are read on purpose: the declared ``paths`` are what the layer-1 gate validated,
+    and the diff's ``+++`` lines are what will actually be applied. A store round-trip can leave
+    the two out of step, and a seam check that trusted only one would have a blind side.
+    """
+    paths: set[str] = set()
+    for value in candidate.paths or ():
+        path = str(value).strip().replace("\\", "/")
+        if path.startswith("./"):
+            path = path[2:]
+        if path and path != "/dev/null":
+            paths.add(path)
+    for line in str(candidate.diff or "").splitlines():
+        if line.startswith("+++ b/"):
+            path = line[len("+++ b/") :].strip().replace("\\", "/")
+            if path and path != "/dev/null":
+                paths.add(path)
+    return paths
+
+
+def seam_modules_touched(candidate: CodePatchCandidate) -> tuple[str, ...]:
+    """The recorded seam modules a candidate's diff touches, sorted.
+
+    A fixture records answers that describe one particular revision of these modules; replaying it
+    against a patch to one of them would judge code nobody recorded. This is checked *before* any
+    hashing and short-circuits the replay: no fixture verdict is better than a verdict about the
+    wrong behaviour.
+    """
+    from rag.evolution.replay_fixture import SEAM_PATHS
+
+    seams = set(SEAM_PATHS)
+    return tuple(sorted(path for path in _candidate_paths(candidate) if path in seams))
+
+
+def _replay_corpus_fingerprint(data_snapshot: str | None, kb_id: str) -> str:
+    """The real fingerprint of the corpus the replay reads; ``""`` when it cannot be computed.
+
+    ``""`` is stale, never equal (see :func:`fixture_staleness`): a run that cannot show which
+    corpus it replayed against cannot support a verdict about that recording.
+    """
+    from rag.evolution.replay_fixture import snapshot_corpus_fingerprint
+
+    try:
+        return snapshot_corpus_fingerprint(data_snapshot, kb_id)
+    except Exception:  # noqa: BLE001 - "cannot fingerprint" must refuse, never crash the run
+        return ""
 
 
 def _replay_env(
@@ -942,6 +1060,23 @@ def _execute(
     # broken sides then compare as "no regression", a verdict about nothing, shown as a number.
     # A fixture replays recorded seams and needs no credentials, so that is the case worth running.
     if run_benchmark and tests_passed is True:
+        # A fixture records answers that describe exactly one revision of the seam modules. A patch
+        # that touches one of them makes every recorded answer evidence about different code, so
+        # no fixture verdict exists for it: refuse before building the second worktree instead of
+        # comparing a recording with code nobody recorded (C-02, 2026-10-22).
+        touched = seam_modules_touched(candidate) if replay_fixture else ()
+        if touched:
+            return report(
+                applied=True,
+                tests_passed=True,
+                benchmark=None,
+                error=(
+                    "benchmark replay fixture unusable: the diff touches a recorded seam module: "
+                    f"{', '.join(touched)}"
+                    "；触及 seam 模块的补丁请改用 scripts/measure_patch_regression_ab.py "
+                    "在宿主做带凭据 A/B"
+                ),
+            )
         baseline_worktree = sandbox_root / BASELINE_WORKTREE_DIRNAME
         added_baseline = _run_command(
             ("git", "worktree", "add", str(baseline_worktree), "--detach", "HEAD"),
@@ -959,18 +1094,35 @@ def _execute(
                     f"{_failure_kind(added_baseline, WORKTREE_TIMEOUT_S)}"
                 ),
             )
+        # Freshness is decided on **both** worktrees and against the corpus the replay really
+        # reads. A recording can only vouch for the code and data it was made from; accepting one
+        # fresh side while the other is stale would still compare recorded answers with behaviour
+        # nobody recorded. The corpus value comes from the snapshot, never from the fixture itself.
+        if replay_fixture:
+            corpus = _replay_corpus_fingerprint(data_snapshot, kb_id)
+            reasons: list[str] = []
+            for label, tree in (("patched", worktree), ("clean", baseline_worktree)):
+                reason = fixture_staleness(replay_fixture, tree, corpus=corpus)
+                if reason:
+                    reasons.append(f"{label} worktree: {reason}")
+            if reasons:
+                stale = "; ".join(reasons)
+                logger.warning("sandbox replay fixture unusable: %s", stale)
+                return report(
+                    applied=True,
+                    tests_passed=True,
+                    benchmark=None,
+                    error=(
+                        f"benchmark replay fixture unusable: {stale}"
+                        "；请用记录该语料与代码的 fixture 重跑，或改用 "
+                        "scripts/measure_patch_regression_ab.py 在宿主做带凭据 A/B"
+                    ),
+                )
         # Each run imports its own tree: PYTHONPATH decides what ``import rag`` resolves to,
         # so the clean run must point at the clean worktree.
-        stale = ""
-        if replay_fixture:
-            stale = fixture_staleness(replay_fixture, baseline_worktree)
-            if stale:
-                logger.warning("sandbox replay fixture unusable: %s", stale)
         baseline_payload, baseline_error = _run_benchmark(
             worktree=baseline_worktree,
-            env=_replay_env(
-                baseline_worktree, data_snapshot, "" if stale else (replay_fixture or "")
-            ),
+            env=_replay_env(baseline_worktree, data_snapshot, replay_fixture or ""),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
@@ -979,22 +1131,13 @@ def _execute(
         )
         patched_payload, patched_error = _run_benchmark(
             worktree=worktree,
-            env=_replay_env(
-                worktree, data_snapshot, "" if stale else (replay_fixture or "")
-            ),
+            env=_replay_env(worktree, data_snapshot, replay_fixture or ""),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
             user_id=replay_user_id,
         )
         replay_error = baseline_error or patched_error
-        if not replay_error and stale:
-            # 触及 seam 的补丁在无凭据沙箱里**量不了**（录制里的答案描述的是另一份代码）。
-            # 与其给一个空洞的结论，不如点名正确的出路：带凭据的宿主 A/B。
-            replay_error = (
-                f"benchmark replay fixture unusable: {stale}"
-                "；触及 seam 模块的补丁请改用 scripts/measure_patch_regression_ab.py 在宿主做带凭据 A/B"
-            )
         if replay_error:
             return report(
                 applied=True,
@@ -1064,6 +1207,15 @@ def run_patch_sandbox(
     ``cwd`` and ``PYTHONPATH``, and the worktree is removed in a ``finally``
     whatever happens in between.
 
+    **This is VCS isolation, not a security boundary** (C-01, 2026-10-22): the
+    children run as this user, inherit its network and can read every file it can
+    read. The run is therefore refused — no worktree, no child process, no
+    candidate code — unless :func:`sandbox_isolation_declared` is true or the
+    operator set ``evolution_sandbox_allow_unisolated``. A refusal is a
+    :class:`SandboxReport` with ``environment=True`` and an error starting with
+    ``sandbox_unavailable``, so :func:`sandbox_gate_outcome` returns ``None`` and
+    no candidate status moves.
+
     ``kb_id`` is the knowledge base the diagnosis came from and is what the
     replay replays; ``tests_timeout`` bounds the target tests (a timeout is
     inconclusive, not a rejection).
@@ -1078,14 +1230,28 @@ def run_patch_sandbox(
     (``docs/evolution-code-patches.md`` section 5). The replay remains available
     as an experiment: ``run_benchmark=True`` plus ``data_snapshot`` and
     ``replay_user_id`` runs the same benchmark in a clean worktree and in the
-    patched one and compares each side (``patch_verdict``).
+    patched one and compares each side (``patch_verdict``). A ``replay_fixture``
+    is only used when it is fresh for **both** trees and the corpus snapshot, and
+    a diff that touches a seam module gets no fixture verdict at all.
 
     Returns a :class:`SandboxReport`. Nothing is raised for a refused candidate:
-    a boundary violation, a dirty main tree, a diff that does not apply, a
-    failing test run and a replay that could not run are all reports. Only a
-    crash in the sandbox itself propagates — and it still cleans up.
+    a missing isolation boundary, a boundary violation, a dirty main tree, a diff
+    that does not apply, a failing test run and a replay that could not run are
+    all reports. Only a crash in the sandbox itself propagates — and it still
+    cleans up.
     """
     started = time.perf_counter()
+    unavailable = sandbox_unavailable_reason()
+    if unavailable:
+        # Refuse **before** any git command, worktree or child process. The worktree protects the
+        # repository's state, not this host from the candidate's code.
+        return SandboxReport(
+            applied=False,
+            tests_passed=None,
+            error=unavailable,
+            duration_s=round(time.perf_counter() - started, 3),
+            environment=True,
+        )
     root = Path(repo_root)
     snapshot = (
         settings.evolution_sandbox_data_snapshot if data_snapshot is None else data_snapshot
@@ -1345,7 +1511,10 @@ def sandbox_gate_outcome(report: SandboxReport) -> tuple[str, str] | None:
     a layer-2 timeout.
     """
     if not report.applied:
-        if report.environment:
+        # ``environment`` is the rich signal; the error prefix is the second, because a report
+        # built by a caller (or by an older writer) may carry only one of them. Either way the
+        # candidate was not judged and must not move.
+        if report.environment or report.error.startswith(SANDBOX_UNAVAILABLE):
             return None
         return EvolutionStatus.REJECTED.value, f"sandbox refused the patch: {report.error}"
     if report.tests_passed is False:
@@ -1387,11 +1556,17 @@ __all__ = [
     "MAX_RECORDED_TESTS",
     "MIN_PREP_P50_MS",
     "REGRESSION_TEST_PATHS",
+    "SANDBOX_ISOLATION_ENV",
     "SANDBOX_ROOT_PREFIX",
+    "SANDBOX_UNAVAILABLE",
     "SandboxReport",
     "WORKTREE_DIRNAME",
     "WORKTREE_TIMEOUT_S",
+    "fixture_staleness",
     "patch_verdict",
     "run_patch_sandbox",
     "sandbox_gate_outcome",
+    "sandbox_isolation_declared",
+    "sandbox_unavailable_reason",
+    "seam_modules_touched",
 ]

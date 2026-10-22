@@ -227,6 +227,12 @@ class Settings(BaseSettings):
     # prep P50=0.0ms、route accuracy 0.15，回放"跑了但什么都没量到"——这类空转必须避免，
     # 否则层 2/3 的"无回归"是假的。
     evolution_sandbox_replay_user_id: int = Field(default=0, ge=0)
+    # 代码补丁沙箱**不是安全边界**：worktree 只隔离 VCS 状态，子进程仍以宿主身份运行、可联网、
+    # 可读宿主能读的一切（含 .env 与 data/）。默认 fail-closed：没有真实隔离标记
+    # （RAG_EVOLUTION_SANDBOX_ISOLATED=1，由容器/低权运行器等隔离启动器在边界内设置）时，
+    # run_patch_sandbox 直接拒绝，**不执行候选代码**。置 true = 操作者显式承担以宿主权限执行
+    # 候选代码的风险（仅限受信候选、本机调试）；推荐用容器 + 只读挂载 + 无出网 + 独立 HOME。
+    evolution_sandbox_allow_unisolated: bool = False
 
     # 候选阶段（第 4 阶段）：候选生成默认关闭（与观测总开关独立，需显式开启）；
     # 模型调用预算沿用第 3 阶段诊断通道（次/轮）。

@@ -7,7 +7,19 @@ purpose — a sandbox needs a clean main tree and isolates itself in two worktre
 something a background round should start — and it records status, detail and the structured
 metrics through :func:`record_sandbox_outcome`.
 
-    python scripts/run_patch_sandbox.py --candidate-id 3 \
+**The sandbox is not a security boundary** (C-01, 2026-10-22). A ``git worktree`` keeps the
+repository's state safe; it does not sandbox the *code*: the target tests and the replay run as
+this user, inherit its network and can read every file this user can read (``.env``,
+``data/users.db``, the backup root). ``run_patch_sandbox`` therefore refuses to execute a
+candidate unless one of two explicit statements is present:
+
+* the process runs inside a real isolation boundary whose launcher set
+  ``RAG_EVOLUTION_SANDBOX_ISOLATED=1`` (container / low-privilege user / no network), or
+* ``--allow-unisolated`` is passed here, which sets the unsafe opt-in and prints a warning.
+  This is informed consent, not isolation: only use it for a trusted candidate on a machine whose
+  credentials and data you accept may be read by the patch.
+
+    python scripts/run_patch_sandbox.py --candidate-id 3 \\
         --data-snapshot D:/tmp/corpus-copy --fixture real-case-handoff/evolab/replay-fixture.json
 
 Without ``--fixture`` the layer-2 replay is **not run at all**, and the gate records the comparison as
@@ -17,7 +29,8 @@ locally, every generation fails and is caught, so ``failed_calls`` stays zero �
 evidence guard to let a comparison through. Two equally broken sides then compare as "no regression", a
 verdict about nothing, rendered in the review panel as a number. With a fixture the replay uses the
 recorded seams (no credentials needed), and a patch that touches one of those modules is refused as
-stale rather than measured against the wrong code. The real layer-2 comparison needs credentials and
+stale rather than measured against the wrong code. The fixture is only used when it is fresh for both
+worktrees *and* the corpus actually replayed. The real layer-2 comparison needs credentials and
 belongs to the administrator, on the host, after applying.
 """
 
@@ -70,12 +83,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--actor-id", default="admin:cli")
     parser.add_argument("--note", default="沙箱回放由管理员手动执行")
     parser.add_argument("--dry-run", action="store_true", help="只跑沙箱，不写回轨迹")
+    parser.add_argument(
+        "--allow-unisolated",
+        action="store_true",
+        help=(
+            "显式接受风险：沙箱不是安全边界，候选代码会以本进程用户的权限执行"
+            "（可联网、可读 .env/data）。仅在受信候选 + 本机调试时使用。"
+        ),
+    )
     args = parser.parse_args(argv)
 
     from rag.evolution.candidate_store import CandidateStore
     from rag.evolution.code_patches import CodePatchCandidate
-    from rag.evolution.sandbox import record_sandbox_outcome, run_patch_sandbox, sandbox_gate_metrics
+    from rag.evolution.sandbox import (
+        SANDBOX_ISOLATION_ENV,
+        SANDBOX_UNAVAILABLE,
+        record_sandbox_outcome,
+        run_patch_sandbox,
+        sandbox_gate_metrics,
+    )
     from rag.evolution.store import FailureTraceStore
+
+    if args.allow_unisolated:
+        settings.evolution_sandbox_allow_unisolated = True
+        print(
+            "警告：--allow-unisolated 已打开。沙箱只是 VCS 隔离，不是安全边界 —— "
+            "候选补丁会以本进程用户的权限执行，可联网并读取 .env/data/。"
+            "仅限受信候选与本机调试；生产建议在容器 + 只读挂载 + 无出网 + 独立 HOME 中运行，"
+            f"并由隔离启动器设置 {SANDBOX_ISOLATION_ENV}=1。",
+            file=sys.stderr,
+            flush=True,
+        )
 
     candidate_id, fields = _candidate_row(settings.evolution_db_path, args.candidate_id)
     diff = str(fields.get("diff") or "")
@@ -108,6 +146,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     metrics = sandbox_gate_metrics(report)
     print(json.dumps(metrics, ensure_ascii=False, indent=2), flush=True)
+    if report.error.startswith(SANDBOX_UNAVAILABLE):
+        # 环境/安全边界问题：候选没有被执行，也不该被写回任何状态。
+        print(report.error, file=sys.stderr, flush=True)
+        print(
+            "沙箱未运行。要显式承担风险请加 --allow-unisolated；"
+            "或在真实隔离边界内运行并由启动器设置 "
+            f"{SANDBOX_ISOLATION_ENV}=1。",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     if args.dry_run:
         return 0 if report.applied else 1
 

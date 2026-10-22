@@ -8,6 +8,13 @@
 （分层开放与永久禁止项）、第 3 节（后台链路与 worktree）、第 13 节（门禁）；
 实施计划 `docs/superpowers/plans/2026-09-27-assisted-self-evolution-code-patches.md`。
 
+> **边界声明（2026-10-22，C-01）**：这里的“隔离”是 **VCS 隔离**——补丁只落在第二棵工作树，
+> 主树永远不动。它**不是安全边界**：沙箱子进程以服务所属用户运行、可联网、可读该用户能读的
+> 一切（`.env`、`data/users.db`、备份根目录）。因此默认 **fail-closed**：没有真实隔离标记
+> （`RAG_EVOLUTION_SANDBOX_ISOLATED=1`，由容器/低权运行器在边界内设置）时，
+> `run_patch_sandbox` 直接拒绝且**不执行候选代码**；本机调试必须显式打开
+> `evolution_sandbox_allow_unisolated`（CLI `--allow-unisolated`）并承担风险。详见第 4 节。
+
 ## 1. 允许改什么：层 → 路径白名单
 
 | 层 | 允许 glob |
@@ -38,6 +45,20 @@
 
 ## 4. 沙箱（层 2/3 的代码版）
 
+**安全边界（C-01，2026-10-22 起）**：`run_patch_sandbox` 默认 **fail-closed**，只有下面两种
+**显式声明**之一成立才会执行候选代码：
+
+1. 进程带有真实隔离标记 `RAG_EVOLUTION_SANDBOX_ISOLATED=1` —— 由容器 / 低权用户 / 独立网络
+   命名空间等**隔离启动器**在边界内设置。本仓库**不自行创建**该边界，也无法验证它；这个标记
+   是启动器与本模块之间的契约。
+2. 操作者显式打开 `evolution_sandbox_allow_unisolated`（CLI：`--allow-unisolated`），等于书面
+   接受“候选代码以宿主权限执行”。**打开开关不是获得了隔离**，只是获得了知情后的放行。
+
+两者都不满足时，`run_patch_sandbox` 返回 `environment=True`、`error` 以 `sandbox_unavailable`
+开头的报告：**不建 worktree、不起任何子进程、不执行候选代码**，且 `sandbox_gate_outcome` 返回
+`None`（环境问题不许移动候选）。真正降低风险要按“容器 + 只读挂载 + 无出网 + 独立 HOME”部署，
+而不是靠这个开关。
+
 `run_patch_sandbox(candidate, repo_root=..., tests_timeout=600, run_benchmark=True)`：
 1. 主工作树必须干净（`git status --porcelain` 为空），否则拒绝运行；
 2. `git worktree add <tmp> --detach <base_commit>`；
@@ -58,6 +79,9 @@
    回放代码仍然保留且有用例覆盖（`run_benchmark=True` + `data_snapshot` + `replay_user_id`）：
    它在**干净工作树**与**打过补丁的工作树**各跑一次并**逐侧比较**（`patch_verdict`，路由 ≤0pp、
    Top-5 ≤2pp、失败调用不增加），是将来"无凭据回放"（下一节第 5 步）落地后的现成机制。
+   给了 `replay_fixture` 时，只有 fixture 对**两棵**工作树都新鲜、语料指纹与回放快照一致、且
+   diff 没有触碰 seam 模块，才会注入并给出回放结论；否则回放不跑，结论是"不可用"而不是"通过"
+   （C-02，见第 5.3 节）。
 6. `finally` 强制 `git worktree remove --force` + `prune` + 删临时目录（两个工作树都清）。
 结论经 `sandbox_gate_outcome(report)` 映射为 (状态, gate_detail)，以 `gate="sandbox"` 落 gate_log。
 
@@ -158,20 +182,36 @@ legacy 侧 route Δ+2.5pp、Top-5 Δ0.0pp、失败 0 ⇒ **`passed: true`**。
 ```powershell
 # 不带 fixture：回放会因无凭据而报"不可用"（方案 C 的原有行为，门禁结论照旧待人工）
 python scripts/run_patch_sandbox.py --candidate-id 13 --data-snapshot <只读副本目录>
-# 带 fixture：四个（实为五个）出网 seam 从录制重放，跑完给出干净侧 vs 打补丁侧的对照
+# 带 fixture：五个出网 seam 从录制重放，跑完给出干净侧 vs 打补丁侧的对照
 python scripts/run_patch_sandbox.py --candidate-id 13 --data-snapshot <副本> `
-  --fixture real-case-handoff/evolab/replay-fixture.json --runs 2
+  --fixture real-case-handoff/evolab/replay-fixture.json
+# 本机调试（没有真实隔离边界）必须显式接受风险，否则默认拒绝执行：
+python scripts/run_patch_sandbox.py --candidate-id 13 --allow-unisolated
 ```
 
 脚本把 `(状态, 详情, 结构化指标)` 一并写回（`gate="sandbox"`），所以审查台的"应用与回滚命令"旁边会
 显示 route / Top-5 / 失败调用 / 预处理 P50 的两侧对照；`--dry-run` 只跑不写，状态机不允许这次迁移时
-它会**如实打印"轨迹未写入"**而不是假装写成功。
+它会**如实打印"轨迹未写入"**而不是假装写成功。没有隔离标记也没给 `--allow-unisolated` 时，脚本
+打印 `sandbox_unavailable` 的原因并以退出码 2 结束，**不执行候选代码、不写任何轨迹**。
 
-**过期规则（要紧，不要绕过）**：fixture 记录的是**录制时那份代码**给出的答案，所以补丁只要碰到
-`rag/embedder.py`、`rag/reranker.py`、`rag/agent.py`、`rag/query_rewriter.py`、`rag/jev/client.py`
-中的任一个，fixture 就**判过期并被拒绝注入**，门禁结论落到 `awaiting_verification` + "replay unavailable"
-——**绝不会给出"通过"**。实测：库里现有的 5 份代码补丁**全部**触及 seam（`agent.py` ×3、`reranker.py` ×2），
-因为路由/排序逻辑本来就住在那里；对这类补丁，正确做法是回到 **§5.2 的宿主 A/B（带凭据）**，而不是放宽
+**过期规则（要紧，不要绕过；2026-10-22 C-02 收紧）**：fixture 记录的是**录制时那份代码与那份
+语料**给出的答案，所以一次回放只有在下面每一条都成立时才算证据：
+
+1. **两侧都新鲜**：`fixture_staleness` 对**打过补丁的 worktree**与**干净 worktree**各算一次，
+   任一侧不过即整次拒绝。此前只算干净树，于是被 fixture 顶掉的 reranker/embedder/agent 补丁
+   拿到的是"pass +0.0pp"——**没测补丁却签发"无回归"**。
+2. **语料指纹取真实值**：`corpus` 用 `snapshot_corpus_fingerprint(data_snapshot, kb_id)` 从回放
+   实际读取的只读快照重算，**不再回传 fixture 自己的值**（那等于拿录制跟自己比，永远相等）；
+   算不出（没配 `--data-snapshot`、快照/集合读不了）一律判过期。
+3. **seam 哈希 fail-closed**：fixture 少记一个 seam 哈希、或任一侧为 `"unavailable"`，都判过期
+   ——**缺席不等于相等**。
+4. **diff 碰到 seam 直接不给结论**：只要补丁（声明的 `paths` 或 diff 的 `+++` 行）触及
+   `rag/embedder.py`、`rag/reranker.py`、`rag/agent.py`、`rag/query_rewriter.py`、
+   `rag/jev/client.py` 中的任一个，回放**根本不跑**，报告 `benchmark=None` + "fixture unusable"，
+   门禁结论落到 `awaiting_verification` + "replay unavailable" ——**绝不会给出"通过"**。
+
+实测：库里现有的 5 份代码补丁**全部**触及 seam（`agent.py` ×3、`reranker.py` ×2），因为路由/排序
+逻辑本来就住在那里；对这类补丁，正确做法是回到 **§5.2 的宿主 A/B（带凭据）**，而不是放宽
 这里的判定（放宽就等于拿"另一份代码的答案"当证据）。
 
 **录制**（有凭据处跑一次即可，`kb_accessories` 实测约 136s）：
@@ -385,6 +425,18 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
      无凭据回放时即为现成机制）。
    * 使沙箱能自动给回归信号的两条路：(a) **词法专用确定性回放**（只走 BM25 + 融合 + 过滤 +
      确定性判定，不碰嵌入/重排）；(b) 本段的**录制-回放 fixture**。两者都还没做。
+
+   **2026-10-22 更新（C-01/C-02：边界与证据链收紧）**：
+
+   * **C-01 沙箱默认 fail-closed**：worktree 是 VCS 隔离，不是安全边界。没有真实隔离标记
+     （`RAG_EVOLUTION_SANDBOX_ISOLATED=1`）且未显式打开 `evolution_sandbox_allow_unisolated`
+     时，`run_patch_sandbox` 直接返回 `sandbox_unavailable` 报告，**连 git 都不问、候选代码
+     一行都不执行**（第 4 节）。CLI 新增 `--allow-unisolated`，打开时打印风险警告。
+   * **C-02 回放证据链**：fixture staleness 改为对**打补丁侧与干净侧各算一次**（任一不过即拒），
+     语料指纹取回放实际读取的快照，seams 缺失/`"unavailable"` 一律判过期，diff 触及 seam 模块
+     时回放根本不跑。因此"seam 补丁拿到 passed +0.0pp"的反例已被用例钉住（第 5.3 节）。
+   * **仍然没有实现容器隔离**：`SANDBOX_ISOLATION_ENV` 只是与隔离启动器的契约，本仓库不创建
+     边界；生产要真正降低风险仍需容器 + 低权用户 + 只读挂载 + 无出网 + 独立 HOME。
 2. **目标测试由模型提议**：`test_paths` 必须真实存在（层 1 校验），但模型可能只挑弱测试；
    固定回归网已覆盖仓库共享路径（缓解此项），人工审核仍应自行补充更严的验证命令。
 3. **一次一轮、单候选**：不做多分支探索（DGM 式）与知识库级灰度。

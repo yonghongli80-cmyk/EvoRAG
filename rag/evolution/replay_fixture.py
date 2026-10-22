@@ -19,10 +19,18 @@ recorded scores are no longer evidence about the patched code — so ``stale_rea
 the caller must treat the replay as unavailable. That is the price of never letting a recorded
 answer stand in for the behaviour under test; patches that touch a seam cannot be measured this
 way and have to be measured where the credentials are.
+
+The freshness check is **fail-closed** (2026-10-22, C-02): a fixture that does not record one of
+the seam hashes, a side that reports a hash as ``"unavailable"``, or a corpus fingerprint missing
+on either side is stale — an absent answer is never an equal answer. The corpus argument must be
+the fingerprint of the corpus the replay *actually reads*
+(:func:`snapshot_corpus_fingerprint`), never the fixture's own value: comparing the recording with
+itself is how a stale corpus used to pass.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -47,6 +55,16 @@ SEAM_MODULES = (
     # 录制实测（embeddings 0）证明这条路径连本地嵌入器都不经过，所以缺了它就无法无凭据重放。
     "rag.jev.client",
 )
+
+#: Repository-relative POSIX path of every seam module. A sandbox uses these to answer "does this
+#: diff touch a seam at all?" *before* it hashes anything, because a recorded answer can never
+#: describe a patched seam.
+SEAM_PATHS: tuple[str, ...] = tuple(
+    str(Path(*name.split(".")).with_suffix(".py")).replace("\\", "/") for name in SEAM_MODULES
+)
+
+#: Scroll page size when fingerprinting a Qdrant snapshot: bounded memory for a corpus read.
+CORPUS_SCROLL_LIMIT = 10_000
 
 
 logger = logging.getLogger(__name__)
@@ -85,14 +103,74 @@ def normalize(question: str) -> str:
     return " ".join(str(question or "").split())
 
 
+def _corpus_key(count: int, names: Sequence[str]) -> str:
+    """The one fingerprint shape: point count plus the sorted set of document names."""
+    return _key("\x00".join([str(int(count)), *sorted({str(name) for name in names})]))
+
+
 def corpus_fingerprint(chunks: Sequence[object]) -> str:
     """A cheap identity for the corpus a recording was made against.
 
     Point count plus the sorted set of document names: enough to notice that the snapshot the
     replay reads is not the snapshot the recording was made from, without hashing gigabytes.
     """
-    names = sorted({str(getattr(chunk, "doc_name", "") or "") for chunk in chunks})
-    return _key("\x00".join([str(len(chunks)), *names]))
+    names = [str(getattr(chunk, "doc_name", "") or "") for chunk in chunks]
+    return _corpus_key(len(chunks), names)
+
+
+def snapshot_corpus_fingerprint(
+    snapshot: str | Path | None, collection_name: str
+) -> str:
+    """The fingerprint of the corpus a replay will read from a Qdrant snapshot, or ``""``.
+
+    The fixture records the fingerprint of the corpus it was recorded against, computed with
+    :func:`corpus_fingerprint`; a replay is evidence about a candidate only when it reads *that*
+    corpus. The sandbox therefore recomputes the same shape from the read-only snapshot it hands
+    the replay, and passes the result to :meth:`ReplayFixture.stale_reason`.
+
+    ``""`` means "could not fingerprint" — never "matched". Callers must treat it as stale, so an
+    unreadable or absent snapshot can never be mistaken for a fresh recording.
+
+    ``snapshot`` follows the same rule as the replay environment: a directory that either *is*
+    the Qdrant storage or carries it as ``qdrant_data/``.
+    """
+    root = str(snapshot or "").strip()
+    collection = str(collection_name or "").strip()
+    if not root or not collection or not Path(root).is_dir():
+        return ""
+    path = Path(root)
+    corpus_dir = path / "qdrant_data"
+    if corpus_dir.is_dir():
+        path = corpus_dir
+    client = None
+    try:
+        from qdrant_client import QdrantClient
+
+        client = QdrantClient(path=str(path))
+        names: list[str] = []
+        count = 0
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=collection,
+                limit=CORPUS_SCROLL_LIMIT,
+                offset=offset,
+                with_payload=["doc_name"],
+            )
+            count += len(points)
+            names.extend(str((point.payload or {}).get("doc_name", "") or "") for point in points)
+            if offset is None:
+                break
+        return _corpus_key(count, names)
+    except Exception:  # noqa: BLE001 - an unreadable snapshot means "no fingerprint", not a crash
+        logger.warning("replay fixture: could not fingerprint the corpus snapshot")
+        return ""
+    finally:
+        if client is not None:
+            # Closing must never mask the fingerprint, which is why it is suppressed rather than
+            # allowed to replace the return value (or the empty string on failure).
+            with contextlib.suppress(Exception):
+                client.close()
 
 
 def seam_hashes(root: str | Path | None = None) -> dict[str, str]:
@@ -189,16 +267,40 @@ class ReplayFixture:
         The seam comparison is the important one: recorded answers describe the code that was
         running when they were recorded, so a patch to a seam module (the reranker is the usual
         one) makes them evidence about the wrong code.
+
+        Every input the recording cannot vouch for is **stale**, not skipped: a missing format,
+        a corpus fingerprint missing on either side or differing, a seam hash this fixture never
+        recorded, a seam hash either side reports as ``"unavailable"``, and any recorded/actual
+        difference. An absent answer is never an equal answer (C-02, 2026-10-22).
         """
         if int(self.version) != FIXTURE_VERSION:
             return f"fixture format v{self.version} != v{FIXTURE_VERSION}"
-        if self.corpus and corpus and self.corpus != corpus:
+        recorded_corpus = str(self.corpus or "").strip()
+        actual_corpus = str(corpus or "").strip()
+        if not recorded_corpus:
+            return "the fixture records no corpus fingerprint"
+        if not actual_corpus:
+            return "the replay corpus fingerprint is unavailable"
+        if recorded_corpus != actual_corpus:
             return "corpus changed since the fixture was recorded"
-        changed = sorted(
+
+        recorded = {
+            str(name): str(digest or "").strip() for name, digest in (self.seams or {}).items()
+        }
+        actual = {str(name): str(digest or "").strip() for name, digest in (seams or {}).items()}
+        missing = sorted(name for name in SEAM_MODULES if not recorded.get(name))
+        if missing:
+            return "the fixture records no seam hash for: " + ", ".join(missing)
+        unavailable = sorted(
             name
-            for name, digest in (seams or {}).items()
-            if self.seams.get(name) and self.seams[name] != digest
+            for name in SEAM_MODULES
+            if not actual.get(name)
+            or recorded.get(name) == "unavailable"
+            or actual.get(name) == "unavailable"
         )
+        if unavailable:
+            return "seam hashes unavailable for: " + ", ".join(unavailable)
+        changed = sorted(name for name in SEAM_MODULES if recorded.get(name) != actual.get(name))
         if changed:
             return "seam modules changed since the fixture was recorded: " + ", ".join(changed)
         return ""
@@ -491,9 +593,11 @@ def install_from_env() -> Callable[[], None] | None:
 
 
 __all__ = [
+    "CORPUS_SCROLL_LIMIT",
     "FIXTURE_ENV",
     "FIXTURE_VERSION",
     "SEAM_MODULES",
+    "SEAM_PATHS",
     "FixtureMiss",
     "RecordingSession",
     "ReplayFixture",
@@ -502,4 +606,5 @@ __all__ = [
     "install_from_env",
     "normalize",
     "seam_hashes",
+    "snapshot_corpus_fingerprint",
 ]
