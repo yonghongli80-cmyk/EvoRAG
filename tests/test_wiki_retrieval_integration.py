@@ -100,8 +100,28 @@ def test_visible_current_version_ids_includes_wiki_revisions(tmp_path):
         bob_id = user_db.create_user("bob", "pwd123")
         bob = user_db.get_user_by_id(bob_id)
 
+        # B-02: a legacy ``scope='public'`` KB no longer grants view to another
+        # account; bob gets view through the organization model instead.
         kb_id = "kb_wiki_versions"
-        user_db.create_kb_metadata(kb_id=kb_id, name="Wiki KB", owner_id=alice_id, scope="public")
+        user_db.create_kb_metadata(
+            kb_id=kb_id, name="Wiki KB", owner_id=alice_id, scope="private"
+        )
+        with user_db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO org_units(code,parent_code,name,kind) "
+                "VALUES('ENG',NULL,'Engineering','team')"
+            )
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('P_BOB',?,'Bob','工程师')",
+                (bob_id,),
+            )
+            conn.execute("INSERT INTO org_memberships VALUES('P_BOB','ENG',1)")
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+                "VALUES(?,'ENG','organization')",
+                (kb_id,),
+            )
 
         page = wiki_store.create_page(
             kb_id=kb_id,
@@ -110,7 +130,7 @@ def test_visible_current_version_ids_includes_wiki_revisions(tmp_path):
         )
         assert page.current_revision_id > 0
 
-        # Bob has public KB access -> Bob's allowed version IDs must include page.current_revision_id!
+        # Bob is an organization member -> his allowed version IDs include the revision.
         version_ids = _visible_current_version_ids(user_db, bob, kb_id, wiki_store=wiki_store)
         assert version_ids is not None
         assert page.current_revision_id in version_ids

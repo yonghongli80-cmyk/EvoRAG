@@ -109,6 +109,10 @@ def test_restore_creates_a_new_version_and_retains_all_history(restore_context):
     context["db"].activate_document_version(
         context["document_id"], accepted.version_id, "rag_docs", "prices.xlsx"
     )
+    # The material worker settles the edit session in the same step as the
+    # activation; mirror that here so the next reservation is not blocked by a
+    # stale pending session (D-03).
+    context["db"].set_spreadsheet_edit_status(accepted.session_id, "active")
     second = _service(context, enqueue).restore(
         context["document_id"],
         v3,

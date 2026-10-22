@@ -143,6 +143,36 @@ def test_edit_endpoint_returns_pending_and_protects_status_lookup(
     assert "document_versions" not in response.text + status.text
 
 
+def test_second_edit_at_the_same_base_conflicts_while_one_is_pending(
+    isolated_api, make_user
+):
+    owner, headers = make_user("owner")
+    document_id, version_id = _seed_editable_spreadsheet(isolated_api, owner)
+
+    accepted = isolated_api.post(
+        f"/documents/{document_id}/spreadsheet-edits",
+        headers=headers,
+        json=_payload(version_id, value=6500),
+    )
+    conflicted = isolated_api.post(
+        f"/documents/{document_id}/spreadsheet-edits",
+        headers=headers,
+        json=_payload(version_id, value=6400),
+    )
+
+    assert accepted.status_code == 202
+    assert conflicted.status_code == 409
+    assert conflicted.json()["detail"]["code"] == (
+        "spreadsheet_pending_session_conflict"
+    )
+    db = isolated_api.app.state.user_db
+    pending = db._conn.execute(
+        "SELECT status FROM spreadsheet_edit_sessions WHERE document_id = ?",
+        (document_id,),
+    ).fetchall()
+    assert [row["status"] for row in pending] == ["pending"]
+
+
 def test_edit_endpoint_accepts_500_changes_and_rejects_501(
     isolated_api, make_user
 ):

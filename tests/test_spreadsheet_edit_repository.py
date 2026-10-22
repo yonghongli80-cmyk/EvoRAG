@@ -121,6 +121,56 @@ def test_duplicate_cell_rolls_back_the_whole_reservation(edit_db):
     ).fetchone()[0] == 0
 
 
+def test_pending_session_blocks_a_second_reservation_at_the_same_base(edit_db):
+    db, user_id, document_id, current_version_id = edit_db
+    first_session, first_version = _reserve(
+        db, user_id, document_id, current_version_id, (_change(),)
+    )
+    versions_before = db._conn.execute(
+        "SELECT COUNT(*) FROM document_versions"
+    ).fetchone()[0]
+
+    with pytest.raises(VersionConflict, match="spreadsheet_pending_session_conflict"):
+        _reserve(db, user_id, document_id, current_version_id, (_change("B13"),))
+
+    # The whole reservation rolls back: no orphan version, session, or changes.
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM document_versions"
+    ).fetchone()[0] == versions_before
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM spreadsheet_edit_sessions"
+    ).fetchone()[0] == 1
+    assert db.get_spreadsheet_edit_session(first_session)["status"] == "pending"
+    assert db.get_document_version_by_id(first_version)["status"] == "staging"
+
+    # Once the pending session is resolved the same base may be reserved again.
+    db.set_spreadsheet_edit_status(first_session, "cancelled")
+    second_session, _ = _reserve(
+        db, user_id, document_id, current_version_id, (_change("B13"),)
+    )
+    assert second_session != first_session
+
+
+def test_pending_session_only_blocks_its_own_document(edit_db):
+    db, user_id, document_id, current_version_id = edit_db
+    _reserve(db, user_id, document_id, current_version_id, (_change(),))
+    other_document = db.create_document_permission(
+        "other.xlsx", "rag_docs", user_id
+    )
+    other_version = db.create_document_version(
+        other_document, "other.xlsx", "versions/2/other.xlsx", "hash-2", user_id
+    )
+    db.activate_document_version(
+        other_document, other_version, "rag_docs", "other.xlsx"
+    )
+
+    session_id, _ = _reserve(
+        db, user_id, other_document, other_version, (_change(),)
+    )
+
+    assert db.get_spreadsheet_edit_session(session_id)["status"] == "pending"
+
+
 def test_active_session_cannot_transition_back_to_pending(edit_db):
     db, user_id, document_id, current_version_id = edit_db
     session_id, _ = _reserve(

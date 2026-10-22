@@ -121,7 +121,9 @@ def restore_question_set_rollout():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _run_legacy_kb_migration()
     auto_index_on_startup()
+    _run_staged_version_migration()
     start_backup_scheduler()
     start_evolution_worker()
     restore_question_set_rollout()
@@ -292,6 +294,61 @@ def _register_repo_document_version(doc_name: str, source_path: Path) -> bool:
     )
     delete_unversioned_points("rag_docs", doc_name)
     return True
+
+
+def _run_legacy_kb_migration() -> None:
+    """Assign every legacy knowledge base an explicit organization policy.
+
+    The 2026-08-20 plan (§7) retires the personal KB ACL during migration: a
+    legacy knowledge base becomes ``unassigned`` and stays administrator-only
+    until an administrator explicitly assigns an organization.  Running this on
+    every start is what makes the fail-closed guard in ``require_kb_view``
+    deterministic instead of depending on a manual ``seed.py`` invocation.
+    """
+    from rag.org_auth.migration import migrate_legacy_knowledge_bases
+
+    try:
+        report = migrate_legacy_knowledge_bases(user_db)
+        logger.info(
+            "legacy knowledge base migration: migrated=%s remaining=%s",
+            report.migrated,
+            report.unmigrated,
+        )
+        if report.unmigrated:
+            logger.warning(
+                "legacy knowledge base migration incomplete: %s knowledge base(s) "
+                "still lack an organization policy and stay owner/administrator-only",
+                report.unmigrated,
+            )
+    except Exception:
+        logger.exception("legacy knowledge base migration failed")
+
+
+def _run_staged_version_migration() -> None:
+    """Promote committed version files left behind under ``staging/``.
+
+    Older ``POST /materials/upload`` rows stored ``document_versions.file_path``
+    in the transient ``staging`` directory, which backups exclude, so the
+    authoritative backup failed with ``referenced_file_missing`` forever.  The
+    migration is idempotent and must run before the backup scheduler can open a
+    window; a failure is logged and never blocks startup.
+    """
+    from rag.document_versions import migrate_staged_document_versions
+
+    try:
+        report = migrate_staged_document_versions(user_db, _versions_root())
+        if report.migrated or report.missing or report.conflicts or report.skipped:
+            logger.info(
+                "staged version migration: migrated=%s unchanged=%s missing=%s "
+                "skipped=%s conflicts=%s",
+                report.migrated,
+                report.unchanged,
+                report.missing,
+                report.skipped,
+                report.conflicts,
+            )
+    except Exception:
+        logger.exception("staged version migration failed")
 
 
 def auto_index_on_startup():

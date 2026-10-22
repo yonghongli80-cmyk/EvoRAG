@@ -25,17 +25,18 @@ def _make_user(db: UserDB, username: str, is_admin: bool = False) -> dict:
     return db.get_user_by_id(uid)
 
 
-def test_filter_chunks_allows_wiki_when_user_has_kb_view(db):
-    """ACL-01: Non-admin users with KB view access must retain wiki chunks."""
+def test_filter_chunks_allows_wiki_for_the_legacy_kb_owner(db):
+    """ACL-01/B-02: the legacy owner keeps KB view; wiki chunks follow it while
+    file chunks still need the personal document ACL."""
     owner = _make_user(db, "alice")
-    viewer = _make_user(db, "bob")
+    other = _make_user(db, "carol")
 
     kb_id = "kb_wiki_shared"
-    # Create KB with public scope so viewer has view rights
     db.create_kb_metadata(kb_id=kb_id, name="Test KB", owner_id=owner["id"], scope="public")
 
-    # Regular private doc belonging to alice
+    # Regular private docs: one owned by the viewer, one owned by somebody else.
     db.create_document_permission("alice_private.pdf", kb_id, owner["id"], is_public=False)
+    db.create_document_permission("carol_private.pdf", kb_id, other["id"], is_public=False)
 
     wiki_chunk = Chunk(
         text="Wiki content on caching strategies",
@@ -45,26 +46,52 @@ def test_filter_chunks_allows_wiki_when_user_has_kb_view(db):
         document_id=1,
         document_version_id=1,
     )
-    private_file_chunk = Chunk(
+    own_file_chunk = Chunk(
         text="Alice private financial data",
         doc_name="alice_private.pdf",
         chunk_index=0,
         document_id=2,
         document_version_id=2,
     )
+    other_file_chunk = Chunk(
+        text="Carol private roadmap",
+        doc_name="carol_private.pdf",
+        chunk_index=0,
+        document_id=3,
+        document_version_id=3,
+    )
 
     result = filter_chunks_by_permission(
         db,
         kb_id,
-        [wiki_chunk, private_file_chunk],
-        viewer,
+        [wiki_chunk, own_file_chunk, other_file_chunk],
+        owner,
     )
 
-    # Bob has KB view access, so wiki_chunk must be retained, but alice_private.pdf must be dropped!
     doc_names = [c.doc_name for c in result]
     assert "Caching Strategies" in doc_names
-    assert "alice_private.pdf" not in doc_names
-    assert len(result) == 1
+    assert "alice_private.pdf" in doc_names
+    assert "carol_private.pdf" not in doc_names
+    assert len(result) == 2
+
+
+def test_filter_chunks_denies_wiki_on_a_public_legacy_kb_for_non_owners(db):
+    """B-02: ``scope='public'`` no longer grants KB view to another account."""
+    owner = _make_user(db, "alice")
+    viewer = _make_user(db, "bob")
+
+    kb_id = "kb_wiki_public"
+    db.create_kb_metadata(kb_id=kb_id, name="Public KB", owner_id=owner["id"], scope="public")
+    wiki_chunk = Chunk(
+        text="Public wiki content",
+        doc_name="Public Wiki",
+        chunk_index=0,
+        chunk_kind="wiki",
+        document_id=7,
+        document_version_id=7,
+    )
+
+    assert filter_chunks_by_permission(db, kb_id, [wiki_chunk], viewer) == []
 
 
 def test_filter_chunks_denies_wiki_when_user_lacks_kb_view(db):

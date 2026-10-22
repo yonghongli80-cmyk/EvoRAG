@@ -72,7 +72,7 @@ def test_acl_hidden_chunks_never_reach_jev_passage_request(monkeypatch):
     pipeline.close()
 
 
-def test_shared_kb_is_visible_only_to_owner_admin_and_named_share(isolated_api, make_user):
+def test_unmigrated_shared_kb_keeps_only_the_owner_and_admin(isolated_api, make_user):
     owner, _ = make_user("owner")
     shared, _ = make_user("shared")
     outsider, _ = make_user("outsider")
@@ -81,27 +81,32 @@ def test_shared_kb_is_visible_only_to_owner_admin_and_named_share(isolated_api, 
     db.create_kb_metadata("kb_finance", "Finance", owner["id"], "shared")
     db.share_kb("kb_finance", shared["id"], owner["id"], "view")
 
+    # B-02: until the startup migration assigns an organization, the personal
+    # share ACL no longer authorizes anyone but the owner and administrators.
+    for denied_user in (shared, outsider):
+        with pytest.raises(HTTPException) as exc:
+            require_kb_view(db, "kb_finance", denied_user)
+        assert exc.value.status_code == 403
     assert require_kb_view(db, "kb_finance", owner)["kb_id"] == "kb_finance"
-    assert require_kb_view(db, "kb_finance", shared)["kb_id"] == "kb_finance"
     assert require_kb_view(db, "kb_finance", admin)["kb_id"] == "kb_finance"
-    with pytest.raises(HTTPException) as exc:
-        require_kb_view(db, "kb_finance", outsider)
-    assert exc.value.status_code == 403
 
 
-def test_view_share_cannot_edit_but_edit_share_can(isolated_api, make_user):
+def test_unmigrated_edit_share_does_not_authorize_kb_mutation(isolated_api, make_user):
     owner, _ = make_user("owner")
     viewer, _ = make_user("viewer")
     editor, _ = make_user("editor")
+    admin, _ = make_user("admin", is_admin=True)
     db = isolated_api.app.state.user_db
     db.create_kb_metadata("kb_ops", "Ops", owner["id"], "shared")
     db.share_kb("kb_ops", viewer["id"], owner["id"], "view")
     db.share_kb("kb_ops", editor["id"], owner["id"], "edit")
 
-    with pytest.raises(HTTPException) as exc:
-        require_kb_edit(db, "kb_ops", viewer)
-    assert exc.value.status_code == 403
-    assert require_kb_edit(db, "kb_ops", editor)["kb_id"] == "kb_ops"
+    for denied_user in (viewer, editor):
+        with pytest.raises(HTTPException) as exc:
+            require_kb_edit(db, "kb_ops", denied_user)
+        assert exc.value.status_code == 403
+    assert require_kb_edit(db, "kb_ops", owner)["kb_id"] == "kb_ops"
+    assert require_kb_edit(db, "kb_ops", admin)["kb_id"] == "kb_ops"
 
 
 def test_missing_metadata_is_conflict_for_mutation(isolated_api, make_user):
@@ -113,16 +118,17 @@ def test_missing_metadata_is_conflict_for_mutation(isolated_api, make_user):
     assert exc.value.status_code == 409
 
 
-def test_shared_scope_is_consistent_across_list_detail_and_query(
+def test_unmigrated_scope_is_consistent_across_list_detail_and_query(
     isolated_api, make_user, monkeypatch
 ):
     import rag.api as api
     from rag.knowledge_base import KnowledgeBaseInfo
     from rag.models import Chunk
 
-    owner, _ = make_user("owner")
+    owner, owner_headers = make_user("owner")
     shared, shared_headers = make_user("shared")
     outsider, outsider_headers = make_user("outsider")
+    admin, admin_headers = make_user("admin", is_admin=True)
     db = isolated_api.app.state.user_db
     db.create_kb_metadata("kb_finance", "Finance", owner["id"], "shared")
     db.share_kb("kb_finance", shared["id"], owner["id"], "view")
@@ -136,15 +142,21 @@ def test_shared_scope_is_consistent_across_list_detail_and_query(
 
     monkeypatch.setattr(api, "KnowledgeBaseManager", FakeManager)
 
-    assert isolated_api.get("/knowledge-bases", headers=outsider_headers).json() == []
-    assert isolated_api.get("/knowledge-bases/kb_finance", headers=outsider_headers).status_code == 403
-    assert isolated_api.post(
-        "/knowledge-bases/kb_finance/query", headers=outsider_headers, json={"question": "budget"}
-    ).status_code == 403
-    assert isolated_api.get("/knowledge-bases/kb_finance", headers=shared_headers).status_code == 200
-    assert isolated_api.post(
-        "/knowledge-bases/kb_finance/query", headers=shared_headers, json={"question": "budget"}
-    ).status_code == 200
+    # B-02: the shared-scope grant no longer leaks the KB to anyone but its
+    # owner and administrators — list, detail and query agree on the denial.
+    for headers in (outsider_headers, shared_headers):
+        assert isolated_api.get("/knowledge-bases", headers=headers).json() == []
+        assert isolated_api.get("/knowledge-bases/kb_finance", headers=headers).status_code == 403
+        assert isolated_api.post(
+            "/knowledge-bases/kb_finance/query", headers=headers, json={"question": "budget"}
+        ).status_code == 403
+
+    assert [
+        item["kb_id"]
+        for item in isolated_api.get("/knowledge-bases", headers=owner_headers).json()
+    ] == ["kb_finance"]
+    assert isolated_api.get("/knowledge-bases/kb_finance", headers=owner_headers).status_code == 200
+    assert isolated_api.get("/knowledge-bases/kb_finance", headers=admin_headers).status_code == 200
 
 
 def test_orphan_collection_delete_is_conflict(isolated_api, make_user, monkeypatch):

@@ -311,6 +311,19 @@ class SpreadsheetRepository(BaseRepository):
             ):
                 raise VersionConflict("spreadsheet_base_version_conflict")
 
+            # One workbook version may be in flight per document.  The worker
+            # keeps only the latest pending version, so letting two reservations
+            # through silently discards the first editor's save (2026-08-14 §7).
+            # ``immediate=True`` holds the write lock, so this check plus the
+            # insert below is the compare-and-swap the API contract requires.
+            pending = conn.execute(
+                "SELECT id FROM spreadsheet_edit_sessions "
+                "WHERE document_id = ? AND status = 'pending' LIMIT 1",
+                (document_id,),
+            ).fetchone()
+            if pending is not None:
+                raise VersionConflict("spreadsheet_pending_session_conflict")
+
             if restored_from_version_id is not None:
                 source = conn.execute(
                     "SELECT document_id FROM document_versions WHERE id = ?",

@@ -18,7 +18,7 @@ from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
-from rag.permissions import check_doc_permission, check_kb_permission
+from rag.permissions import check_doc_permission
 from rag.repositories.analysis_repo import (
     _SENSITIVE_CONFIG_HINTS,
     _mask_url_credentials,
@@ -156,8 +156,38 @@ def require_admin(user: dict = Depends(require_user)) -> dict:
     return user
 
 
+def _legacy_kb_owner_or_admin(meta: dict, user: dict) -> bool:
+    """Return *True* when an unmigrated KB may keep serving this principal.
+
+    The legacy owner and administrators keep the access they had before the
+    migration; the personal ``scope``/``kb_shares`` ACL does not.  That closes
+    the ``scope='public'`` hole (any signed-in account reading an old KB by id)
+    without stranding the owner of an unmigrated private KB.
+    """
+    return bool(user.get("is_admin")) or meta.get("owner_id") == user.get("id")
+
+
+def _deny_unmigrated_legacy_kb(kb_id: str) -> None:
+    """Fail closed for a legacy KB that has no organization policy yet.
+
+    The startup migration classifies every ``kb_metadata`` row as
+    ``unassigned``, which is administrator-only until an explicit organization
+    is assigned (2026-08-20 §7).  If the policy is still missing, only the
+    legacy owner and administrators may pass; ``public``/``shared`` scopes and
+    ``kb_shares`` grants must not authorize anyone else.
+    """
+    logger.debug(
+        "legacy knowledge base %s has no organization policy; denying non-owner",
+        kb_id,
+    )
+    raise HTTPException(
+        status_code=403,
+        detail="知识库尚未完成组织归属迁移，仅所有者或管理员可见",
+    )
+
+
 def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
-    """Require an explicit KB view grant; legacy metadata is admin-only."""
+    """Require an explicit KB view grant; legacy metadata is owner/admin-only."""
     meta = db.get_kb_metadata(kb_id)
     policy = OrgRepository(db).get_kb_policy(kb_id)
     if policy is not None:
@@ -173,7 +203,8 @@ def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
         if user.get("is_admin"):
             return {"kb_id": kb_id, "owner_id": 0, "scope": "orphaned"}
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
-    check_kb_permission(db, kb_id, user, "view")
+    if not _legacy_kb_owner_or_admin(meta, user):
+        _deny_unmigrated_legacy_kb(kb_id)
     return meta
 
 
@@ -192,7 +223,8 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
         return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
     if meta is None:
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
-    check_kb_permission(db, kb_id, user, "edit")
+    if not _legacy_kb_owner_or_admin(meta, user):
+        _deny_unmigrated_legacy_kb(kb_id)
     return meta
 
 
@@ -222,7 +254,7 @@ def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
     if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         require_kb_view(db, kb_id, user)
-        if doc is None:
+        if doc is None or doc.get("deleted_at") is not None:
             raise HTTPException(status_code=404, detail="资源不存在")
         return doc
     if doc is None:
@@ -252,7 +284,7 @@ def require_doc_edit(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
     doc = db.get_document_permission(doc_name, kb_id)
     if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
         require_kb_edit(db, kb_id, user)
-        if doc is None:
+        if doc is None or doc.get("deleted_at") is not None:
             raise HTTPException(status_code=404, detail="资源不存在")
         if doc.get("protected"):
             raise HTTPException(status_code=403, detail="受保护文档不可修改")

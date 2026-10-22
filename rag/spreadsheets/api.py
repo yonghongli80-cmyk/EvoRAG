@@ -27,6 +27,11 @@ from rag.user_db import VersionConflict
 
 router = APIRouter()
 
+# A document version is readable through the row endpoint only while it is a
+# live version.  Recycle/purge and failed/staging versions must not serve data
+# even when the caller still holds a dataset path (D-02).
+_READABLE_VERSION_STATUSES = frozenset({"current", "historical"})
+
 
 @router.get("/admin/spreadsheet-changes")
 def spreadsheet_change_audits(
@@ -249,7 +254,14 @@ def rows(
     require_doc_view(db, document["doc_name"], document["kb_id"], user)
     version = db.get_document_version_by_id(version_id)
     dataset = db.get_structured_dataset_for_version(version_id)
-    if version is None or dataset is None or version["document_id"] != document_id or dataset["document_id"] != document_id or dataset["status"] != "ready":
+    if (
+        version is None
+        or dataset is None
+        or version["document_id"] != document_id
+        or dataset["document_id"] != document_id
+        or dataset["status"] != "ready"
+        or version["status"] not in _READABLE_VERSION_STATUSES
+    ):
         raise HTTPException(404, "spreadsheet version not found")
     root = Path(
         getattr(
