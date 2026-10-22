@@ -719,7 +719,7 @@ class RAGPipeline:
         self._submit_shadow_case(question, rewritten, "rag", context, candidates, coordinator, effective_kb_id, user)
         prepared = self._finalize_rag_context(
             question, session_id, context, top_k, effective_kb_id,
-            build_bundle=enterprise_request,
+            build_bundle=enterprise_request or not context,
         )
         prepared.setdefault("decision_metadata", {})["legacy_route"] = route
         # 结构化尝试的种类跟着这次请求走：它解释"为什么结构化没有帮上忙"，

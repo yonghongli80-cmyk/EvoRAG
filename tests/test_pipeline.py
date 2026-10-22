@@ -381,10 +381,13 @@ def test_prepare_context_returns_rag_route():
         mock_reranker_cls.return_value = MagicMock()
         p = RAGPipeline("test.txt")
 
+    # 空检索现在一律过证据门（route=fixed）；本用例验证的是"普通问题命中资料仍走 rag"，
+    # 因此检索/重排必须返回至少一个块。
+    chunk = Chunk(text="test content", doc_name="test.txt", chunk_index=0)
     with patch("rag.agent.route_question", return_value="rag"), \
          patch("rag.pipeline.rewrite_query", return_value="test"), \
-         patch.object(p.retriever, "retrieve", return_value=[]), \
-         patch.object(p.reranker, "rerank", return_value=[]):
+         patch.object(p.retriever, "retrieve", return_value=[chunk]), \
+         patch.object(p.reranker, "rerank", return_value=[chunk]):
         result, error = p._prepare_context("test question", "s1", None)
 
     assert error is None
