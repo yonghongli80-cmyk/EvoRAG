@@ -440,5 +440,9 @@ def on_quitting(environment, **kwargs):
     print(" 按接口:")
     for name, entry in stats.entries.items():
         if entry.num_requests > 0:
-            print(f"   {name:50s} {entry.num_requests:5d}次 avg={entry.avg_response_time:.0f}ms fails={entry.num_failures}")
+            method, label = name if isinstance(name, tuple) else ("", name)
+            print(
+                f"   {method:6s} {label:45s} {entry.num_requests:5d}次 "
+                f"avg={entry.avg_response_time:.0f}ms fails={entry.num_failures}"
+            )
     print("=" * 60)
