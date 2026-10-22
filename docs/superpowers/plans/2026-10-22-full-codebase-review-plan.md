@@ -3,6 +3,9 @@
 > 配套 spec：`docs/superpowers/specs/2026-10-22-full-codebase-review.md`
 > 基线：`HEAD=67da261`，2366 passed，ruff 全绿，服务 healthy。
 > 原则：只读审查；不改产品代码、不写数据库、不停服务。
+> **完成状态（2026-10-22）：T2–T7 已完成。** 发现见
+> `docs/superpowers/plans/2026-10-22-full-codebase-review-findings.md`；
+> 整改见 `docs/superpowers/plans/2026-10-22-pre-upgrade-remediation-plan.md`。
 
 ## 任务
 
