@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -85,6 +86,9 @@ from rag.routers.system import (
 )
 from rag.routers.system import (
     get_gaps as get_gaps,
+)
+from rag.routers.system import (
+    record_http_request as record_http_request,
 )
 from rag.wiki.api import router as wiki_router
 
@@ -565,6 +569,30 @@ async def spa_fallback_middleware(request, call_next):
     response = await call_next(request)
     response.headers["Vary"] = "Authorization"
     return response
+
+
+@app.middleware("http")
+async def metrics_middleware(request, call_next):
+    """Record route-level request counters without storing raw paths or payloads.
+
+    The scrape endpoint itself is excluded so polling does not distort its own
+    numbers. Route templates (``/files/{filename}/download``) keep label
+    cardinality bounded and avoid leaking document names into metrics.
+    """
+    if request.url.path == "/metrics":
+        return await call_next(request)
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", "") or "unmatched"
+        record_http_request(
+            request.method, route_path, status_code, time.perf_counter() - started
+        )
 
 
 app.state.user_db = user_db

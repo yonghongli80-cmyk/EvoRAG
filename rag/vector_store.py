@@ -1,4 +1,7 @@
+import threading
+import time
 import uuid
+from collections import deque
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -19,8 +22,41 @@ COLLECTION_NAME = "rag_docs"
 
 _SCROLL_PAGE = 256
 
+# 检索阶段的进程内指标：只保留计数与最近的耗时样本（秒），供只读 /metrics 聚合。
+# 不记录查询文本、文档名或集合名，避免把业务数据带进指标端点。
+_SEARCH_SAMPLE_LIMIT = 512
+
 _client = None
 _write_lock = ReadWriteLock()
+
+_search_lock = threading.Lock()
+_search_counts = {"hit": 0, "empty": 0}
+_search_samples: deque[float] = deque(maxlen=_SEARCH_SAMPLE_LIMIT)
+
+
+def client_mode() -> str:
+    """Return ``"remote"`` when a Qdrant server URL is configured, else ``"local"``."""
+    return "remote" if (settings.qdrant_url or "").strip() else "local"
+
+
+def _record_search(duration_seconds: float, result_count: int) -> None:
+    with _search_lock:
+        _search_counts["hit" if result_count else "empty"] += 1
+        _search_samples.append(max(0.0, duration_seconds))
+
+
+def search_stats_snapshot() -> dict:
+    """Return a copy of the search counters/samples for metrics aggregation."""
+    with _search_lock:
+        return {"counts": dict(_search_counts), "samples": list(_search_samples)}
+
+
+def reset_search_stats() -> None:
+    """Reset the process-local search metrics (used by tests and for clean windows)."""
+    with _search_lock:
+        _search_counts["hit"] = 0
+        _search_counts["empty"] = 0
+        _search_samples.clear()
 
 
 def _invalidate_bm25(collection_name: str) -> None:
@@ -37,7 +73,14 @@ def _invalidate_bm25(collection_name: str) -> None:
 def _get_client():
     global _client
     if _client is None:
-        _client = QdrantClient(path=settings.qdrant_path)
+        url = (settings.qdrant_url or "").strip()
+        if url:
+            # Phase 1：连 Qdrant server，所有副本共享同一份向量数据。
+            api_key = (settings.qdrant_api_key or "").strip() or None
+            _client = QdrantClient(url=url, api_key=api_key)
+        else:
+            # 默认（向后兼容）：本地嵌入式目录，进程级独占锁。
+            _client = QdrantClient(path=settings.qdrant_path)
     return _client
 
 
@@ -205,6 +248,7 @@ def search(
     doc_name: str = None,
     tags: list[str] = None,
 ) -> list[Chunk]:
+    started = time.perf_counter()
     with _write_lock.read():
         client = _get_client()
         _ensure_collection()
@@ -226,7 +270,7 @@ def search(
             with_payload=True,
             query_filter=Filter(must=conditions) if conditions else None,
         )
-        return [
+        results = [
             Chunk(
                 text=h.payload["text"],
                 doc_name=h.payload.get("doc_name", ""),
@@ -236,6 +280,8 @@ def search(
             for h in hits.points
             if h.payload
         ]
+    _record_search(time.perf_counter() - started, len(results))
+    return results
 
 
 def _ensure_collection_name(collection_name: str):
@@ -366,6 +412,7 @@ def add_to_collection(
 
 
 def search_collection(collection_name: str, query_embedding: list[float], top_k: int = 5, doc_name: str = None, tags: list[str] = None, allowed_version_ids: set[int] = None, validity_statuses: set[str] = None) -> list[Chunk]:
+    started = time.perf_counter()
     with _write_lock.read():
         client = _get_client()
         if not client.collection_exists(collection_name):
@@ -399,7 +446,7 @@ def search_collection(collection_name: str, query_embedding: list[float], top_k:
             with_payload=True,
             query_filter=search_filter,
         )
-        return [
+        results = [
             Chunk(
                 text=h.payload["text"],
                 doc_name=h.payload.get("doc_name", ""),
@@ -425,6 +472,8 @@ def search_collection(collection_name: str, query_embedding: list[float], top_k:
             for h in hits.points
             if h.payload
         ]
+    _record_search(time.perf_counter() - started, len(results))
+    return results
 
 
 def mark_document_version_current(collection_name: str, document_id: int, version_id: int) -> None:

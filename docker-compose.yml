@@ -14,6 +14,30 @@ services:
       timeout: 5s
       retries: 3
 
+  qdrant:
+    # Phase 1：Qdrant server（持久卷 + 健康检查 + 仅 Compose 内网，不发布宿主端口）。
+    # 应用默认仍走本地目录；在 .env 设 RAG_QDRANT_URL=http://qdrant:6333 才切到本服务。
+    image: qdrant/qdrant:v1.18.3
+    container_name: ragv3-qdrant
+    environment:
+      QDRANT__LOG_LEVEL: INFO
+      # 认证默认关闭（本服务不发布宿主端口，只在 Compose 内网可达）。
+      # 启用：在 .env 设置强随机 QDRANT_API_KEY，再取消下面一行的注释。
+      # 不要把该变量设成空字符串——Qdrant 会把它当成"已配置的空 key"（qdrant#8856）。
+      # QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?set QDRANT_API_KEY to a non-empty value}
+    volumes:
+      - qdrant_server_data:/qdrant/storage
+    expose:
+      - "6333"
+    restart: unless-stopped
+    healthcheck:
+      # 官方镜像不带 curl/wget（安全考虑）；用 bash 的 /dev/tcp 做 TCP 探活。
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   rag-app:
     build: .
     container_name: ragv3
@@ -24,13 +48,20 @@ services:
     environment:
       - RAG_REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       - RAG_BACKUP_ROOT=/app/backups
+      # Phase 1：Qdrant 连接。默认空 = 仍用本地目录 /app/qdrant_data（兼容旧部署）；
+      # 设为 http://qdrant:6333 切 server 模式。回滚 = 清空该变量并重启。
+      - RAG_QDRANT_URL=${RAG_QDRANT_URL:-}
+      - RAG_QDRANT_API_KEY=${QDRANT_API_KEY:-}
     volumes:
       # 命名卷首次挂载时继承镜像内 rag 用户的目录属主，非 root 进程可写
       - rag_data:/app/data
+      # 本地 path 模式的旧目录：保留只读副本用于 Phase 1 回滚
       - qdrant_data:/app/qdrant_data
       - backup_data:/app/backups
     depends_on:
       redis:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -43,4 +74,5 @@ volumes:
   redis_data:
   rag_data:
   qdrant_data:
+  qdrant_server_data:
   backup_data:

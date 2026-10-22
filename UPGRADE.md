@@ -1,9 +1,11 @@
 # RAGv3 生产化升级方案（多实例）
 
-> **状态：规划稿，未实施。** 日期：2026-10-21。
+> **状态：Phase 0 部分实施、Phase 1 配置面落地；运行时迁移未执行（Docker daemon 不可用）。** 日期：2026-10-22。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
 > 单机缺陷的修复见 [`docs/superpowers/plans/2026-10-21-unified-remediation.md`](docs/superpowers/plans/2026-10-21-unified-remediation.md)。
 > 原则：**不 big-bang**，每个阶段独立可回滚，上一阶段验收不过不进下一阶段。
+> 2026-10-22 的实施细节、压测命令与基线档案见
+> [`docs/phase0-observability-and-baseline.md`](docs/phase0-observability-and-baseline.md)。
 
 ---
 
@@ -32,13 +34,13 @@ Phase 4 对象存储 → Phase 5 多副本与独立 worker → Phase 6 安全与
 | 组件 | 现状 | 阻塞点 | 证据 |
 | --- | --- | --- | --- |
 | API | 单进程 | 无副本、无优雅摘流 | `start.py` 只 `Popen` 一个 uvicorn |
-| Qdrant | `QdrantClient(path=settings.qdrant_path)` | **进程级独占目录**，第二个进程打不开；基准/沙箱必须停服务 | `rag/vector_store.py:37-41` |
+| Qdrant | `QdrantClient(path=settings.qdrant_path)`，或 `url=settings.qdrant_url`（Phase 1 已加，默认空） | **进程级独占目录**，第二个进程打不开；基准/沙箱必须停服务 | `rag/vector_store.py::_get_client` |
 | SQLite | `ConnectionManager`：单写连接 + 线程本地只读连接 | 多副本写会锁；WAL 放共享盘不安全 | `rag/db/connection.py` |
 | SQL 方言 | 56 张表、`INSERT OR IGNORE`、`lastrowid`、`PRAGMA`、FTS5 | 不能直接换 Postgres | `rag/repositories/schema.py`、`rag/db/migrations/` |
 | Redis | 只给 LLM 池并发门用 | 答案缓存 `cached=None`；改写缓存是进程内 | `rag/llm_pool/router.py:192`、`pipeline.py:501` |
 | 文件 | `data/upload`、`data/document_versions`、`data/structured_datasets` | 本机盘；Docker `COPY . .` 有带入风险 | `rag/context.py:27`、`.dockerignore` |
 | Worker | 素材/演化/备份在 API 进程内启动 | 多副本会重复跑 | `rag/api.py` lifespan |
-| 观测 | 基准算 P50/P95；`locustfile.py` 有 P99 口径 | 无重构后报告、无指标端点 | `scripts/benchmark_jev_retrieval.py:357` |
+| 观测 | 基准算 P50/P95；`locustfile.py` 有 P99 口径；`/ready`（依赖就绪）与 `/metrics`（Prometheus 文本）已加 | 仍无 rerank/generation 独立分段与追踪 | `rag/routers/system.py`、`docs/phase0-observability-and-baseline.md` |
 
 ---
 
@@ -74,23 +76,42 @@ Client ──TLS──> LB / Reverse Proxy
   P99 318ms（20 并发 × 200 次）。尾延迟主要来自生成，不是检索准备。
 - 2026-10-22 完整 locust 套件（隔离实例，8 用户 / 60s）：73 请求、0 失败，P50 530ms、
   P95 13s、P99 19s、QPS 1.7。混合负载受 LLM 生成主导。
-- 给 `scripts/locustfile.py` 补一次可复现的压测档案：固定用户数、思考时间、目标 KB、`--user-id`；
-  产出 P50/P95/P99、错误率、RPS。
-- 增加只读 `/metrics`（或 OpenTelemetry exporter）：请求量/延迟、检索/重排/生成分段耗时、
-  Qdrant/SQLite/Redis 健康、LLM 池排队。
-- 结构化日志补 `request_id`、`kb_id`、`route`、`rewrite_dual_rerank`（已有）。
-- **验收**：同一压测脚本在单机产出稳定 P99；能看到“慢在检索、重排还是生成”。
-- **回滚**：只增观测，无行为变化。
+- **[x] 压测档案**：`docs/phase0-observability-and-baseline.md` 第 3 节给出 locust/benchmark
+  的固定命令、CSV 百分位列、记录模板与上面两条已记录基线，并明确 benchmark 只输出
+  P50/P95、不反推 P99。本次未重跑压测，不补数字。
+- **[x] `/ready`**（只读依赖就绪）：SQLite `SELECT 1`、Qdrant 集合可列举、Redis 已配置时 ping；
+  未就绪 503 + 组件状态，不泄露异常文本；`/health` 契约保持不变（容器 healthcheck 继续用它）。
+- **[x] `/metrics`**（只读，管理员鉴权）：Prometheus 文本格式，输出请求量/延迟（P50/P95/P99）、
+  检索阶段耗时、执行轨迹分段、依赖健康、LLM 池并发；不含问题文本/文档名/原始路径/凭据。
+  HTTP 计数由 `rag/api.py` 中间件按路由模板采集，检索耗时在 `rag/vector_store.py` 采集。
+- **[ ] rerank/generation 独立分段**：需要 `pipeline.py`/`reranker.py`/`generator.py` 钩子，
+  不在本工作流边界；在此之前 `/metrics` 只报已落盘的 `preparation`/`jev_*` 分段，不用差值冒充。
+- **[ ] 结构化日志补 `request_id`、`kb_id`、`route`**：`request_id` 已由日志过滤器注入，
+  `route`/`rewrite_dual_rerank` 已进执行轨迹的 metadata；`kb_id` 与 `route` 尚未统一成日志字段。
+- **验收**：同一压测脚本在单机产出稳定 P99（**部分达成**：命令与基线档案已就绪，2026-10-22
+  未在 S7 内重跑）；“慢在检索、重排还是生成”目前只能看到检索/准备分段，重排与生成待钩子。
+- **回滚**：只增观测，无行为变化（`/health` 不变，新增端点只读）。
 
 ### Phase 1：Qdrant server（2–3 天）
 
-- 配置：新增 `RAG_QDRANT_URL`、`RAG_QDRANT_API_KEY`；为空时保持本地 `path` 模式（向后兼容）。
-- 代码：`rag/vector_store.py` 按 URL/Path 二选一构造客户端；所有 `collection` 名称保持不变。
-- 部署：Compose 增加 `qdrant` 服务（持久卷、健康检查、只对内网暴露），应用改连 `http://qdrant:6333`。
-- 迁移：对每个集合做 snapshot/restore（或 scroll + upsert），迁移后比对点数与抽样召回。
-- **验收**：两个 API 进程可同时检索/写入，不再有目录锁；同一问题 top-5 与迁移前一致；
-  `scripts/verify_structured_schema_mirror.py` 与基准可不停服务运行。
+- **[x] 配置**：新增 `RAG_QDRANT_URL`、`RAG_QDRANT_API_KEY`；为空时保持本地 `path` 模式
+  （向后兼容）。`config.Settings` 默认空，`.env.example` 已写明两种模式与回滚方式。
+- **[x] 代码**：`rag/vector_store.py::_get_client()` 按 URL/Path 二选一构造客户端
+  （URL 非空 → `QdrantClient(url=..., api_key=...)`；空 → `QdrantClient(path=...)`），
+  所有 `collection` 名称保持不变；本地/远程分支有单测（mock client，不真连）。
+- **[x] 部署**：Compose 增加 `qdrant` 服务（`qdrant/qdrant:v1.18.3`、持久卷
+  `qdrant_server_data`、健康检查、`expose: 6333` 不发布宿主端口；API key 认证默认关闭，
+  启用方式与"空字符串不要注入"的注意事项写在 `.env.example`/Compose 注释里）；
+  应用通过 `RAG_QDRANT_URL` 切换，默认空仍连本地目录；旧 `qdrant_data` 卷保留用于回滚。
+- **[ ] 迁移**：对每个集合做 snapshot/restore（或 scroll + upsert），迁移后比对点数与抽样召回。
+  **未执行——Docker daemon 当前不可用**（无法拉镜像/起容器）。
+- **验收**（全部待 Docker 可用后验证）：两个 API 进程可同时检索/写入，不再有目录锁；
+  同一问题 top-5 与迁移前一致；`scripts/verify_structured_schema_mirror.py` 与基准可不停服务运行。
 - **回滚**：清空 `RAG_QDRANT_URL` 回到本地目录（迁移期间保留旧目录只读副本）。
+- **阻塞事实（2026-10-22）**：`docker` daemon 不可用；`docker-compose.yml` 通过了 YAML 解析、
+  静态断言与 `docker compose config`（用占位 `REDIS_PASSWORD`/`QDRANT_API_KEY` 做插值校验，
+  `config` 不接触 daemon），但镜像 tag 未 pull、容器未启动、健康检查与 API key 未实测、
+  迁移与双进程验收均未做。详见 `docs/phase0-observability-and-baseline.md` 第 5 节。
 
 ### Phase 2：PostgreSQL（1–2 周，最大的一块）
 
@@ -160,8 +181,8 @@ Client ──TLS──> LB / Reverse Proxy
 
 | 阶段 | 硬指标 | 测试 | 回滚 |
 | --- | --- | --- | --- |
-| 0 观测 | P99 可复现；分段耗时可见 | 压测档案 | 无 |
-| 1 Qdrant | 双进程并发；top-5 一致 | 检索回归 + 基准 | 清空 URL |
+| 0 观测 | P99 可复现；分段耗时可见（**部分**：rerank/generation 待钩子） | 压测档案（已建）+ `/ready` `/metrics` | 无 |
+| 1 Qdrant | 双进程并发；top-5 一致（**配置面已就绪，运行时未验证：Docker 阻塞**） | 检索回归 + 基准 | 清空 URL |
 | 2 Postgres | 2313 用例通过；并发无锁；恢复演练 | 全量 + 迁移比对 | 切回 SQLite |
 | 3 Redis | 跨副本改写一致；故障降级 | 多副本集成 + 断网 | backend=memory |
 | 4 对象存储 | 大文件/断点/删除 | 集成 + 恢复 | 本地适配器 |
@@ -197,8 +218,24 @@ Client ──TLS──> LB / Reverse Proxy
 
 ## 8. 下一步
 
-1. **先做 Phase 0 + 1**：补 P99 压测档案、加 `/metrics`、把 Qdrant 切到 server 模式并在双进程下验证。
-2. 单机修复（统一修复计划）全部验收通过后，再开 Phase 2。
-3. 每个阶段单独分支/提交，验收记录写入 `docs/development-log.md`。
+1. Phase 0 观测面已落地（`/ready`、`/metrics`、压测档案）；剩余：rerank/generation 独立分段
+   （跨工作流钩子）与 `kb_id` 统一进日志字段。
+2. **在有 Docker daemon 的环境**按 `docs/phase0-observability-and-baseline.md` 4.3 完成 Qdrant
+   迁移与双进程验收；验收不过不进 Phase 2。
+3. 单机修复（统一修复计划）全部验收通过后，再开 Phase 2；每个阶段单独分支/提交，
+   验收记录写入 `docs/development-log.md`。
 
 > 本文是路线图，不是承诺工期；实际排期取决于 Postgres 迁移的盘点结果与压测数据。
+
+---
+
+## 9. 实施记录（2026-10-22，S7：Phase 0 + Phase 1 配置面）
+
+| 项 | 内容 |
+| --- | --- |
+| 代码 | `rag/routers/system.py`：只读 `/ready`、管理员 `/metrics`（请求量/延迟、检索耗时、执行轨迹分段、依赖健康、LLM 池并发）；`rag/api.py`：按路由模板采集 HTTP 指标（排除 `/metrics` 自身，不落原始路径）；`rag/vector_store.py`：`_get_client()` 的本地/远程分支 + 检索耗时/命中计数；`config.py`：`qdrant_url` / `qdrant_api_key`（默认空） |
+| 部署 | `docker-compose.yml`：新增 `qdrant` 服务（`qdrant/qdrant:v1.18.3`、持久卷 `qdrant_server_data`、bash `/dev/tcp` 健康检查、`expose` 不发布宿主端口、应用 `depends_on: service_healthy`）；`.env.example`：两种 Qdrant 模式、API key 与回滚说明 |
+| 文档 | 新增 `docs/phase0-observability-and-baseline.md`（端点契约、指标清单/缺口、可复现压测命令、基线与记录模板、Phase 1 切换/回滚/阻塞）；更新本文件 Phase 0/1、验收矩阵与阻塞说明 |
+| 测试 | 新增 `tests/test_system_ready_metrics.py`、`tests/test_vector_store_remote.py`、`tests/test_qdrant_deployment.py`；`tests/test_router_parity.py` 基线加入 `/ready`、`/metrics` |
+| 验证 | 新增用例 30 passed；`test_api` / 部署与 Compose / `test_vector_store*` / `test_stream_eventloop_nonblocking` / router parity 等回归通过；本次改动文件 `ruff check` 全绿（全树当时仍有其它并行工作流修改中的文件报错） |
+| 未做/阻塞 | **Docker daemon 不可用**：未 pull 镜像、未启动容器、未验证健康检查/API key/持久卷、未做 snapshot 迁移、未做双进程验收；Compose 仅静态校验。rerank/generation 独立分段需 `pipeline.py`/`reranker.py`/`generator.py` 钩子（超出 S7 边界）。未提交 Git |

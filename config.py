@@ -82,8 +82,12 @@ class Settings(BaseSettings):
     # 外部数据源可能携带连接凭据；未显式开启前不暴露相关接口。
     data_sources_enabled: bool = False
 
-    # Qdrant 本地模式
+    # Qdrant 连接方式（Phase 1）：`qdrant_url` 为空 = 本地嵌入式目录（单进程，目录锁，
+    # 保持既有行为）；设置为 http(s)://host:6333 时连 Qdrant server，此时 `qdrant_path`
+    # 不生效。`qdrant_api_key` 为空表示不启用 API key，请求不发送空的 api-key 头。
     qdrant_path: str = str(Path(__file__).resolve().parent / "qdrant_data")
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
 
     # BM25 倒排索引
     bm25_db_path: str = str(Path(__file__).resolve().parent / "data" / "bm25_index.db")
