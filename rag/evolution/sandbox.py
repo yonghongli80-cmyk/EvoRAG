@@ -64,6 +64,13 @@ actually reads, a missing or unavailable seam hash is stale, and a diff that
 touches a seam module gets no fixture verdict at all — a recording can only
 describe the code that was running when it was recorded.
 
+The recorded data snapshot is copied into the sandbox **twice**, one private copy
+per side (C-04): a replay opens a local vector store at the path it is handed and
+may write into it, so a shared snapshot would let the clean run change what the
+patched run reads — and would mutate the very bytes a corpus fingerprint vouches
+for. A copy that cannot be made stops the replay instead of falling back to
+sharing the recording.
+
 The module stops at the report. Turning one into a candidate-status move is the
 caller's job, and :func:`sandbox_gate_outcome` is the seam for it: it returns the
 exact ``(status, gate_detail)`` pair to write back with ``gate="sandbox"``, which
@@ -89,6 +96,7 @@ from rag.evolution.candidate_gates import ROUTE_DELTA_MAX_PP, TOP5_DELTA_MAX_PP
 from rag.evolution.candidates import PayloadBoundaryError
 from rag.evolution.code_patches import (
     GIT_APPLY_TIMEOUT_S,
+    PERMISSION_REGRESSION_TESTS,
     CodePatchCandidate,
     validate_patch,
 )
@@ -108,6 +116,13 @@ BASELINE_WORKTREE_DIRNAME = "baseline"
 BENCHMARK_REPORT_NAME = "benchmark.json"
 #: The clean run's report, kept apart from the patched one.
 BASELINE_REPORT_NAME = "benchmark-baseline.json"
+#: The replay's **private** corpus copy per side (C-04). Both are made inside the sandbox root
+#: before either child starts: a replay opens a local vector store at ``RAG_QDRANT_PATH`` and may
+#: write to it (collection folders, lock files, a mutated ``users.db``), so two replays sharing the
+#: recorded snapshot would see each other's writes and the recording itself would stop being the
+#: data the fixture described.
+BASELINE_SNAPSHOT_DIRNAME = "snapshot-baseline"
+PATCHED_SNAPSHOT_DIRNAME = "snapshot-patched"
 #: The phase-2 A/B runner, addressed as a *relative* path so the worktree's own
 #: copy of ``scripts/`` is what the replay measures.
 BENCHMARK_SCRIPT = "scripts/benchmark_jev_retrieval.py"
@@ -136,7 +151,16 @@ SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 #: It carries the weight the end-to-end replay cannot: the replay's preparation
 #: path calls a routing model, a rewriter, an embedder and a reranker over the
 #: network, and the sandbox never hands a child the credentials for any of them.
+#:
+#: The permission boundary is part of the net (C-10, 2026-10-22). ``rag/pipeline.py``,
+#: ``rag/guard.py`` and ``rag/retriever.py`` carry the ACL call sites a legal patch may reach, so a
+#: run that cannot show "the permission tests still pass" cannot claim to have checked that
+#: boundary. The paths are taken from
+#: :data:`rag.evolution.code_patches.PERMISSION_REGRESSION_TESTS` — the same table layer 1 derives
+#: its requirement from — so the two rules cannot drift: the net always runs them, and a candidate
+#: that touches a call site has to name one.
 REGRESSION_TEST_PATHS: tuple[str, ...] = (
+    *PERMISSION_REGRESSION_TESTS,
     "tests/test_jev_client.py",
     "tests/test_jev_passage_policy.py",
     "tests/test_jev_routing_policy.py",
@@ -533,6 +557,45 @@ def _is_within(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _snapshot_copy(source: Path, destination: Path) -> Path:
+    """A private copy of the replay snapshot for one side (C-04).
+
+    The replay child is handed a *copy*, never the recorded snapshot itself. Three reasons, all
+    measured or structural:
+
+    * two replays (clean and patched) must not share state — a local vector store writes into the
+      path it is given, so the patched run would otherwise read whatever the clean run wrote;
+    * the recording is evidence: its bytes must be identical before and after a run, or the corpus
+      fingerprint that vouches for a fixture no longer describes it;
+    * the copy lives inside the sandbox root, which is removed in the run's ``finally``.
+
+    Symlinks are copied as links (not followed): a link out of the snapshot would otherwise pull
+    content from a path the snapshot never contained. A copy failure propagates — the caller reports
+    it and does not fall back to sharing the original.
+    """
+    shutil.copytree(source, destination, symlinks=True)
+    return destination
+
+
+def _replay_snapshots(
+    data_snapshot: str | None, sandbox_root: Path
+) -> tuple[str | None, str | None]:
+    """The two private snapshot paths the replays run against, ``(baseline, patched)``.
+
+    An unset, missing or file-shaped snapshot is passed through untouched: :func:`_replay_env`
+    already ignores those, and there is nothing to copy. A directory is copied twice — one copy per
+    side, never shared — so neither replay can observe the other's writes and the recording's own
+    bytes stay exactly what the fixture describes.
+    """
+    snapshot = str(data_snapshot or "").strip()
+    if not snapshot or not Path(snapshot).is_dir():
+        return (snapshot or None, snapshot or None)
+    source = Path(snapshot)
+    baseline = _snapshot_copy(source, sandbox_root / BASELINE_SNAPSHOT_DIRNAME)
+    patched = _snapshot_copy(source, sandbox_root / PATCHED_SNAPSHOT_DIRNAME)
+    return str(baseline), str(patched)
 
 
 def _git_category(stderr: str) -> str:
@@ -1118,11 +1181,27 @@ def _execute(
                         "scripts/measure_patch_regression_ab.py 在宿主做带凭据 A/B"
                     ),
                 )
+        # C-04: each side replays against its **own** copy of the snapshot. The copies are
+        # byte-identical to the recording (which is asserted to stay unchanged), so the corpus
+        # fingerprint above describes both; they exist separately because a replay may write into
+        # the store it opens. A copy that cannot be made stops the replay — never a shared fallback.
+        try:
+            baseline_snapshot, patched_snapshot = _replay_snapshots(data_snapshot, sandbox_root)
+        except OSError as error:
+            return report(
+                applied=True,
+                tests_passed=True,
+                benchmark=None,
+                error=(
+                    "benchmark replay snapshot could not be isolated into the sandbox: "
+                    f"{type(error).__name__}"
+                ),
+            )
         # Each run imports its own tree: PYTHONPATH decides what ``import rag`` resolves to,
         # so the clean run must point at the clean worktree.
         baseline_payload, baseline_error = _run_benchmark(
             worktree=baseline_worktree,
-            env=_replay_env(baseline_worktree, data_snapshot, replay_fixture or ""),
+            env=_replay_env(baseline_worktree, baseline_snapshot, replay_fixture or ""),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,
@@ -1131,7 +1210,7 @@ def _execute(
         )
         patched_payload, patched_error = _run_benchmark(
             worktree=worktree,
-            env=_replay_env(worktree, data_snapshot, replay_fixture or ""),
+            env=_replay_env(worktree, patched_snapshot, replay_fixture or ""),
             sandbox_root=sandbox_root,
             kb_id=kb_id,
             timeout=benchmark_timeout,

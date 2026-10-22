@@ -41,7 +41,8 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import get_args
 
@@ -702,6 +703,20 @@ class CanaryRequest(BaseModel):
     percent: int
 
 
+#: ``gate_log`` names of the layers a canary must see concluded. Layer 2 is the fixed benchmark
+#: corpus (:data:`rag.evolution.candidate_gates.GATE_NAME`); layer 3 is the shadow comparison. They
+#: are the two layers that measure a question set *before* it serves traffic, which is why the
+#: canary endpoint reads their entries instead of trusting the status alone (C-05, 2026-10-22).
+BENCHMARK_GATE = "benchmark"
+SHADOW_GATE = "shadow"
+
+#: How many recorded shadow comparisons count as "sampled enough". One comparison already proves
+#: the layer ran; zero is the state this guard exists for — the endpoint used to accept a candidate
+#: whose trail held nothing but its own payload, so a question set could serve live traffic with no
+#: evidence behind it at all.
+MIN_SHADOW_SAMPLES = 1
+
+
 def _reconcile_rollout(store: CandidateStore) -> None:
     """Rebuild live rollout state from the persisted trail before acting on it."""
     rollout.restore(store)
@@ -712,6 +727,39 @@ def _require_candidate(store: CandidateStore, candidate_id: int) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="候选不存在")
     return row
+
+
+def _gate_entries(row: Mapping) -> list[Mapping]:
+    """The readable entries of one candidate's ``gate_log`` (malformed values dropped)."""
+    entries = row.get("gate_log")
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, Mapping)]
+
+
+def _gate_passed(entries: Sequence[Mapping], gate: str) -> bool:
+    """Whether ``gate`` recorded a **passed** conclusion in this trail."""
+    return any(
+        str(entry.get("gate") or "") == gate and str(entry.get("result") or "") == "passed"
+        for entry in entries
+    )
+
+
+def _shadow_samples(entry: Mapping) -> int:
+    """How many comparisons one shadow entry says it recorded.
+
+    ``record_gate_entry`` stores structured numbers under ``metrics``; a hand-written or legacy
+    entry without them counts as zero, which is the conservative direction for this guard (an
+    unreadable sample count is not evidence of sampling).
+    """
+    metrics = entry.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return 0
+    for key in ("samples", "sample_count"):
+        value = metrics.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return max(0, value)
+    return 0
 
 
 def _require_canaryable_payload(row: dict) -> None:
@@ -730,6 +778,41 @@ def _require_canaryable_payload(row: dict) -> None:
         raise HTTPException(
             status_code=409, detail=f"候选载荷越界，拒绝灰度：{error.reason}"
         ) from error
+
+
+def _require_canary_entry_conditions(row: Mapping) -> None:
+    """Refuse to expose a candidate whose layers 2 and 3 never concluded (C-05).
+
+    ``awaiting_verification`` is a claim written by a runner; this reads the trail that is supposed
+    to back it. Layer 2 needs a **passed** benchmark entry — a missing one, a failed one, or an
+    inconclusive retry all mean the candidate has no measured comparison against the live question
+    set. Layer 3 needs at least :data:`MIN_SHADOW_SAMPLES` recorded shadow comparisons, because
+    that is the only evidence about how the two question sets answer the same live question.
+
+    Both refusals are 409s that write nothing: the caller may run the missing layer and retry.
+    """
+    entries = _gate_entries(row)
+    if not _gate_passed(entries, BENCHMARK_GATE):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "层 2 基准门禁没有通过的记录：不能进入灰度"
+                "（请先跑 benchmarks 对照，让 gate_log 里有 benchmark=passed）"
+            ),
+        )
+    samples = sum(
+        _shadow_samples(entry)
+        for entry in entries
+        if str(entry.get("gate") or "") == SHADOW_GATE
+    )
+    if samples < MIN_SHADOW_SAMPLES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"层 3 影子采样不足（{samples} 次，至少 {MIN_SHADOW_SAMPLES} 次）：不能进入灰度"
+                "（无样本的灰度等于拿线上流量做第一次测量）"
+            ),
+        )
 
 
 @router.get("/candidates", summary="候选问题集列表")
@@ -799,6 +882,16 @@ def canary_candidate(
     its version in ``decision_metadata``; the rest keep the current set. A
     percentage of zero registers nothing, which is the default online
     behaviour. Only one candidate may be live at a time.
+
+    Layer 4 is the first point at which a question set meets real traffic, so it
+    refuses a candidate whose trail does not carry the two measurements that
+    justify that (C-05, 2026-10-22): a **passed** layer-2 benchmark entry and at
+    least one layer-3 shadow comparison. A row that merely *is* in
+    ``awaiting_verification`` is a status claim; the entry conditions read the
+    evidence. The live registration happens **before** the status is written, so
+    a failed write cannot leave a candidate recorded as "in canary" while
+    nothing serves it — and if the write does fail, the registration is removed
+    again.
     """
     if not 0 <= payload.percent <= 100:
         raise HTTPException(status_code=400, detail="灰度百分比必须是 0..100 的整数")
@@ -816,12 +909,33 @@ def canary_candidate(
         raise HTTPException(status_code=404, detail="观测数据库不存在")
     _reconcile_rollout(store)
     row = _require_candidate(store, candidate_id)
+    # 第一条断言：这张表两个制品共用，问题集的灰度端点只服务问题集候选。代码补丁没有
+    # 百分比灰度（没有第二个实例可分流量），它的层 4 是 `/code-candidates/{id}/decision`。
+    if row["artifact_type"] != QUESTION_SET_ARTIFACT_TYPE:
+        raise HTTPException(status_code=404, detail="候选不存在")
     actor_id = str(user["id"])
     percent = payload.percent
     current = row["status"]
+    rollback_ref = row["rollback_ref"] if isinstance(row["rollback_ref"], Mapping) else {}
+
+    def activate() -> None:
+        """Apply the live effect; never let a registration failure become a status move."""
+        try:
+            rollout.activate(
+                candidate_id,
+                row["target"],
+                row["payload"],
+                str(rollback_ref.get("question_set_version", "")),
+                percent,
+            )
+        except (TypeError, ValueError) as error:
+            # An unknown target or an unreadable payload is not something to serve.
+            raise HTTPException(status_code=409, detail=f"候选载荷无法灰度：{error}") from error
 
     if current == EvolutionStatus.CANARY.value:
-        # Already live: a percentage change is its own audited action.
+        # Already live: a percentage change is its own audited action. The registration comes
+        # first for the same reason as the transition below — the trail must describe what serves.
+        activate()
         store.add_audit(actor_id, "canary", candidate_id, percent_note(percent))
     elif current in (
         EvolutionStatus.AWAITING_VERIFICATION.value,
@@ -840,6 +954,8 @@ def canary_candidate(
                 detail=f"候选 #{live[0]['id']} 正在灰度中：同一时间只允许一个候选问题集在线",
             )
         _require_canaryable_payload(row)
+        _require_canary_entry_conditions(row)
+        activate()
         try:
             if current == EvolutionStatus.AWAITING_VERIFICATION.value:
                 store.advance_candidate(
@@ -858,24 +974,16 @@ def canary_candidate(
             )
         except KeyError as error:
             # The candidate disappeared between the read above and this write.
+            rollout.deactivate(candidate_id)
             raise HTTPException(status_code=404, detail="候选不存在") from error
         except ValueError as error:
+            rollout.deactivate(candidate_id)
             raise HTTPException(status_code=409, detail=f"非法状态转移：{error}") from error
     else:
         raise HTTPException(
             status_code=409, detail=f"候选状态 {current} 不允许灰度（需 awaiting_verification 或 canary）"
         )
 
-    # The live effect goes last: every audited write above it already
-    # succeeded, so a failure here leaves the trail truthful and no traffic.
-    rollback_ref = row["rollback_ref"] if isinstance(row["rollback_ref"], Mapping) else {}
-    rollout.activate(
-        candidate_id,
-        row["target"],
-        row["payload"],
-        str(rollback_ref.get("question_set_version", "")),
-        percent,
-    )
     updated = store.get_candidate(candidate_id)
     return _serialize_candidate(updated, canary_percent=rollout.percent_for(candidate_id))
 
@@ -1563,6 +1671,34 @@ class ApplyRequest(BaseModel):
     note: str = ""
 
 
+@contextmanager
+def _apply_lease():
+    """Hold the exclusive apply/rollback lease for one request (C-11, 2026-10-22).
+
+    Applying and rolling back both move the working tree and then the candidate's status, so two of
+    them interleaved — from two administrators, two browser tabs, or the API and a script — leave the
+    tree and the trail describing different things. The lease is the same atomic file lock the host
+    A/B uses (:mod:`rag.evolution.host_lock`), taken on its own file
+    (:func:`rag.evolution.service_control.apply_lock_path`) because a host measurement may legitimately
+    run beside an apply.
+
+    A held lease is a **409**, not a wait: the operation is minutes long, and queueing a second one
+    silently is worse than telling the caller someone else is doing it. It is also cross-process, so
+    a CLI or a second API process is refused the same way.
+    """
+    from rag.evolution.host_lock import HostLocked, host_measurement_lock
+    from rag.evolution.service_control import apply_lock_path
+
+    try:
+        with host_measurement_lock(apply_lock_path(REPO_ROOT)):
+            yield
+    except HostLocked as error:
+        raise HTTPException(
+            status_code=409,
+            detail=f"另一个应用/回滚正在进行，请等它结束：{error}",
+        ) from error
+
+
 @router.post("/code-candidates/{candidate_id}/apply", summary="应用已批准的补丁，可选一键重启")
 def apply_code_candidate(
     candidate_id: int, payload: ApplyRequest, user: dict = Depends(_admin_user)
@@ -1575,9 +1711,28 @@ def apply_code_candidate(
     patch's own target tests must pass **before** anything is restarted. Any failure reverts the
     patch and leaves the running service untouched.
 
+    The whole sequence runs under the apply lease (C-11): the status advance and the working-tree
+    operations are serialized with every other apply/rollback, and the restart helper inherits the
+    same lease so a second apply cannot start while the process is being swapped.
+
     The outcome is returned in the response and appended to ``artifacts/service-control.log``. The
     evolution audit table is deliberately not used: its action column is CHECK-constrained to the
     three diagnosis decisions, and rebuilding a table to record an operational event is not worth it.
+    """
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="候选数据库不存在")
+    with _apply_lease():
+        return _apply_code_candidate_locked(store, candidate_id, payload, user)
+
+
+def _apply_code_candidate_locked(
+    store: CandidateStore, candidate_id: int, payload: ApplyRequest, user: dict
+) -> dict:
+    """The apply body, run inside the lease.
+
+    The preconditions are read **after** the lease is taken, so the state this run acts on cannot be
+    changed by another apply between the read and the write.
     """
     from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
@@ -1591,9 +1746,6 @@ def apply_code_candidate(
         spawn_restart_helper,
     )
 
-    store = _open_candidate_store()
-    if store is None:
-        raise HTTPException(status_code=404, detail="候选数据库不存在")
     row = _require_candidate(store, candidate_id)
     if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
         raise HTTPException(status_code=404, detail="候选不存在")
@@ -1746,7 +1898,22 @@ def rollback_code_candidate(
     A patch whose change is already in a commit is refused rather than reversed: ``git apply -R`` would
     leave the working tree holding the inverse of a commit, and the honest way to undo a commit is
     ``git revert``. The refusal names the commit that last touched those paths.
+
+    The whole sequence runs under the same apply lease as apply (C-11), and its restart helper
+    inherits that lease — a rollback and an apply cannot interleave their tree operations or status
+    moves.
     """
+    store = _open_candidate_store()
+    if store is None:
+        raise HTTPException(status_code=404, detail="候选数据库不存在")
+    with _apply_lease():
+        return _rollback_code_candidate_locked(store, candidate_id, payload, user)
+
+
+def _rollback_code_candidate_locked(
+    store: CandidateStore, candidate_id: int, payload: RollbackRequest, user: dict
+) -> dict:
+    """The rollback body, run inside the lease (preconditions read under it)."""
     from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
         apply_patch,
@@ -1761,9 +1928,6 @@ def rollback_code_candidate(
         spawn_restart_helper,
     )
 
-    store = _open_candidate_store()
-    if store is None:
-        raise HTTPException(status_code=404, detail="候选数据库不存在")
     row = _require_candidate(store, candidate_id)
     if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
         raise HTTPException(status_code=404, detail="候选不存在")
@@ -1874,14 +2038,25 @@ def rollback_code_candidate(
 
 
 class RegenerateRequest(BaseModel):
-    """One administrative action on a patch the system already rolled back."""
+    """One administrative action on a patch the system already rolled back or rejected."""
 
     model_config = ConfigDict(extra="forbid")
 
     #: Which member observation the new patch is generated from. Empty means "the one the
-    #: rolled-back candidate came from", which is the reproduce-the-same-idea default.
+    #: closed-out candidate came from", which is the reproduce-the-same-idea default.
     observation_id: int | None = None
     note: str = ""
+
+
+#: 一个代码补丁候选可以"结案后重生"的状态（C-08，2026-10-22）。三者都是终态，也都意味着
+#: 那条观测不再有任何未决补丁；重生是**新行**，不是复活旧行。
+_REGENERABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        EvolutionStatus.ROLLED_BACK.value,
+        EvolutionStatus.REJECTED.value,
+        EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+    }
+)
 
 
 def _patch_generator():
@@ -1957,12 +2132,12 @@ def _draft_for_regeneration(store, observation_id: int, layer: str) -> dict:
 
 @router.post(
     "/code-candidates/{candidate_id}/regenerate",
-    summary="回滚后从同一聚类重新生成一条候选",
+    summary="回滚/驳回后从同一聚类重新生成一条候选",
 )
 def regenerate_code_candidate(
     candidate_id: int, payload: RegenerateRequest, user: dict = Depends(_admin_user)
 ) -> dict:
-    """Generate a **new** candidate from the cluster a rolled-back patch came from.
+    """Generate a **new** candidate from the cluster a rolled-back or rejected patch came from.
 
     ``rolled_back`` is a terminal status: the transition table has no way back to
     ``approved_for_canary``, so after a rollback the interface could not re-apply the same
@@ -1971,6 +2146,12 @@ def regenerate_code_candidate(
     from the same cluster, which then walks the ordinary path — sandbox, administrator review,
     approval, apply. The cluster has to be still ``approved_for_candidate`` with a confirmed
     layer, which is the state it is in after a rollback by construction.
+
+    The same entry serves a **rejected** or **needs_more_evidence** candidate (C-08,
+    2026-10-22). Those are terminal too, and they are the normal outcome of a review; without this
+    path, "administrator rejects an attempt" removed the observation from the generation queue for
+    good (the queue's ``NOT EXISTS`` used to ignore status), so the failure it described could
+    never be addressed again except by editing the database.
 
     Pile guard, same as the worker's: refuse while the cluster carries another open patch
     candidate, so regenerating cannot be used to stack variants of one idea side by side. A
@@ -1988,12 +2169,12 @@ def regenerate_code_candidate(
     row = _require_candidate(candidates, candidate_id)
     if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
         raise HTTPException(status_code=404, detail="候选不存在")
-    if row["status"] != EvolutionStatus.ROLLED_BACK.value:
+    if row["status"] not in _REGENERABLE_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=(
-                "只有回滚过的补丁才需要重新生成（当前状态："
-                f"{row['status']}）；已回滚之外的状态请走原有路径"
+                "只有回滚过或被驳回的补丁才需要重新生成（当前状态："
+                f"{row['status']}）；未决补丁请继续走原有路径"
             ),
         )
 
@@ -2050,7 +2231,8 @@ def regenerate_code_candidate(
         "advance",
         new_id,
         (
-            f"回滚后重新生成：由 {user.get('username')} 从候选 #{int(row['id'])}（rolled_back）"
+            f"结案后重新生成：由 {user.get('username')} 从候选 #{int(row['id'])}"
+            f"（{row['status']}）"
             f"所在的聚类 {cluster_id} 重新生成，观测 {observation_id}，草案 {draft.get('id')}，"
             f"层级 {layer}｜{payload.note}"
         ).strip("｜"),
@@ -2091,6 +2273,10 @@ def decide_code_candidate(
     if store is None:
         raise HTTPException(status_code=404, detail="观测数据库不存在")
     row = _require_candidate(store, candidate_id)
+    # 表是两个制品共用的：这个端点只对代码补丁做层 4 审核。问题集候选的层 4 是 canary，
+    # 一条问题集的 payload 被当成补丁决策，状态机会给它开一条它没走过的路（C-05）。
+    if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
+        raise HTTPException(status_code=404, detail="候选不存在")
     new_status = target["new_status"]
     if new_status not in EVOLUTION_TRANSITIONS.get(row["status"], ()):
         # Checked here as well as inside the store so the 409 leaves no trace:

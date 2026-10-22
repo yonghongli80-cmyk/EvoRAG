@@ -793,6 +793,70 @@ def test_a_question_set_candidate_leaves_the_code_patch_queue_untouched(tmp_path
     assert [row["observation_id"] for row in queue] == [member["id"]]
 
 
+def _closed_out_patch(store, cluster, member, *, final_status: str) -> int:
+    """A patch candidate moved to a concluded status (rejected / needs_more_evidence / rolled_back)."""
+    candidate_id = store.add_candidate(member["id"], cluster["id"], sample_code_patch())
+    path = {
+        EvolutionStatus.REJECTED.value: (
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            EvolutionStatus.REJECTED.value,
+        ),
+        EvolutionStatus.NEEDS_MORE_EVIDENCE.value: (
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+        ),
+        EvolutionStatus.ROLLED_BACK.value: (
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            EvolutionStatus.APPROVED_FOR_CANARY.value,
+            EvolutionStatus.CANARY.value,
+            EvolutionStatus.ROLLED_BACK.value,
+        ),
+    }[final_status]
+    for status in path:
+        store.advance_candidate(candidate_id, status, actor_id="test", note=f"→ {status}")
+    return candidate_id
+
+
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        EvolutionStatus.REJECTED.value,
+        EvolutionStatus.NEEDS_MORE_EVIDENCE.value,
+        EvolutionStatus.ROLLED_BACK.value,
+    ],
+)
+def test_a_concluded_patch_puts_its_observation_back_in_the_queue(tmp_path, final_status):
+    """C-08：结案的补丁不再占着观测 —— 否则一次驳回就是*永久*退场。
+
+    队列的 ``NOT EXISTS`` 以前不看状态：任何一条 ``code_patch`` 行（包括 ``rejected`` /
+    ``needs_more_evidence``）都会让这条观测从"待生成"清单里消失，于是管理员驳回一次之后，
+    这个失败再也不可能被重新处理，只能手写 SQL 修库。
+    """
+    _, store, cluster, member = seeded(tmp_path)
+    _closed_out_patch(store, cluster, member, final_status=final_status)
+
+    queue = store.observations_awaiting_code_patch(limit=50)
+
+    assert [row["observation_id"] for row in queue] == [member["id"]]
+
+
+@pytest.mark.parametrize(
+    "open_status",
+    [
+        EvolutionStatus.CANDIDATE_TESTING.value,
+        EvolutionStatus.AWAITING_VERIFICATION.value,
+    ],
+)
+def test_an_open_patch_still_reserves_its_observation(tmp_path, open_status):
+    """C-08 的另一半：未决的补丁仍然占位，队列不会催生第二个变体。"""
+    _, store, cluster, member = seeded(tmp_path)
+    candidate_id = store.add_candidate(member["id"], cluster["id"], sample_code_patch())
+    if open_status != EvolutionStatus.CANDIDATE_TESTING.value:
+        store.advance_candidate(candidate_id, open_status, actor_id="test", note="open")
+
+    assert store.observations_awaiting_code_patch(limit=50) == []
+
+
 def test_gate_metrics_ride_along_with_the_gate_entry(tmp_path):
     """结构化指标随门禁条目一起落库；不带指标时条目形状与从前完全一致（向前兼容）。"""
     _, store, cluster, member = seeded(tmp_path)

@@ -1499,16 +1499,143 @@ def test_rollback_reverts_restarts_and_records_the_status(
 
 
 # ------------------------------------------------------------------
+# C-11 (2026-10-22)：apply/rollback 串行在同一个租约上。
+# ------------------------------------------------------------------
+
+
+def _apply_lease_path():
+    """The lease path the endpoints use under the suite's redirected log directory."""
+    from rag.evolution.service_control import apply_lock_path
+
+    return apply_lock_path(evolution_api.REPO_ROOT)
+
+
+def test_apply_refuses_while_another_run_holds_the_lease(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """同一个租约被占用时，第二个 apply 直接 409，而不是与它并行改工作树。
+
+    并行的后果是工作树与候选状态互相矛盾：一个请求刚把补丁应用、另一个把它反向，而两边的审计
+    都写着"成功"。拒绝是**跨进程**的（同一份锁文件），所以脚本与第二个 API 进程同样被挡住。
+    """
+    from rag.evolution.host_lock import host_measurement_lock
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch)
+
+    with host_measurement_lock(_apply_lease_path()):
+        response = evolution_client.post(
+            f"{PREFIX}/code-candidates/{candidate_id}/apply",
+            headers=admin_headers,
+            json={"restart": True},
+        )
+
+    assert response.status_code == 409
+    assert "另一个应用/回滚正在进行" in response.json()["detail"]
+    assert calls["apply"] == 0 and calls["restart"] == 0, "被租约挡下时一步都不许走"
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "approved_for_canary"
+
+    # 租约释放后同一条请求可以正常执行：拒绝没有留下半截状态，也不是死锁。
+    released = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply",
+        headers=admin_headers,
+        json={"restart": True},
+    )
+    assert released.status_code == 200
+    store.close()
+
+
+def test_rollback_refuses_while_another_run_holds_the_lease(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    from rag.evolution.host_lock import host_measurement_lock
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch, state="applied")
+
+    with host_measurement_lock(_apply_lease_path()):
+        response = evolution_client.post(
+            f"{PREFIX}/code-candidates/{candidate_id}/rollback",
+            headers=admin_headers,
+            json={"restart": False},
+        )
+
+    assert response.status_code == 409
+    assert "另一个应用/回滚正在进行" in response.json()["detail"]
+    assert calls["revert"] == 0
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "approved_for_canary"
+    store.close()
+
+
+def test_apply_releases_the_lease_when_a_guard_refuses(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    """失败路径也必须释放租约：否则一次失败的 apply 会把后续操作永久锁在门外。"""
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    calls = _fake_control(monkeypatch, smoke=(False, "ImportError: boom"))
+    lock_path = _apply_lease_path()
+
+    first = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply",
+        headers=admin_headers,
+        json={"restart": True},
+    )
+    assert first.status_code == 409
+    assert calls["apply"] == 1 and calls["revert"] == 1
+    assert not lock_path.exists(), "拒绝之后租约必须已经释放"
+
+    second = evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply",
+        headers=admin_headers,
+        json={"restart": True},
+    )
+    assert second.status_code == 409
+    assert calls["apply"] == 2, "同一个租约可以再次取得（不是被泄漏）"
+    store.close()
+
+
+def test_every_successful_apply_leaves_the_lease_free(
+    evolution_client, admin_headers, monkeypatch, store_with_cluster
+):
+    store = FailureTraceStore(settings_path())
+    candidate_id = _approved_patch(store)
+    _fake_control(monkeypatch)
+    lock_path = _apply_lease_path()
+
+    assert evolution_client.post(
+        f"{PREFIX}/code-candidates/{candidate_id}/apply",
+        headers=admin_headers,
+        json={"restart": True},
+    ).status_code == 200
+
+    assert not lock_path.exists()
+    store.close()
+
+
+# ------------------------------------------------------------------
 # 回滚之后从同一聚类重新生成（14.3 缺口二：rolled_back 是终态，接口层面没法再应用）。
 # 修法 ①：不回滚状态机，改从聚类产出一条**新**候选，让它重新走一遍原有路径。
 # ------------------------------------------------------------------
 
 
-def _rolled_back_patch(store, cluster_id: int, member_id: int, *, marker: str = "旧补丁") -> int:
-    """把一份种子补丁推进到终态 ``rolled_back``（回滚后重新生成的唯一合法前态）。
+def _rolled_back_patch(
+    store,
+    cluster_id: int,
+    member_id: int,
+    *,
+    marker: str = "旧补丁",
+    statuses: tuple[str, ...] | None = None,
+) -> int:
+    """把一份种子补丁推进到终态（默认 ``rolled_back``：回滚后重新生成的前态）。
 
-    同时把聚类推进到"已批准生成候选"并写下一条层级一致的成员草案——这正是回滚之后
-    聚类所处的状态（回滚只动候选，不动聚类）。
+    ``statuses`` 让同一个构造器产出别的终态（``rejected`` / ``needs_more_evidence``）：C-08 之后
+    这两种结案同样是"重新生成"的合法入口。
+
+    同时把聚类推进到"已批准生成候选"并写下一条层级一致的成员草案——这正是回滚/驳回之后
+    聚类所处的状态（结案只动候选，不动聚类）。
     """
     import time
 
@@ -1516,7 +1643,13 @@ def _rolled_back_patch(store, cluster_id: int, member_id: int, *, marker: str = 
 
     candidate_id = _seed_code_patch_candidate(store, marker=marker, observation_id=member_id)
     candidates = CandidateStore(store)
-    for status in ("awaiting_verification", "approved_for_canary", "canary", "rolled_back"):
+    path = statuses or (
+        "awaiting_verification",
+        "approved_for_canary",
+        "canary",
+        "rolled_back",
+    )
+    for status in path:
         candidates.advance_candidate(candidate_id, status, actor_id="test", note="seed")
     store.decide_cluster(
         cluster_id,
@@ -1691,6 +1824,48 @@ def test_regenerate_allows_when_other_candidate_is_stable(
     assert seen["calls"] == 1
     store.close()
 
+
+
+@pytest.mark.parametrize(
+    "final_status,path",
+    [
+        ("rejected", ("awaiting_verification", "rejected")),
+        ("needs_more_evidence", ("awaiting_verification", "needs_more_evidence")),
+    ],
+)
+def test_regenerate_after_a_rejection_creates_a_new_candidate(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch, final_status, path
+):
+    """C-08：被驳回/要求补证据也是终态，同样需要一条"重新生成"的路。
+
+    上一次驳回只是**结案**，不是"这个失败以后不许再处理"；入口仍然是同一聚类 + 同一观测的
+    一条新候选，旧行原样留在终态（审计可追）。
+    """
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(settings_path())
+    cluster_id = store_with_cluster["cluster_id"]
+    member_id = store_with_cluster["member_id"]
+    closed_id = _rolled_back_patch(store, cluster_id, member_id, statuses=path)
+    seen = _fake_patch_generator(monkeypatch)
+
+    response = _regenerate(
+        evolution_client, admin_headers, closed_id, note=f"{final_status} 后重新生成"
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] != closed_id
+    assert body["status"] == "candidate_testing"
+    assert body["observation_id"] == member_id
+    assert seen["calls"] == 1
+
+    candidates = CandidateStore(store)
+    assert candidates.get_candidate(closed_id)["status"] == final_status
+    audit = candidates.list_audit(body["id"])
+    assert "重新生成" in audit[-1]["note"]
+    assert final_status in audit[-1]["note"]
+    store.close()
 
 
 def test_regenerate_refuses_a_candidate_that_was_not_rolled_back(

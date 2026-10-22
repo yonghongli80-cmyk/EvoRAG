@@ -28,12 +28,15 @@ is the whole mechanism:
   that trail and reconciles the in-memory state with it, so a restarted API
   process resumes (or drops) exactly what the administrator persisted. No new
   column, no ``gate_log`` pollution — a percentage is not a gate result — and
-  rollback depends on the stored trail alone.
+  rollback depends on the stored trail alone. The configured ceiling
+  (``evolution_candidate_canary_percent``) is applied during that replay, so the
+  kill switch reaches a canary that was already live.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
 from collections.abc import Iterator, Mapping
@@ -41,6 +44,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
+from config import settings
 from rag.evolution.models import EvolutionStatus
 from rag.jev.questions import (
     PASSAGE_QUESTION_SET_VERSION,
@@ -51,6 +55,8 @@ from rag.jev.questions import (
     register_candidate_question_set,
     unregister_candidate_question_set,
 )
+
+logger = logging.getLogger(__name__)
 
 # The audit note carries the percentage in a machine-readable form so
 # ``restore`` can rebuild live state from the trail alone.
@@ -85,6 +91,18 @@ def percent_note(percent: int) -> str:
 def _percent_from_note(note: str) -> int | None:
     match = _PERCENT_NOTE.search(note)
     return None if match is None else int(match.group(1))
+
+
+def canary_ceiling() -> int:
+    """The configured hard cap on a canary share: ``0`` means canary is off.
+
+    This is a kill switch, not a default: it is read at the moment live state is rebuilt, so a
+    deployment that lowers ``evolution_candidate_canary_percent`` (to zero during an incident)
+    stops serving the persisted share on the next reconcile instead of on the next administrator
+    action. The value is clamped to ``0..100`` here so a hand-edited environment cannot make the
+    comparison meaningless.
+    """
+    return max(0, min(100, int(getattr(settings, "evolution_candidate_canary_percent", 0) or 0)))
 
 
 def bucket(request_key: str) -> int:
@@ -272,18 +290,37 @@ class CandidateRollout:
         re-registered at the percentage its audit trail records; everything
         else in memory is dropped. A process that restarted while a canary was
         live therefore resumes it, and one whose trail was rolled back drops
-        it. No audit row is written — this only rebuilds memory and the data
-        registrations the provider serves from.
+        it. No audit row is written for the ordinary reconciliations — this only
+        rebuilds memory and the data registrations the provider serves from.
+
+        **The configured ceiling is applied here, and only here** (C-06, 2026-10-22): the canary
+        endpoint already refuses a share above ``evolution_candidate_canary_percent``, but the
+        reconstruction from the trail did not, so lowering the cap — including to zero, its
+        incident setting — had no effect on a live canary until the next administrator action. The
+        trail is authoritative about *what an administrator asked for*; this cap is authoritative
+        about *what may serve*, so the live share becomes ``min(persisted, ceiling)``:
+
+        * ``ceiling <= 0`` serves **nothing** and writes no audit row — a zero cap is a
+          configuration state, and rewriting the trail with ``canary_percent=0`` would erase the
+          administrator's recorded intent (raising the cap again would then serve nothing);
+        * a non-zero cap below the persisted share registers the capped share and appends one
+          ``canary`` audit row recording the clamp, so the trail says what is actually served and
+          the correction is durable (a later ``restore`` reads the capped value).
+
+        Every clamp is logged, so a kill switch taking effect is visible in the service log rather
+        than only in the reduced traffic.
         """
+        ceiling = canary_ceiling()
         recovered: dict[int, _Rollout] = {}
         for status in _SERVING_STATUSES:
             for row in store.list_candidates(status=status, limit=_RESTORE_SCAN_LIMIT):
-                percent = self._persisted_percent(store, int(row["id"]))
+                persisted = self._persisted_percent(store, int(row["id"]))
+                percent = self._capped(store, int(row["id"]), persisted, ceiling)
                 payload = row.get("payload")
                 rollback_ref = row.get("rollback_ref")
                 if percent <= 0 or not isinstance(payload, Mapping) or not isinstance(rollback_ref, Mapping):
-                    # A row that cannot be served (a hand-edited payload or a
-                    # rolled-back trail) simply stays off the live path.
+                    # A row that cannot be served (a hand-edited payload, a rolled-back trail, or a
+                    # share the configured ceiling does not allow) simply stays off the live path.
                     continue
                 candidate_id = int(row["id"])
                 base_version = str(rollback_ref.get("question_set_version") or "")
@@ -311,6 +348,41 @@ class CandidateRollout:
                     build_with_overlay(target, payload, chunk_ids)
                 ),
             )
+
+    @staticmethod
+    def _capped(store, candidate_id: int, persisted: int, ceiling: int) -> int:
+        """``persisted`` clamped to ``ceiling``, with a log line and (when it reduces) an audit row.
+
+        Both are evidence that the kill switch fired: a service log alone disappears on rotation,
+        and a silent reduction would look like a canary nobody promoted. The audit action stays
+        ``canary`` because the red line is "an administrator action", not "a config reload"; the
+        note says explicitly that the value came from the cap.
+        """
+        if persisted <= ceiling:
+            return max(0, persisted)
+        capped = max(0, ceiling)
+        logger.warning(
+            "canary rollout capped by configuration candidate=%s persisted=%s ceiling=%s served=%s",
+            candidate_id,
+            persisted,
+            ceiling,
+            capped,
+        )
+        if capped > 0:
+            # Zero is a configuration state, not a rollout decision: writing canary_percent=0 into
+            # the trail would destroy the recorded 30%/60% an administrator chose.
+            try:
+                store.add_audit(
+                    "rollout",
+                    "canary",
+                    int(candidate_id),
+                    f"启动恢复：按配置上限收敛灰度 {persisted}% → {capped}%"
+                    f"（evolution_candidate_canary_percent={ceiling}）"
+                    f"｜{PERCENT_NOTE_KEY}={capped}",
+                )
+            except Exception:  # noqa: BLE001 - a trail write must never stop the reconcile
+                logger.exception("canary rollout cap could not be audited candidate=%s", candidate_id)
+        return capped
 
     @staticmethod
     def _persisted_percent(store, candidate_id: int) -> int:
@@ -345,6 +417,7 @@ __all__ = [
     "PERCENT_NOTE_KEY",
     "RolloutSnapshot",
     "bucket",
+    "canary_ceiling",
     "candidate_question_set_version",
     "percent_note",
     "rollout",

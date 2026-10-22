@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import time
+import types
 from pathlib import Path
 
+from rag.evolution import service_control as control
 from rag.evolution.service_control import (
     HELPER_SOURCE,
+    acquire_apply_lease,
+    apply_lock_path,
     apply_patch,
     import_smoke,
     patch_state,
     revert_patch,
     run_full_suite,
+    spawn_restart_helper,
 )
 
 
@@ -112,3 +119,74 @@ def test_the_helper_source_compiles(tmp_path):
     compile(HELPER_SOURCE, "restart-helper", "exec")
     assert "stop_service" in HELPER_SOURCE  # 不会停服务就不是"重启"
     assert "full_suite_passes" in HELPER_SOURCE
+
+
+# ------------------------------------------------------------------
+# C-11 (2026-10-22): the apply lease, and the helper inheriting it.
+# ------------------------------------------------------------------
+
+
+def test_acquire_apply_lease_waits_for_the_holder_then_gives_up(tmp_path):
+    """助手必须**等**请求释放租约（请求在响应返回前一直持有），等不到就什么都不做。"""
+    from rag.evolution.host_lock import host_measurement_lock
+
+    lock_path = tmp_path / "apply.lock"
+
+    with host_measurement_lock(lock_path):
+        started = time.monotonic()
+        lease = acquire_apply_lease(lock_path, wait_seconds=0.2, poll_seconds=0.05)
+        elapsed = time.monotonic() - started
+        assert lease is None
+        assert elapsed >= 0.15, "它应当等满窗口，而不是立刻放弃"
+
+    lease = acquire_apply_lease(lock_path, wait_seconds=0.5, poll_seconds=0.05)
+    assert lease is not None
+    try:
+        # 已持有时再取一次＝重入：拒绝（与 API 那边同一个语义），不嵌套。
+        assert acquire_apply_lease(lock_path, wait_seconds=0.0) is None
+    finally:
+        lease.release()
+
+    assert not lock_path.exists()
+    reacquired = acquire_apply_lease(lock_path, wait_seconds=0.0)
+    assert reacquired is not None
+    reacquired.release()
+
+
+def test_the_helper_source_inherits_the_apply_lease():
+    """租约是**继承**的：助手在自己的进程里取同一个锁文件，而不是另起一套。"""
+    compile(HELPER_SOURCE, "restart-helper", "exec")
+    assert "acquire_apply_lease" in HELPER_SOURCE
+    assert 'COMMAND["lock"]' in HELPER_SOURCE
+    assert "not restarting" in HELPER_SOURCE  # 等不到就不重启
+
+
+def test_spawn_restart_helper_hands_the_lease_to_the_helper(tmp_path, monkeypatch):
+    """命令里必须带锁文件与等待窗口，助手才知道该继承哪一个租约。"""
+    captured: dict = {}
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = list(argv)
+            captured["command"] = json.loads(argv[-1])
+
+    monkeypatch.setattr(
+        control,
+        "subprocess",
+        types.SimpleNamespace(
+            Popen=FakePopen,
+            DEVNULL=subprocess.DEVNULL,
+            DETACHED_PROCESS=0,
+            CREATE_NEW_PROCESS_GROUP=0,
+        ),
+    )
+
+    helper = spawn_restart_helper(
+        repo_root=tmp_path, patch_file=tmp_path / "candidate.patch", candidate_id=7
+    )
+
+    command = captured["command"]
+    assert helper.is_file()
+    assert command["lock"] == str(apply_lock_path(tmp_path))
+    assert command["lock_wait"] > 0
+    assert command["candidate_id"] == 7

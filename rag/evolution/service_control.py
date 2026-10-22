@@ -48,6 +48,70 @@ def service_log_path(repo_root: str | Path) -> Path:
     directory = Path(override) if override else Path(repo_root) / "artifacts"
     return directory / LOG_NAME
 
+
+#: The apply/rollback lease (C-11, 2026-10-22). One file next to the operational log, created with
+#: the same atomic ``O_CREAT | O_EXCL`` protocol as the host A/B lock (:mod:`rag.evolution.host_lock`).
+LOCK_NAME = "evolution-apply.lock"
+
+#: How long the detached restart helper waits for the request that spawned it to release the lease.
+#: The request holds it until its response is built, so a few seconds is the normal case; the wait
+#: exists because the helper runs *after* the response, never during it.
+HELPER_LOCK_WAIT_S = 60.0
+
+
+def apply_lock_path(repo_root: str | Path) -> Path:
+    """Where apply/rollback take their exclusive lease.
+
+    **Why a separate file instead of the host A/B lock:** the two protect different things and can
+    be legitimately concurrent (a host A/B measurement must not block an administrator's apply). The
+    location follows :func:`service_log_path`, so the existing ``RAG_EVOLUTION_SERVICE_LOG_DIR``
+    override (and the suite's fixture) moves the lease with the log and never touches the operator's
+    ``artifacts/`` directory.
+    """
+    return service_log_path(repo_root).parent / LOCK_NAME
+
+
+class _HeldLease:
+    """A lease acquired by hand (the helper is not inside a ``with`` statement)."""
+
+    def __init__(self, manager) -> None:
+        self._manager = manager
+
+    def release(self) -> None:
+        self._manager.__exit__(None, None, None)
+
+
+def acquire_apply_lease(
+    lock_path: str | Path,
+    *,
+    wait_seconds: float = HELPER_LOCK_WAIT_S,
+    poll_seconds: float = 0.5,
+    sleep=time.sleep,
+) -> _HeldLease | None:
+    """Take the apply lease, waiting up to ``wait_seconds``; ``None`` when it never freed.
+
+    The detached restart helper needs exactly this: the API request that spawned it is still
+    holding the lease (it holds it through the spawn, so two applies cannot interleave), and the
+    helper must take over **the same** lease before it starts stopping/starting the process. Waiting
+    is bounded — a helper that never gets the lease must not restart a service it does not own.
+
+    Re-entrancy has the same meaning as everywhere else: a process that already holds the lease gets
+    ``None`` rather than a second nested hold.
+    """
+    from rag.evolution.host_lock import HostLocked, host_measurement_lock
+
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    while True:
+        manager = host_measurement_lock(lock_path)
+        try:
+            manager.__enter__()
+        except HostLocked:
+            if time.monotonic() >= deadline:
+                return None
+            sleep(max(0.01, float(poll_seconds)))
+            continue
+        return _HeldLease(manager)
+
 #: Bounds: applying and importing are fast; the target tests may not be.
 GIT_TIMEOUT_S = 60.0
 SMOKE_TIMEOUT_S = 120.0
@@ -263,6 +327,10 @@ import urllib.request
 from pathlib import Path
 
 COMMAND = json.loads(sys.argv[1])
+# 助手是**同一份仓库**里的进程：把仓库根放进 sys.path，才能复用那套已经测过的租约实现
+# （apply/rollback 与重启必须串行在同一个锁上，见 acquire_apply_lease）。
+sys.path.insert(0, COMMAND["root"])
+from rag.evolution.service_control import acquire_apply_lease  # noqa: E402
 
 
 def log(message):
@@ -361,6 +429,21 @@ def full_suite_passes():
 
 def main():
     log(f"restart helper started for candidate {COMMAND['candidate_id']}")
+    # 继承应用请求的租约（C-11）：请求在返回响应之前一直持有它，所以这里要等，
+    # 而不是放弃；等不到就**什么都不做** —— 不属于自己的重启比不重启更危险。
+    lease = acquire_apply_lease(
+        COMMAND["lock"], wait_seconds=float(COMMAND.get("lock_wait") or 60)
+    )
+    if lease is None:
+        log("another apply/rollback still holds the lease; not restarting")
+        return
+    try:
+        run()
+    finally:
+        lease.release()
+
+
+def run():
     if COMMAND.get("test_scope") == "full" and not full_suite_passes():
         log("full suite failed; undoing this run's change and NOT restarting")
         undo()
@@ -421,8 +504,16 @@ def spawn_restart_helper(
     service_pid: int | None = None,
     grace_s: int = 3,
     direction: str = "apply",
+    lock_wait_s: float = HELPER_LOCK_WAIT_S,
 ) -> Path:
-    """Write the helper to disk and start it detached; returns the helper's path."""
+    """Write the helper to disk and start it detached; returns the helper's path.
+
+    The helper **inherits the apply lease** (C-11, 2026-10-22): the command carries the same lock
+    file the request held, and the helper takes it before doing anything. A restart is part of the
+    same operation, so a second apply must not start while this one's helper is still swapping the
+    process — and the request that spawned it only releases the lease when it returns, which is why
+    the helper waits (bounded by ``lock_wait_s``) instead of failing fast.
+    """
     root = Path(repo_root)
     helper = root / "artifacts" / f"restart-candidate-{int(candidate_id)}.py"
     helper.parent.mkdir(parents=True, exist_ok=True)
@@ -443,6 +534,9 @@ def spawn_restart_helper(
         "direction": "revert" if str(direction) == "revert" else "apply",
         "grace": int(grace_s),
         "log": str(service_log_path(root)),
+        # 继承应用请求的租约（C-11）：同一个文件，助手开工前先取到它。
+        "lock": str(apply_lock_path(root)),
+        "lock_wait": float(lock_wait_s),
     }
     flags = 0
     if os.name == "nt":  # pragma: no cover - platform specific
@@ -463,8 +557,12 @@ def spawn_restart_helper(
 
 
 __all__ = [
+    "HELPER_LOCK_WAIT_S",
+    "LOCK_NAME",
     "LOG_NAME",
     "LOG_DIR_ENV",
+    "acquire_apply_lease",
+    "apply_lock_path",
     "apply_patch",
     "import_smoke",
     "log_line",

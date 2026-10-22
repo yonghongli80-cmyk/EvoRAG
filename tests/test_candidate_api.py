@@ -183,7 +183,13 @@ def _approved_cluster(store: FailureTraceStore, key: str) -> tuple[int, int]:
 
 
 def _add_candidate(store: FailureTraceStore, *, status: str | None = None, key: str) -> int:
-    """Persist one candidate, optionally advanced past ``candidate_testing``."""
+    """Persist one candidate, optionally advanced past ``candidate_testing``.
+
+    A candidate that has left ``candidate_testing`` carries the two measurements layer 4 requires
+    (C-05): a passed layer-2 benchmark entry — written by the move itself — and a layer-3 shadow
+    entry recorded as evidence. The canary endpoint reads those entries, so a fixture without them
+    would be describing a candidate the endpoint must now refuse.
+    """
     cluster_id, member_id = _approved_cluster(store, key)
     candidates = CandidateStore(store)
     candidate_id = candidates.add_candidate(
@@ -194,6 +200,15 @@ def _add_candidate(store: FailureTraceStore, *, status: str | None = None, key: 
         candidates.advance_candidate(
             candidate_id, status, actor_id="gate-2", note="层 2/3 通过",
             gate="benchmark", gate_detail="路线准确率不降",
+        )
+        candidates.record_gate_entry(
+            candidate_id,
+            actor_id="gate-3",
+            note="层 3 影子对比样本",
+            gate="shadow",
+            result="passed",
+            gate_detail="影子对比 24 次，路由一致率 1.0",
+            gate_metrics={"samples": 24},
         )
     return candidate_id
 
@@ -351,10 +366,11 @@ def test_candidate_detail_reports_the_gate_trail_and_the_audit(
         f"{CANDIDATES_URL}/{candidate_ready}", headers=admin_headers
     ).json()
 
-    assert [entry["gate"] for entry in detail["gate_log"]] == ["scope", "benchmark"]
+    assert [entry["gate"] for entry in detail["gate_log"]] == ["scope", "benchmark", "shadow"]
     assert detail["gate_log"][1]["result"] == "passed"
     assert detail["gate_log"][1]["detail"] == "路线准确率不降"
-    assert [row["action"] for row in detail["audit"]] == ["generate", "advance"]
+    assert detail["gate_log"][2]["metrics"] == {"samples": 24}
+    assert [row["action"] for row in detail["audit"]] == ["generate", "advance", "advance"]
     assert detail["audit"][0]["actor_id"] == "test-model"
     assert detail["rollback_ref"]["question_set_version"] == PREFLIGHT_QUESTION_SET_VERSION
     summary = detail["payload_summary"]
@@ -404,11 +420,14 @@ def test_canary_registers_the_question_set_and_advances_the_candidate(
     assert rollout.percent_for(candidate_ready) == 30
 
     audit = _candidate_audit(candidate_ready)
-    assert [row["action"] for row in audit] == ["generate", "advance", "advance", "canary"]
+    assert [row["action"] for row in audit] == [
+        "generate", "advance", "advance", "advance", "canary",
+    ]
     assert audit[-1]["actor_id"] == _admin_id(evolution_client)
     assert "canary_percent=30" in audit[-1]["note"]
+    # 层 2（benchmark）与层 3（shadow）的结论都在轨迹里；canary 是这两条之后的动作。
     assert [entry["gate"] for entry in _candidate_gate_log(candidate_ready)] == [
-        "scope", "benchmark", "canary",
+        "scope", "benchmark", "shadow", "canary",
     ]
     assert _candidate_gate_log(candidate_ready)[-1]["detail"] == "percent=30"
 
@@ -422,7 +441,9 @@ def test_canary_rejects_a_percent_outside_the_unit_range(
     assert _candidate_status(candidate_ready) == "awaiting_verification"
     assert rollout.percent_for(candidate_ready) == 0
     assert set(question_set_registry()["preflight"]) == {PREFLIGHT_QUESTION_SET_VERSION}
-    assert [row["action"] for row in _candidate_audit(candidate_ready)] == ["generate", "advance"]
+    assert [row["action"] for row in _candidate_audit(candidate_ready)] == [
+        "generate", "advance", "advance",
+    ]
 
 
 def test_canary_refuses_a_percent_above_the_configured_ceiling(
@@ -476,13 +497,249 @@ def test_canary_twice_only_updates_the_percentage(
     assert second.json()["canary_percent"] == 60
     assert rollout.percent_for(candidate_ready) == 60
     assert [row["action"] for row in _candidate_audit(candidate_ready)] == [
-        "generate", "advance", "advance", "canary", "canary",
+        "generate", "advance", "advance", "advance", "canary", "canary",
     ]
     assert "canary_percent=60" in _candidate_audit(candidate_ready)[-1]["note"]
     # A percentage change is not a gate layer: the trail keeps exactly one canary entry.
     assert [entry["gate"] for entry in _candidate_gate_log(candidate_ready)] == [
-        "scope", "benchmark", "canary",
+        "scope", "benchmark", "shadow", "canary",
     ]
+
+
+# ------------------------------------------------------------------
+# C-05 (2026-10-22): the canary endpoint reads evidence, not just status.
+# ------------------------------------------------------------------
+
+
+def _code_patch_row(store: FailureTraceStore, key: str) -> int:
+    """One stored code-patch candidate, advanced past testing (a row of the other artifact type)."""
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    cluster_id, member_id = _approved_cluster(store, key)
+    candidates = CandidateStore(store)
+    candidate_id = candidates.add_candidate(
+        member_id,
+        cluster_id,
+        CodePatchCandidate(
+            artifact_type="code_patch",
+            layer="reranking",
+            paths=("rag/reranker.py",),
+            diff="--- a/rag/reranker.py\n+++ b/rag/reranker.py\n@@ -1 +1,2 @@\n x = 1\n+# probe\n",
+            test_paths=("tests/test_reranker.py",),
+            rationale="同表另一制品",
+            expected_effect="无行为变化",
+            rollback_ref={"base_commit": "0" * 40},
+            confidence="low",
+        ),
+    )
+    candidates.advance_candidate(
+        candidate_id,
+        EvolutionStatus.AWAITING_VERIFICATION.value,
+        actor_id="gate",
+        note="sandbox passed",
+        gate="sandbox",
+        gate_detail="tests passed",
+    )
+    return candidate_id
+
+
+def test_canary_asserts_the_artifact_type_first(evolution_client, admin_headers):
+    """The table serves two artifact types; the question-set canary must refuse the other one.
+
+    A code patch has no percentage canary (there is no second instance to serve a share of
+    traffic), so posting one here would register a ``target``/``payload`` pair that is NULL for
+    that row — the exact shape the split exists to keep apart.
+    """
+    store = _store()
+    try:
+        patch_id = _code_patch_row(store, "code-patch-row")
+    finally:
+        store.close()
+
+    response = _canary(evolution_client, patch_id, 10, admin_headers)
+
+    assert response.status_code == 404
+    assert _candidate_status(patch_id) == "awaiting_verification"
+    assert rollout.percent_for(patch_id) == 0
+    assert set(question_set_registry()["preflight"]) == {PREFLIGHT_QUESTION_SET_VERSION}
+
+
+def test_canary_refuses_a_candidate_whose_layer_two_never_passed(evolution_client, admin_headers):
+    """``awaiting_verification`` is a claim; the benchmark entry is the evidence behind it."""
+    store = _store()
+    try:
+        cluster_id, member_id = _approved_cluster(store, "no-benchmark")
+        candidates = CandidateStore(store)
+        candidate_id = candidates.add_candidate(member_id, cluster_id, sample_candidate())
+        # 层 3 有样本，但层 2 没有结论：状态到了，证据没到。
+        candidates.advance_candidate(
+            candidate_id,
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            actor_id="gate",
+            note="advanced without a benchmark conclusion",
+        )
+        candidates.record_gate_entry(
+            candidate_id,
+            actor_id="gate-3",
+            note="shadow sampled",
+            gate="shadow",
+            result="passed",
+            gate_detail="24 comparisons",
+            gate_metrics={"samples": 24},
+        )
+    finally:
+        store.close()
+
+    response = _canary(evolution_client, candidate_id, 10, admin_headers)
+
+    assert response.status_code == 409
+    assert "层 2" in response.json()["detail"]
+    assert _candidate_status(candidate_id) == "awaiting_verification"
+    assert rollout.percent_for(candidate_id) == 0
+    assert [row["action"] for row in _candidate_audit(candidate_id)].count("canary") == 0
+
+
+def test_canary_refuses_a_candidate_with_no_shadow_samples(evolution_client, admin_headers):
+    """No layer-3 comparison means the canary would be the first measurement, on live traffic."""
+    store = _store()
+    try:
+        cluster_id, member_id = _approved_cluster(store, "no-shadow")
+        candidates = CandidateStore(store)
+        candidate_id = candidates.add_candidate(member_id, cluster_id, sample_candidate())
+        candidates.advance_candidate(
+            candidate_id,
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            actor_id="gate",
+            note="benchmark passed",
+            gate="benchmark",
+            gate_detail="route delta +0.0pp",
+        )
+    finally:
+        store.close()
+
+    response = _canary(evolution_client, candidate_id, 10, admin_headers)
+
+    assert response.status_code == 409
+    assert "层 3" in response.json()["detail"]
+    assert "0 次" in response.json()["detail"]
+    assert _candidate_status(candidate_id) == "awaiting_verification"
+    assert rollout.percent_for(candidate_id) == 0
+
+
+def test_canary_refuses_a_shadow_entry_that_sampled_nothing(evolution_client, admin_headers):
+    """An entry claiming ``samples=0`` is the same absence as no entry at all."""
+    store = _store()
+    try:
+        cluster_id, member_id = _approved_cluster(store, "zero-shadow")
+        candidates = CandidateStore(store)
+        candidate_id = candidates.add_candidate(member_id, cluster_id, sample_candidate())
+        candidates.advance_candidate(
+            candidate_id,
+            EvolutionStatus.AWAITING_VERIFICATION.value,
+            actor_id="gate",
+            note="benchmark passed",
+            gate="benchmark",
+            gate_detail="route delta +0.0pp",
+        )
+        candidates.record_gate_entry(
+            candidate_id,
+            actor_id="gate-3",
+            note="shadow ran but sampled nothing",
+            gate="shadow",
+            result="passed",
+            gate_detail="0 comparisons",
+            gate_metrics={"samples": 0},
+        )
+    finally:
+        store.close()
+
+    assert _canary(evolution_client, candidate_id, 10, admin_headers).status_code == 409
+    assert rollout.percent_for(candidate_id) == 0
+
+
+def test_a_canary_write_failure_leaves_no_live_registration(
+    evolution_client, admin_headers, candidate_ready, monkeypatch
+):
+    """The live registration happens before the status write, so a refused write leaves no canary.
+
+    The old order wrote the status first and registered last: a failure between the two left a
+    candidate recorded as "in canary" that served nothing, and nothing could tell the difference
+    from a healthy one. Now the registration is compensated when the write is refused.
+    """
+
+    def refuse(self, *args, **kwargs):
+        raise ValueError("store refused the move")
+
+    monkeypatch.setattr(CandidateStore, "advance_candidate", refuse)
+
+    response = _canary(evolution_client, candidate_ready, 30, admin_headers)
+
+    assert response.status_code == 409
+    assert "非法状态转移" in response.json()["detail"]
+    assert rollout.percent_for(candidate_ready) == 0
+    assert set(question_set_registry()["preflight"]) == {PREFLIGHT_QUESTION_SET_VERSION}
+
+
+# ------------------------------------------------------------------
+# C-06 (2026-10-22): the configured ceiling is a kill switch, not a hint.
+# ------------------------------------------------------------------
+
+
+def test_restore_caps_a_persisted_canary_at_the_configured_ceiling(
+    evolution_client, admin_headers, candidate_ready, monkeypatch
+):
+    """Lowering ``evolution_candidate_canary_percent`` reaches a canary that is already live.
+
+    The endpoint already refused a share above the cap, but the reconstruction from the audit
+    trail did not, so a lowered cap changed nothing until the next administrator action. The cap
+    now applies on every reconcile — and the correction is written to the trail, so it is durable
+    and visible rather than a silent traffic reduction.
+    """
+    assert _canary(evolution_client, candidate_ready, 60, admin_headers).status_code == 200
+    rollout.deactivate(candidate_ready)  # a fresh process holds no live state
+    monkeypatch.setattr(settings, "evolution_candidate_canary_percent", 20)
+
+    store = _store()
+    try:
+        rollout.restore(CandidateStore(store))
+        assert rollout.percent_for(candidate_ready) == 20
+        version = candidate_question_set_version(PREFLIGHT_QUESTION_SET_VERSION, candidate_ready)
+        assert version in question_set_registry()["preflight"]
+        audit = _candidate_audit(candidate_ready)
+        assert audit[-1]["action"] == "canary"
+        assert "canary_percent=20" in audit[-1]["note"]
+        assert "上限" in audit[-1]["note"]
+        assert "60" in audit[-1]["note"]
+
+        # Idempotent: the second reconcile reads the capped value and writes nothing more.
+        recorded = len(audit)
+        rollout.restore(CandidateStore(store))
+        assert rollout.percent_for(candidate_ready) == 20
+        assert len(_candidate_audit(candidate_ready)) == recorded
+    finally:
+        store.close()
+
+
+def test_a_zero_ceiling_stops_serving_without_rewriting_the_trail(
+    evolution_client, admin_headers, candidate_ready, monkeypatch
+):
+    """Ceiling zero is the incident setting: serve nothing, and keep what the admin asked for.
+
+    Writing ``canary_percent=0`` into the trail would make the clamp permanent — raising the cap
+    again would then restore nothing. The zero cap is a configuration state, so it is logged and
+    applied to the live share only.
+    """
+    assert _canary(evolution_client, candidate_ready, 30, admin_headers).status_code == 200
+    rollout.deactivate(candidate_ready)
+    monkeypatch.setattr(settings, "evolution_candidate_canary_percent", 0)
+    before = len(_candidate_audit(candidate_ready))
+
+    page = evolution_client.get(CANDIDATES_URL, headers=admin_headers).json()  # reconcile via the API
+
+    assert page["items"][0]["canary_percent"] == 0
+    assert rollout.percent_for(candidate_ready) == 0
+    assert set(question_set_registry()["preflight"]) == {PREFLIGHT_QUESTION_SET_VERSION}
+    assert len(_candidate_audit(candidate_ready)) == before, "the zero cap must not rewrite the trail"
 
 
 # ------------------------------------------------------------------

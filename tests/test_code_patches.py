@@ -257,27 +257,28 @@ def test_three_hundred_changed_lines_are_within_the_quota():
 
 
 @pytest.mark.parametrize(
-    "layer,path",
+    "layer,path,test_paths",
     [
-        ("chunking", "rag/chunker.py"),
-        ("chunking", "rag/chunking/splitter.py"),
-        ("reranking", "rag/reranker.py"),
-        ("reranking", "rag/rrf_fusion.py"),
-        ("reranking", "rag/fusion/weights.py"),
-        ("parser", "rag/document_sources/base.py"),
-        ("parser", "rag/parsers/pdf.py"),
-        ("parser", "rag/extractor.py"),
-        ("tool_workflow", "rag/agent.py"),
-        ("tool_workflow", "rag/tools/registry.py"),
-        ("tool_workflow", "rag/spreadsheets/audit.py"),
-        ("tool_workflow", "rag/coordinator_loop.py"),
-        ("tool_workflow", "rag/structured_query_planner.py"),
-        ("code", "rag/retriever.py"),
-        ("code", "rag/deep/nested/module.py"),
+        ("chunking", "rag/chunker.py", (EXISTING_TEST,)),
+        ("chunking", "rag/chunking/splitter.py", (EXISTING_TEST,)),
+        ("reranking", "rag/reranker.py", (EXISTING_TEST,)),
+        ("reranking", "rag/rrf_fusion.py", (EXISTING_TEST,)),
+        ("reranking", "rag/fusion/weights.py", (EXISTING_TEST,)),
+        ("parser", "rag/document_sources/base.py", (EXISTING_TEST,)),
+        ("parser", "rag/parsers/pdf.py", (EXISTING_TEST,)),
+        ("parser", "rag/extractor.py", (EXISTING_TEST,)),
+        ("tool_workflow", "rag/agent.py", (EXISTING_TEST,)),
+        ("tool_workflow", "rag/tools/registry.py", (EXISTING_TEST,)),
+        ("tool_workflow", "rag/spreadsheets/audit.py", (EXISTING_TEST,)),
+        ("tool_workflow", "rag/coordinator_loop.py", (EXISTING_TEST,)),
+        ("tool_workflow", "rag/structured_query_planner.py", (EXISTING_TEST,)),
+        # C-10：retriever 承载 ACL 调用点，改它必须点名一条权限用例（否则层 1 拒绝）。
+        ("code", "rag/retriever.py", ("tests/test_retriever.py", "tests/test_permissions.py")),
+        ("code", "rag/deep/nested/module.py", (EXISTING_TEST,)),
     ],
 )
-def test_layer_whitelist_admits_its_own_paths(layer, path):
-    candidate = patch_candidate(layer=layer, paths=(path,), diff=diff_for(path))
+def test_layer_whitelist_admits_its_own_paths(layer, path, test_paths):
+    candidate = patch_candidate(layer=layer, paths=(path,), diff=diff_for(path), test_paths=test_paths)
     assert validate_patch(candidate, repo_root=REPO_ROOT) is None
 
 
@@ -585,3 +586,70 @@ def test_validate_payload_serves_question_sets_only():
     assert not isinstance(error, PayloadBoundaryError)
     assert "code_patch" in str(error)
     assert "validate_patch" in str(error)
+
+
+# ------------------------------------------------------------------
+# C-10 (2026-10-22): the ACL/audit call sites are a path-level red line.
+# ------------------------------------------------------------------
+
+
+def test_the_acl_requirement_is_derived_from_the_changed_files():
+    """派生规则本身：命中哪个调用点文件，就要求它对应的权限用例；别的层不受影响。"""
+    from rag.evolution.code_patches import acl_call_site_paths, required_acl_test_paths
+
+    assert required_acl_test_paths(("rag/reranker.py", "rag/chunker.py")) == ()
+    assert acl_call_site_paths(("rag/reranker.py", "rag/pipeline.py")) == ("rag/pipeline.py",)
+
+    pipeline = required_acl_test_paths(("rag/pipeline.py",))
+    assert "tests/test_permissions.py" in pipeline
+    assert "tests/test_api_security.py" in pipeline
+
+    guard = required_acl_test_paths(("rag/guard.py",))
+    assert guard == ("tests/test_permissions.py",)
+
+    retriever = required_acl_test_paths(("rag/retriever.py",))
+    assert retriever == ("tests/test_permissions.py",)
+
+
+def test_a_patch_touching_an_acl_call_site_must_name_a_permission_test():
+    """pipeline 承载 ACL 过滤：改它却不点名权限用例 ⇒ 层 1 拒绝（不是警告）。"""
+    reason = reject_reason(
+        patch_candidate(
+            layer="code",
+            paths=("rag/pipeline.py",),
+            diff=edit_file_diff("rag/pipeline.py"),
+            test_paths=("tests/test_pipeline.py",),
+        )
+    )
+
+    assert "ACL" in reason
+    assert "rag/pipeline.py" in reason
+    assert "tests/test_permissions.py" in reason
+    assert "tests/test_api_security.py" in reason
+
+
+def test_an_acl_patch_that_names_the_permission_test_is_accepted():
+    """要求是"点名权限用例"，不是"不许改 pipeline"：带了权限用例的补丁照常放行。"""
+    candidate = patch_candidate(
+        layer="code",
+        paths=("rag/pipeline.py",),
+        diff=edit_file_diff("rag/pipeline.py"),
+        test_paths=("tests/test_pipeline.py", "tests/test_api_security.py"),
+    )
+
+    assert validate_patch(candidate, repo_root=REPO_ROOT) is None
+
+
+def test_the_acl_check_runs_after_the_layer_boundary():
+    """层级先判：reranking 层点 pipeline 得到的是层级拒绝（不会被 ACL 规则顶掉）。"""
+    reason = reject_reason(
+        patch_candidate(
+            layer="reranking",
+            paths=("rag/pipeline.py",),
+            diff=new_file_diff("rag/pipeline.py"),
+            test_paths=(EXISTING_TEST,),
+        )
+    )
+
+    assert "outside the reranking layer" in reason
+    assert "forbidden" not in reason

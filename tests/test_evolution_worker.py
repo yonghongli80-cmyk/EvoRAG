@@ -3,10 +3,12 @@
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -375,6 +377,267 @@ def test_purge_can_be_disabled_with_purge_every_rounds_zero():
     assert store.purges == []
 
 
+# ── C-07 (2026-10-22): the round's deadline and cancellation reach the steps ──
+
+
+def test_the_worker_publishes_its_round_clock_to_the_steps():
+    """Every step can read the round's deadline and remaining time while it runs (C-07).
+
+    Before this, the deadline was only applied *after* the work: a step kept scheduling model calls
+    until it was done, and the budget was an accounting fact rather than a bound.
+    """
+    from rag.evolution.worker import current_round, round_expired, round_model_timeout
+
+    captured: dict = {}
+
+    def run_once():
+        captured["clock"] = current_round()
+        captured["expired"] = round_expired()
+        captured["timeout"] = round_model_timeout(600.0)
+        return {}
+
+    worker = EvolutionWorker(
+        run_once,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        budget=EvolutionBudget(max_run_seconds=120.0),
+    )
+
+    assert worker.run_once_when_idle() == "ok"
+
+    clock = captured["clock"]
+    assert clock is not None and clock.deadline is not None
+    assert captured["expired"] is False
+    assert 0 < captured["timeout"] <= 600.0
+    # 轮次之外没有预算可执行：一个直接调用的 step 保持旧行为（不因"上一轮过期"而停）。
+    assert current_round() is None
+    assert round_expired() is False
+
+
+def test_a_model_call_timeout_is_capped_by_the_time_the_round_has_left():
+    """A slow provider eats the round's budget instead of overrunning it."""
+    from rag.evolution.worker import (
+        _MIN_MODEL_TIMEOUT_S,
+        RoundClock,
+        round_model_timeout,
+    )
+
+    now = {"t": 100.0}
+    clock = RoundClock(
+        started=100.0, deadline=112.5, cancelled=threading.Event(), clock=lambda: now["t"]
+    )
+    token = worker_module._current_round.set(clock)
+    try:
+        assert round_model_timeout(600.0) == 12.5
+        now["t"] = 111.9
+        # 余量小于地板：给的是地板值（1 秒），不是一个几乎立刻超时的 0.6 秒。
+        assert round_model_timeout(600.0) == _MIN_MODEL_TIMEOUT_S
+        now["t"] = 200.0
+        assert round_model_timeout(600.0) == _MIN_MODEL_TIMEOUT_S
+    finally:
+        worker_module._current_round.reset(token)
+
+
+def test_a_stuck_step_is_interrupted_at_the_round_deadline():
+    """A step that loops cannot outlive the round's wall clock (C-07).
+
+    The loop is cooperative on purpose — Python cannot preempt a blocking call — but the deadline is
+    now *readable inside* the step, so a step that schedules work in a loop stops scheduling and the
+    round returns as ``budget_exhausted`` instead of running long and being noticed afterwards.
+    """
+    from rag.evolution.worker import round_expired
+
+    seen: dict = {"iterations": 0, "expired": False}
+
+    def run_once():
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            seen["iterations"] += 1
+            if round_expired():
+                seen["expired"] = True
+                return {"model_calls": 0}
+            time.sleep(0.01)
+        return {"model_calls": 0}
+
+    worker = EvolutionWorker(
+        run_once,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        budget=EvolutionBudget(max_run_seconds=0.2),
+    )
+    started = time.monotonic()
+    status = worker.run_once_when_idle()
+    elapsed = time.monotonic() - started
+
+    assert status == "budget_exhausted"
+    assert seen["expired"] is True
+    assert elapsed < 2.0, "the step was cut off by the deadline, not by its own loop"
+    assert worker.stats()["last_budget_reason"] == "max_run_seconds"
+
+
+def test_stop_cancels_the_round_in_flight():
+    """``stop()`` reaches a running step, so shutdown does not wait for the next batch."""
+    from rag.evolution.worker import round_expired
+
+    started = threading.Event()
+    observed: dict = {"cancelled": False, "finished": threading.Event()}
+
+    def run_once():
+        started.set()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if round_expired():
+                observed["cancelled"] = True
+                observed["finished"].set()
+                return {"model_calls": 0}
+            time.sleep(0.01)
+        observed["finished"].set()
+        return {"model_calls": 0}
+
+    worker = EvolutionWorker(
+        run_once,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        budget=EvolutionBudget(max_run_seconds=30.0),
+    )
+    worker.start()
+    assert started.wait(2.0)
+
+    worker.stop(timeout=5.0)
+
+    assert observed["finished"].is_set(), "the step observed the cancellation"
+    assert observed["cancelled"] is True
+    assert worker.is_alive is False
+    assert worker.stats()["cancelled"] >= 1
+
+
+def test_a_spent_round_deadline_skips_the_remaining_steps():
+    """Time spent in one step is not spent by the next one: they wait for the following round."""
+    store = FakeStore()
+    now = {"t": 0.0}
+    calls: list[str] = []
+
+    def diagnosis_step():
+        calls.append("diagnosis")
+        now["t"] = 50.0  # the step consumed the whole round budget
+        return {"diagnosed": 0, "diagnosis_failed": 0, "model_calls": 0, "diagnosis_config": {}}
+
+    def patch_step():
+        calls.append("patch")
+        return {"patches_created": 0, "patch_failed": 0, "patch_pending": 0, "patch_model_calls": 0}
+
+    def gap_step():
+        calls.append("gaps")
+        return {
+            "tickets_created": 0, "tickets_pending": 0, "ticket_questions_probed": 0,
+            "tickets_rechecked": 0, "tickets_updated": 0,
+        }
+
+    run_once = make_evolution_run_once(
+        FakeClusterer(),
+        store,
+        retention_days=90,
+        diagnosis_step=diagnosis_step,
+        patch_step=patch_step,
+        gap_ticket_step=gap_step,
+    )
+    worker = EvolutionWorker(
+        run_once,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        clock=lambda: now["t"],
+        budget=EvolutionBudget(max_run_seconds=10.0),
+    )
+
+    assert worker.run_once_when_idle() == "budget_exhausted"
+
+    assert calls == ["diagnosis"], "the remaining steps were not started with a spent clock"
+    assert worker.stats()["last_budget_reason"] == "max_run_seconds"
+
+
+def test_the_round_takes_a_cross_process_lease(tmp_path):
+    """A round refuses to start while another process holds the worker lease (C-07)."""
+    from rag.evolution.host_lock import host_measurement_lock
+
+    lock_path = tmp_path / "evolution-worker.lock"
+    ran: list[int] = []
+    worker = EvolutionWorker(
+        lambda: ran.append(1),
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        lock_path=lock_path,
+    )
+
+    with host_measurement_lock(lock_path):
+        assert worker.run_once_when_idle() == "busy"
+
+    assert ran == [], "a second worker must not measure while the lease is held"
+    assert worker.stats()["lease_busy"] == 1
+
+    assert worker.run_once_when_idle() == "ok"
+    assert ran == [1]
+    assert not lock_path.exists(), "the lease is released after the round"
+
+
+def test_two_workers_on_one_database_never_round_together(tmp_path):
+    """The concurrent case the lease exists for: the second worker waits, the first finishes."""
+    lock_path = tmp_path / "evolution-worker.lock"
+    started = threading.Event()
+    release = threading.Event()
+    first_runs: list[int] = []
+    second_runs: list[int] = []
+
+    def first_round():
+        first_runs.append(1)
+        started.set()
+        assert release.wait(5.0)
+        return {}
+
+    first = EvolutionWorker(
+        first_round,
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        lock_path=lock_path,
+    )
+    second = EvolutionWorker(
+        lambda: second_runs.append(1),
+        interval_seconds=0.01,
+        busy_provider=lambda: False,
+        lock_path=lock_path,
+    )
+    first.start()
+    try:
+        assert started.wait(2.0)
+        assert second.run_once_when_idle() == "busy"
+        assert second_runs == []
+        assert second.stats()["lease_busy"] == 1
+    finally:
+        release.set()
+        first.stop(timeout=5.0)
+
+    assert first_runs == [1]
+    # 第一轮结束、租约释放后，第二个 worker 可以开工。
+    assert second.run_once_when_idle() == "ok"
+    assert second_runs == [1]
+
+
+def test_build_evolution_worker_puts_the_lease_next_to_the_database(tmp_path):
+    """The built worker always takes the lease; it lives beside the database it guards."""
+    store = FakeStore()
+    clusterer = FakeClusterer()
+    db = tmp_path / "evolution.db"
+    worker = build_evolution_worker(
+        settings_obj=_fake_settings(evolution_db_path=str(db)),
+        store=store,
+        clusterer=clusterer,
+    )
+
+    assert worker is not None
+    assert worker.host_lease_path == tmp_path / "evolution-worker.lock"
+    assert worker.run_once_when_idle() == "ok"
+    assert clusterer.calls == [200]
+
+
 # ── settings wiring and module entry ──────────────────────────────────────────
 
 
@@ -382,7 +645,11 @@ def _fake_settings(**overrides):
     base = dict(
         evolution_enabled=True,
         evolution_worker_enabled=True,
-        evolution_db_path="unused.db",
+        # 一个临时目录而不是 "unused.db"：worker 的跨进程租约（C-07）放在库文件旁边，
+        # 落在仓库根目录会让测试在运行中往工作树里写锁文件。
+        evolution_db_path=str(
+            Path(tempfile.gettempdir()) / "rag-evolution-worker-tests" / "evolution.db"
+        ),
         evolution_cluster_threshold=3,
         evolution_cluster_window_days=30,
         evolution_observation_retention_days=90,

@@ -26,6 +26,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -77,6 +78,27 @@ FORBIDDEN_GLOBS: tuple[str, ...] = (
     ".github/**",
     "docs/superpowers/**",
     "**/.env*",
+)
+
+#: ACL/审计红线（C-10，2026-10-22）：这些文件承载权限边界的**调用点**，而它们不在黑名单里
+#: ——合法的检索/排序/防注入改动经常就在这里。只按文件名划红线有一个盲区：补丁可以改
+#: ``rag/pipeline.py`` 把 ``_post_rank_acl`` 删掉，而不碰任何一个"禁止"模块，于是边界静默失效。
+#:
+#: 因此对每个被改动的调用点文件，**从它派生**出必须点名的权限用例：补丁的 ``test_paths`` 里
+#: 至少出现其中一条，否则层 1 直接拒绝（fail-closed）。这不是"要求它一定通过"——沙箱会真的
+#: 跑这些用例——而是"不许在没有权限证据的情况下改这条路径"。
+ACL_CALL_SITE_TESTS: dict[str, tuple[str, ...]] = {
+    "rag/pipeline.py": ("tests/test_permissions.py", "tests/test_api_security.py"),
+    "rag/guard.py": ("tests/test_permissions.py",),
+    "rag/retriever.py": ("tests/test_permissions.py",),
+}
+
+#: The permission tests the fixed regression net always runs (C-10). They are the offline proof
+#: that the ACL boundary still holds, and layer 1 refuses any diff that could rewrite ``tests/**``,
+#: so a candidate cannot shrink them.
+PERMISSION_REGRESSION_TESTS: tuple[str, ...] = (
+    "tests/test_permissions.py",
+    "tests/test_api_security.py",
 )
 
 # Quotas: one surgical patch at a time.
@@ -191,6 +213,29 @@ def _forbidden_glob(path: str, *, tests_are_targets: bool = False) -> str | None
         if any(fnmatch.fnmatch(path, pattern) for pattern in _glob_patterns(glob)):
             return glob
     return None
+
+
+def acl_call_site_paths(paths: Sequence[str]) -> tuple[str, ...]:
+    """The touched paths that carry an ACL/audit call site, in order (C-10)."""
+    return tuple(
+        dict.fromkeys(path for path in paths if path in ACL_CALL_SITE_TESTS)
+    )
+
+
+def required_acl_test_paths(paths: Sequence[str]) -> tuple[str, ...]:
+    """The permission tests derived from the files this patch changes (C-10).
+
+    Empty when the patch touches no ACL/audit call site — rankers, chunkers, parsers and tools are
+    their own layer and are not this red line. When it does, the answer is the union of that file's
+    ``ACL_CALL_SITE_TESTS`` entries, in table order: the caller (layer 1, and the generator's prompt)
+    uses it as "at least one of these must be in ``test_paths``".
+    """
+    required: list[str] = []
+    for path in acl_call_site_paths(paths):
+        for test in ACL_CALL_SITE_TESTS[path]:
+            if test not in required:
+                required.append(test)
+    return tuple(required)
 
 
 # ------------------------------------------------------------------
@@ -380,6 +425,32 @@ def _validate_test_paths(test_paths: tuple[str, ...], repo_root: Path) -> None:
             raise PayloadBoundaryError(f"{path} does not exist under the repository")
 
 
+def _validate_acl_regression_tests(
+    paths: tuple[str, ...], test_paths: tuple[str, ...]
+) -> None:
+    """A patch that touches an ACL/audit call site must name a permission test (C-10).
+
+    The blacklist protects the permission *modules*; it cannot protect the *call sites* inside
+    ``pipeline.py`` / ``guard.py`` / ``retriever.py``, which legitimate patches must be able to
+    edit. This closes that blind side without forbidding the files: the diff is refused unless the
+    candidate's verification targets include a permission test derived from the file it touches.
+    The sandbox runs the same tests (they are also in the fixed net), so the requirement is
+    evidence, not a formality.
+    """
+    touched = acl_call_site_paths(paths)
+    if not touched:
+        return
+    required = required_acl_test_paths(paths)
+    if set(test_paths) & set(required):
+        return
+    raise PayloadBoundaryError(
+        f"diff touches an ACL/audit call site ({', '.join(touched)}): test_paths must include a "
+        f"permission test derived from it ({' / '.join(required)}); "
+        "the permission boundary can move through these files even though the permission modules "
+        "are forbidden"
+    )
+
+
 def _validate_diff_quotas(candidate: CodePatchCandidate, paths: tuple[str, ...]) -> None:
     """Files, changed lines, binary content, deletion and unnamed files."""
     if len(paths) > MAX_PATCH_FILES:
@@ -427,6 +498,11 @@ def validate_patch(candidate: CodePatchCandidate, *, repo_root: str | Path) -> N
     3. ``test_paths`` name real verification targets: under ``tests/``, named
        ``test_*.py``, present under ``repo_root``, and not a blacklist exception
        (``tests/**`` itself is what a test path points at).
+    3b. **ACL/audit red line (C-10)**: a diff that touches an ACL call site
+       (``rag/pipeline.py`` / ``rag/guard.py`` / ``rag/retriever.py``) must name at least one
+       permission test derived from that file (:data:`ACL_CALL_SITE_TESTS`). The blacklist
+       protects the permission modules; this protects the call sites a legitimate patch can
+       reach.
     4. Quotas: at most five files, at most 300 changed lines, no binary patch, no
        file deletion, and no file in the diff that ``paths`` does not name.
     5. ``git apply --check`` inside ``repo_root`` (stdin, read-only, 60s); a
@@ -449,12 +525,14 @@ def validate_patch(candidate: CodePatchCandidate, *, repo_root: str | Path) -> N
 
     _validate_path_boundary(candidate, paths)
     _validate_test_paths(test_paths, root)
+    _validate_acl_regression_tests(paths, test_paths)
     _validate_diff_quotas(candidate, paths)
     _git_apply_check(candidate.diff, root)
     _validate_rollback_ref(candidate)
 
 
 __all__ = [
+    "ACL_CALL_SITE_TESTS",
     "ARTIFACT_TYPE",
     "FORBIDDEN_GLOBS",
     "GIT_APPLY_TIMEOUT_S",
@@ -462,6 +540,9 @@ __all__ = [
     "LAYER_PATH_GLOBS",
     "MAX_PATCH_CHANGED_LINES",
     "MAX_PATCH_FILES",
+    "PERMISSION_REGRESSION_TESTS",
     "CodePatchCandidate",
+    "acl_call_site_paths",
+    "required_acl_test_paths",
     "validate_patch",
 ]

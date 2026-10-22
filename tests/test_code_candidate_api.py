@@ -604,6 +604,43 @@ def test_the_two_candidate_lists_never_mix_artifact_types(evolution_client, admi
     assert PATCH_DIFF not in evolution_client.get(CANDIDATES_URL, headers=admin_headers).text
 
 
+def test_the_code_patch_decision_never_acts_on_a_question_set_row(
+    evolution_client, admin_headers, export_dir
+):
+    """C-05：同表两个制品，层 4 的补丁审核也只处理自己那一类。
+
+    一条问题集候选没有 diff、没有 layer，走补丁审核会把状态机推进到一条它从没走过的路上。
+    守卫只拦错制品，真正的补丁在同一请求里仍然可以正常批准。
+    """
+    store = _store()
+    try:
+        set_id = _add_candidate(
+            store,
+            sample_question_set(),
+            "set-decision",
+            status=EvolutionStatus.AWAITING_VERIFICATION.value,
+        )
+        patch_id = _add_candidate(
+            store,
+            sample_patch(),
+            "patch-decision",
+            status=EvolutionStatus.AWAITING_VERIFICATION.value,
+        )
+    finally:
+        store.close()
+
+    refused = _decision(evolution_client, set_id, "approve_for_apply", admin_headers)
+
+    assert refused.status_code == 404
+    assert _candidate(set_id)["status"] == "awaiting_verification"
+    assert [row["action"] for row in _candidate_audit(set_id)] == ["generate", "advance"]
+    assert not (export_dir / f"candidate-{set_id}.patch").exists()
+
+    accepted = _decision(evolution_client, patch_id, "approve_for_apply", admin_headers)
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "approved_for_canary"
+
+
 # ------------------------------------------------------------------
 # The read-only generation queue: what a manual trigger would act on.
 # ------------------------------------------------------------------

@@ -553,11 +553,21 @@ def _available_tests(repo_root: Path, paths: tuple[str, ...], *, limit: int = 12
     This lists real names — never content — and it prefers tests that *import* the module being
     patched, falling back to name matching, so the list is small and relevant rather than a dump of
     the whole directory.
+
+    **Derived from the changed files, in two senses** (C-10, 2026-10-22): the importers/name matches
+    come from the paths this patch touches, and any ACL/audit call site among them contributes the
+    permission tests layer 1 will *require* — listed first, because a candidate that names none of
+    them is refused at the boundary no matter how good the diff is.
     """
     root = Path(repo_root)
     tests_dir = root / "tests"
     if not tests_dir.is_dir():
         return ()
+    from rag.evolution.code_patches import required_acl_test_paths
+
+    required = tuple(
+        path for path in required_acl_test_paths(paths) if (root / path).is_file()
+    )
     modules = {
         path[: -len(".py")].replace("/", ".")
         for path in paths
@@ -576,7 +586,7 @@ def _available_tests(repo_root: Path, paths: tuple[str, ...], *, limit: int = 12
             continue
         if any(f"from {module}" in text or f"import {module}" in text for module in modules):
             importers.append(relative)
-    ordered = list(dict.fromkeys(importers + by_name))
+    ordered = list(dict.fromkeys([*required, *importers, *by_name]))
     return tuple(ordered[:limit])
 
 
@@ -712,6 +722,7 @@ def _edits_messages(
             _render_available_tests(
                 _available_tests(repo_root, tuple(entry[0] for entry in targets))
             ),
+            _render_acl_note(tuple(entry[0] for entry in targets)),
             f"# git base 信息\nHEAD commit: {base_commit}",
             "请只输出一个 JSON 对象（结构见系统提示规则 1）。",
         )
@@ -733,6 +744,26 @@ def _render_available_tests(tests: tuple[str, ...]) -> str:
         "# 可用的验证测试（仓库里实际存在的文件名，**只能从中选择**）\n"
         f"{listed}\n"
         "元数据的 test_paths 必须来自上面这个列表：编造一个不存在的文件名会被边界直接拒绝。"
+    )
+
+
+def _render_acl_note(paths: tuple[str, ...]) -> str:
+    """The ACL red line, stated **only** when this patch touches an ACL call site (C-10).
+
+    The rule is enforced by layer 1 regardless (``code_patches.validate_patch``); stating it here is
+    what makes the model likely to satisfy it on the first attempt instead of being refused.
+    """
+    from rag.evolution.code_patches import acl_call_site_paths, required_acl_test_paths
+
+    touched = acl_call_site_paths(paths)
+    if not touched:
+        return ""
+    required = required_acl_test_paths(paths)
+    return (
+        "# 权限红线\n"
+        f"这次改动命中权限/审计调用点（{', '.join(touched)}）："
+        f"test_paths 必须包含 {' 或 '.join(required)} 中的至少一条，"
+        "否则边界会直接拒绝（不允许在没有权限证据的情况下改动这条路径）。"
     )
 
 
@@ -823,6 +854,7 @@ def _build_messages(
             _render_available_tests(
                 _available_tests(Path(repo_root), tuple(entry[0] for entry in targets))
             ),
+            _render_acl_note(tuple(entry[0] for entry in targets)),
             f"# git base 信息\nHEAD commit: {base_commit}",
             "请严格按系统提示输出：一个 unified diff + 四行元数据。"
             "若上面给出了定位，请把修改落在该函数/该行附近；正文里没显示的行不要臆造。",

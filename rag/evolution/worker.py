@@ -18,15 +18,29 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
 from config import settings
+from rag.evolution.candidate_store import OPEN_CANDIDATE_STATUSES
+from rag.evolution.host_lock import HostLocked, host_measurement_lock
 from rag.evolution.models import EvolutionStatus
 
 logger = logging.getLogger(__name__)
 
 _PAUSE_POLL_SECONDS = 0.1
+
+#: Floor for a model call's own timeout once the round's wall clock is nearly spent. A call that
+#: cannot be given at least this much time is not started (the step's loop has already stopped
+#: scheduling work by then); the floor exists so a rounding-to-zero remaining budget cannot turn
+#: into an unbounded call.
+_MIN_MODEL_TIMEOUT_S = 1.0
+
+#: Filename of the worker's cross-process lease, created next to ``evolution_db_path``. Two workers
+#: (the API-owned thread and ``python -m rag.evolution.worker``) share one evolution database, so a
+#: round that measures or writes must not run twice at the same time.
+HOST_LEASE_FILENAME = "evolution-worker.lock"
 
 #: Re-retrieval width for one diagnosis reproduction check. The evidence module
 #: caps its own recall the same way; the worker only owns the request.
@@ -111,6 +125,88 @@ class EvolutionBudget:
             raise ValueError("max_rss_mb must be > 0")
 
 
+@dataclass(frozen=True)
+class RoundClock:
+    """The one round's wall clock and cancellation flag, handed to every step (C-07).
+
+    Two things were missing from the budget model, and both are visible from outside: the round
+    only *recorded* a deadline after its work had run, and a step had no way to learn that the round
+    was over, cancelled or nearly out of time. A step that ignores the clock can only be discovered
+    afterwards — as a round that took far longer than its budget, with a model call still running.
+
+    So the worker publishes this object through a :class:`~contextvars.ContextVar` for the duration
+    of one round, and every step reads it:
+
+    * ``expired()`` is the cooperative stop signal — steps stop *scheduling* work (the remaining
+      items wait for the next round) instead of the round being torn down and losing its counters;
+    * ``remaining()`` / ``model_timeout()`` bound a single model call by the time the round has
+      left, so a slow provider eats the round's budget instead of overrunning it;
+    * ``cancelled`` is the worker's stop event: ``stop()`` asks the round in flight to wind down,
+      which is what makes a shutdown not wait for the next batch of observations.
+
+    ``clock`` is injected (the worker takes one for tests), so "expired" is decided by the same
+    monotonic source that computed the deadline.
+    """
+
+    started: float
+    deadline: float | None
+    cancelled: threading.Event
+    clock: Callable[[], float]
+
+    def remaining(self) -> float | None:
+        """Seconds left in the round, or ``None`` when it has no wall-clock budget."""
+        if self.deadline is None:
+            return None
+        return self.deadline - self.clock()
+
+    def expired(self) -> bool:
+        """True when the round's time is spent or the worker asked it to stop."""
+        if self.cancelled.is_set():
+            return True
+        return self.deadline is not None and self.clock() >= self.deadline
+
+    def model_timeout(self, base: float) -> float:
+        """``base`` seconds, capped by the time this round has left.
+
+        A model call is the one unbounded operation in a round (the provider decides how long to
+        take), so it is the one that must inherit the round's deadline. The floor keeps a nearly
+        spent round from asking for a zero-second call.
+        """
+        remaining = self.remaining()
+        if remaining is None:
+            return float(base)
+        return max(_MIN_MODEL_TIMEOUT_S, min(float(base), float(remaining)))
+
+
+#: The clock of the round currently executing on this thread/context, if any.
+_current_round: ContextVar[RoundClock | None] = ContextVar(
+    "evolution_worker_round_clock", default=None
+)
+
+
+def current_round() -> RoundClock | None:
+    """The round in flight, or ``None`` when a step is called outside a worker round."""
+    return _current_round.get()
+
+
+def round_expired() -> bool:
+    """True when the current round is out of time or cancelled (``False`` outside a round).
+
+    Steps use this between units of work: returning early keeps the counters they already produced,
+    and the worker still reports the round as ``budget_exhausted`` because its deadline has passed.
+    Outside a round (a step called directly by a test or a script) there is no budget to enforce,
+    so the answer is ``False`` — the previous behaviour.
+    """
+    clock = _current_round.get()
+    return clock is not None and clock.expired()
+
+
+def round_model_timeout(base: float) -> float:
+    """A model call's timeout, capped by the current round's remaining time (C-07)."""
+    clock = _current_round.get()
+    return float(base) if clock is None else clock.model_timeout(base)
+
+
 def default_busy_provider() -> bool:
     """True when the 1-minute load average exceeds the configured factor x CPUs.
 
@@ -127,7 +223,15 @@ def default_busy_provider() -> bool:
 
 
 class EvolutionWorker:
-    """Daemon-thread worker with per-round budgets, busy pause and error isolation."""
+    """Daemon-thread worker with per-round budgets, busy pause and error isolation.
+
+    ``lock_path`` enables the **cross-process** lease (C-07, 2026-10-22): the round takes
+    ``host_measurement_lock(lock_path)`` before doing anything, and a round that finds the lease held
+    by another process reports ``busy`` instead of running a second time against the same evolution
+    database. :func:`build_evolution_worker` always configures it (next to ``evolution_db_path``);
+    the default ``None`` keeps the in-process lock only, which is what a directly constructed worker
+    in a test needs.
+    """
 
     def __init__(
         self,
@@ -138,6 +242,7 @@ class EvolutionWorker:
         busy_provider: Callable[[], bool] | None = None,
         clock: Callable[[], float] | None = None,
         rss_provider: Callable[[], float | None] | None = None,
+        lock_path: str | Path | None = None,
         name: str = "rag-evolution-worker",
     ):
         self._run_once = run_once
@@ -146,6 +251,7 @@ class EvolutionWorker:
         self._busy_provider = busy_provider or default_busy_provider
         self._clock = clock or time.monotonic
         self._rss_provider = rss_provider
+        self._lock_path = None if lock_path is None else Path(lock_path)
         self._name = name
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -157,6 +263,8 @@ class EvolutionWorker:
         self._runs = 0
         self._failed_rounds = 0
         self._busy_rounds = 0
+        self._lease_busy_rounds = 0
+        self._cancelled_rounds = 0
         self._budget_exhausted = 0
         self._last_budget_reason: str | None = None
         self._last_status = "idle"
@@ -170,6 +278,11 @@ class EvolutionWorker:
     @property
     def budget(self) -> EvolutionBudget:
         return self._budget
+
+    @property
+    def host_lease_path(self) -> Path | None:
+        """The cross-process lease file this worker takes, or ``None`` when it takes none."""
+        return self._lock_path
 
     def start(self) -> None:
         with self._state_lock:
@@ -214,6 +327,8 @@ class EvolutionWorker:
                 "budget_exhausted": self._budget_exhausted,
                 "failed": self._failed_rounds,
                 "busy_rounds": self._busy_rounds,
+                "lease_busy": self._lease_busy_rounds,
+                "cancelled": self._cancelled_rounds,
                 "last_budget_reason": self._last_budget_reason,
                 "last_diagnosis_config": self._last_diagnosis_config,
                 "alive": self.is_alive,
@@ -227,11 +342,36 @@ class EvolutionWorker:
             self._record("busy")
             return "busy"
         try:
-            status = self._run_round()
+            status = self._run_round_under_lease()
         finally:
             self._round_lock.release()
         self._record(status)
         return status
+
+    def _run_round_under_lease(self) -> str:
+        """Take the cross-process lease, then run the round; a held lease means busy.
+
+        The lease is the same ``O_CREAT | O_EXCL`` file lock the host A/B uses
+        (:mod:`rag.evolution.host_lock`), so it is atomic across processes and a run killed without
+        cleanup does not block the next one forever. ``busy`` is the honest answer for a held lease:
+        queueing a second round would run two provider-heavy measurements at once, which is exactly
+        what the lock exists to prevent.
+        """
+        if self._lock_path is None:
+            return self._run_round()
+        try:
+            with host_measurement_lock(self._lock_path) as takeover:
+                if takeover:
+                    logger.warning(
+                        "evolution_worker_host_lease_takeover holder_pid=%s",
+                        takeover.get("pid"),
+                    )
+                return self._run_round()
+        except HostLocked as error:
+            with self._state_lock:
+                self._lease_busy_rounds += 1
+            logger.info("evolution_worker_round status=busy reason=host_lease detail=%s", error)
+            return "busy"
 
     def _run_round(self) -> str:
         if self._is_busy():
@@ -242,6 +382,14 @@ class EvolutionWorker:
         if deadline is not None and self._clock() >= deadline:
             # A non-positive run-seconds budget never starts a round at all.
             return self._exhaust("max_run_seconds")
+        # Publish this round's clock to every step for the duration of the round (C-07): a step
+        # stops scheduling work once it expires, and the model calls it does start are bounded by
+        # the time left. ``_stop_event`` doubles as the cancellation flag, so ``stop()`` reaches a
+        # round that is already running.
+        round_clock = RoundClock(
+            started=started, deadline=deadline, cancelled=self._stop_event, clock=self._clock
+        )
+        token = _current_round.set(round_clock)
         try:
             result = self._run_once()
         except BudgetExhausted as error:
@@ -252,6 +400,7 @@ class EvolutionWorker:
                 self._failed_rounds += 1
             return "failed"
         finally:
+            _current_round.reset(token)
             with self._state_lock:
                 self._runs += 1
         self._record_diagnosis_config(result)
@@ -260,7 +409,14 @@ class EvolutionWorker:
         # anything" is unanswerable from outside — the only other records on this
         # path are failures and budget warnings.
         counters = _round_counts(result)
-        if deadline is not None and self._clock() >= deadline:
+        if self._stop_event.is_set():
+            # ``stop()`` asked this round to wind down and the steps honoured it: that is a
+            # cancellation, not a budget problem, and the two are reported apart so a shutdown
+            # does not look like an exhausted budget.
+            with self._state_lock:
+                self._cancelled_rounds += 1
+            status = "cancelled"
+        elif deadline is not None and self._clock() >= deadline:
             status = self._exhaust("max_run_seconds")
         elif self._over_model_budget(result):
             status = self._exhaust("max_model_calls")
@@ -407,14 +563,27 @@ def make_evolution_run_once(
     """
     rounds = {"n": 0}
 
+    def run_step(step: Callable[[], dict] | None, empty: dict) -> dict:
+        """Run one step unless the round's wall clock is already spent (C-07).
+
+        Skipping instead of raising keeps what the earlier steps already counted: the round returns
+        with its real counters and the worker marks it ``budget_exhausted`` because the deadline has
+        passed. The remaining work is not lost — its items stay queued for the next round.
+        """
+        if step is None:
+            return dict(empty)
+        if round_expired():
+            return dict(empty)
+        return step()
+
     def run_once() -> dict:
         rounds["n"] += 1
         outcome = clusterer.cluster_once(limit=batch_limit)
-        diagnosis = diagnosis_step() if diagnosis_step is not None else dict(_NO_DIAGNOSIS)
+        diagnosis = run_step(diagnosis_step, _NO_DIAGNOSIS)
         # 补丁生成在诊断之后：它只处理"已批准 + 已确认层级"的聚类，与诊断互不依赖。
-        patch = patch_step() if patch_step is not None else dict(_NO_PATCH)
-        candidate = candidate_step() if candidate_step is not None else dict(_NO_CANDIDATE)
-        gaps = gap_ticket_step() if gap_ticket_step is not None else dict(_NO_GAPS)
+        patch = run_step(patch_step, _NO_PATCH)
+        candidate = run_step(candidate_step, _NO_CANDIDATE)
+        gaps = run_step(gap_ticket_step, _NO_GAPS)
         purged = 0
         if purge_every_rounds > 0 and rounds["n"] % purge_every_rounds == 0:
             purged = purge_evolution_observations(store, retention_days=retention_days)
@@ -585,7 +754,9 @@ def make_evolution_diagnosis_step(
         from rag.evolution.diagnoser import Diagnoser
 
         return lambda: Diagnoser(
-            timeout_seconds=cfg.evolution_diagnosis_timeout_seconds,
+            # 单次模型调用不得超过本轮剩余时间（C-07）：否则一个慢 provider 会把轮次预算变成
+            # "事后记账"，下一轮开始时上一轮还在等模型。
+            timeout_seconds=round_model_timeout(cfg.evolution_diagnosis_timeout_seconds),
             max_tokens=cfg.evolution_diagnosis_max_tokens,
         )
 
@@ -636,6 +807,9 @@ def make_evolution_diagnosis_step(
             config["model"] = str(diagnoser.model_name)
             marked = _marked_not_a_defect(cfg)
             for item in _keep_defects(pending, marked):
+                if round_expired():
+                    # 本轮时间/取消信号到了：剩下的观测留给下一轮，已花的调用照实记账。
+                    break
                 if outcome["model_calls"] >= budget:
                     break  # budget reached: the remaining observations wait for the next round
                 observation = item["observation"]
@@ -660,6 +834,9 @@ def make_evolution_diagnosis_step(
                     continue
                 attempts = 0
                 while attempts < _MAX_DIAGNOSIS_ATTEMPTS and outcome["model_calls"] < budget:
+                    if round_expired():
+                        # 采样本身是模型调用：本轮没时间就不再发起新的调用（已发出的照实计入）。
+                        break
                     attempts += 1
                     # 采样次数受本轮剩余预算限制：宁可少采一次（票型会记下来），也不越过上限。
                     allowance = min(samples, budget - outcome["model_calls"])
@@ -775,14 +952,9 @@ def _keep_defects(items: list[dict], marked: frozenset[str]) -> list[dict]:
 #: 一个聚类能一口气产出 112 条。人被驳回（rejected）之后重新放开 ⇒ 管理员驳回即"可以再试"。
 #: 2026-10-13 修复：stable 已经是上线/合入终态（如 close_out_merged 结案的 #20/#29），不应继续
 #: 作为"未决"占着聚类名额，否则该聚类将永远无法再次演化。
-_OPEN_CANDIDATE_STATUSES: frozenset[str] = frozenset(
-    {
-        EvolutionStatus.CANDIDATE_TESTING.value,
-        EvolutionStatus.AWAITING_VERIFICATION.value,
-        EvolutionStatus.APPROVED_FOR_CANARY.value,
-        EvolutionStatus.CANARY.value,
-    }
-)
+#: 2026-10-22（C-08）：同一个集合现在也决定"观测是否还在生成队列里"，定义搬到
+#: ``candidate_store.OPEN_CANDIDATE_STATUSES``（那份 SQL 要用它），这里只引用，避免两处漂移。
+_OPEN_CANDIDATE_STATUSES: frozenset[str] = frozenset(OPEN_CANDIDATE_STATUSES)
 
 
 def _clusters_with_open_candidates(candidate_store, artifact_type: str) -> set[int]:
@@ -810,8 +982,12 @@ def _eligible_patch_items(store, candidate_store) -> list[dict]:
     * the cluster is ``approved_for_candidate`` **and** carries ``confirmed_layer``;
     * the newest stored draft for the member observation suggests that same layer (the
       generator refuses a mismatch anyway, so asking would be a wasted call);
-    * the observation has no code-patch candidate yet, **and neither does its cluster** (a
-      regenerated patch is an explicit administrator action, never a background retry);
+    * the observation has no code-patch candidate yet, **and neither does its cluster**. A concluded
+      attempt (``rejected`` / ``needs_more_evidence``) releases the *cluster-level* gate, but the
+      background step deliberately does not retry the same observation: regeneration is the
+      administrator's explicit action (``POST /code-candidates/{id}/regenerate``), never an
+      automatic retry of something a human just refused (C-08 keeps that split; see
+      ``candidate_store.OPEN_CANDIDATE_STATUSES`` for the queue side);
 
     Content gaps are absent by construction: an undetermined root cause never leaves the
     observation queue (``clusterer`` design section 6), so it can never reach this list.
@@ -894,8 +1070,9 @@ def make_evolution_patch_step(
             generator_factory
             or (
                 lambda: PatchGenerator(
-                    timeout_seconds=float(
-                        getattr(cfg, "evolution_patch_timeout_seconds", 600.0)
+                    # 单次生成不得超过本轮剩余时间（C-07）。
+                    timeout_seconds=round_model_timeout(
+                        float(getattr(cfg, "evolution_patch_timeout_seconds", 600.0))
                     ),
                     patch_format=str(getattr(cfg, "evolution_patch_format", "diff") or "diff"),
                 )
@@ -908,6 +1085,9 @@ def make_evolution_patch_step(
 
         open_clusters = _clusters_with_open_candidates(candidates, CODE_PATCH_ARTIFACT_TYPE)
         for item in items:
+            if round_expired():
+                # 时间/取消信号到了：剩下的条目等到下一轮，已经生成的候选保留。
+                break
             # 轮内也要挡：轮初快照挡不住同一轮里同聚类的其他成员。
             if int(item["cluster"]["id"]) in open_clusters:
                 continue
@@ -1057,8 +1237,9 @@ def make_evolution_candidate_step(
             generator_factory
             or (
                 lambda: CandidateGenerator(
-                    timeout_seconds=float(
-                        getattr(cfg, "evolution_candidate_timeout_seconds", 120.0)
+                    # 单次生成不得超过本轮剩余时间（C-07）。
+                    timeout_seconds=round_model_timeout(
+                        float(getattr(cfg, "evolution_candidate_timeout_seconds", 120.0))
                     ),
                     max_tokens=int(getattr(cfg, "evolution_candidate_max_tokens", 16000)),
                 )
@@ -1075,6 +1256,9 @@ def make_evolution_candidate_step(
                 candidates, QUESTION_SET_ARTIFACT_TYPE
             )
             for item in items:
+                if round_expired():
+                    # 时间/取消信号到了：剩下的条目等到下一轮。
+                    break
                 # 同上：同一轮里同一聚类只留一条未决候选。
                 if int(item["cluster"]["id"]) in open_clusters:
                     continue
@@ -1233,6 +1417,9 @@ def make_evolution_gap_ticket_step(
 
         try:
             for cluster in store.list_clusters():
+                if round_expired():
+                    # 本轮时间/取消信号到了：工单等到下一轮（它是queued work，不会丢）。
+                    break
                 if not is_gap_cluster(cluster):
                     continue
                 if int(cluster["id"]) in have:
@@ -1269,6 +1456,8 @@ def make_evolution_gap_ticket_step(
             # 第二阶段：内容入库后的**复测**。缺的词被覆盖 ⇒ content_added；仍有缺 ⇒ 更新清单。
             now = time.time()
             for row in store.list_gap_tickets(status="open")[:recheck_limit]:
+                if round_expired():
+                    break
                 payload = row.get("payload") or {}
                 questions = [str(item) for item in (payload.get("question_samples") or ())]
                 if not questions:
@@ -1385,6 +1574,9 @@ def build_evolution_worker(
         busy_provider=busy_provider,
         clock=clock,
         rss_provider=rss_provider,
+        # 跨进程租约（C-07）：API 线程里的 worker 与 `python -m rag.evolution.worker` 共用同一个
+        # evolution.db，同一时刻只允许一轮在里面测量/写入。锁文件放在库旁边，进程之间才看得见。
+        lock_path=Path(cfg.evolution_db_path).parent / HOST_LEASE_FILENAME,
     )
     worker.store = store
     worker.clusterer = clusterer

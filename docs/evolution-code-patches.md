@@ -34,6 +34,22 @@
 另有限额：单补丁 ≤5 文件、≤300 行变动、不得二进制、不得删文件、路径不得越界或含 `..`；
 补丁必须真实通过 `git apply --check`（diff 经 stdin，显式 UTF-8）。
 
+**ACL/审计路径级红线（C-10，2026-10-22 起）**：黑名单保护的是权限**模块**，保护不了它们在各处的
+**调用点**——`rag/pipeline.py` 里的 `_post_rank_acl` / `filter_chunks_by_permission`、
+`rag/retriever.py` 的 `doc_permission_id` 过滤、`rag/guard.py` 的输出/注入审计。删掉其中一处
+上层调用不需要碰任何禁止文件，边界就静默失效。因此这三条路径命中时，补丁的 `test_paths`
+**必须**包含由它派生的权限用例，否则层 1 直接拒绝（不是警告）：
+
+| 被改文件 | 必须点名的权限用例（至少一条） |
+| --- | --- |
+| `rag/pipeline.py` | `tests/test_permissions.py` / `tests/test_api_security.py` |
+| `rag/guard.py` | `tests/test_permissions.py` |
+| `rag/retriever.py` | `tests/test_permissions.py` |
+
+生成器一侧同步：这个清单被**放进提示词的"可用测试"最前面**，命中时还会多一段"权限红线"说明，
+所以模型有明确选择，而不是从"相关测试"里挑一个注定被拒的。这不是"要求它一定通过"——沙箱会真的
+跑这些用例（第 4 节第 4 步）——而是"不许在没有权限证据的情况下改这条路径"。
+
 ## 3. 根因层级的权威是管理员
 
 生成补丁前，聚类上必须有**管理员确认的根因层级**（`confirmed_layer`）：
@@ -65,11 +81,12 @@
 3. worktree 内 `git apply`（stdin + UTF-8）——失败即 `rejected`；
 4. 测试运行 `pytest <候选 test_paths> + 固定回归网`（cwd/PYTHONPATH=worktree、`PYTHONHASHSEED=0`、
    不继承 `.env`）；失败 → `rejected`；超时或收集失败 → `needs_more_evidence`（不误杀）。
-   固定回归网见 `rag/evolution/sandbox.py` 的 `REGRESSION_TEST_PATHS`（24 个离线确定性文件，
-   覆盖 Jev 策略与注册表、管线装配、检索、重排、切块、结构化查询与工具）。补丁永远不能改
+   固定回归网见 `rag/evolution/sandbox.py` 的 `REGRESSION_TEST_PATHS`（26 个离线确定性文件，
+   覆盖权限边界、Jev 策略与注册表、管线装配、检索、重排、切块、结构化查询与工具）。补丁永远不能改
    `tests/**` 与 `**/conftest.py`（第 2 节黑名单），所以这张网对候选恒定，无法被它裁掉、跳过或改写；
    候选没写 `test_paths` 时仍是 `needs_more_evidence`——"我们跑了自己的基线"不等于"候选自带
-   的验证目标通过了"。
+   的验证目标通过了"。其中 `tests/test_permissions.py` 与 `tests/test_api_security.py` 是 C-10 的
+   固定权限网：即使候选没点名权限用例（层 1 会拒绝这种补丁），基线里这两条也照跑。
 5. **回归 A/B 不由沙箱做**（默认 `run_benchmark=False`，2026-10-02 决定）。理由是可核实的：
    这个系统的嵌入（`rag/embedder.py`）与重排（`rag/reranker.py`）都是**外部 API 调用**，而沙箱
    子进程刻意剥掉所有 `RAG_*`（含凭据）。在无凭据的沙箱里跑回放，量到的是"没有密钥"而不是补丁
@@ -82,6 +99,11 @@
    给了 `replay_fixture` 时，只有 fixture 对**两棵**工作树都新鲜、语料指纹与回放快照一致、且
    diff 没有触碰 seam 模块，才会注入并给出回放结论；否则回放不跑，结论是"不可用"而不是"通过"
    （C-02，见第 5.3 节）。
+   **回放的数据快照按侧各复制一份（C-04，2026-10-22）**：`data_snapshot` 会在 sandbox 临时根里
+   复制成 `snapshot-baseline/` 与 `snapshot-patched/`，两侧各自只读自己那一份。原因是回放会打开
+   本地向量库并往路径里写（集合目录、锁文件、被改的 `users.db`）：共用一份时干净侧会改变打补丁
+   侧读到的内容，而且会改动**指纹所担保的那份录制字节**。复制失败 ⇒ 回放不跑（报告里写明
+   "snapshot could not be isolated"），绝不退化成共用录制。
 6. `finally` 强制 `git worktree remove --force` + `prune` + 删临时目录（两个工作树都清）。
 结论经 `sandbox_gate_outcome(report)` 映射为 (状态, gate_detail)，以 `gate="sandbox"` 落 gate_log。
 
@@ -480,3 +502,42 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
 `edits`；要回到旧行为只需把 `RAG_EVOLUTION_PATCH_FORMAT` 设成 `diff`（可随时回退）。
 **样本局限**：6 个观测 ×2 次、都在 cluster 3（`reranking` 层）⇒ 结论强但不外推；边界未放宽，
 所以风险与旧路径相同。
+
+## 9. 2026-10-22 阶段 2：P2 加固（C-04~C-08、C-10、C-11）
+
+这一轮的改动全部是"把已经写下来的规则真正执行"。每条都带回归用例；行为变化按下面顺序记录。
+
+| 项 | 代码 | 现在的行为 |
+| --- | --- | --- |
+| C-04 回放快照 | `sandbox.py` | 每次回放各复制一份快照（baseline/patched），录制字节与指纹不受回放写入影响；复制失败则回放不跑 |
+| C-05 灰度入口 | `api.py` | canary 端点**第一行**按 `artifact_type` 拒绝补丁行；进入灰度前要求 `gate_log` 有 `benchmark=passed` 与至少一次 `shadow` 采样（无样本 409）；**先注册后写状态**，写失败即反注册 |
+| C-06 灰度上限 | `rollout.py` | `restore()` 把持久化的百分比 clamp 到 `evolution_candidate_canary_percent`；上限 0 不注册；下调有 warning + 审计行 |
+| C-07 worker 预算 | `worker.py`、`host_lock.py` | 轮次的 deadline 与取消信号经 ContextVar 传进每个 step（步内停止排新活）；模型调用超时按剩余时间收紧；轮次开始前取 **跨进程租约**，被占用则记 `busy` |
+| C-08 终态重生 | `candidate_store.py`、`api.py` | 生成队列的 `NOT EXISTS` 只看**未决**状态（`rejected`/`needs_more_evidence` 结案即释放观测）；`/code-candidates/{id}/regenerate` 接受 `rolled_back` / `rejected` / `needs_more_evidence`（仍带聚类堆放守卫） |
+| C-10 ACL 红线 | `code_patches.py`、`sandbox.py`、`patch_generator.py` | 见第 2 节表：改 ACL 调用点必须点名权限用例；固定回归网新增两条权限测试；提示词把派生出的权限用例排在最前 |
+| C-11 apply/rollback 串行 | `api.py`、`service_control.py` | 两个端点全程持 `artifacts/evolution-apply.lock`（与 host A/B 分开），状态推进与工作树操作串行；重启助手**继承同一租约**（等请求释放，等不到就不重启） |
+
+### 9.1 运维要知道的三件事
+
+1. **重入/并发会得到 409**：apply、rollback 任一正在跑时，第二个请求（同一浏览器两个页签、脚本、
+   另一个 API 进程）都会收到 409 `另一个应用/回滚正在进行`。这是设计，不是故障；等前一个结束即可。
+   重启助手会等最多 `lock_wait`（默认 60s）再开工；等不到就在 `service-control.log` 里写明
+   "another apply/rollback still holds the lease; not restarting"，此时**服务没有被重启**。
+2. **灰度上限现在是 kill switch**：把 `RAG_EVOLUTION_CANDIDATE_CANARY_PERCENT` 调到 0 之后，下一次
+   reconcile（任一次候选列表/详情/灰度请求，或启动恢复）就会把在线灰度百分比降到 0，无需管理员再点
+   一次；调到低于已持久化值时同理，并在审计里留下 `启动恢复：按配置上限收敛灰度 60% → 20%`。
+   上限为 0 时**不写**审计（零上限是配置状态，写回 0 会抹掉管理员当初选的比例）。
+3. **灰度有进入条件**：候选必须带着层 2 的 `benchmark=passed` 与至少一次层 3 `shadow` 采样
+   （`gate_log` 里的 `metrics.samples`）。只把状态推到 `awaiting_verification` 不再足够——这正是
+   C-05 要修的"状态是声明、轨迹才是证据"。缺证据时的 409 会说明缺哪一层，补跑那一层再试。
+
+### 9.2 未闭环（如实记录）
+
+- **层 3 影子采样的写入者仍未接线**：`CandidateShadowEvaluator` 会把样本数与一致率算出来，但当前
+  没有生产代码把 `shadow` gate 条目写进 `gate_log`（与本轮之前相同）。因此 C-05 的进入条件在真实
+  部署里会**先要求补这一层**——这是有意的 fail-closed：在写入者出现之前，灰度端点不会仅凭状态放行。
+  接线方式应当是 `record_gate_entry(gate="shadow", result=..., gate_metrics={"samples": n})`。
+- **容器隔离仍未实现**（C-01 的结论不变）：`SANDBOX_ISOLATION_ENV` 只是与启动器的契约。
+- **helper 的租约等待窗口是常量**（60s）：请求侧若因大补丁/慢盘超过 60s 未释放，助手会放弃重启并留痕。
+  需要时可调 `spawn_restart_helper(lock_wait_s=...)`。
+

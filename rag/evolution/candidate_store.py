@@ -45,6 +45,18 @@ from rag.evolution.models import EVOLUTION_TRANSITIONS, EvolutionStatus, Observa
 # two tables' enum lists from drifting apart.
 from rag.evolution.store import FailureTraceStore, _enum_values, _sql_in
 
+#: 一个候选"还占着这条观测"的状态：仍在测试、待验证、已批准灰度、灰度中。只有这些状态让
+#: 观测留在未决集合里；``rejected`` / ``needs_more_evidence`` / ``rolled_back`` / ``stable``
+#: 都是**已结案**的尝试，不能永久把观测挡在生成队列外（C-08，2026-10-22）。此前队列的
+#: ``NOT EXISTS`` 不看状态，于是一次驳回＝这条观测再也不会被生成——驳回成了不可撤销的终局。
+OPEN_CANDIDATE_STATUSES: tuple[str, ...] = (
+    EvolutionStatus.CANDIDATE_TESTING.value,
+    EvolutionStatus.AWAITING_VERIFICATION.value,
+    EvolutionStatus.APPROVED_FOR_CANARY.value,
+    EvolutionStatus.CANARY.value,
+)
+_OPEN_STATUS_PLACEHOLDERS = ", ".join("?" for _ in OPEN_CANDIDATE_STATUSES)
+
 # Design section 8 actions for the candidate lifecycle; anything else is
 # rejected before the INSERT, and the CHECK constraint is the second gate.
 _AUDIT_ACTIONS = ("generate", "advance", "reject", "canary", "rollback", "accept")
@@ -595,17 +607,23 @@ class CandidateStore:
         return [_decode_candidate_row(row) for row in rows]
 
     def observations_awaiting_code_patch(self, limit: int) -> list[dict]:
-        """Approved clusters' member observations that have no code patch yet.
+        """Approved clusters' member observations that have no **open** code patch yet.
 
         The phase-5 generator runs outside the worker's round by design, so this
         read-only query is where the queue is visible before an administrator
         triggers a generation by hand: one row per member observation of a cluster
-        whose status is ``approved_for_candidate`` and which no ``code_patch``
+        whose status is ``approved_for_candidate`` and which no **open** ``code_patch``
         candidate mentions yet. Each row carries both layer authorities the
         generator weighs — the cluster's administrator-confirmed
         ``confirmed_layer`` and the newest draft's own ``suggested_layer`` — and
         the prompt version that draft was produced with, so the list is auditable
         without opening the cluster detail.
+
+        "Open" is :data:`OPEN_CANDIDATE_STATUSES` on purpose (C-08, 2026-10-22): a candidate an
+        administrator **rejected** (or asked for more evidence on) is a concluded attempt, not a
+        reservation. Excluding the observation for the rest of its life made a review decision
+        permanent — the queue said "nothing to generate" while the failure it described was still
+        happening.
         """
         with self._lock:
             rows = self._conn.execute(
@@ -628,11 +646,13 @@ class CandidateStore:
                 "  AND NOT EXISTS ("
                 "      SELECT 1 FROM candidates p WHERE p.artifact_type = ? "
                 "        AND p.observation_id = o.id"
+                f"        AND p.status IN ({_OPEN_STATUS_PLACEHOLDERS})"
                 "  ) "
                 "ORDER BY o.id ASC LIMIT ?",
                 (
                     EvolutionStatus.APPROVED_FOR_CANDIDATE.value,
                     CODE_PATCH_ARTIFACT_TYPE,
+                    *OPEN_CANDIDATE_STATUSES,
                     int(limit),
                 ),
             ).fetchall()
@@ -744,4 +764,4 @@ class CandidateStore:
             self._conn.close()
 
 
-__all__ = ["CandidateStore"]
+__all__ = ["OPEN_CANDIDATE_STATUSES", "CandidateStore"]

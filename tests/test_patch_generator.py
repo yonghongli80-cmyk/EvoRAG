@@ -56,7 +56,10 @@ TARGET_FILE = "rag/reranker.py"
 TARGET_TEST = "tests/test_reranker.py"
 CHUNKER_MARKER = "from langchain_text_splitters import RecursiveCharacterTextSplitter"
 RERANKER_MARKER = '"""Re-ranking module using SiliconFlow Rerank API."""'
-VECTOR_STORE_MARKER = "def search_collection(collection_name: str, query_embedding: list[float], top_k"
+# Stable anchor inside the documented 400-line prompt window. Do not use
+# `search_collection`: Phase 1 moved it past line 400, which would make this
+# test assert truncation behaviour against the wrong thing.
+VECTOR_STORE_MARKER = "def delete_unversioned_points(collection_name: str, doc_name: str) -> int:"
 TRUNCATED_AWAY_MARKER = "def delete_doc(collection_name: str, doc_name: str):"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1033,6 +1036,28 @@ def test_the_prompt_says_what_to_do_when_no_test_matches():
 
     assert "绝不编造" in rendered
     assert "不存在" in rendered or "确实存在" in rendered
+
+
+def test_the_available_tests_lead_with_the_permission_test_for_an_acl_call_site():
+    """C-10：改 ACL 调用点时，**必须点名的权限用例**排在最前，并被提示词点名。
+
+    提示词只列"相关测试"时，模型会选 ``tests/test_pipeline.py``——而那正是层 1 会拒绝的组合；
+    把派生出来的权限用例放进清单并写明红线，才有机会一次通过。
+    """
+    from rag.evolution.patch_generator import _available_tests, _render_acl_note
+
+    tests = _available_tests(Path(REPO_ROOT), ("rag/pipeline.py",))
+
+    assert tests[0] == "tests/test_permissions.py"
+    assert "tests/test_api_security.py" in tests
+    assert all((Path(REPO_ROOT) / name).is_file() for name in tests)
+
+    note = _render_acl_note(("rag/pipeline.py",))
+    assert note.startswith("# 权限红线")
+    assert "rag/pipeline.py" in note
+    assert "tests/test_permissions.py" in note
+    # 不碰 ACL 调用点的补丁不显示这条红线（噪音最小化，也避免把规则说成"所有补丁都要"）。
+    assert _render_acl_note(("rag/reranker.py", "rag/chunker.py")) == ""
 
 # ------------------------------------------------------------------
 # 带失败类别的一次重试（含真实调用计数）。

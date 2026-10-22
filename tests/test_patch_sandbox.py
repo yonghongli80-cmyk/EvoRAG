@@ -1216,6 +1216,43 @@ def test_every_fixed_regression_path_exists_in_this_repository():
     assert missing == []
 
 
+def test_the_permission_boundary_is_part_of_the_fixed_net():
+    """C-10：固定回归网必须含权限用例 —— 补丁改不了 tests/**，所以它缩不掉这两条。"""
+    assert "tests/test_permissions.py" in REGRESSION_TEST_PATHS
+    assert "tests/test_api_security.py" in REGRESSION_TEST_PATHS
+
+
+def test_an_acl_call_site_patch_without_a_permission_test_never_runs(
+    sandbox_repo: Path, make_runner
+):
+    """C-10：命中 ACL 调用点却不点名权限用例 ⇒ 层 1 拒绝，连 worktree 都不建。
+
+    ``sandbox_repo`` 里没有 ``rag/pipeline.py``，所以用"新建该文件"的 diff 来触发路径命中；
+    关键是拒绝发生在任何 git 命令之前：候选代码一行都没跑。
+    """
+    runner = make_runner()
+    candidate = make_candidate(
+        sandbox_repo,
+        layer="code",
+        paths=("rag/pipeline.py",),
+        diff=new_module_diff("rag/pipeline.py"),
+        test_paths=PROBE_TESTS,
+    )
+
+    report = run_patch_sandbox(candidate, repo_root=sandbox_repo, run_benchmark=False)
+
+    assert report.applied is False
+    assert report.tests_passed is None
+    assert report.error.startswith("boundary:")
+    assert "ACL" in report.error
+    # 拒绝发生在任何实质动作之前：没有 worktree add、没有 git apply、没有任何测试进程。
+    # （``finally`` 里的 worktree remove/prune 是清理，不属于"执行候选代码"。）
+    commands = [" ".join(call.command) for call in runner.calls]
+    assert not any("worktree add" in command for command in commands)
+    assert not any("apply" in command for command in commands)
+    assert not any("pytest" in command for command in commands)
+
+
 def test_the_net_is_empty_only_where_the_repository_does_not_carry_it(sandbox_repo: Path):
     """A synthetic repository runs its targets alone; the real one runs the net."""
     assert sandbox_module._existing_regression_paths(sandbox_repo) == []
@@ -1353,6 +1390,134 @@ def test_the_replay_command_replays_as_a_principal():
 
     with_principal = _benchmark_command(kb_id="kb1", json_out=Path("x.json"), user_id=1)
     assert with_principal[with_principal.index("--user-id") + 1] == "1"
+
+
+# ------------------------------------------------------------------
+# C-04：回放快照按侧复制、互不共享、录制字节不变。
+# ------------------------------------------------------------------
+
+
+def _write_snapshot(root: Path) -> Path:
+    """A recorded snapshot with the three entries a replay reads."""
+    (root / "qdrant_data").mkdir(parents=True)
+    (root / "qdrant_data" / "meta.json").write_text('{"collection": "rag_docs"}', encoding="utf-8")
+    (root / "users.db").write_bytes(b"users-bytes")
+    (root / "memory.db").write_bytes(b"memory-bytes")
+    return root
+
+
+def _snapshot_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+class SnapshotWritingRunner(FakeRunner):
+    """A runner whose replay writes into the store it was handed, like the real one can.
+
+    The real replay opens a local vector store at ``RAG_QDRANT_PATH`` and writes collection
+    metadata/lock files there. This runner does the same on purpose: it records what it can see in
+    its own copy *before* writing, so a shared snapshot shows up as one side observing the other's
+    file.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.corpora: list[Path] = []
+        self.saw_other_side_write: list[bool] = []
+
+    def __call__(self, command, *, cwd, env=None, timeout=60.0, stdin_text=None):
+        outcome = super().__call__(
+            command, cwd=cwd, env=env, timeout=timeout, stdin_text=stdin_text
+        )
+        if env is not None and "benchmark_jev_retrieval.py" in " ".join(map(str, command)):
+            corpus = Path(env["RAG_QDRANT_PATH"])
+            marker = "baseline.write" if not self.corpora else "patched.write"
+            other = "patched.write" if marker == "baseline.write" else "baseline.write"
+            self.saw_other_side_write.append((corpus / other).exists())
+            (corpus / marker).write_text("written by the replay", encoding="utf-8")
+            self.corpora.append(corpus)
+        return outcome
+
+
+def test_each_replay_side_gets_its_own_snapshot_copy(sandbox_repo: Path, monkeypatch, tmp_path):
+    """C-04：两侧回放各拿一份**独立**副本，谁都不是录制本身。"""
+    snapshot = _write_snapshot(tmp_path / "recorded-snapshot")
+    before = _snapshot_bytes(snapshot)
+    runner = SnapshotWritingRunner(benchmark=_benchmark_payload())
+    monkeypatch.setattr(sandbox_module, "_run_command", runner)
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        data_snapshot=str(snapshot),
+    )
+
+    assert report.tests_passed is True
+    assert report.benchmark is not None
+    assert len(runner.corpora) == 2, "exactly one replay per side"
+    baseline_corpus, patched_corpus = runner.corpora
+    assert baseline_corpus != patched_corpus, "the two sides must not share one snapshot"
+    assert baseline_corpus != snapshot and patched_corpus != snapshot, (
+        "a replay must never read the recording itself"
+    )
+    for corpus in runner.corpora:
+        assert corpus.name == "qdrant_data"
+        assert corpus.parent.name in {"snapshot-baseline", "snapshot-patched"}
+        assert corpus.parent.parent.name.startswith(sandbox_module.SANDBOX_ROOT_PREFIX)
+        assert not corpus.parent.exists(), "the copies are removed with the sandbox root"
+    # 录制本身就是证据：跑完之后逐字节不变，也没有多出任何文件。
+    assert _snapshot_bytes(snapshot) == before
+
+
+def test_a_replay_write_cannot_reach_the_other_side_or_the_recording(
+    sandbox_repo: Path, monkeypatch, tmp_path
+):
+    """C-04：一侧写自己的副本，另一侧看不见；录制目录里绝不出现这些写入。"""
+    snapshot = _write_snapshot(tmp_path / "recorded-snapshot")
+    runner = SnapshotWritingRunner(benchmark=_benchmark_payload())
+    monkeypatch.setattr(sandbox_module, "_run_command", runner)
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        data_snapshot=str(snapshot),
+    )
+
+    assert report.benchmark is not None
+    assert runner.saw_other_side_write == [False, False], (
+        "neither replay may observe the other side's writes"
+    )
+    assert not (snapshot / "qdrant_data" / "baseline.write").exists()
+    assert not (snapshot / "qdrant_data" / "patched.write").exists()
+
+
+def test_a_snapshot_that_cannot_be_copied_is_refused_not_shared(
+    sandbox_repo: Path, make_runner, monkeypatch, tmp_path
+):
+    """C-04：复制失败就报错，绝不退化成"两侧共用录制"。"""
+    snapshot = _write_snapshot(tmp_path / "recorded-snapshot")
+    runner = make_runner(benchmark=_benchmark_payload())
+
+    def exploding_copy(source, destination):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(sandbox_module, "_snapshot_copy", exploding_copy)
+
+    report = run_patch_sandbox(
+        make_candidate(sandbox_repo),
+        repo_root=sandbox_repo,
+        run_benchmark=True,
+        data_snapshot=str(snapshot),
+    )
+
+    assert report.benchmark is None
+    assert "could not be isolated" in report.error
+    assert runner.of("benchmark_jev_retrieval.py") == [], "no replay against a shared snapshot"
 
 
 def test_a_failed_threshold_exit_still_yields_a_verdict(tmp_path, monkeypatch):
