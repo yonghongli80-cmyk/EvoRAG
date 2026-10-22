@@ -14,7 +14,8 @@ be weakened to let a candidate through):
 * Top-5 source hit: the candidate may drop at most 2pp.
 
 Report shape: :class:`GateResult` carries the aggregate ``stats`` (both sides'
-hit counts and rates, the two deltas, optional cost counters), one ``per_case``
+hit counts and rates, the two deltas, the non-blocking ``net_zero_churn``
+visibility flag, optional cost counters), one ``per_case``
 entry per benchmark case with both sides' routes, sources and the per-case
 difference flags, and a one-paragraph ``verdict`` that doubles as the
 ``gate_log`` detail when the outcome is written back through
@@ -369,6 +370,9 @@ def evaluate_on_benchmark(
         if (candidate_side.route_correct and not baseline.route_correct)
         or (candidate_side.top5_hit is True and baseline.top5_hit is not True)
     ]
+    # 可见性统计，**不参与判定**：净 route delta 为 0，却在逐例上既有失也有得——
+    # 聚合值把变动抵消掉了，审计需要一眼看到"零净变化但其实换了批用例"。判定仍只看 ``reasons``。
+    net_zero_churn = bool(route_delta_pp == 0 and route_regressions and improvements)
     baseline_errors = [
         view.case_id for view, (baseline, _) in zip(views, pairs, strict=True) if baseline.error is not None
     ]
@@ -462,6 +466,7 @@ def evaluate_on_benchmark(
         "refusal_escapes": refusal_escapes,
         "refusal_misses": refusal_misses,
         "improvements": improvements,
+        "net_zero_churn": net_zero_churn,
         "external_calls_delta": candidate_stats.external_calls - baseline_stats.external_calls,
         "thresholds": {
             "route_drop_max_pp": ROUTE_DELTA_MAX_PP,

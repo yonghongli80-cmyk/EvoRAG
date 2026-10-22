@@ -67,6 +67,7 @@ STATS_KEYS = {
     "refusal_escapes",
     "refusal_misses",
     "improvements",
+    "net_zero_churn",
     "external_calls_delta",
     "thresholds",
     "candidate_ref",
@@ -476,6 +477,60 @@ def test_route_delta_of_exactly_zero_pp_passes_even_when_cases_change():
     assert result.passed is True
     assert result.stats["route_regressions"] == [f"rag-{index:03d}" for index in range(1, 6)]
     assert result.stats["improvements"] == [f"rag-{index:03d}" for index in range(16, 21)]
+
+
+def test_net_zero_churn_is_flagged_when_zero_delta_still_trades_cases():
+    """净零变化但逐例有进有退：判定不动，另给一个纯可见性标记。
+
+    这是 ``test_route_delta_of_exactly_zero_pp_passes_even_when_cases_change`` 的同一构造：
+    5 失 5 得互相抵消。``passed``/``verdict`` 仍只看聚合 delta，``net_zero_churn`` 只是让审计
+    一眼看到"这个 0pp 其实是换了一批用例"，不参与判定。
+    """
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 21)]
+    routes, sources = correct_routes(cases)
+    baseline_routes = {
+        case["id"]: ("rag" if index <= 15 else "structured") for index, case in enumerate(cases, start=1)
+    }
+    candidate_routes = {
+        case["id"]: ("rag" if index > 5 else "structured") for index, case in enumerate(cases, start=1)
+    }
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(baseline_routes, sources=sources),
+        route_fn(candidate_routes, sources=sources),
+        cases,
+    )
+
+    assert result.stats["route_delta_pp"] == 0.0
+    assert result.stats["route_regressions"]
+    assert result.stats["improvements"]
+    assert result.stats["net_zero_churn"] is True
+    # 语义不变：净零仍然通过，verdict 仍是 passed。
+    assert result.passed is True
+    assert result.verdict.startswith("passed")
+
+
+def test_net_zero_churn_is_false_when_no_case_moves():
+    """净 delta 0 且两侧逐例路由完全相同：没有变动可看，标记必须是 False。"""
+    cases = [gate_case(f"rag-{index:03d}") for index in range(1, 21)]
+    routes, sources = correct_routes(cases)
+    same_routes = {
+        case["id"]: ("rag" if index <= 15 else "structured") for index, case in enumerate(cases, start=1)
+    }
+
+    result = evaluate(
+        gate_candidate(),
+        route_fn(same_routes, sources=sources),
+        route_fn(same_routes, sources=sources),
+        cases,
+    )
+
+    assert result.stats["route_delta_pp"] == 0.0
+    assert result.stats["route_regressions"] == []
+    assert result.stats["improvements"] == []
+    assert result.stats["net_zero_churn"] is False
+    assert result.passed is True
 
 
 # ------------------------------------------------------------------
