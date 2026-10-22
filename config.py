@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # 1.5s 会让临界响应触发 SDK 重试并放大 P95，故取 3.0s 并保留最多 1 次重试。
     jev_timeout_seconds: float = Field(default=3.0, gt=0.0, le=10.0)
     jev_route_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
+    #: 预判给出的改写概率达到该阈值才改写。0.5 时普通问题改写率 0.312（目标 0.281）；
+    #: 提到 0.55 只减少“临界可改写”的请求，不动路由与判定阈值。
+    jev_rewrite_probability: float = Field(default=0.55, ge=0.0, le=1.0)
     # 段落判断的重复采样轮数（1 = 关闭投票）。
     # 实测（2026-10-19）：同一候选池连判 5 轮，关键块的 answer_evidence 是
     # 0.50/0.52/0.49/0.54/0.50——抖动只有 ±0.03 却横跨 0.5，于是"有没有答案证据"在同一输入上

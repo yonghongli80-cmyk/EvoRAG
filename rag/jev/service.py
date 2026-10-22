@@ -25,7 +25,10 @@ class JevDecisionService:
         self._policy = (
             policy
             if policy is not None
-            else JevPolicy(route_confidence=settings.jev_route_confidence)
+            else JevPolicy(
+                route_confidence=settings.jev_route_confidence,
+                rewrite_probability=settings.jev_rewrite_probability,
+            )
         )
 
     @property
