@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.api_security import get_user_db, require_kb_edit, require_kb_view, require_user
-from rag.wiki.indexer import WikiIndexer
+from rag.wiki.indexer import WikiIndexer, enqueue_wiki_reindex_job
+from rag.wiki.models import WikiPage
 from rag.wiki.store import WikiStore
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/wiki", tags=["wiki"])
+
+#: Upper bound for page markdown. Without one a single request can persist
+#: arbitrarily large content and hand it to the chunker/embedder.
+WIKI_CONTENT_MAX_CHARS = 200_000
 
 #: 只缓存 indexer。store 的单例由 ``rag.wiki.store.get_wiki_store`` 持有（``reset_wiki_store`` 也管它），
 #: 这里曾经另有一个 ``_wiki_store`` 全局，但**从未被赋值**：它看起来像第二层缓存，实际是死代码。
@@ -37,7 +45,7 @@ class CreateWikiPageRequest(BaseModel):
 
     kb_id: str
     title: str
-    content: str
+    content: str = Field(max_length=WIKI_CONTENT_MAX_CHARS)
     slug: str | None = None
     tags: list[str] = Field(default_factory=list)
 
@@ -46,7 +54,7 @@ class UpdateWikiPageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = None
-    content: str | None = None
+    content: str | None = Field(default=None, max_length=WIKI_CONTENT_MAX_CHARS)
     tags: list[str] | None = None
     comment: str = "Update"
 
@@ -55,6 +63,32 @@ class RollbackWikiPageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision_num: int
+
+
+def _sync_page_index(
+    db: Any,
+    indexer: WikiIndexer,
+    page: WikiPage,
+    *,
+    old_title: str | None = None,
+) -> dict[str, Any]:
+    """Index a page without turning a vector-store failure into a lost page.
+
+    The page content is already committed by the store, so a failed index write
+    must not fail the request: ``WikiIndexer.sync_page`` writes the new revision
+    before deleting the old one (the previous revision stays searchable) and
+    this helper records a ``wiki_reindex`` job for the shared worker to retry.
+    """
+    try:
+        chunks_indexed = indexer.sync_page(page.id, old_title=old_title)
+    except Exception:
+        logger.exception("wiki page %s index sync failed; queueing a retry", page.id)
+        queued = enqueue_wiki_reindex_job(db, page.id, page.current_revision_id)
+        return {
+            "chunks_indexed": 0,
+            "index_status": "retry_queued" if queued else "failed",
+        }
+    return {"chunks_indexed": chunks_indexed, "index_status": "ok"}
 
 
 @router.get("/pages", summary="列出 Wiki 页面")
@@ -114,11 +148,7 @@ def create_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chunks_indexed = indexer.sync_page(page.id)
-    return {
-        "page": page.model_dump(),
-        "chunks_indexed": chunks_indexed,
-    }
+    return {"page": page.model_dump(), **_sync_page_index(db, indexer, page)}
 
 
 @router.get("/pages/{page_id}", summary="获取 Wiki 页面详情及双向链接")
@@ -177,10 +207,9 @@ def update_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chunks_indexed = indexer.sync_page(page_id, old_title=old_title)
     return {
         "page": updated.model_dump(),
-        "chunks_indexed": chunks_indexed,
+        **_sync_page_index(db, indexer, updated, old_title=old_title),
     }
 
 
@@ -250,10 +279,9 @@ def rollback_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    chunks_indexed = indexer.sync_page(page_id, old_title=old_title)
     return {
         "page": updated.model_dump(),
-        "chunks_indexed": chunks_indexed,
+        **_sync_page_index(db, indexer, updated, old_title=old_title),
     }
 
 

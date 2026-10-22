@@ -10,6 +10,12 @@ Worker ordering (mirrors the plan):
 7. commit, then repair the advisory ``is_current`` flags;
 8. on pre-commit failure delete only this version's points/artifacts;
 9. on post-commit repair failure enqueue ``repair_vector_flags``.
+
+The same loop also drains two lifecycle job types that need the same lease and
+retry budget instead of a second scheduler: ``purge_document`` (30-day
+retention sweep enqueued by :func:`rag.materials.recycle.scan_due_purges`) and
+``wiki_reindex`` (a Wiki page whose index write failed; see
+:mod:`rag.wiki.indexer`).
 """
 
 from __future__ import annotations
@@ -28,6 +34,12 @@ from rag.materials.formats import FormatCapabilityRegistry
 from rag.materials.incremental import fingerprint_material
 from rag.materials.jobs import claim_material_jobs
 from rag.materials.models import ExtractedMaterial, FormatResolution
+from rag.materials.recycle import (
+    PURGE_JOB_TYPE,
+    RecycleError,
+    purge_document,
+    scan_due_purges,
+)
 from rag.models import Chunk
 from rag.spreadsheets.chunker import DatasetMetadata
 from rag.spreadsheets.migration import dataset_schema_mirror
@@ -36,6 +48,9 @@ from rag.spreadsheets.store import resolve_dataset_path, write_dataset
 from rag.user_db import UserDB
 
 logger = logging.getLogger(__name__)
+
+#: ``document_index_jobs.job_type`` value for incremental material indexing.
+MATERIAL_INDEX_JOB_TYPE = "material_index"
 
 
 class ActivationFailed(Exception):
@@ -132,6 +147,9 @@ class WorkerServices:
     structured_datasets_root: Path = field(
         default_factory=lambda: Path(settings.structured_datasets_root)
     )
+    #: Injected by tests and by callers that already own a Wiki indexer. When
+    #: ``None`` a retry job resolves the process-wide Wiki store lazily.
+    wiki_indexer: object | None = None
 
 
 class MaterialWorker:
@@ -149,11 +167,14 @@ class MaterialWorker:
         worker_id: str = "worker-1",
         lease_seconds: int = 120,
         max_attempts: int = 5,
+        purge_scan_interval: float = 60.0,
     ):
         self.services = services
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
         self.max_attempts = max_attempts
+        self.purge_scan_interval = purge_scan_interval
+        self._next_purge_scan_at = 0.0
         self._running = False
         self._in_flight: list[int] = []
 
@@ -174,10 +195,39 @@ class MaterialWorker:
             self._running = True
         return job
 
-    def run(self, batch: int = 4) -> list[JobResult]:
-        """Claim and process up to ``batch`` due jobs synchronously."""
+    def schedule_due_purges(self, now: float | None = None) -> list[int]:
+        """Run the 30-day retention sweep at most once per ``purge_scan_interval``.
+
+        Reuses the existing job table and lease/retry machinery; the sweep only
+        decides *which* expired tombstones deserve a ``purge_document`` job.
+        """
+        now = now if now is not None else time.time()
+        if now < self._next_purge_scan_at:
+            return []
+        self._next_purge_scan_at = now + self.purge_scan_interval
+        try:
+            return scan_due_purges(self.services.db, now)
+        except Exception:
+            logger.exception("30-day purge scan failed")
+            return []
+
+    def _process(self, job: dict, now: float) -> JobResult:
+        """Route one claimed job to the processor for its ``job_type``."""
+        job_type = job.get("job_type") or MATERIAL_INDEX_JOB_TYPE
+        if job_type == PURGE_JOB_TYPE:
+            return process_purge_job(job, self.services, now=now)
+        from rag.wiki.indexer import WIKI_REINDEX_JOB_TYPE
+
+        if job_type == WIKI_REINDEX_JOB_TYPE:
+            return process_wiki_reindex_job(job, self.services)
+        return process_index_job(job, self.services)
+
+    def run(self, batch: int = 4, now: float | None = None) -> list[JobResult]:
+        """Sweep due purges, then claim and process up to ``batch`` due jobs."""
+        current = now if now is not None else time.time()
+        self.schedule_due_purges(current)
         jobs = claim_material_jobs(
-            self.services.db, self.worker_id, time.time(), batch, self.lease_seconds
+            self.services.db, self.worker_id, current, batch, self.lease_seconds
         )
         results = []
         for job in jobs:
@@ -199,9 +249,9 @@ class MaterialWorker:
             renewal_thread = threading.Thread(target=_renew_lease, daemon=True)
             renewal_thread.start()
             try:
-                result = process_index_job(job, self.services)
+                result = self._process(job, current)
             except Exception:
-                logger.exception("material index job %s failed", job["id"])
+                logger.exception("material job %s failed", job["id"])
                 attempts_exhausted = job["attempt"] >= self.max_attempts
                 result = JobResult(
                     job["id"],
@@ -211,7 +261,9 @@ class MaterialWorker:
                     0,
                     "processing_failed",
                 )
-                if attempts_exhausted:
+                if attempts_exhausted and (
+                    job.get("job_type") or MATERIAL_INDEX_JOB_TYPE
+                ) == MATERIAL_INDEX_JOB_TYPE:
                     _exhaust_spreadsheet_job(job, self.services)
                 retry_at = None
                 if result.status == "retry":
@@ -307,6 +359,72 @@ def _exhaust_spreadsheet_job(job: dict, services: WorkerServices) -> None:
         status="failed",
         error_code="processing_failed",
     )
+
+
+def process_purge_job(
+    job: dict, services: WorkerServices, now: float | None = None
+) -> JobResult:
+    """Purge one document whose 30-day restore window has closed.
+
+    The tombstone/deadline is re-verified inside ``purge_document``; a document
+    restored or purged in the meantime settles the job without touching files.
+    """
+    db = services.db
+    document_id = int(job["document_id"])
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        return JobResult(job["id"], "failed", 0, 0, 0, "document_missing")
+
+    version_ids = [int(row["id"]) for row in db.list_document_versions(document_id)]
+    try:
+        result = purge_document(
+            db,
+            document_id,
+            now if now is not None else time.time(),
+            versions_root=services.versions_root,
+            structured_datasets_root=services.structured_datasets_root,
+        )
+    except RecycleError as exc:
+        if exc.reason_code == "document_missing":
+            return JobResult(job["id"], "failed", 0, 0, 0, exc.reason_code)
+        if exc.reason_code in {"not_tombstoned", "restore_window_open"}:
+            return JobResult(job["id"], "cancelled", 0, 0, 0, exc.reason_code)
+        raise
+
+    # Qdrant deletes are idempotent, so a retried purge still clears the points
+    # of an earlier attempt without needing the purge to run again.
+    for version_id in sorted(set(version_ids) | set(result.version_ids)):
+        try:
+            services.vector_store.delete_version(document["kb_id"], version_id)
+        except Exception:
+            logger.exception(
+                "purge vector cleanup failed for version %s of document %s",
+                version_id,
+                document_id,
+            )
+    return JobResult(job["id"], "done", 0, 0, 0)
+
+
+def _default_wiki_indexer() -> object:
+    from rag.wiki.indexer import WikiIndexer
+    from rag.wiki.store import get_wiki_store
+
+    return WikiIndexer(wiki_store=get_wiki_store())
+
+
+def process_wiki_reindex_job(job: dict, services: WorkerServices) -> JobResult:
+    """Reindex one Wiki page whose API-time index write failed.
+
+    Wiki pages are not material documents, so the job carries ``version_id=0``
+    and the page id in ``document_id``. A deleted page cancels the retry.
+    """
+    indexer = services.wiki_indexer or _default_wiki_indexer()
+    page_id = int(job["document_id"])
+    page = indexer.store.get_page(page_id)
+    if page is None:
+        return JobResult(job["id"], "cancelled", 0, 0, 0, "page_missing")
+    indexed = indexer.sync_page(page_id)
+    return JobResult(job["id"], "done", 0, indexed, 0)
 
 
 def process_index_job(job: dict, services: WorkerServices) -> JobResult:

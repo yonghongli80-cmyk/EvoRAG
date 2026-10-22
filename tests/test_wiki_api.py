@@ -59,6 +59,7 @@ def api_client(tmp_path, monkeypatch):
         "wiki_store": store,
         "trace_store": trace_store,
         "indexer": indexer,
+        "db": getattr(app.state, "user_db", None),
     }
 
     try:
@@ -272,6 +273,161 @@ def test_wiki_api_fine_grained_permissions(isolated_api, make_user, monkeypatch,
     assert resp.status_code == 200
 
     store.close()
+
+
+def test_create_page_queues_a_retry_when_indexing_fails(api_client, monkeypatch, tmp_path):
+    """D-05: a failed index write must leave a durable retry job, not a lost page."""
+    client: TestClient = api_client["client"]
+    indexer: WikiIndexer = api_client["indexer"]
+    db = api_client["db"]
+    assert db is not None
+
+    calls = {"fail": True}
+    real_sync = indexer.sync_page
+
+    def flaky_sync(page_id: int, old_title: str | None = None) -> int:
+        if calls["fail"]:
+            raise RuntimeError("qdrant unavailable")
+        return real_sync(page_id, old_title=old_title)
+
+    monkeypatch.setattr(indexer, "sync_page", flaky_sync)
+
+    resp = client.post(
+        "/wiki/pages",
+        json={
+            "kb_id": "kb_prod",
+            "title": "索引重试",
+            "content": "# 重试章节\n写入时向量库不可用。",
+        },
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["chunks_indexed"] == 0
+    assert body["index_status"] == "retry_queued"
+    page_id = body["page"]["id"]
+
+    job = db._conn.execute(
+        "SELECT * FROM document_index_jobs WHERE document_id = ? AND job_type = 'wiki_reindex'",
+        (page_id,),
+    ).fetchone()
+    assert job is not None
+    assert job["status"] == "queued"
+
+    # The worker drains the retry and the page becomes searchable again.
+    calls["fail"] = False
+    from rag.materials.formats import build_default_format_registry
+    from rag.materials.worker import MaterialWorker, WorkerServices
+
+    worker = MaterialWorker(
+        WorkerServices(
+            db=db,
+            versions_root=tmp_path / "versions",
+            registry=build_default_format_registry(),
+            wiki_indexer=indexer,
+        ),
+        worker_id="wiki-retry",
+        purge_scan_interval=0.0,
+    )
+    results = worker.run(batch=5)
+
+    assert [result.status for result in results] == ["done"]
+    reloaded = db.get_index_job(int(job["id"]))
+    assert reloaded["status"] == "done"
+
+    records, _ = vector_store._get_client().scroll(
+        collection_name="kb_prod", limit=10, with_payload=True
+    )
+    assert len(records) == 1
+    assert records[0].payload["doc_name"] == "索引重试"
+
+
+def test_update_page_records_a_retry_when_indexing_fails(api_client, monkeypatch):
+    """D-05 covers updates too: the committed edit must not disappear from search."""
+    client: TestClient = api_client["client"]
+    indexer: WikiIndexer = api_client["indexer"]
+    db = api_client["db"]
+
+    created = client.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_prod", "title": "更新重试", "content": "# 第一节\n初始内容。"},
+    )
+    assert created.status_code == 201
+    assert created.json()["index_status"] == "ok"
+    page_id = created.json()["page"]["id"]
+
+    def broken_sync(page_id_arg: int, old_title: str | None = None) -> int:
+        raise RuntimeError("qdrant unavailable")
+
+    monkeypatch.setattr(indexer, "sync_page", broken_sync)
+    resp = client.put(f"/wiki/pages/{page_id}", json={"content": "# 第二节\n更新后内容。"})
+
+    assert resp.status_code == 200
+    assert resp.json()["chunks_indexed"] == 0
+    assert resp.json()["index_status"] == "retry_queued"
+    queued = db._conn.execute(
+        "SELECT COUNT(*) AS total FROM document_index_jobs "
+        "WHERE document_id = ? AND job_type = 'wiki_reindex'",
+        (page_id,),
+    ).fetchone()["total"]
+    assert queued == 1
+
+
+def test_worker_cancels_a_retry_for_a_deleted_page(api_client, monkeypatch, tmp_path):
+    client: TestClient = api_client["client"]
+    indexer: WikiIndexer = api_client["indexer"]
+    db = api_client["db"]
+
+    def broken_sync(page_id: int, old_title: str | None = None) -> int:
+        raise RuntimeError("qdrant unavailable")
+
+    monkeypatch.setattr(indexer, "sync_page", broken_sync)
+    resp = client.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_prod", "title": "随后删除", "content": "# 章节\n内容。"},
+    )
+    assert resp.status_code == 201
+    page_id = resp.json()["page"]["id"]
+    client.delete(f"/wiki/pages/{page_id}")
+
+    from rag.materials.formats import build_default_format_registry
+    from rag.materials.worker import MaterialWorker, WorkerServices
+
+    worker = MaterialWorker(
+        WorkerServices(
+            db=db,
+            versions_root=tmp_path / "versions",
+            registry=build_default_format_registry(),
+            wiki_indexer=indexer,
+        ),
+        worker_id="wiki-retry",
+        purge_scan_interval=0.0,
+    )
+    results = worker.run(batch=5)
+
+    assert [result.status for result in results] == ["cancelled"]
+
+
+def test_wiki_content_length_is_bounded(api_client):
+    from rag.wiki.api import WIKI_CONTENT_MAX_CHARS
+
+    client: TestClient = api_client["client"]
+
+    oversized = "x" * (WIKI_CONTENT_MAX_CHARS + 1)
+    resp = client.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_prod", "title": "超长内容", "content": oversized},
+    )
+    assert resp.status_code == 422
+
+    created = client.post(
+        "/wiki/pages",
+        json={"kb_id": "kb_prod", "title": "正常内容", "content": "# 章节\n正常长度。"},
+    )
+    assert created.status_code == 201
+    page_id = created.json()["page"]["id"]
+
+    update = client.put(f"/wiki/pages/{page_id}", json={"content": oversized})
+    assert update.status_code == 422
 
 
 def test_get_revision_diff(api_client):

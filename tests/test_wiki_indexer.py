@@ -245,6 +245,91 @@ def test_rename_page_purges_old_title_vectors(isolated_env):
     assert len(old_records) == 0
 
 
+def test_sync_failure_keeps_the_previous_revision_searchable(isolated_env, monkeypatch):
+    """D-05: a failed re-index must not delete the chunks that were already working."""
+    wiki_store: WikiStore = isolated_env["wiki_store"]
+    indexer: WikiIndexer = isolated_env["indexer"]
+    kb_id = isolated_env["collection"]
+
+    page = wiki_store.create_page(
+        kb_id=kb_id,
+        title="回滚演练",
+        content="# 第一节\n旧内容继续可检索。",
+    )
+    assert indexer.sync_page(page.id) == 1
+    wiki_store.update_page(page.id, content="# 第二节\n新内容暂时写不进去。")
+
+    def broken_embed(_texts):
+        raise RuntimeError("embedding provider unavailable")
+
+    monkeypatch.setattr(indexer, "_embed_fn", broken_embed)
+    with pytest.raises(RuntimeError):
+        indexer.sync_page(page.id)
+
+    client = vector_store._get_client()
+    records, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records) == 1
+    assert "旧内容" in records[0].payload["text"]
+
+    monkeypatch.setattr(
+        indexer, "_embed_fn", lambda texts: [[0.2] * 1024 for _ in texts]
+    )
+    assert indexer.sync_page(page.id) == 1
+
+    records_after, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records_after) == 1
+    assert "新内容" in records_after[0].payload["text"]
+    assert "旧内容" not in records_after[0].payload["text"]
+
+
+def test_add_failure_keeps_the_previous_revision_searchable(isolated_env, monkeypatch):
+    """D-05: a failed vector write must leave the old revision in place."""
+    import rag.wiki.indexer as indexer_module
+
+    wiki_store: WikiStore = isolated_env["wiki_store"]
+    indexer: WikiIndexer = isolated_env["indexer"]
+    kb_id = isolated_env["collection"]
+
+    page = wiki_store.create_page(
+        kb_id=kb_id,
+        title="写入失败",
+        content="# 第一节\n旧内容继续可检索。",
+    )
+    indexer.sync_page(page.id)
+    wiki_store.update_page(page.id, content="# 第二节\n写入新块时失败。")
+
+    def broken_add(*_args, **_kwargs):
+        raise RuntimeError("qdrant unavailable")
+
+    monkeypatch.setattr(indexer_module, "add_to_collection", broken_add)
+    with pytest.raises(RuntimeError):
+        indexer.sync_page(page.id)
+
+    client = vector_store._get_client()
+    records, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records) == 1
+    assert "旧内容" in records[0].payload["text"]
+
+
+def test_resync_of_the_same_revision_does_not_duplicate_points(isolated_env):
+    """The new write-then-delete ordering must stay idempotent for retries."""
+    wiki_store: WikiStore = isolated_env["wiki_store"]
+    indexer: WikiIndexer = isolated_env["indexer"]
+    kb_id = isolated_env["collection"]
+
+    page = wiki_store.create_page(
+        kb_id=kb_id,
+        title="重复索引",
+        content="# 第一节\n同一修订重复同步。",
+    )
+    assert indexer.sync_page(page.id) == 1
+    assert indexer.sync_page(page.id) == 1
+
+    client = vector_store._get_client()
+    records, _ = client.scroll(collection_name=kb_id, limit=10, with_payload=True)
+    assert len(records) == 1
+
+
 def test_delete_wiki_page_preserves_identically_named_regular_doc(isolated_env):
     wiki_store: WikiStore = isolated_env["wiki_store"]
     indexer: WikiIndexer = isolated_env["indexer"]
