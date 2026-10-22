@@ -180,6 +180,18 @@ class TestConfigMasking:
 # ── 只读 SQL 白名单 ──────────────────────────────────────────────────────
 
 
+@pytest.fixture()
+def allowed_db_dir(tmp_path):
+    """A writable directory inside the SQLite whitelist (B-07)."""
+    from pathlib import Path
+
+    from config import settings
+
+    root = Path(settings.structured_datasets_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 class TestReadOnlySQLEnforcement:
     def test_validate_read_only_sql_rejects_writes(self):
         for bad in (
@@ -204,9 +216,9 @@ class TestReadOnlySQLEnforcement:
         # 字符串字面量中的写词不误报
         assert validate_read_only_sql("SELECT 'delete' AS label, 'update' AS l2") is None
 
-    def test_test_connection_does_not_execute_destructive_sql(self, tmp_path):
+    def test_test_connection_does_not_execute_destructive_sql(self, allowed_db_dir):
         """test_connection 只做 SELECT 1 连通性检查，不应执行 DROP。"""
-        db_path = str(tmp_path / "t.db")
+        db_path = str(allowed_db_dir / "t.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE t (id INTEGER)")
         conn.commit()
@@ -223,8 +235,8 @@ class TestReadOnlySQLEnforcement:
         conn.close()
         assert row is not None
 
-    def test_fetch_rejects_delete_and_preserves_rows(self, tmp_path):
-        db_path = str(tmp_path / "t.db")
+    def test_fetch_rejects_delete_and_preserves_rows(self, allowed_db_dir):
+        db_path = str(allowed_db_dir / "t.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE t (id INTEGER)")
         conn.execute("INSERT INTO t VALUES (1)")
@@ -240,8 +252,8 @@ class TestReadOnlySQLEnforcement:
         conn.close()
         assert cnt == 1
 
-    def test_fetch_rejects_multistatement(self, tmp_path):
-        db_path = str(tmp_path / "t.db")
+    def test_fetch_rejects_multistatement(self, allowed_db_dir):
+        db_path = str(allowed_db_dir / "t.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE t (id INTEGER)")
         conn.commit()
@@ -258,8 +270,8 @@ class TestReadOnlySQLEnforcement:
         conn.close()
         assert row is not None
 
-    def test_fetch_allows_select(self, tmp_path):
-        db_path = str(tmp_path / "t.db")
+    def test_fetch_allows_select(self, allowed_db_dir):
+        db_path = str(allowed_db_dir / "t.db")
         conn = sqlite3.connect(db_path)
         conn.execute("CREATE TABLE t (id INTEGER)")
         conn.execute("INSERT INTO t VALUES (42)")
@@ -423,6 +435,8 @@ def test_auth_disabled_admin_mode_can_manage_sources(monkeypatch):
 
 def test_api_sync_rejects_non_select_with_400(monkeypatch):
     """sync 对非只读 SQL 返回 400（而非 500），并回显中文校验消息。"""
+    from pathlib import Path
+
     from fastapi.testclient import TestClient
 
     from config import settings
@@ -430,10 +444,15 @@ def test_api_sync_rejects_non_select_with_400(monkeypatch):
 
     monkeypatch.setattr(settings, "data_sources_enabled", True)
 
+    # B-07: SQLite sources are confined to the structured-dataset/upload roots, so
+    # the fixture must live under one of them to reach the SQL validation stage.
+    allowed_db = Path(settings.structured_datasets_root) / "bad_sql.db"
     sid = user_db.create_data_source(
         name="BadSQL",
         source_type="database",
-        config='{"connection_string": "sqlite:///nonexistent.db", "query": "DELETE FROM t"}',
+        config=json.dumps(
+            {"connection_string": f"sqlite:///{allowed_db}", "query": "DELETE FROM t"}
+        ),
         owner_id="anonymous",
     )
     try:

@@ -115,16 +115,31 @@ class BatchImporter:
         file_path: str,
         mode: str = "qa_pair",
         kb_id: str = "rag_docs",
-        user: dict | None = None,
-        user_db=None,
+        *,
+        user: dict,
+        user_db,
         config: dict | None = None,
         doc_name: str | None = None,
-        duplicate_action: str = "overwrite",
+        duplicate_action: str = "reject",
     ) -> dict:
-        """导入单个文件并对齐文档版本树与向量库。"""
+        """导入单个文件并对齐文档版本树与向量库。
+
+        ``user``/``user_db`` 必填（B-08）：旧实现缺省会伪造一个管理员身份并
+        直连 ``settings.users_db_path``（生产库），CLI 之外的调用可能因此在错误
+        的主体或错误的库上写入。覆盖既有文档时还必须通过 ``require_doc_edit``，
+        凭证只来自真实登录用户。
+        """
+        if not user or user.get("id") is None:
+            raise ValueError("user is required for batch import")
+        if user_db is None:
+            raise ValueError("user_db is required for batch import")
+        if duplicate_action not in {"reject", "overwrite", "keep"}:
+            raise ValueError(f"不支持的 duplicate_action: {duplicate_action}")
+
         import time
         from dataclasses import replace
 
+        from rag.api_security import require_doc_edit
         from rag.document_sources.upload import UploadDocumentSource
         from rag.document_version_store import (
             final_version_path,
@@ -140,12 +155,7 @@ class BatchImporter:
             mark_document_version_current,
         )
 
-        if user_db is None:
-            from rag.user_db import UserDB
-            user_db = UserDB(settings.users_db_path)
-
-        user = user or {"id": 1, "username": "admin", "is_admin": True, "permission_level": 1}
-        user_id = int(user.get("id", 1))
+        user_id = int(user["id"])
 
         filename = doc_name or Path(file_path).name
         chunks = self.parse(file_path, mode=mode, config=config, doc_name=filename)
@@ -155,6 +165,9 @@ class BatchImporter:
         final_name = choose_document_name(user_db, kb_id, filename, duplicate_action)
         existing = user_db.get_document_permission(final_name, kb_id)
         was_existing = existing is not None
+        if was_existing:
+            # 覆盖既有文档（或向其追加版本）需要 edit 权限，而不是伪造的 admin。
+            require_doc_edit(user_db, final_name, kb_id, user)
 
         if not was_existing:
             document_id = user_db.create_document_permission(final_name, kb_id, user_id, 1, False)
@@ -242,11 +255,12 @@ class BatchImporter:
         file_path: str,
         mode: str = "qa_pair",
         kb_id: str = "rag_docs",
-        user: dict | None = None,
-        user_db=None,
+        *,
+        user: dict,
+        user_db,
         config: dict | None = None,
         doc_name: str | None = None,
-        duplicate_action: str = "overwrite",
+        duplicate_action: str = "reject",
     ) -> dict:
         """处理 CSV 文件并完成版本化入库。"""
         return self.import_file(
@@ -265,10 +279,11 @@ class BatchImporter:
         file_paths: list[str],
         mode: str = "qa_pair",
         kb_id: str = "rag_docs",
-        user: dict | None = None,
-        user_db=None,
+        *,
+        user: dict,
+        user_db,
         config: dict | None = None,
-        duplicate_action: str = "overwrite",
+        duplicate_action: str = "reject",
     ) -> list[dict]:
         """批量导入多个文件并挂载到文档版本树。"""
         results = []

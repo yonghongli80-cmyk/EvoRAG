@@ -198,6 +198,18 @@ class TestRSSSource:
 # ── DB source tests ─────────────────────────────────────────────────────────
 
 
+@pytest.fixture()
+def sqlite_root(tmp_path):
+    """A writable directory inside the SQLite whitelist (B-07 / SEC-02)."""
+    from pathlib import Path
+
+    from config import settings
+
+    root = Path(settings.structured_datasets_root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 class TestDBSource:
     """Database data source supporting SQLite, MySQL, PostgreSQL."""
 
@@ -218,27 +230,20 @@ class TestDBSource:
         with pytest.raises(ValueError, match="query"):
             DBSource(connection_string="sqlite:///test.db", query="")
 
-    def test_sqlite_connection_success(self):
-        """Test connection to a real SQLite in-memory database."""
-        import os
-        import tempfile
-
+    def test_sqlite_connection_success(self, sqlite_root):
+        """Test connection to a real SQLite database inside the allowed root."""
         from rag.data_sources.db_source import DBSource
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_name = tmp.name
-        try:
-            conn = sqlite3.connect(tmp_name)
-            conn.execute("CREATE TABLE test (id INTEGER, name TEXT)")
-            conn.commit()
-            conn.close()
+        db_path = sqlite_root / "connection.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE test (id INTEGER, name TEXT)")
+        conn.commit()
+        conn.close()
 
-            src = DBSource(connection_string=f"sqlite:///{tmp_name}", query="SELECT * FROM test")
-            assert src.test_connection() is True
-        finally:
-            os.unlink(tmp_name)
+        src = DBSource(connection_string=f"sqlite:///{db_path}", query="SELECT * FROM test")
+        assert src.test_connection() is True
 
-    def test_sqlite_connection_failure(self):
+    def test_sqlite_connection_failure(self, sqlite_root):
         """A failing connect must make test_connection() return False.
 
         ``sqlite3.connect()`` happily *creates* an empty database for a
@@ -248,63 +253,52 @@ class TestDBSource:
         """
         from rag.data_sources.db_source import DBSource
 
-        src = DBSource(connection_string="sqlite:///nonexistent_xyz.db", query="SELECT 1")
+        src = DBSource(
+            connection_string=f"sqlite:///{sqlite_root / 'nonexistent_xyz.db'}",
+            query="SELECT 1",
+        )
         with patch(
             "sqlite3.connect",
             side_effect=sqlite3.OperationalError("unable to open database file"),
         ):
             assert src.test_connection() is False
 
-    def test_fetch_sqlite(self):
-        import os
-        import tempfile
-
+    def test_fetch_sqlite(self, sqlite_root):
         from rag.data_sources.db_source import DBSource
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_name = tmp.name
-        try:
-            conn = sqlite3.connect(tmp_name)
-            conn.execute("CREATE TABLE articles (title TEXT, content TEXT, url TEXT, published_at TEXT)")
-            conn.execute("INSERT INTO articles VALUES ('Hello', 'World', 'http://example.com', '2025-01-01')")
-            conn.execute("INSERT INTO articles VALUES ('Hi', 'Earth', 'http://example.org', '2025-01-02')")
-            conn.commit()
-            conn.close()
+        db_path = sqlite_root / "articles.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE articles (title TEXT, content TEXT, url TEXT, published_at TEXT)")
+        conn.execute("INSERT INTO articles VALUES ('Hello', 'World', 'http://example.com', '2025-01-01')")
+        conn.execute("INSERT INTO articles VALUES ('Hi', 'Earth', 'http://example.org', '2025-01-02')")
+        conn.commit()
+        conn.close()
 
-            src = DBSource(
-                connection_string=f"sqlite:///{tmp_name}",
-                query="SELECT title, content, url, published_at FROM articles",
-            )
-            results = _run(src.fetch())
-            assert len(results) == 2
-            assert results[0]["title"] == "Hello"
-            assert results[0]["content"] == "World"
-            assert results[1]["title"] == "Hi"
-        finally:
-            os.unlink(tmp_name)
+        src = DBSource(
+            connection_string=f"sqlite:///{db_path}",
+            query="SELECT title, content, url, published_at FROM articles",
+        )
+        results = _run(src.fetch())
+        assert len(results) == 2
+        assert results[0]["title"] == "Hello"
+        assert results[0]["content"] == "World"
+        assert results[1]["title"] == "Hi"
 
-    def test_fetch_empty_result(self):
-        import os
-        import tempfile
-
+    def test_fetch_empty_result(self, sqlite_root):
         from rag.data_sources.db_source import DBSource
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_name = tmp.name
-        try:
-            conn = sqlite3.connect(tmp_name)
-            conn.execute("CREATE TABLE empty_table (id INTEGER)")
-            conn.commit()
-            conn.close()
+        db_path = sqlite_root / "empty.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE empty_table (id INTEGER)")
+        conn.commit()
+        conn.close()
 
-            src = DBSource(
-                connection_string=f"sqlite:///{tmp_name}",
-                query="SELECT * FROM empty_table",
-            )
-            results = _run(src.fetch())
-            assert results == []
-        finally:
-            os.unlink(tmp_name)
+        src = DBSource(
+            connection_string=f"sqlite:///{db_path}",
+            query="SELECT * FROM empty_table",
+        )
+        results = _run(src.fetch())
+        assert results == []
 
 
 # ── API source tests ────────────────────────────────────────────────────────

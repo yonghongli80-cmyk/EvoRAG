@@ -10,14 +10,13 @@ import json as _json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 import rag.evolution.store as store_mod
 from config import settings
 from rag.api_security import get_user_db, require_kb_view, require_user
-from rag.auth import verify_api_key
 from rag.citations import CitationRecord
 from rag.context import (
     _get_or_create_pipeline,
@@ -28,13 +27,19 @@ from rag.context import (
 from rag.evolution.models import DiagnosticDetail, FailureStage
 from rag.evolution.service_control import log_line
 from rag.generator import generate
+from rag.guard import check_output
 from rag.knowledge_tasks import TaskService
 from rag.llm_pool import get_llm_pool_router
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.permissions import check_doc_permission
-from rag.pipeline import _agent_run_kwargs
-from rag.resilience import DEGRADED_ANSWER_TEXT, CircuitOpenError, circuit_open_cause
+from rag.pipeline import _HISTORICAL_EVIDENCE_WARNING, _agent_run_kwargs
+from rag.resilience import (
+    DEGRADED_ANSWER_TEXT,
+    CircuitOpenError,
+    circuit_open_cause,
+    is_degraded_answer,
+)
 from rag.suggest import suggest_questions
 from rag.tracker import ExecutionTrace
 from rag.user_db import UserDB
@@ -411,7 +416,7 @@ async def query_stream(
 
 
 @router.post("/suggest", summary="生成追问建议", description="基于问答生成 3 个推荐追问")
-async def suggest(req: SuggestRequest, user_id: str = Security(verify_api_key)):
+async def suggest(req: SuggestRequest, user: dict = Depends(require_user)):
     questions = await asyncio.to_thread(suggest_questions, req.question, req.answer)
     return {"questions": questions}
 
@@ -430,6 +435,97 @@ async def submit_feedback(
     if value_int < 0:
         await asyncio.to_thread(_submit_feedback_observation, db, req, int(user["id"]))
     return {"status": "ok"}
+
+
+_REGENERATE_DEFAULT_KB = "rag_docs"
+
+_CONFIDENCE_LEVELS = frozenset({"high", "medium", "low", "unavailable"})
+_ANSWERABILITY_KINDS = frozenset(
+    {
+        "answerable",
+        "answerable_with_warning",
+        "clarification_required",
+        "insufficient_evidence",
+        "permission_limited",
+    }
+)
+
+
+def _regenerate_target_kb(db: UserDB, message_id: int, reliability: dict) -> str:
+    """Resolve the knowledge base an already-persisted answer came from (A-06).
+
+    ``/regenerate`` used to always rebuild the answer from the default
+    ``rag_docs`` collection, so regenerating an answer that came from a
+    knowledge base either failed or answered from the wrong corpus.
+
+    The reliability record is authoritative when it carries ``kb_id``. Existing
+    rows do not (the chat message schema has no such column), so the persisted
+    citations are used instead: every citation of one answer points into the KB
+    that produced it. Only when neither source identifies exactly one KB do we
+    fall back to the default library.
+    """
+    explicit = str((reliability or {}).get("kb_id") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        citations = db.get_answer_citations(message_id)
+    except Exception:  # noqa: BLE001 - inference must never break regenerate
+        logger.debug("could not read citations for regenerate", exc_info=True)
+        return _REGENERATE_DEFAULT_KB
+    kb_ids: set[str] = set()
+    for citation in citations:
+        document_id = citation.get("document_id")
+        if not document_id:
+            continue
+        document = db.get_document_permission_by_id(int(document_id))
+        if document is not None and document.get("kb_id"):
+            kb_ids.add(str(document["kb_id"]))
+    if len(kb_ids) == 1:
+        return kb_ids.pop()
+    return _REGENERATE_DEFAULT_KB
+
+
+def _persist_regenerated_reliability(
+    db: UserDB, message_id: int, prepared: dict
+) -> dict:
+    """Persist the new assessment for a regenerated answer, or invalidate the old one.
+
+    Leaving the previous confidence/answerability attached would present the old
+    judgment as if it described the new text (A-06). A route without an
+    assessment invalidates the stale values instead of silently keeping them.
+    """
+    decision = prepared.get("decision")
+    confidence = prepared.get("confidence")
+    if decision is not None and confidence is not None:
+        reliability = {
+            "confidence_level": confidence.level,
+            "confidence_reasons": list(confidence.reasons),
+            "answerability_kind": decision.kind,
+        }
+        if (
+            reliability["confidence_level"] not in _CONFIDENCE_LEVELS
+            or reliability["answerability_kind"] not in _ANSWERABILITY_KINDS
+        ):
+            raise HTTPException(status_code=500, detail="可靠性评估结果无效")
+    else:
+        reliability = {
+            "confidence_level": "unavailable",
+            "confidence_reasons": [],
+            "answerability_kind": "answerable",
+        }
+    reasons_json = _json.dumps(reliability["confidence_reasons"], ensure_ascii=False)
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE chat_messages SET confidence_level = ?, "
+            "confidence_reasons_json = ?, answerability_kind = ? WHERE id = ?",
+            (
+                reliability["confidence_level"],
+                reasons_json,
+                reliability["answerability_kind"],
+                message_id,
+            ),
+        )
+    return reliability
 
 
 @router.post("/regenerate", summary="重新生成回答")
@@ -453,27 +549,83 @@ async def regenerate(
     if not user_question:
         raise HTTPException(status_code=400, detail="找不到对应的用户问题")
 
-    with get_pipeline_lock().read():
-        current_pipeline = get_pipeline()
-        if current_pipeline is None:
-            raise HTTPException(status_code=400, detail="尚未索引文档")
+    # A-06：按该答案的来源知识库重生成，而不是固定 rag_docs。
+    reliability_record = await asyncio.to_thread(
+        db.get_message_reliability, req.message_id, user["id"]
+    )
+    target_kb = await asyncio.to_thread(
+        _regenerate_target_kb, db, req.message_id, reliability_record or {}
+    )
+
+    if target_kb != _REGENERATE_DEFAULT_KB:
+        require_kb_view(db, target_kb, user)
+
+        def _resolve_kb_pipeline():
+            with get_pipeline_lock().write():
+                return _get_or_create_pipeline(target_kb)
+
+        current_pipeline = await asyncio.to_thread(_resolve_kb_pipeline)
+    else:
+        with get_pipeline_lock().read():
+            current_pipeline = get_pipeline()
+            if current_pipeline is None:
+                raise HTTPException(status_code=400, detail="尚未索引文档")
 
     session_id = current_pipeline._memory_session_id(f"conv_{req.conversation_id}", user)
-    prepared, error = current_pipeline._prepare_context(user_question, session_id, None, user=user, kb_id="rag_docs")
+    prepared, error = await asyncio.to_thread(
+        current_pipeline._prepare_context,
+        user_question,
+        session_id,
+        None,
+        user=user,
+        kb_id=target_kb,
+    )
     if error:
         raise HTTPException(status_code=400, detail=error)
 
-    if prepared["route"] == "fixed":
-        new_answer = prepared["answer"]
-    elif prepared["route"] == "agent":
-        new_answer = await asyncio.to_thread(
-            current_pipeline.agent.run, user_question, **_agent_run_kwargs(prepared)
+    try:
+        if prepared["route"] in {"fixed", "structured", "cached"}:
+            new_answer = prepared["answer"]
+        elif prepared["route"] == "agent":
+            new_answer = await asyncio.to_thread(
+                current_pipeline.agent.run,
+                user_question,
+                **_agent_run_kwargs(prepared),
+            )
+        else:
+            new_answer = await asyncio.to_thread(generate, prepared["messages"], 0.7)
+            decision = prepared.get("decision")
+            if decision is not None and decision.kind == "answerable_with_warning":
+                # 与 pipeline.query 对齐：历史版本证据的提示属于回答契约（A-06）。
+                new_answer = _HISTORICAL_EVIDENCE_WARNING + new_answer
+    except CircuitOpenError:
+        logger.warning("regenerate degraded: circuit breaker is open")
+        return JSONResponse(
+            status_code=503,
+            content={"error": DEGRADED_ANSWER_TEXT, "degraded": True},
         )
-    else:
-        new_answer = await asyncio.to_thread(generate, prepared["messages"], 0.7)
+
+    if is_degraded_answer(new_answer):
+        logger.warning("regenerate degraded: the degradation copy was returned as an answer")
+        return JSONResponse(
+            status_code=503,
+            content={"error": DEGRADED_ANSWER_TEXT, "degraded": True},
+        )
+
+    # 与 pipeline.query 的后处理一致：输出过滤后的文本才落库（A-06）。
+    output_check = check_output(new_answer)
+    if output_check.filtered:
+        new_answer = output_check.text
 
     await asyncio.to_thread(db.update_message, req.message_id, new_answer, user["id"])
-    return {"message_id": req.message_id, "answer": new_answer}
+    reliability = await asyncio.to_thread(
+        _persist_regenerated_reliability, db, req.message_id, prepared
+    )
+    return {
+        "message_id": req.message_id,
+        "answer": new_answer,
+        "reliability": reliability,
+    }
 
 
 @router.get("/conversations/search", summary="搜索对话")

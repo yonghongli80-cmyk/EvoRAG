@@ -33,8 +33,15 @@ def test_data_upload_not_accessible_without_auth(client):
 # ── C8: delete_file 未登录可删除文件 ──────────────────────────────
 
 
-def test_delete_file_rejects_no_auth(client):
-    """C8: 未登录用户删除文件应返回 401。"""
+def test_delete_file_rejects_no_auth(client, monkeypatch):
+    """C8: 认证开启时未登录用户删除文件应返回 401。
+
+    认证关闭（本地开发模式）下 `/files` 与其它端点一致落到开发管理员身份，
+    因此这里显式开启认证来验证生产模式下的边界（B-04 统一认证入口）。
+    """
+    from config import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
     response = client.delete("/files/test.txt")
     assert response.status_code == 401, f"C8: 未登录删除应返回 401，实际 {response.status_code}"
 

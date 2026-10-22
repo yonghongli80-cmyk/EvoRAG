@@ -102,10 +102,17 @@ class AnalysisRepository(BaseRepository):
     """Handles data sources, analysis cards, summaries, and questions."""
 
     def _is_admin(self, user_id: Any) -> bool:
+        """Return *True* only for an explicitly identified administrator.
+
+        A missing principal must not be treated as an administrator (B-03): the
+        ``None`` default used to expose every data source to any caller that
+        forgot to pass the authenticated user id.  See
+        :meth:`UserRepository._is_admin` for the shared semantics.
+        """
         if self.db is not None:
             return self.db._is_admin(user_id)
         if user_id is None:
-            return True
+            return False
         uid = str(user_id)
         if uid in ("admin", "0"):
             return True

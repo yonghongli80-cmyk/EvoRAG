@@ -14,7 +14,6 @@ from fastapi import (
     Depends,
     File,
     Form,
-    Header,
     HTTPException,
     Query,
     Request,
@@ -28,14 +27,12 @@ import rag.permissions as perm_mod
 import rag.vector_store as vector_store
 from config import settings
 from rag.api_security import (
-    _get_current_user,
     get_user_db,
     optional_user,
     require_admin,
     require_doc_edit,
     require_personal_document_acl,
     require_user,
-    resolve_principal,
 )
 from rag.batch_importer import BatchImporter
 from rag.context import (
@@ -144,19 +141,6 @@ def _can_overwrite_existing(user: dict | None, existing_perm: dict | None) -> bo
     if existing_perm["owner_id"] == user["id"]:
         return True
     return existing_perm.get("scope") == "public"
-
-
-def _resolve_user_from_token(db: UserDB, token: str) -> dict | None:
-    return resolve_principal(db, f"Bearer {token}", None)
-
-
-async def _require_auth_helper(db: UserDB, authorization: str) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="未提供认证信息")
-    user_dict = await asyncio.to_thread(resolve_principal, db, authorization, None)
-    if not user_dict:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
-    return user_dict
 
 
 async def _ingest_default_document(
@@ -353,15 +337,9 @@ async def upload_file(
 async def delete_file(
     filename: str,
     request: Request,
-    authorization: str = Header(default=""),
+    user_dict: dict = Depends(require_user),
 ):
     db = get_user_db(request)
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="请先登录")
-    token = authorization.replace("Bearer ", "")
-    user_dict = await asyncio.to_thread(_get_current_user, token, db)
-    if not user_dict or user_dict.get("id") == "anonymous":
-        raise HTTPException(status_code=401, detail="请先登录")
 
     data_dir = _get_upload_dir()
     versions_root = _get_versions_root()
@@ -386,9 +364,10 @@ async def delete_file(
     try:
         delete_doc(COLLECTION_NAME, safe_name)
         logger.info("向量已删除: %s", safe_name)
-    except Exception as e:
-        logger.error("删除向量失败: %s", e)
-        raise HTTPException(status_code=500, detail=f"删除向量失败: {e}") from e
+    except Exception as exc:
+        logger.exception("删除向量失败: %s", safe_name)
+        # 不把底层异常文本回显给客户端（B-05）。
+        raise HTTPException(status_code=500, detail="删除向量失败") from exc
 
     legacy_path.unlink(missing_ok=True)
     for version_path in version_paths:

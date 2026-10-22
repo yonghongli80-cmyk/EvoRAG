@@ -65,11 +65,15 @@ def _resolve_source_owner(user_id: str, authorization: str = "", db=None) -> str
     return "anonymous"
 
 
-def _sync_source(source_id: int, db=None) -> dict:
-    """同步数据源：根据类型创建对应的 DataSource 实例并 fetch()。"""
+def _sync_source(source_id: int, db=None, user_id: str | None = None) -> dict:
+    """同步数据源：根据类型创建对应的 DataSource 实例并 fetch()。
+
+    *user_id* 是调用方的主体，必须显式传入：数据源仓库不再把缺省主体当管理员
+    （B-03）。
+    """
     if db is None:
         db = default_user_db
-    source = db.get_data_source(source_id)
+    source = db.get_data_source(source_id, user_id)
     if source is None:
         raise ValueError("数据源不存在")
 
@@ -156,7 +160,8 @@ async def list_sources(
 ):
     user_db = get_user_db(request)
     if user.get("is_admin"):
-        sources = await asyncio.to_thread(user_db.list_data_sources)
+        # 显式传主体：仓库层不再把 None 当管理员（B-03）。
+        sources = await asyncio.to_thread(user_db.list_data_sources, str(user["id"]))
     else:
         owner_id = _resolve_source_owner(user_id, "", user_db)
         sources = await asyncio.to_thread(user_db.list_data_sources, owner_id)
@@ -189,7 +194,8 @@ async def list_sources(
 @router.delete("/sources/{source_id}", summary="删除数据源", description="删除指定数据源")
 async def delete_source(source_id: int, request: Request, user: dict = Depends(require_data_sources_admin)):
     user_db = get_user_db(request)
-    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id)
+    # 必须显式传主体，否则仓库层缺省会按"无归属"匹配（B-03）。
+    deleted = await asyncio.to_thread(user_db.delete_data_source, source_id, str(user["id"]))
     if not deleted:
         raise HTTPException(status_code=404, detail="数据源不存在")
     return {"status": "deleted"}
@@ -198,11 +204,13 @@ async def delete_source(source_id: int, request: Request, user: dict = Depends(r
 @router.post("/sources/{source_id}/sync", summary="同步数据源", description="手动触发数据源同步")
 async def sync_source(source_id: int, request: Request, user: dict = Depends(require_data_sources_admin)):
     user_db = get_user_db(request)
-    source = await asyncio.to_thread(user_db.get_data_source, source_id)
+    source = await asyncio.to_thread(user_db.get_data_source, source_id, str(user["id"]))
     if source is None:
         raise HTTPException(status_code=404, detail="数据源不存在")
     try:
-        result = await asyncio.to_thread(_sync_source, source_id, db=user_db)
+        result = await asyncio.to_thread(
+            _sync_source, source_id, db=user_db, user_id=str(user["id"])
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result

@@ -20,7 +20,6 @@ from rag.api_security import (
     require_kb_edit,
     require_kb_view,
     require_user,
-    resolve_principal,
 )
 from rag.context import (
     DATA_DIR,
@@ -93,24 +92,13 @@ class QueryKBRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, description="返回相关文档数量")
 
 
-def _get_current_user(token: str, db=None) -> dict | None:
-    if db is None:
-        db = default_user_db
-    return resolve_principal(db, f"Bearer {token}", None)
-
-
-async def _require_auth(authorization: str, db=None) -> dict:
-    if db is None:
-        db = default_user_db
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="未提供认证信息")
-    user_dict = await asyncio.to_thread(resolve_principal, db, authorization, None)
-    if not user_dict:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
-    return user_dict
-
-
 def _check_kb_edit_permission(kb_id: str, user_dict: dict, db=None) -> None:
+    """Legacy (non-org) KB edit gate: owner, admin, or a shared editor.
+
+    Denials are reported as 404 so that a caller cannot distinguish "not yours"
+    from "does not exist" — the same contract the organization-policy branches
+    already use (B-06).
+    """
     if db is None:
         db = default_user_db
     if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
@@ -125,7 +113,7 @@ def _check_kb_edit_permission(kb_id: str, user_dict: dict, db=None) -> None:
         return
     if db.is_kb_shared(kb_id, user_dict["id"], permission="edit"):
         return
-    raise HTTPException(status_code=403, detail="仅知识库所有者、管理员或共享编辑者可操作")
+    raise HTTPException(status_code=404, detail="资源不存在")
 
 
 def _audit_org_event(user: dict, action: str, kb_id: str, reason: str = "authorized", db=None) -> None:
@@ -166,7 +154,10 @@ async def list_knowledge_bases(request: Request, user: dict = Depends(require_us
         try:
             meta = await asyncio.to_thread(require_kb_view, user_db, kb.kb_id, user)
         except HTTPException as exc:
-            if exc.status_code in {403, 409}:
+            # 403/404/409 都是"这个库对当前主体不可见"：迁移后的 unassigned 库
+            # 会给出 404，之前只 continue 403/409 会让一个未归属的库把整张列表
+            # 变成 404（B-06）。跳过它，其余可见库照常返回。
+            if exc.status_code in {403, 404, 409}:
                 continue
             raise
         is_owner = meta["owner_id"] == user["id"]
@@ -439,8 +430,10 @@ async def query_knowledge_base(
     manager = KnowledgeBaseManager()
     try:
         chunks = manager.search(kb_id, req.question, top_k=req.top_k * 3)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as exc:
+        logger.exception("KB query failed", extra={"kb_id": kb_id})
+        # 内部异常文本不回显（B-05）。
+        raise HTTPException(status_code=400, detail="知识库检索失败") from exc
     visible_chunks = await asyncio.to_thread(
         filter_chunks_by_permission, user_db, kb_id, chunks, user
     )
@@ -602,16 +595,16 @@ async def generate_kb_toc(
                         (toc_str, kb_id, filename),
                     )
             return toc_results, None
-        except Exception as e:
-            return None, str(e)
+        except Exception:
+            logger.exception("KB toc generation failed", extra={"kb_id": kb_id})
+            # 返回使用固定标记而非异常文本：调用方只把它翻译成不透明错误（B-05）。
+            return None, "internal_error"
 
     result, error = await asyncio.to_thread(_generate)
-    if error == "not_found":
-        raise HTTPException(status_code=404, detail="知识库不存在")
     if error == "no_documents":
         raise HTTPException(status_code=400, detail="知识库中无文档，请先添加文档")
     if error:
-        raise HTTPException(status_code=500, detail=f"目录生成失败: {error}")
+        raise HTTPException(status_code=500, detail="目录生成失败")
     return {"kb_id": kb_id, "toc": result}
 
 
@@ -657,16 +650,16 @@ async def generate_kb_overview(
                     (kb_id, overview, overview),
                 )
             return overview, None
-        except Exception as e:
-            return None, str(e)
+        except Exception:
+            logger.exception("KB overview generation failed", extra={"kb_id": kb_id})
+            # 固定标记，异常文本只进日志（B-05）。
+            return None, "internal_error"
 
     result, error = await asyncio.to_thread(_generate)
-    if error == "not_found":
-        raise HTTPException(status_code=404, detail="知识库不存在")
     if error == "no_documents":
         raise HTTPException(status_code=400, detail="知识库中无文档，请先添加文档")
     if error:
-        raise HTTPException(status_code=500, detail=f"概述生成失败: {error}")
+        raise HTTPException(status_code=500, detail="概述生成失败")
     return {"kb_id": kb_id, "overview": result}
 
 
@@ -685,7 +678,8 @@ async def share_knowledge_base(
     if not meta:
         raise HTTPException(status_code=404, detail="知识库不存在")
     if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可共享")
+        # 与组织库分支一致：非所有者看不到"存在但无权"（B-06）。
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     target = user_db.get_user_by_id(req.user_id)
     if not target:
@@ -693,10 +687,12 @@ async def share_knowledge_base(
 
     try:
         await asyncio.to_thread(user_db.share_kb, kb_id, req.user_id, user_dict["id"], req.permission)
-    except Exception as e:
-        if "UNIQUE" in str(e):
-            raise HTTPException(status_code=409, detail="该用户已被共享") from e
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except Exception as exc:
+        if "UNIQUE" in str(exc):
+            raise HTTPException(status_code=409, detail="该用户已被共享") from exc
+        logger.exception("KB share failed", extra={"kb_id": kb_id, "user_id": req.user_id})
+        # 数据库内部错误文本不回显（B-05）。
+        raise HTTPException(status_code=500, detail="共享知识库失败") from exc
 
     return {"kb_id": kb_id, "user_id": req.user_id, "permission": req.permission}
 
@@ -716,7 +712,7 @@ async def unshare_knowledge_base(
     if not meta:
         raise HTTPException(status_code=404, detail="知识库不存在")
     if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可操作")
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     await asyncio.to_thread(user_db.unshare_kb, kb_id, user_id)
     return None
@@ -736,7 +732,7 @@ async def list_kb_shares(
     if not meta:
         raise HTTPException(status_code=404, detail="知识库不存在")
     if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
-        raise HTTPException(status_code=403, detail="仅知识库所有者或管理员可查看")
+        raise HTTPException(status_code=404, detail="资源不存在")
 
     shares = await asyncio.to_thread(user_db.list_kb_shared_users, kb_id)
     return shares

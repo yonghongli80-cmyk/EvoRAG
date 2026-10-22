@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 
+from config import settings
 from rag.data_sources.base import DataSource, validate_external_host
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,34 @@ _RESTRICTED_SQLITE_NAMES = {
     "bm25.db",
     "audit.log",
 }
+
+_RESTRICTED_SQLITE_SUFFIXES = (".txt", ".key", ".pem", ".env")
+
+_ALLOWED_SQLITE_HINT = "禁止访问系统数据库或受限路径"
+
+
+def _allowed_sqlite_roots() -> tuple[Path, ...]:
+    """Directories a SQLite data source may read from (B-07 / SEC-02).
+
+    Data sources are administrator-configured, so an arbitrary ``sqlite:///``
+    path was an arbitrary file-read primitive (``SELECT`` over ``data/users.db``
+    dumps password hashes). Reads are confined to the two directories that hold
+    *content* — the upload area and the structured-dataset area. Application
+    databases live outside them and the name blacklist stays as a second layer
+    for anything copied next to the allowed roots.
+
+    The roots are resolved per call so a test or a deployment that repoints the
+    storage roots is honoured.
+    """
+    roots: list[Path] = []
+    try:
+        from rag.context import get_upload_dir
+
+        roots.append(Path(get_upload_dir()))
+    except Exception:  # pragma: no cover - a broken context must not disable validation
+        logger.debug("upload root unavailable for the SQLite whitelist", exc_info=True)
+    roots.append(Path(settings.structured_datasets_root))
+    return tuple(root.expanduser().resolve() for root in roots)
 
 
 def validate_read_only_sql(query: str) -> None:
@@ -88,17 +118,29 @@ class DBSource(DataSource):
 
     @staticmethod
     def _validate_sqlite_path(path: str) -> None:
-        """Validate SQLite database path against directory traversal and sensitive system files."""
+        """Confine SQLite sources to whitelisted roots (B-07).
+
+        Three layers, in order:
+        1. reject ``..`` segments;
+        2. reject system database/secret filenames (blacklist kept as a fallback);
+        3. resolve the path and require it to stay under an allowed content root
+           (``Path.resolve`` follows symlinks, so a link cannot escape either).
+        """
         if not path or path == ":memory:":
             return
         clean_parts = path.replace("\\", "/").split("/")
         if ".." in clean_parts:
-            raise ValueError("禁止访问系统数据库或受限路径")
+            raise ValueError(_ALLOWED_SQLITE_HINT)
 
-        from pathlib import Path
         filename = Path(path).name.lower()
-        if filename in _RESTRICTED_SQLITE_NAMES or filename.endswith((".txt", ".key", ".pem", ".env")):
-            raise ValueError("禁止访问系统数据库或受限路径")
+        if filename in _RESTRICTED_SQLITE_NAMES or filename.endswith(
+            _RESTRICTED_SQLITE_SUFFIXES
+        ):
+            raise ValueError(_ALLOWED_SQLITE_HINT)
+
+        resolved = Path(path).expanduser().resolve()
+        if not any(resolved.is_relative_to(root) for root in _allowed_sqlite_roots()):
+            raise ValueError(_ALLOWED_SQLITE_HINT)
 
     def _validate_remote_host(self) -> None:
         parsed = urlparse(self.connection_string)

@@ -1,7 +1,7 @@
 """TDD tests for data source management API endpoints."""
 
 import sys
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -208,8 +208,8 @@ class TestSyncSource:
             data = response.json()
             assert data["synced"] == 5
             assert data["errors"] == []
-            # 同步执行体由路由以 `db=<当前 UserDB>` 关键字注入。
-            mock_sync.assert_called_once_with(source_id, db=user_db)
+            # 同步执行体由路由以当前 UserDB 与显式主体注入（B-03）。
+            mock_sync.assert_called_once_with(source_id, db=user_db, user_id=ANY)
 
     def test_sync_nonexistent(self):
         response = client.post("/sources/99999/sync")
@@ -226,7 +226,7 @@ class TestSyncSource:
         # Patch the module-level _sync_source so it does the DB updates
         # without making real HTTP requests. The route now injects the active
         # UserDB as the `db` keyword argument.
-        def _fake_sync(sid, db=None):
+        def _fake_sync(sid, db=None, user_id=None):
             target_db = db if db is not None else user_db
             target_db.update_data_source_synced(sid)
             target_db.update_data_source_status(sid, "active")

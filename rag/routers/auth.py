@@ -219,6 +219,72 @@ async def reset_password(
     return {"message": "密码已重置"}
 
 
+def _audit_role_change(
+    db,
+    actor: dict,
+    target: dict,
+    granted: bool,
+    previous: bool,
+    result: str,
+    reason: str,
+) -> None:
+    """Record one administrator-flag change attempt (B-03).
+
+    Successful changes *and* refused attempts are audited: knowing that somebody
+    tried to demote the last administrator is the point of the audit trail.
+    """
+    OrgAuditService(db).record(
+        int(actor["id"]),
+        "user_role_changed",
+        "user",
+        str(target["id"]),
+        result,
+        reason,
+        {
+            "is_admin": bool(granted),
+            "previous_is_admin": bool(previous),
+            "username": target.get("username", ""),
+        },
+    )
+
+
+def _count_other_admins(db, user_id: int) -> int:
+    """Return how many administrators would remain if *user_id* lost the flag."""
+    with db.locked_read() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE is_admin = 1 AND id <> ?", (user_id,)
+        ).fetchone()
+    return int(row[0])
+
+
+def _apply_role_change(db, actor: dict, target: dict, granted: bool) -> bool:
+    """Validate and apply one administrator-flag change, audited either way.
+
+    Guards (B-03):
+    - an administrator cannot revoke their own flag (no accidental lock-out);
+    - the last remaining administrator cannot be demoted (defense in depth for
+      callers other than this endpoint).
+
+    Returns ``True`` when the stored value changed.
+    """
+    previous = bool(target["is_admin"])
+    if previous == granted:
+        _audit_role_change(db, actor, target, granted, previous, "success", "unchanged")
+        return False
+    if not granted:
+        if int(target["id"]) == int(actor["id"]):
+            _audit_role_change(db, actor, target, granted, previous, "denied", "self_demotion")
+            raise HTTPException(status_code=403, detail="不能撤销自己的管理员权限")
+        if _count_other_admins(db, int(target["id"])) == 0:
+            _audit_role_change(
+                db, actor, target, granted, previous, "denied", "last_administrator"
+            )
+            raise HTTPException(status_code=409, detail="不能撤销最后一名管理员的权限")
+    db.set_user_admin(int(target["id"]), granted)
+    _audit_role_change(db, actor, target, granted, previous, "success", "granted" if granted else "revoked")
+    return True
+
+
 @router.put("/users/{uid}/role", summary="设置用户角色（管理员/权限等级）")
 async def set_user_role(
     request: Request,
@@ -236,7 +302,7 @@ async def set_user_role(
         if not target:
             raise HTTPException(status_code=404, detail="用户不存在")
         if req.is_admin is not None:
-            db.set_user_admin(uid, req.is_admin)
+            _apply_role_change(db, user, target, req.is_admin)
         return db.get_user_by_id(uid)
 
     return await asyncio.to_thread(_set)

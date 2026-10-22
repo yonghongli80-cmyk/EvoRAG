@@ -157,11 +157,18 @@ class UserRepository(BaseRepository):
             conn.commit()
 
     def _is_admin(self, user_id: Any) -> bool:
-        """判断 *user_id* 是否具备数据源 admin 权限（可读/删全部数据源）。"""
+        """判断 *user_id* 是否具备数据源 admin 权限（可读/删全部数据源）。
+
+        没有主体（``None``）不等于管理员：旧实现在缺省参数下 fail-open，任何
+        忘记传 user_id 的调用都会拿到全量数据源（B-03）。现在缺省主体一律拒绝，
+        显式 ``"admin"`` 保留为仓库层兼容别名（端点只传真实登录用户的 id）。
+        """
         if user_id is None:
-            return True
+            return False
         uid = str(user_id)
         if uid in ("admin", "0"):
+            # "admin" is the historical default owner (migrated rows) and "0" is the
+            # auth-disabled development principal.
             return True
         if uid.isdigit():
             try:

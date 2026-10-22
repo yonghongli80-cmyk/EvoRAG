@@ -2,7 +2,6 @@
 
 import hashlib
 import hmac
-import json
 import os
 import secrets
 from datetime import UTC, datetime
@@ -98,25 +97,30 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def verify_api_key(api_key: str = Security(api_key_header), authorization: str = Header(default="")) -> str:
-    """校验 API Key 或 JWT Token，返回 user_id。auth_enabled=False 时跳过校验。"""
+    """校验 API Key 或 JWT Token，返回 user_id。auth_enabled=False 时跳过校验。
+
+    Both credential kinds resolve through :func:`rag.api_security.resolve_principal`
+    (B-04).  The old X-API-Key branch returned the configured principal name
+    verbatim, so a key for a deleted or deactivated account still authenticated.
+    The API key itself carries no token version; account activation (and, for
+    Bearer tokens, ``security_version``) is therefore the shared revocation
+    boundary.
+    """
     if not settings.auth_enabled:
         return "anonymous"
-    # Try X-API-Key first
-    if api_key:
-        try:
-            keys = json.loads(settings.auth_keys)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=500, detail="鉴权配置格式错误") from exc
-        for user_id, key in keys.items():
-            if hmac.compare_digest(api_key, key):
-                return user_id
-    # Fallback: resolve JWT through the same principal boundary as modern APIs.
     # Import lazily to avoid the api.py -> auth.py import cycle.
-    if authorization.startswith("Bearer "):
-        from rag.api_security import resolve_principal
-        from rag.context import get_user_db
+    from rag.api_security import resolve_principal
+    from rag.context import get_user_db
 
-        user = resolve_principal(get_user_db(), authorization, None)
+    db = get_user_db()
+    if api_key:
+        user = resolve_principal(db, "", api_key)
+        if not user:
+            raise HTTPException(status_code=403, detail="认证失败，请提供有效的 API Key 或 JWT Token")
+        return str(user["id"])
+    # Fallback: resolve JWT through the same principal boundary as modern APIs.
+    if authorization.startswith("Bearer "):
+        user = resolve_principal(db, authorization, None)
         if user:
             return str(user["id"])
     raise HTTPException(status_code=403, detail="认证失败，请提供有效的 API Key 或 JWT Token")
