@@ -14,7 +14,7 @@
 | R-1 | 非企业空检索直接生成（D-2） | legacy 路径 `_prepare_context_standard` 用 `build_bundle=enterprise_request`（`rag/pipeline.py:722`）；空上下文且非企业时 `build_bundle=False`，`_finalize_rag_context` 不建证据包、不判定，直接 `generate()`。Jev 路径已用 `enterprise_request or not context`（`:998`），所以两条链路行为不一致 | **修**：legacy 对齐 Jev，空上下文一律过证据门；非空非企业行为不变 |
 | R-2 | 层 2 门禁零净变化（D-1） | `passed = not reasons`；`route_delta_pp == 0` 时即使逐例有进有退也 pass；`per_case` 已记录 `route_regressed/route_improved`，但 `stats` 没有“净零但逐例变动”的显式信号 | **不改语义**；只加非阻塞统计 `net_zero_churn`，让审计一眼看到 |
 | R-3 | `structured_query_kind` 无 `failed` 真机样本 | DB 分布 `[(None,198),(not_applicable,6),(unsupported,3)]`；生产者在 `pipeline._attempt_structured_query`，单测覆盖 record/detail，但没有 DB 落库用例 | **补 DB 级测试**：用临时 `evolution.db` + 真实 `FailureRecorder`，确认 `failed` 写进 `failure_observations.details_structured_query_kind`；不改产品代码 |
-| R-4 | 候选 #30/#31、alice 账号、canary 观察窗 | `candidates`：30 条；#30 `canary`（percent=0）、#31 `candidate_testing`（code_patch，只有 scope 门禁）。`users`：4 个 `alice_*` + 4 个伴生 `admin_*`；#30 0% 导致 canary 窗无样本 | **运维/产品动作**：写运行手册与决策表，不自动删账号、不自动推进候选 |
+| R-4 | 候选 #30/#31、alice 账号、canary 观察窗 | `candidates`：30 条；#30 `canary`（percent=0）、#31 `candidate_testing`（code_patch，只有 scope 门禁）。`users`：4 个 `alice_*` + 4 个伴生 `admin_*`；#30 0% 导致 canary 窗无样本 | **账号已合并（见 §4.1）；候选/观察窗仍待人工决策** |
 | R-5 | 架构升级 | Qdrant 本地独占、SQLite 单写、Redis 只用于 LLM 门、文件在本地、单进程 worker | **不实施**；在 `UPGRADE.md` 基础上补一份“当前阻塞/下一步”审计，Phase 0/1 才动手 |
 
 ---
@@ -84,11 +84,13 @@
 
 ### 4.1 审计发现（需要人拍板/执行）
 
-1. **账号安全（优先）**：4 个 `admin_*` 仍是脚本常量口令 `Password123!` 且 `is_admin=1`；
-   它们目前靠 `org_people.active=0` 在登录口被 `account_inactive` 拦住，属于“靠一个字段兜底”。
-   4 个 `alice_*` **没有 `org_people` 行**，`active` 检查对它们不生效——只要口令正确就能登录。
-   现有 `cleanup_test_artifacts.py` 匹配不到这 8 个账号（只匹配 `_` 前缀）。
-   **本次只审计，未改账号/未写库**；建议立即轮换口令或按 §2.2 顺序删除。
+1. **账号安全（已处置，2026-10-22 14:21）**：停服备份后删除 `users` id 3/4/6–12；
+   保留 id5 改为 `admin`/`admin`、`is_admin=1`、`permission_level=1`、`org_people.active=1`；
+   `FK check` 为空，旧账号全部 401，`admin` 登录 200 且可见 4 个 KB。
+   附带的真实缺陷：admin 有 `org_people` 行时 KB 列表走组织过滤、legacy KB 无 policy ⇒ 列表 0；
+   已修为 admin 不走组织列表（`f75e982`）。备份见
+   `artifacts/users-db-backup-20261022-142100/`，执行细节见运维审计 §2.6。
+   **注意 `admin/admin` 仅限本地测试，公网必须改密。**
 2. **候选 #30**：状态 `canary@0%`，结构上零样本；`gate_log` 缺层 3 shadow。推荐用
    `POST /candidates/30/rollback` 明确关闭观察窗（行与轨迹保留），而不是继续挂“在观察”。
 3. **候选 #31**：`code_patch/reranking`，只有 scope 门禁；静态核对显示它改的是 legacy

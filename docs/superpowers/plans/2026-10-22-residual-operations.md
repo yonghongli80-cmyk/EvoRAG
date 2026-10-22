@@ -256,6 +256,24 @@ DELETE FROM users               WHERE id IN (:admin, :alice);
 - 处置建议：这 8 行按 §2.2 删除即可一次性消掉上述两点；若暂不删，**先轮换 4 个 `admin_*` 口令**
   （`POST /users/{id}/reset-password`，或让管理员改）。
 
+### 2.6 执行记录（2026-10-22 14:21，已写库）
+
+- 停服后备份：`artifacts/users-db-backup-20261022-142100/`（`users.db` + `-wal` + `-shm`）。
+- 单事务删除 `users` id **3、4、6–12**（`test_live`/`test_employee` + 4 个 `admin_*` + 4 个 `alice_*`），
+  连同 conversations/chat_messages/feedback/citations/structured_query_runs、文档 27/28 与版本 29/30、
+  对应 org scopes/memberships/people/units 与 actor 审计行；`PRAGMA foreign_key_check` 为空。
+- 保留 id **5**，改为：
+  - `username=admin`、`password=admin`、`is_admin=1`、`permission_level=1`（当前最大值）；
+  - `password_changed_at=now`（旧 token 失效）、`salt=''`；
+  - `org_people.active=1`、`display_name=Admin`、`job_title=Administrator`、`security_version+1`；
+  - 保留 `doc_spec_81018c.txt`（doc#26 / version 28）与 `ORG-81018c` 管理范围。
+- 复核：`admin/admin` 登录 **200**、`/me` `is_admin=true`；`test_live`/`test_employee`/`alice_*`
+  全部 **401**；`admin` 可见 4 个知识库（见下条代码修复）。
+- 注意：`admin/admin` 是**仅限本地测试**的弱口令；公网/共享环境必须立即改密。
+- 附带修复：`admin` 有 `org_people` 行时，`GET /knowledge-bases` 走组织过滤，而 legacy KB
+  没有 `kb_org_policies`，导致列表为 0。已改为 **admin 不走组织列表**（`f75e982`），
+  现在返回 4 个 KB。
+
 ---
 
 ## 3. canary 观察窗：#30 为什么不可能有样本
