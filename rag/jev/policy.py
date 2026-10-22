@@ -6,6 +6,7 @@ and passage selection. Request-local chunk IDs follow the ``c{index}`` conventio
 :mod:`rag.jev.service`.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -14,6 +15,17 @@ from rag.jev.models import PassageJudgment, PreflightDecision
 from rag.models import Chunk
 
 RouteKind = Literal["structured", "rag", "tool", "clarification", "legacy"]
+
+#: A bare model name (``r50``, ``iPhone 15``) has no attribute to look up; asking which
+#: attribute is the correct behavior, not answering a nearby document.
+_MODEL_ONLY_RE = re.compile(r"^[A-Za-z]{1,8}[-_ ]?\d{1,6}[A-Za-z0-9._-]*$")
+
+#: Aggregation/statistics wording. When the KB actually has structured data, this is a
+#: structured question even if the preflight model is unsure; the coordinator may still
+#: decline and the pipeline falls back to document retrieval.
+_AGGREGATE_INTENT_RE = re.compile(
+    r"数量|人数|统计|合计|总计|平均|最高|最低|排名|同比|环比|占比"
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,40 @@ class RouteDecision:
     should_rewrite: bool
     reason: str
     preflight: PreflightDecision | None = None
+
+
+def deterministic_route(
+    question: str, capabilities: KbCapabilities | None
+) -> RouteDecision | None:
+    """Route cases the preflight model should not get to decide.
+
+    Two patterns are cheap and unambiguous enough to settle before the model call:
+
+    * a bare product model (``r50``) → clarification (which attribute?);
+    * an aggregation question on a KB that has structured data → structured.
+
+    Everything else returns ``None`` and keeps the existing preflight + policy path.
+    """
+    text = (question or "").strip()
+    if not text:
+        return None
+    if _MODEL_ONLY_RE.fullmatch(text):
+        return RouteDecision(
+            route="clarification",
+            should_rewrite=False,
+            reason="model_only_query",
+        )
+    if (
+        capabilities is not None
+        and capabilities.has_structured_data
+        and _AGGREGATE_INTENT_RE.search(text)
+    ):
+        return RouteDecision(
+            route="structured",
+            should_rewrite=False,
+            reason="structured_aggregate_question",
+        )
+    return None
 
 
 @dataclass(frozen=True)

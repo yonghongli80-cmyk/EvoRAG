@@ -3,7 +3,13 @@
 import pytest
 
 from rag.jev.models import JevBatchResult, PreflightDecision
-from rag.jev.policy import JevPolicy, KbCapabilities, RouteDecision, choose_route
+from rag.jev.policy import (
+    JevPolicy,
+    KbCapabilities,
+    RouteDecision,
+    choose_route,
+    deterministic_route,
+)
 from rag.jev.service import JevDecisionService
 
 
@@ -77,6 +83,35 @@ def test_route_decision_carries_preflight_for_trace():
     assert isinstance(result, RouteDecision)
     assert result.preflight is decision
     assert result.reason
+
+
+def test_a_bare_model_name_is_a_clarification():
+    """``r50`` alone has no attribute; asking which one beats answering a nearby doc."""
+    result = deterministic_route("r50", KbCapabilities(has_structured_data=True))
+    assert result is not None
+    assert result.route == "clarification"
+    assert result.reason == "model_only_query"
+
+
+def test_a_model_with_an_attribute_keeps_the_normal_path():
+    assert deterministic_route("r50电池价格", KbCapabilities(has_structured_data=True)) is None
+
+
+def test_an_aggregate_question_with_structured_data_is_structured():
+    result = deterministic_route(
+        "帮我统计7月份的招聘数量及入职人数",
+        KbCapabilities(has_structured_data=True),
+    )
+    assert result is not None
+    assert result.route == "structured"
+    assert result.reason == "structured_aggregate_question"
+
+
+def test_an_aggregate_question_without_structured_data_is_not_forced():
+    assert deterministic_route(
+        "帮我统计7月份的招聘数量",
+        KbCapabilities(has_structured_data=False),
+    ) is None
 
 
 class FakeJevClient:

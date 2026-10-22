@@ -11,6 +11,7 @@ from rag.jev.policy import (
     PassageSelection,
     RouteDecision,
     choose_route,
+    deterministic_route,
     select_passages,
 )
 from rag.models import Chunk
@@ -37,6 +38,9 @@ class JevDecisionService:
 
     def route(self, question: str, capabilities: KbCapabilities) -> RouteDecision:
         """Return the deterministic route decision for one question."""
+        guarded = deterministic_route(question, capabilities)
+        if guarded is not None:
+            return guarded
         state = {
             "question": question,
             "capabilities": {
