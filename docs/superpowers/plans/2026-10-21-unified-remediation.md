@@ -419,13 +419,15 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 | 3.5 | `8812348` | 生成温度默认 0.0（同问同答优先） | 12 个生成器用例 |
 | 3.6 | `2e85136` | 基准把 `fixed/insufficient_evidence` 归为 `rag` | 40 个基准用例 |
 | 3.7 | `476e4f0` | locustfile 支持用既有账号登录（`RAG_LOAD_USERNAME`/`RAG_LOAD_PASSWORD`） | locust 2.46.7 已用清华源安装 |
+| 3.8 | `948243c` | 路由确定性护栏：裸型号 → clarification；结构化 KB 的聚合问题 → structured | 18 个路由用例；四例子集 route 1.000、refusal 1.000/2 |
+| 3.9 | `0e62637` | 改写触发阈值 0.5 → 0.55（`RAG_JEV_REWRITE_PROBABILITY`） | 3 轮完整基准；p95 由 10.2s 降到 7.7s，改写率仍失败且不单调 |
 | 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
 
 - 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
   `RAG_REWRITE_DUAL_RERANK_MODE=below_threshold`（阈值 0.5）。
 - 回滚：`RAG_QUERY_REWRITE_CACHE_ENABLED=false` + `RAG_REWRITE_DUAL_RERANK_MODE=off`，
   逐字节回到 2026-10-21 之前的行为。
-- 全量套件（含新增用例）：**2350 passed / 0 failed，26:00**（2026-10-21；含 sync `kb_id`、脱敏价格守卫、Docker 规则、标签、温度与路由映射用例）。
+- 全量套件（含新增用例）：**2354 passed / 0 failed，32:57**（2026-10-22；含 sync `kb_id`、脱敏守卫、Docker 规则、标签、温度、路由护栏与阈值用例）。
 - 真机复现（2026-10-21，停 8080 释放 Qdrant 后 `verify_rewrite_stability.py --dual`）：
   6 轮产生 5 个不同改写，**3 轮触发双路重排**，top 分 **0.531–0.701**，未跨 0.35；
   最坏改写「如何查询副厂配件明细？」被原问题重排救回 **0.701** → **PASS**。服务已恢复，`/health` healthy。
@@ -437,10 +439,14 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 - 同进程对照（2026-10-21）：同一 pipeline 交替执行 `query` / `query_stream`，两者均
   `decision=answerable`、`sources=5`，差异只在生成措辞。因此“同步拒答/流式作答”的根因是
   同步接口丢 `kb_id`（已修），不是 Jev 判定分叉；若要求逐字一致，需产品决定是否把生成温度降到 0。
-- 基准（2026-10-21，24 例 × 1 run，`--user-id 1`）：old/new route **0.833**（均低于 0.95，
-  主要受标签争议 real-008/012/018/022 影响）；p50 **PASS**（1186.0ms vs 3343.6ms）、
-  p95 **FAIL**（6314.7ms vs 4834.7ms）、rewrite **PASS**、top5 **PASS**；
-  refusal 修前 **0.750 / 4**（real-017 被 Jev 作答），加脱敏守卫后拒答子集 **1.000 / 3**。
+- 基准（2026-10-22，24 例 × 3 run，`--user-id 1`，阈值 0.55）：new **P50 2382.9ms PASS**、
+  **P95 7726.8ms PASS**（old 10516.8ms，目标 8413.5ms）、**route 1.000 PASS**、
+  **top5 1.000 PASS**、**refusal 1.000 / 12 PASS**；**rewrite FAIL**：ordinary 0.354
+  vs 目标 0.281（old 0.938）。阈值 0.5 的那轮 3 run 是 rewrite 0.312 / P95 10222.7ms，
+  说明改写率受预判概率波动支配，0.5 → 0.55 不是单调改善；保留 0.55 是因为该轮 P95 过线，
+  不宣称 rewrite 已解决。
+- 首轮单次基准（2026-10-21，24 例 × 1 run）保留作对照：route 0.833、P95 6314.7ms FAIL、
+  refusal 0.750/4；三处都已被上述修复改善。
 - Jev 脱敏价格守卫：`real-017/018` 在 active 路径均为 `fixed/insufficient_evidence`，
   引用仍保留（6/8 条来源），不再输出金额；旧链路行为不变。HTTP 复核：同步 `/query` 对
   `r50电池价格`、`r50原厂电池价格` 均返回固定拒答 + **5 个来源**。
@@ -452,9 +458,15 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
   传温度时使用它（改写与回答都走同一默认），用于“同问同答优先”。12 个生成器用例通过。
 - 基准路由映射修正：`route=fixed` 且 `decision.kind=insufficient_evidence` 归为 `rag`，
   不再被误算成 clarification；`clarification_required`/`permission_limited` 仍归 clarification。
-  2 个新用例钉住。完整基准未复跑，因此 route 数字仍以修复前那次 0.833 记录。
+  2 个新用例钉住；3 轮完整基准已验证 route 1.000。
 - 标签拍板：**不改 real-008/022 标签**。real-008 的 structured 是产品口径（暴露 HR 统计表缺口）；
   real-022 的 clarification 正确（系统答出 R50 参数是真实路由缺陷）。route 失败按缺陷保留。
+- 路由优化（2026-10-22）：新增确定性护栏——裸型号（`r50`）直接 clarification；结构化 KB 上的
+  聚合问题（数量/人数/统计/合计/平均/最高/最低/排名/同比/环比/占比）直接 structured。
+  四例子集（real-008/012/018/022）实测 **route 1.000、refusal 1.000/2**；完整 24 例 × 3 轮
+  实测 **new route 1.000、special 1.000**（old 仍 0.833，未动旧链路）。
+  真机复核（fresh session）：`r50` → `route=fixed`、`jev_route=clarification`、
+  `reason=model_only_query`、0 来源；旧会话里若有历史，仍会先做指代补全再路由，这是多轮设计。
 - Docker 构建上下文实跑未执行：`docker` CLI 存在但守护进程未启动；WSL 没有已安装的发行版，
   Docker Desktop 进程启动后退出，Linux engine 无法就绪。`.dockerignore` 规则由
   `tests/test_dockerignore_context.py` 钉住，装好 WSL2 发行版并启动 Docker Desktop 后可按
