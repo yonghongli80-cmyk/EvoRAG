@@ -277,7 +277,8 @@ D-02/D-03/D-04/D-05、E-01/E-02/E-03、F-02/F-03、B-02。
 
 ## 6. 审查限制
 
-1. 全部为静态审查 + 定向只读；没有在干净环境复现 F-01，没有构建镜像/跑全量测试。
+1. 审查阶段为静态 + 定向只读；修复后已补跑全量 pytest、前端 Vitest/build 和备份验证，
+   但未在干净容器里实际 `docker build`（Docker 构建仍受本机环境限制）。
 2. 部分 P2/P3 的利用条件未实测（C-09 mode-only、D-07 大合并区、F-07 环境泄漏）。
 3. `docs/superpowers/plans/2026-10-22-full-codebase-review-findings.md` 是汇总；逐域原始
    证据行号以本文件为准，子代理报告未单独入库。
@@ -288,3 +289,26 @@ D-02/D-03/D-04/D-05、E-01/E-02/E-03、F-02/F-03、B-02。
 
 按 `docs/superpowers/plans/2026-10-22-pre-upgrade-remediation-plan.md` 的 P0 → P1 顺序实施；
 P0 未修完不进入 Qdrant/Postgres 升级。
+
+---
+
+## 8. 修复状态（2026-10-22 晚）
+
+P0 与 P1 已按 7 条工作流并行修复并提交：
+
+| 项 | 提交 |
+| --- | --- |
+| F-01/F-02/F-03 | `e789e6d` |
+| B-01 + A-01/A-02 | `2bf5724` |
+| D-01 | `2d3769f` |
+| B-02 + D-02/D-03 | `c7e62a6` |
+| D-04/D-05 | `b12b8e0` |
+| C-01/C-02 | `9f5f0c8` |
+| E-01/E-02/E-03 | `91efbce` |
+
+集成验证：**2444 passed / 0 failed（26:20）**、全树 ruff 通过、前端 **255 passed** 且 build 成功、
+启动迁移 `migrated=4 remaining=0`、`admin/admin` 200、备份 `status=verified`。
+行为变化与未闭环项（legacy KB 变 unassigned、沙箱默认 fail-closed、B-06/W7 残留）
+见 `docs/superpowers/plans/2026-10-22-pre-upgrade-remediation-plan.md` §6.2/§6.3。
+
+**结论：P0/P1 门禁已关闭，可以进入架构升级；P2/P3 不阻塞，但应先处理 legacy KB 的组织归属。**

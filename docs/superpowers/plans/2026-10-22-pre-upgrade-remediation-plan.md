@@ -142,3 +142,53 @@ npm run build
 
 **放行条件**：P0 全部关闭，P1 至少 A-01/A-02、C-01/C-02、D-02~D-05、E-01~E-03、
 F-02/F-03、B-02 关闭；全量测试、ruff、benchmark、locust 0 失败；备份/恢复演练通过。
+
+---
+
+## 6. 实施记录（2026-10-22）
+
+7 条工作流并行实施完成，按工作流拆分提交：
+
+| 工作流 | 提交 | 内容 | 验证 |
+| --- | --- | --- | --- |
+| W1 | `e789e6d` | F-01 锁文件补 `typesafe-sdk`/`httpx2`/`httpcore2`/`truststore`；F-02 `.dockerignore` 排除公司数据/产物；F-03 `scripts/bootstrap_admin.py` + 部署文档 | 新增 18 passed；`pip check` 干净；`import rag.api` 通过 |
+| W2 | `2bf5724` | B-01 记忆按 principal 命名空间 + 会话归属前置校验；A-01/A-02 熔断改可识别失败，不污染缓存/记忆/可靠性 | 新增 + 相关 175 passed |
+| W3 | `2d3769f` | D-01 上传先 promote 到 final path，旧 staging 幂等迁移；备份端到端 | 新增 3 passed；材料/备份 50 passed |
+| W6 | `c7e62a6` | B-02 legacy KB 启动迁移 + owner/admin fail-closed；D-02 删除墓碑；D-03 并发编辑 409；W3 启动钩子 | 63 个相关文件 399 passed |
+| W7 | `b12b8e0` | D-04 30 天回收 purge 入 worker；D-05 Wiki 先写新块再删旧块 + 入队重试 | 材料 56 passed；Wiki 40 passed |
+| W5 | `9f5f0c8` | C-01 沙箱默认 fail-closed（无隔离标记不执行候选代码）；C-02 staleness 对 patched/clean 双侧 + 真语料指纹 + seam 短路 | 目标 86 passed |
+| W4 | `91efbce` | E-01 素材改 cookie；E-02 logout/401/403 清理 store；E-03 SSE error 处理；重建 static | 前端 255 passed；build 成功 |
+
+### 6.1 集成验证
+
+| 项 | 结果 |
+| --- | --- |
+| 全量 pytest | **2444 passed / 0 failed，26:20** |
+| ruff（全树） | All checks passed |
+| 前端 Vitest | **255 passed / 36 files** |
+| 前端 build | 成功（static 已重建） |
+| 新增用例 | 52 passed |
+| 启动迁移 | `legacy knowledge base migration: migrated=4 remaining=0` |
+| 服务 | `127.0.0.1:8080` healthy；`admin/admin` 200，`/me is_admin=true`，4 个 KB |
+| 备份 | `create --trigger manual` → `status=verified`，3 DB / 45 files / 4.9MB |
+
+### 6.2 行为变化（部署前必须知道）
+
+1. **legacy KB 迁移**：4 个 KB 已写为 `unassigned`；迁移期只有 **owner/admin** 可访问。
+   要给普通成员使用，必须在组织管理里分配 KB 所属组织；否则成员 403/404。
+2. **沙箱默认 fail-closed**：没有 `RAG_EVOLUTION_SANDBOX_ISOLATED=1`（由真实隔离启动器设置）
+   且未显式 `--allow-unisolated` 时，`run_patch_sandbox` 不执行候选代码；CLI 退出码 2。
+3. **对话记忆**：旧全局 `default` 历史不再对 API 用户可见；新会话按 `u{uid}:{session}` 隔离。
+4. **熔断**：`generate`/`generate_stream` 熔断时抛 `CircuitOpenError`；同步端点返回 503
+   `degraded`，流式发 `error` 事件，不再入记忆/附 reliability。其它直接调用 `generate`
+   的路径（analysis/organizer/regenerate）在熔断时会显式失败，需要在各自边界补 503。
+5. **备份迁移**：启动时会把旧 staging 版本文件 promote 到 final；启动日志会打印迁移计数。
+
+### 6.3 未闭环（P2/P3，未在本轮）
+
+- B-06：`/knowledge-bases` 对 unassigned 的 404 仍会整表 404；启动迁移后更易触发。
+- W6 边界外：`knowledge.py::_check_kb_edit_permission` 仍走 legacy owner/shared；
+  overview/TOC/summary 端点需后续收口。
+- W7：wiki reindex 复用 `document_index_jobs`，`document_id=page_id` 与物料 id 空间重号，
+  低概率会 cancel 同号物料 job；彻底修需 job 表加 scope 列。
+- 其余 P2/P3 见 findings 文档；架构升级前不阻塞。
