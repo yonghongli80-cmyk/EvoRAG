@@ -68,11 +68,26 @@ docker compose run --rm rag-app python -m rag.org_auth.seed --db-path /app/data/
 
 ## 更新
 
-根目录的 `deploy.sh` 会拉取当前分支、重建应用镜像并重启服务：
+根目录的 `deploy.sh` 会拉取当前分支、重建应用镜像、做一次到期备份、启动服务，并**在最后验证健康**：
 
 ```bash
 bash deploy.sh
 ```
+
+流程与失败边界（F-06，2026-10-22）：
+
+1. 预检：`docker compose version`、`.env` 存在（缺失则退出 1）、`.env` 权限收紧为 `600`、
+   端口绑定提示（发布到全部网卡时告警，公网部署应前置 TLS 反代）；
+2. `git pull --ff-only` → `docker compose build rag-app`；
+3. `python scripts/backup.py create-if-due --trigger deploy`（失败即中止，旧容器继续跑）；
+4. `docker compose up -d`；
+5. 健康门禁：先探测 `/ready`（S7 落地后存在；503 = 依赖未就绪，继续等），不存在（404）
+   时退回 `/health`；要求**一次 200**，否则打印 `docker compose ps`、最近 100 行日志并
+   **退出 1**（不再出现"容器起不来也算部署成功"）。
+
+可用环境变量调整门禁：`RAG_PUBLISHED_PORT`（默认 8000）、`RAG_HEALTH_BASE_URL`、
+`RAG_HEALTH_RETRIES`（默认 24）、`RAG_HEALTH_INTERVAL_SECONDS`（默认 5）、
+`RAG_HEALTH_PATH`（强制指定路径）、`RAG_HEALTH_PROBE_TIMEOUT_SECONDS`、`RAG_COMPOSE_SERVICE`。
 
 也可手动执行：
 
@@ -81,6 +96,69 @@ git pull --ff-only
 docker compose build rag-app
 docker compose up -d
 ```
+
+### 优雅停止（F-04）
+
+容器里 `python -u start.py` 是 **PID 1**（`Dockerfile` 的 exec-form `CMD`），它负责：
+
+- 把 `SIGTERM`/`SIGINT` 转发给 uvicorn 子进程，让 FastAPI lifespan 清理真正跑完；
+- 宽限期（`RAG_SHUTDOWN_TIMEOUT`，默认 10 秒）内没退出就 `kill()`，避免容器长期卡在 `stopping`；
+- 第二次信号（运维连按 Ctrl+C / compose 再发一次）立即强杀。
+
+对运维的含义：`docker stop` 默认等 10 秒后 SIGKILL，与上面的默认宽限期相同。**如果把宽限期调大，
+要同步调大 `docker stop --time` / compose 的 `stop_grace_period`，否则清理仍会被 SIGKILL 打断。**
+`/health` 探测超时（`RAG_START_HEALTH_ATTEMPTS`，默认 60 次 × 0.5 秒）时只打印警告、不打印
+"服务已就绪"，也不再打开浏览器。
+
+## CI 与代码托管事实（F-08）
+
+- **本仓库的 `origin` 在 Gitee**：`git@gitee.com:li-yonghong111/ragv3.git`（2026-10-22 用
+  `git remote -v` 核对，只有一个 origin，没有 GitHub remote）。
+- 因此 `.github/workflows/ci.yml` 与 `deploy.yml` **不会因为推送到 Gitee 而运行**：GitHub Actions
+  只跟随 GitHub 仓库的 push/pull_request 事件。这两个文件是给 GitHub 镜像/迁移后的仓库准备的；
+  Gitee 侧若需要门禁，应使用 Gitee Go 或自建 runner，命令与
+  下面"本地等价命令"一致。真实部署路径是服务器上执行 `bash deploy.sh`（同一套备份门禁与健康门禁）。
+- 什么时候会真正生效：仓库同步到 GitHub（含 Actions 权限）后，或把 workflow 迁移到 Gitee Go。
+
+本地等价命令（与 CI 各 job 一一对应）：
+
+```bash
+# backend / runtime-lock：锁文件一致性 + 依赖自检 + 导入冒烟
+python -m venv .venv-clean
+.venv-clean/bin/pip install -r requirements.lock      # Windows: .venv-clean\Scripts\pip.exe
+.venv-clean/bin/pip check
+.venv-clean/bin/python -c "import rag.api"
+.venv-clean/bin/python -m pytest tests/test_dependency_lock.py -q
+
+# backend：开发锁 + 全量门禁
+pip install -r requirements-dev.lock
+pip check
+ruff check .
+pytest tests/ -q
+
+# docker-build：镜像冒烟（Docker daemon 不可用时跳过）
+docker build --tag ragv3:ci .
+docker run --rm ragv3:ci python -c "import rag.api"
+```
+
+CI 固定的行为（`tests/test_ci_quality_gates.py` 会因此失败）：
+
+- 所有 action 用 **commit SHA** 固定，且同一行要有版本注释（缺注释测试会失败）；
+- 每个 job 必须有 `timeout-minutes`，workflow 顶层 `permissions` 只有 `contents: read`；
+- 必须有一条"只装 `requirements.lock`"的 job，并在其中 `pip check` + `import rag.api`；
+- `docker build` 冒烟存在；runner 没有 Docker daemon 时打印 `::warning` 后跳过（可用仓库变量
+  `RUN_DOCKER_BUILD=false` 关掉整个 job）。
+
+## Render 模板已移除（F-09）
+
+`render.yaml` 已删除。原因（不是"暂时不用"，而是它和新拓扑不兼容）：
+
+1. 旧模板是单 web 服务 + 1 GB 磁盘，**没有挂载 `qdrant_data`**，每次部署都会丢失向量索引
+   （2026-06-26 审查 I48 已记录）；
+2. 生产拓扑是 **Compose 单机**：`rag-app` + `redis`（必填 `REDIS_PASSWORD`）+ 本地 Qdrant
+   目录卷，Render 的免费层磁盘/私有网络无法等价表达，保留模板只会误导部署者；
+3. 若将来改用托管平台，应按 `docker-compose.yml` 的卷与密钥清单重写模板，并同步
+   `tests/test_redis_deployment_security.py` 的断言（它现在只校验 Compose/.env 这一条路径）。
 
 ## 数据与备份
 

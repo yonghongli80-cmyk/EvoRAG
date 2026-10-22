@@ -1,37 +1,140 @@
+"""Shared pytest fixtures.
+
+F-07 (2026-10-22): the suite must not inherit the developer's ``.env`` and must not write
+into the repository's production data.  The old file only pinned four variables and patched
+the API-level paths, which left three holes:
+
+* ``rag/context.py`` creates ``UserDB(settings.users_db_path)`` **at import time**, so merely
+  collecting the suite opened (and migrated) the real ``data/users.db``;
+* the machine's ``.env`` sets ``RAG_JEV_MODE=active``, ``RAG_EVOLUTION_ENABLED=true``,
+  ``RAG_EVOLUTION_CANDIDATE_ENABLED=true`` and a diagnosis-labels path under ``benchmarks/``,
+  so tests written for the defaults silently took the Jev/evolution paths;
+* ``rag/auth.py`` loads (and may create) ``data/jwt_secret.txt`` at import time.
+
+Three layers close them:
+
+1. ``PRESEEDED_ENVIRONMENT`` — environment variables outrank ``.env`` for pydantic-settings,
+   and they are assigned *before* any ``rag``/``config`` import, so even import-time
+   singletons see the sandbox paths and the neutral subsystem flags.
+2. ``neutralized_settings`` — patches the live ``Settings`` object for every test, covering
+   the ``*_path``/``*_root``/``*_dir`` fields (``tests/test_test_isolation.py`` fails when a
+   new path field is added without being covered here).
+3. ``sandbox_api_storage`` — per-test private database/uploads/vector store for API tests.
+
+Keep ``tests/test_test_isolation.py`` green when adding a setting: it is the guardrail that
+stops the next ambient-configuration leak.
+"""
+
+import atexit
 import os
+import shutil
+import tempfile
+from pathlib import Path
 
-# 安全修复后 config.auth_enabled 默认开启（True）。
-# 既有测试大多不带 token 直接调用接口，依赖认证关闭环境运行，
-# 因此在本文件被 pytest 加载时（早于任何 import config / import rag.*）
-# 把 RAG_AUTH_ENABLED 预置为 "false"。
-# tests/test_auth_default_enabled.py 用 monkeypatch.delenv 恢复未设置态来测默认值。
-os.environ.setdefault("RAG_AUTH_ENABLED", "false")
-os.environ.setdefault("RAG_SELF_REGISTRATION_ENABLED", "true")
-os.environ.setdefault("RAG_MATERIAL_WORKER_ENABLED", "false")
-os.environ.setdefault("RAG_BACKUP_ENABLED", "false")
+# ── layer 1: environment, applied before any project import ─────────────────
+# Session-scoped sandbox for import-time singletons (rag.context.UserDB, rag.auth JWT secret).
+_SESSION_SANDBOX = Path(tempfile.mkdtemp(prefix="ragv3-test-session-"))
+atexit.register(shutil.rmtree, _SESSION_SANDBOX, ignore_errors=True)
 
-import pytest
-from fastapi.testclient import TestClient
+PRESEEDED_ENVIRONMENT = {
+    # Auth: most tests call endpoints anonymously; the auth-enabled subset opts back in.
+    # tests/test_auth_enabled_smoke.py is the counterweight for this default.
+    "RAG_AUTH_ENABLED": "false",
+    "RAG_SELF_REGISTRATION_ENABLED": "true",
+    # Deterministic JWT secret: never read or create data/jwt_secret.txt from a test run.
+    "RAG_JWT_SECRET": "ragv3-tests-only-jwt-secret-not-for-deployment",
+    # Optional subsystems: off unless a test turns one on explicitly.
+    "RAG_JEV_MODE": "off",
+    "RAG_JEV_KB_ALLOWLIST": "",
+    "RAG_EVOLUTION_ENABLED": "false",
+    "RAG_EVOLUTION_WORKER_ENABLED": "false",
+    "RAG_EVOLUTION_CANDIDATE_ENABLED": "false",
+    "RAG_EVOLUTION_CANDIDATE_CANARY_PERCENT": "0",
+    "RAG_EVOLUTION_CANDIDATE_SHADOW_SAMPLE_RATE": "0",
+    "RAG_EVOLUTION_SANDBOX_ALLOW_UNISOLATED": "false",
+    "RAG_EVOLUTION_DIAGNOSIS_LABELS_PATH": "",
+    "RAG_EVOLUTION_SANDBOX_DATA_SNAPSHOT": "",
+    "RAG_EVOLUTION_SANDBOX_REPLAY_FIXTURE": "",
+    "RAG_MATERIAL_WORKER_ENABLED": "false",
+    "RAG_BACKUP_ENABLED": "false",
+    # Persistent state: session sandbox, never the repository.
+    "RAG_USERS_DB_PATH": str(_SESSION_SANDBOX / "users.db"),
+    "RAG_WIKI_DB_PATH": str(_SESSION_SANDBOX / "wiki.db"),
+    "RAG_ANALYSIS_DB_PATH": str(_SESSION_SANDBOX / "analysis.db"),
+    "RAG_MEMORY_DB_PATH": str(_SESSION_SANDBOX / "memory.db"),
+    "RAG_BM25_DB_PATH": str(_SESSION_SANDBOX / "bm25_index.db"),
+    "RAG_QDRANT_PATH": str(_SESSION_SANDBOX / "qdrant"),
+    "RAG_EVOLUTION_DB_PATH": str(_SESSION_SANDBOX / "evolution.db"),
+    "RAG_DOCUMENT_VERSIONS_ROOT": str(_SESSION_SANDBOX / "document_versions"),
+    "RAG_STRUCTURED_DATASETS_ROOT": str(_SESSION_SANDBOX / "structured_datasets"),
+    "RAG_MATERIAL_EMBEDDING_CACHE_PATH": str(_SESSION_SANDBOX / "embedding_cache.sqlite3"),
+    "RAG_BACKUP_ROOT": str(_SESSION_SANDBOX / "backups"),
+}
+# Assigned (not setdefault): a developer shell exporting RAG_AUTH_ENABLED=true must not
+# change what the suite means.
+for _key, _value in PRESEEDED_ENVIRONMENT.items():
+    os.environ[_key] = _value
+del _key, _value
 
-from rag.auth import create_token
-from rag.user_db import UserDB
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from rag.auth import create_token  # noqa: E402
+from rag.user_db import UserDB  # noqa: E402
+
+#: Settings fields that hold a filesystem path but do not end with one of the scanned suffixes.
+_EXTRA_PATH_FIELDS = (
+    "evolution_sandbox_data_snapshot",
+    "evolution_sandbox_replay_fixture",
+)
+
+
+def _isolated_path_fields() -> list[str]:
+    from config import settings
+
+    derived = [
+        name
+        for name in type(settings).model_fields
+        if name.endswith(("_path", "_root", "_dir"))
+    ]
+    return sorted(set(derived) | set(_EXTRA_PATH_FIELDS))
 
 
 @pytest.fixture(autouse=True)
-def deterministic_jev_mode(monkeypatch):
-    """Isolate the suite from a developer .env that enables optional subsystems.
+def neutralized_settings(tmp_path_factory, monkeypatch):
+    """Pin optional subsystems and every persistent path for the duration of one test.
 
-    A live service may run with ``RAG_JEV_MODE=active`` and
-    ``RAG_EVOLUTION_ENABLED=true`` (this machine does); without this fixture the suite
-    would inherit that configuration and take the Jev/evolution paths in tests written
-    for the defaults. Tests that exercise those subsystems set the values themselves,
-    so their explicit values win.
+    A live service may run with Jev active and the evolution canary enabled (this machine
+    does); without this fixture the suite would inherit that configuration and take paths
+    its tests were never written for, and any Settings path left at its repository default
+    is a production write from a test run.
     """
     from config import settings
 
+    sandbox = tmp_path_factory.mktemp("settings-sandbox")
+
+    # Persistence first: every path-shaped field goes to a per-test temporary directory.
+    # The explicit neutralisations below win over this loop (e.g. an empty labels path).
+    for name in _isolated_path_fields():
+        monkeypatch.setattr(settings, name, str(sandbox / name))
+
+    # External services / optional subsystems.
     monkeypatch.setattr(settings, "jev_mode", "off")
     monkeypatch.setattr(settings, "jev_kb_allowlist", "")
     monkeypatch.setattr(settings, "evolution_enabled", False)
+    monkeypatch.setattr(settings, "evolution_worker_enabled", False)
+    monkeypatch.setattr(settings, "evolution_candidate_enabled", False)
+    monkeypatch.setattr(settings, "evolution_candidate_canary_percent", 0)
+    monkeypatch.setattr(settings, "evolution_candidate_shadow_sample_rate", 0.0)
+    monkeypatch.setattr(settings, "evolution_sandbox_allow_unisolated", False)
+    monkeypatch.setattr(settings, "evolution_diagnosis_labels_path", "")
+    monkeypatch.setattr(settings, "evolution_sandbox_data_snapshot", "")
+    monkeypatch.setattr(settings, "evolution_sandbox_replay_fixture", "")
+    monkeypatch.setattr(settings, "data_sources_enabled", False)
+    monkeypatch.setattr(settings, "material_worker_enabled", False)
+    monkeypatch.setattr(settings, "backup_enabled", False)
+    # Explicit, not "whatever the host .env says"; isolated_api/auth smoke tests opt back in.
+    monkeypatch.setattr(settings, "auth_enabled", False)
 
 
 @pytest.fixture(autouse=True)
@@ -56,12 +159,16 @@ def sandbox_api_storage(tmp_path_factory, monkeypatch):
     monkeypatch.setattr("rag.context._DB_PATH", sandbox / "users.db")
     monkeypatch.setattr("rag.context.DATA_DIR", upload_dir)
     monkeypatch.setattr("rag.context.KB_FILES_ROOT", kb_files_root)
+    monkeypatch.setattr(settings, "users_db_path", str(sandbox / "users.db"))
     monkeypatch.setattr(settings, "qdrant_path", str(sandbox / "qdrant"))
     monkeypatch.setattr(settings, "analysis_db_path", str(sandbox / "analysis.db"))
     monkeypatch.setattr(settings, "memory_db_path", str(sandbox / "memory.db"))
     # 2026-10-18：这两个默认落在仓库 data/ 里，套件此前直接写生产库（wiki.db、bm25_index.db）。
     monkeypatch.setattr(settings, "wiki_db_path", str(sandbox / "wiki.db"))
     monkeypatch.setattr(settings, "bm25_db_path", str(sandbox / "bm25_index.db"))
+    monkeypatch.setattr(settings, "evolution_db_path", str(sandbox / "evolution.db"))
+    monkeypatch.setattr(settings, "backup_root", str(sandbox / "backups"))
+    monkeypatch.setattr(settings, "material_embedding_cache_path", str(sandbox / "embedding_cache.sqlite3"))
     monkeypatch.setattr(settings, "document_versions_root", str(versions_root))
     monkeypatch.setattr(settings, "structured_datasets_root", str(structured_root))
     monkeypatch.setattr(api.app.state, "user_db", db)
@@ -166,7 +273,7 @@ def mock_embedding_indexing(monkeypatch):
 
 @pytest.fixture
 def isolated_api(tmp_path, monkeypatch):
-    """Give API tests a private database and upload root."""
+    """Give API tests a private database and upload root, with authentication enabled."""
     import rag.api as api
     from config import settings
 

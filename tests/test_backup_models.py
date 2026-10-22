@@ -13,6 +13,8 @@ from tests.backup_fixtures import make_backup_context, make_manifest
 def test_backup_settings_have_weekly_safe_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("RAG_BACKUP_ENABLED", raising=False)
+    # conftest 把备份根目录重定向到临时目录（避免测试写生产备份盘），这里验的是默认值。
+    monkeypatch.delenv("RAG_BACKUP_ROOT", raising=False)
     configured = Settings(_env_file=None)
 
     assert configured.backup_enabled is True

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -9,7 +10,9 @@ def test_application_image_runs_as_dedicated_non_root_user():
     assert "useradd -m -u 10001 rag" in dockerfile
     assert "chown -R rag:rag /app" in dockerfile
     assert "USER rag" in dockerfile
-    assert dockerfile.index("USER rag") < dockerfile.index('CMD ["python", "start.py"]')
+    cmd = re.search(r"^CMD\s+\[.*\]$", dockerfile, re.MULTILINE)
+    assert cmd is not None and "start.py" in cmd.group(0)
+    assert dockerfile.index("USER rag") < cmd.start()
 
 
 def test_application_data_uses_named_volumes_owned_by_the_image():

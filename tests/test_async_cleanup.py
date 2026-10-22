@@ -91,27 +91,19 @@ class TestMeEndpointAuth:
         assert "id" in data
         assert "username" in data
 
-    def test_me_with_auth_disabled_returns_200(self, client):
+    def test_me_with_auth_disabled_returns_200(self, client, monkeypatch):
         """/me with auth_enabled=False should return 200, not 422."""
         from config import settings
-        original = settings.auth_enabled
-        settings.auth_enabled = False
-        try:
-            resp = client.get("/me")
-            assert resp.status_code == 200
-        finally:
-            settings.auth_enabled = original
+        monkeypatch.setattr(settings, "auth_enabled", False)
+        resp = client.get("/me")
+        assert resp.status_code == 200
 
-    def test_me_with_invalid_token_returns_auth_error(self, client):
+    def test_me_with_invalid_token_returns_auth_error(self, client, monkeypatch):
         """/me with invalid token returns 401/403 when auth is enabled."""
         from config import settings
-        original = settings.auth_enabled
-        settings.auth_enabled = True
-        try:
-            resp = client.get("/me", headers={"Authorization": "Bearer bad_token"})
-            assert resp.status_code in (401, 403)
-        finally:
-            settings.auth_enabled = original
+        monkeypatch.setattr(settings, "auth_enabled", True)
+        resp = client.get("/me", headers={"Authorization": "Bearer bad_token"})
+        assert resp.status_code in (401, 403)
 
 
 # ── Issue #3: /feedback ownership check ───────────────────────────────

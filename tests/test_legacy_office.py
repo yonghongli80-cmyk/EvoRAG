@@ -76,14 +76,14 @@ def converter_fixture(tmp_path):
     return Fixture()
 
 
-def test_legacy_conversion_is_archive_only_without_isolated_launcher(settings):
-    settings.legacy_office_enabled = False
+def test_legacy_conversion_is_archive_only_without_isolated_launcher(settings, monkeypatch):
+    monkeypatch.setattr(settings, "legacy_office_enabled", False)
     assert legacy_conversion_capability(settings) == "archive_only"
 
 
-def test_conversion_capability_requires_enabled_and_launcher(settings):
-    settings.legacy_office_enabled = True
-    settings.legacy_office_launcher = ""
+def test_conversion_capability_requires_enabled_and_launcher(settings, monkeypatch):
+    monkeypatch.setattr(settings, "legacy_office_enabled", True)
+    monkeypatch.setattr(settings, "legacy_office_launcher", "")
     assert legacy_conversion_capability(settings) == "archive_only"
 
 

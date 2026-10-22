@@ -1,18 +1,27 @@
 name: Deploy to Server
 
+# F-08/F-09：本仓库 origin 在 Gitee，GitHub Actions 默认不会运行（见
+# docs/deployment.md「CI 与代码托管事实」）。保留此文件是为了 GitHub 镜像部署，
+# 真实部署路径是服务器上执行 `bash deploy.sh`（同样的备份门禁 + 健康门禁）。
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@a8952ebe2a1428de1644645b937cea45ed655b67
+        # 以 commit SHA 固定（tag 可移动）。该承诺是 2024-11-17 的提交（GitHub API 核对），
+        # 不是发布 tag；升级时换成新的已审核提交即可。
+        uses: appleboy/ssh-action@a8952ebe2a1428de1644645b937cea45ed655b67  # commit SHA (2024-11-17), not a release tag
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
