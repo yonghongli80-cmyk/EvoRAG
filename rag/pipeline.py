@@ -43,6 +43,12 @@ from rag.reliability import (
 )
 from rag.reliability.models import AnswerabilityDecision, ConfidenceAssessment
 from rag.reranker import Reranker, merge_ranked_chunks
+from rag.resilience import (
+    DEGRADED_ANSWER_TEXT,
+    CircuitOpenError,
+    circuit_open_cause,
+    is_degraded_answer,
+)
 from rag.retriever import Retriever
 from rag.spreadsheets.coordinator import SpreadsheetQueryCoordinator
 from rag.tracker import ExecutionTrace, ExecutionTracker, ToolCall
@@ -97,6 +103,9 @@ _TRANSIENT_ERROR_NAMES = frozenset(
         "TimeoutError",
         "ConnectionError",
         "ConnectionResetError",
+        # 熔断本身就是供应商侧暂时不可用（重试即可），按瞬态外部故障记为跳过，
+        # 而不是当成内部缺陷进诊断队列。
+        "CircuitOpenError",
     }
 )
 
@@ -119,6 +128,16 @@ def _reliability_payload(prepared: dict) -> dict | None:
         "confidence_reasons": list(confidence.reasons),
         "answerability_kind": decision.kind,
     }
+
+
+def _degraded_sse_event() -> str:
+    """SSE error event for a generation that was never produced (A-02).
+
+    It is deliberately **not** a ``done`` event: a degraded request must not carry
+    reliability or look like a formal answer. The client sees an explicit failure.
+    """
+    payload = {"type": "error", "reason": DEGRADED_ANSWER_TEXT, "degraded": True}
+    return f'data: {_json.dumps(payload, ensure_ascii=False)}\n\n'
 
 
 #: 判定层认为"这次请求给出了答案"的取值。与基准的位置记分（``ANSWER_POSITIONS``）同源：
@@ -490,6 +509,17 @@ class RAGPipeline:
             return route_decision
         return corrected
 
+    def _memory_session_id(self, session_id: str | None, user: dict | None) -> str:
+        """Principal-scoped key for every DialogueMemory read and write (B-01).
+
+        The API always passes the authenticated user, so a bare ``session_id`` (and
+        the default ``"default"``) becomes ``u{user_id}:{session_id}``. Without a
+        principal (CLI/offline) the legacy bare key is kept: there is nobody to
+        isolate, and changing it would silently forget existing local history.
+        """
+        user_id = user.get("id") if user else None
+        return _memory_mod.session_key(user_id, session_id or getattr(self, "session_id", None))
+
     def _history_is_available(self, session_id: str) -> bool:
         """这个会话里有没有可用的历史轮次；读不到就当作没有。"""
         try:
@@ -546,8 +576,13 @@ class RAGPipeline:
             cached = cache.get(key)
             if cached is not None:
                 cache.move_to_end(key)
-                return cached
+                # 旧版本可能已经把降级文案写进缓存（P1-01）：命中它也不能当改写结果。
+                return question if is_degraded_answer(cached) else cached
         rewritten = produce()
+        if is_degraded_answer(rewritten):
+            # A degradation copy is never a valid rewrite: using it as the retrieval
+            # query would permanently pin this question to garbage recall (P1-01).
+            return question
         if not rewritten or rewritten == question:
             return rewritten
         with lock:
@@ -595,6 +630,8 @@ class RAGPipeline:
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
         """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
+        # 任何进入 pipeline 的记忆读写都先落到主体命名空间（幂等，见 session_key）。
+        session_id = self._memory_session_id(session_id, user)
         question = sanitize_input(question)
         guard = check_injection(question)
         if guard.blocked:
@@ -1277,7 +1314,7 @@ class RAGPipeline:
         return [s for s in sources if s.get("doc_name") in allowed_names]
 
     def query(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None) -> QueryResult:
-        sid = session_id or self.session_id or "default"
+        sid = self._memory_session_id(session_id, user)
         start_time = time.time()
 
         prepared, error = self._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
@@ -1310,13 +1347,27 @@ class RAGPipeline:
             sources = []
             tool_calls = [ToolCall(**c) for c in captured_calls]
         else:
-            answer = generate(prepared["messages"])
+            try:
+                answer = generate(prepared["messages"])
+            except CircuitOpenError as error:
+                # 熔断不是答案：留失败轨迹/观测后把可识别失败交给端点，绝不入 memory、
+                # 也绝不附带 reliability（P1-02）。
+                logger.warning("sync generation degraded because the circuit breaker is open")
+                self._record_stream_failure(question, start_time, prepared, error)
+                raise
             decision = prepared.get("decision")
             if decision is not None and decision.kind == "answerable_with_warning":
                 answer = _HISTORICAL_EVIDENCE_WARNING + answer
             context = prepared["context"]
             sources = prepared["sources"]
             tool_calls = []
+
+        if is_degraded_answer(answer):
+            # 防御旧调用方/旧 provider 仍把降级文案当字符串返回：它同样不是答案。
+            error = CircuitOpenError("generator")
+            logger.warning("sync generation degraded: the degradation copy was returned as an answer")
+            self._record_stream_failure(question, start_time, prepared, error)
+            raise error
 
         total_ms = (time.time() - start_time) * 1000
         chunk_hashes = prepared.get("chunk_hashes", [])
@@ -1364,7 +1415,7 @@ class RAGPipeline:
         models: list[str] = None,
     ):
         """流式查询，yield SSE 格式的事件字符串。"""
-        sid = session_id or self.session_id or "default"
+        sid = self._memory_session_id(session_id, user)
         start_time = time.time()
 
         try:
@@ -1444,6 +1495,20 @@ class RAGPipeline:
             tool_calls = [ToolCall(**c) for c in captured_calls]
         elif models and len(models) > 1:
             router = get_llm_pool_router()
+            arena_targets = [
+                router.providers[provider_id]
+                for provider_id in models
+                if provider_id in router.providers
+            ]
+            if arena_targets and not any(provider.is_available() for provider in arena_targets):
+                # 所有被选中的模型都处于熔断/停用状态：没有模型会产出 token，这不是答案。
+                error = CircuitOpenError("llm_pool_arena")
+                logger.warning("arena generation degraded: every selected provider is unavailable")
+                await asyncio.to_thread(
+                    self._record_stream_failure, question, start_time, prepared, error
+                )
+                yield _degraded_sse_event()
+                return
             model_answers: dict[str, str] = {}
             async for event in router.generate_stream_parallel(prepared["messages"], provider_ids=models):
                 if event.get("type") == "token":
@@ -1469,16 +1534,45 @@ class RAGPipeline:
 
             router = get_llm_pool_router()
             if len(router.providers) > 1 or model:
-                async for event in router.generate_stream_balanced(prepared["messages"], preferred_provider_id=model):
-                    token = event.get("content", "")
-                    answer += token
-                    yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+                try:
+                    async for event in router.generate_stream_balanced(prepared["messages"], preferred_provider_id=model):
+                        token = event.get("content", "")
+                        answer += token
+                        yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+                except Exception as error:
+                    cause = circuit_open_cause(error)
+                    if cause is None:
+                        raise
+                    logger.warning("stream generation degraded: %s is open", cause.service)
+                    await asyncio.to_thread(
+                        self._record_stream_failure, question, start_time, prepared, cause
+                    )
+                    yield _degraded_sse_event()
+                    return
             else:
-                async for token in generate_stream(prepared["messages"]):
-                    answer += token
-                    yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
+                try:
+                    async for token in generate_stream(prepared["messages"]):
+                        answer += token
+                        yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
+                except CircuitOpenError as error:
+                    logger.warning("stream generation degraded because the generator breaker is open")
+                    await asyncio.to_thread(
+                        self._record_stream_failure, question, start_time, prepared, error
+                    )
+                    yield _degraded_sse_event()
+                    return
             sources = prepared["sources"]
             tool_calls = []
+
+        if is_degraded_answer(answer):
+            # 防御旧 provider 仍把降级文案当 token 流回来：不写 memory、不发 done。
+            error = CircuitOpenError("generator")
+            logger.warning("stream generation degraded: the degradation copy was streamed as tokens")
+            await asyncio.to_thread(
+                self._record_stream_failure, question, start_time, prepared, error
+            )
+            yield _degraded_sse_event()
+            return
 
         # 后处理
         # 注意：流式输出时 token 已经逐个发送给客户端，check_output 无法拦截已发送的内容。

@@ -1,7 +1,7 @@
 """查询改写模块 — 将口语化问题改写为正式问法，提升检索命中率"""
 
 from rag.prompt_manager import PromptManager
-from rag.resilience import retry
+from rag.resilience import CircuitOpenError, is_degraded_answer, retry
 
 _pm = PromptManager()
 
@@ -32,6 +32,11 @@ def rewrite_query(question: str, history=(), summary: str | None = None) -> str:
             {"role": "user", "content": prompt},
         ]
         result = generate(messages).strip()
-        return result if result else question
+        # 熔断/降级文案不是改写结果：返回原问题，交给 pipeline 按"未改变"处理（不缓存）。
+        if not result or is_degraded_answer(result):
+            return question
+        return result
+    except CircuitOpenError:
+        return question
     except Exception:
         return question

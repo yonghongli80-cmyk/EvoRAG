@@ -10,6 +10,45 @@ import time
 
 import openai
 
+#: User-facing copy for a degraded generation. It is only ever used as an SSE
+#: ``error``/``degraded`` reason or a 503 body — never as a model answer, a rewrite
+#: result, or a memory entry (2026-10-22 review P1-01/P1-02).
+DEGRADED_ANSWER_TEXT = "系统繁忙，请稍后重试。"
+
+
+class CircuitOpenError(RuntimeError):
+    """Raised when a circuit breaker is open and rejects an external call.
+
+    A dedicated type instead of a sentinel answer string: callers can tell "the
+    model was never called" apart from real model output, so the fallback copy can
+    never be cached as a query rewrite or persisted as a formal answer.
+    """
+
+    def __init__(self, service: str = "llm", message: str | None = None) -> None:
+        self.service = service
+        super().__init__(message or f"{service} circuit breaker is open")
+
+
+def circuit_open_cause(error: BaseException | None) -> CircuitOpenError | None:
+    """Return the :class:`CircuitOpenError` behind a wrapper exception chain, if any.
+
+    The LLM pool router re-raises provider failures as ``RuntimeError`` so it can
+    report every provider it tried; the breaker decision is still recoverable from
+    ``__cause__``/``__context__``.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, CircuitOpenError):
+            return error
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return None
+
+
+def is_degraded_answer(text: str | None) -> bool:
+    """True when *text* is the degradation copy rather than a model answer."""
+    return bool(text) and DEGRADED_ANSWER_TEXT.rstrip("。") in text
+
 
 def retry(
     max_attempts: int = 3,

@@ -18,6 +18,25 @@ class Message:
 
 MAX_ROUNDS = 10
 
+
+def session_key(user_id: int | str | None, session_id: str | None = None) -> str:
+    """Namespace a dialogue session by principal (B-01).
+
+    ``DialogueMemory`` stores messages under an opaque key; the pipeline prefixes
+    every key with ``u{user_id}:`` so two users reusing the same ``session_id`` (or
+    both omitting it) never share history. The legacy bare key is kept only when no
+    principal exists (CLI/offline calls), where there is nobody to isolate.
+    """
+    base = session_id or "default"
+    if user_id is None:
+        return base
+    prefix = f"u{user_id}:"
+    if base.startswith(prefix):
+        # 幂等：已带同一主体前缀的键（例如 pipeline 入口已命名空间化）不再叠加。
+        return base
+    return f"{prefix}{base}"
+
+
 SYSTEM_PROMPT = (
     "你是一个有帮助的助手。请基于提供的上下文回答问题。"
     "如果上下文中没有答案，就说你不知道。"

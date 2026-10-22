@@ -1,8 +1,11 @@
-"""Tests for generator circuit-breaker fallback (graceful degradation)."""
+"""Tests for generator circuit-breaker degradation (identifiable failure)."""
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from rag.generator import _breaker, generate
+from rag.resilience import CircuitOpenError
 
 
 def _force_breaker_open():
@@ -19,8 +22,11 @@ def _reset_breaker():
 
 
 class TestGeneratorCircuitBreakerFallback:
-    """When the circuit breaker is open, generate() must return a friendly
-    fallback string instead of raising an exception."""
+    """When the circuit breaker is open, generate() must raise a dedicated error.
+
+    一句"系统繁忙"不是模型输出：它被改写缓存当成改写结果、被 pipeline 当成正式答案
+    写进 memory 与轨迹（2026-10-22 全库评审 P1-01/P1-02）。降级必须是可识别失败。
+    """
 
     def setup_method(self):
         _reset_breaker()
@@ -28,26 +34,12 @@ class TestGeneratorCircuitBreakerFallback:
     def teardown_method(self):
         _reset_breaker()
 
-    def test_open_breaker_returns_fallback_string(self):
-        """Circuit open -> generate() returns a string containing '系统繁忙'."""
+    def test_open_breaker_raises_a_circuit_open_error(self):
+        """Circuit open -> generate() raises CircuitOpenError, never returns the busy copy."""
         _force_breaker_open()
 
-        result = generate([
-            {"role": "user", "content": "hello"},
-        ])
-
-        assert isinstance(result, str)
-        assert "系统繁忙" in result
-
-    def test_open_breaker_does_not_raise(self):
-        """Circuit open -> generate() must NOT raise any exception."""
-        _force_breaker_open()
-
-        # Should not raise
-        result = generate([
-            {"role": "user", "content": "hello"},
-        ])
-        assert result is not None
+        with pytest.raises(CircuitOpenError):
+            generate([{"role": "user", "content": "hello"}])
 
     def test_breaker_recovery_returns_normal_answer(self):
         """After the breaker recovers, generate() works normally."""
@@ -65,8 +57,6 @@ class TestGeneratorCircuitBreakerFallback:
 
         with patch("rag.generator.client") as mock_client:
             mock_client.chat.completions.create.return_value = mock_response
-            result = generate([
-                {"role": "user", "content": "hello"},
-            ])
+            result = generate([{"role": "user", "content": "hello"}])
 
         assert result == "Hello from the model"

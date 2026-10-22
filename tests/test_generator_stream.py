@@ -94,9 +94,13 @@ def test_generate_stream_strips_reasoning_content():
         assert "reasoning_content" not in msg
 
 
-def test_generate_stream_respects_circuit_breaker():
-    """熔断时 generate_stream 应该 yield 降级提示。"""
+def test_generate_stream_raises_circuit_open_when_breaker_is_open():
+    """熔断时必须抛可识别失败，不能把降级文案当成 token 流出去。"""
+    import pytest
+
     from rag.generator import _breaker, generate_stream
+    from rag.resilience import CircuitOpenError
+
     for _ in range(5):
         _breaker.record_failure()
 
@@ -106,10 +110,10 @@ def test_generate_stream_respects_circuit_breaker():
         async for token in generate_stream([{"role": "user", "content": "hello"}]):
             tokens.append(token)
 
-    asyncio.run(collect())
+    with pytest.raises(CircuitOpenError):
+        asyncio.run(collect())
 
-    assert len(tokens) > 0
-    assert "系统繁忙" in "".join(tokens)
+    assert tokens == []
     _breaker.record_success()
 
 

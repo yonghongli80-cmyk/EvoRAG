@@ -4,7 +4,7 @@ import threading
 from openai import AsyncOpenAI, OpenAI
 
 from config import settings
-from rag.resilience import CircuitBreaker, retry
+from rag.resilience import CircuitBreaker, CircuitOpenError, retry
 
 client = None
 _client_lock = threading.Lock()
@@ -30,7 +30,8 @@ def generate(messages: list[dict], temperature: float | None = None) -> str:
     if temperature is None:
         temperature = settings.generation_temperature
     if not _breaker.allow_request():
-        return "系统繁忙，请稍后重试。"
+        # Identifiable failure, not an answer: callers must not cache/persist this.
+        raise CircuitOpenError("generator")
     if client is None:
         with _client_lock:
             if client is None:
@@ -113,8 +114,7 @@ async def generate_stream(messages: list[dict], temperature: float | None = None
     if temperature is None:
         temperature = settings.generation_temperature
     if not _breaker.allow_request():
-        yield "系统繁忙，请稍后重试。"
-        return
+        raise CircuitOpenError("generator")
     if _async_client is None:
         with _async_client_lock:
             if _async_client is None:

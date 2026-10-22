@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 from openai import AsyncOpenAI, OpenAI
 
 from rag.llm_pool.models import LLMProviderConfig
-from rag.resilience import CircuitBreaker
+from rag.resilience import CircuitBreaker, CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,7 @@ class LLMProvider:
     ) -> AsyncGenerator[str, None]:
         """Stream generated tokens asynchronously with isolated circuit breaker protection."""
         if not self.circuit_breaker.allow_request():
-            yield "系统繁忙，请稍后重试。"
-            return
+            raise CircuitOpenError(f"llm_provider:{self.config.provider_id}")
 
         client = self._get_async_client()
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
@@ -105,7 +104,7 @@ class LLMProvider:
     def generate(self, messages: list[dict], temperature: float = 0.3) -> str:
         """Synchronously generate response."""
         if not self.circuit_breaker.allow_request():
-            return "系统繁忙，请稍后重试。"
+            raise CircuitOpenError(f"llm_provider:{self.config.provider_id}")
 
         client = self._get_sync_client()
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]

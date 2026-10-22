@@ -34,6 +34,7 @@ from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.permissions import check_doc_permission
 from rag.pipeline import _agent_run_kwargs
+from rag.resilience import DEGRADED_ANSWER_TEXT, CircuitOpenError, circuit_open_cause
 from rag.suggest import suggest_questions
 from rag.tracker import ExecutionTrace
 from rag.user_db import UserDB
@@ -187,6 +188,19 @@ async def query(
 ):
     db = get_user_db()
     target_kb = req.kb_id or "rag_docs"
+
+    # B-01：归属校验必须在生成之前，且早于 pipeline 解析/构造。此前只在生成后落库时
+    # 校验，别的用户可以把顺序可猜的 conversation_id 塞进 prompt，读走别人的历史。
+    session_id = req.session_id
+    conversation = None
+    if user and req.conversation_id is not None:
+        conversation = await asyncio.to_thread(
+            db.get_conversation, req.conversation_id, user["id"]
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在或无权访问")
+        session_id = f"conv_{req.conversation_id}"
+
     if target_kb != "rag_docs":
         require_kb_view(db, target_kb, user)
         await asyncio.to_thread(_audit_org_event, db, user, "answer_requested", target_kb)
@@ -205,48 +219,48 @@ async def query(
                     content={"error": "尚未索引文档，请先调用 POST /index 上传文档"},
                 )
 
-    session_id = req.session_id
-    if user and req.conversation_id is not None:
-        session_id = f"conv_{req.conversation_id}"
-
-    result = await asyncio.to_thread(
-        contextvars.copy_context().run,
-        current_pipeline.query,
-        req.question,
-        top_k=req.top_k,
-        session_id=session_id,
-        doc_name=req.doc_name,
-        tags=req.tags,
-        user=user,
-        kb_id=target_kb,
-    )
+    try:
+        result = await asyncio.to_thread(
+            contextvars.copy_context().run,
+            current_pipeline.query,
+            req.question,
+            top_k=req.top_k,
+            session_id=session_id,
+            doc_name=req.doc_name,
+            tags=req.tags,
+            user=user,
+            kb_id=target_kb,
+        )
+    except CircuitOpenError:
+        # A-02：熔断是失败，不是答案。不落会话消息、不附 reliability，显式告知客户端降级。
+        logger.warning("查询因模型熔断而降级: conversation_id=%s", req.conversation_id)
+        return JSONResponse(
+            status_code=503,
+            content={"error": DEGRADED_ANSWER_TEXT, "degraded": True},
+        )
     if getattr(getattr(result, "decision", None), "kind", None) == "insufficient_evidence":
         await asyncio.to_thread(
             _record_refusal_task, db, user, req.question, target_kb, req.doc_name
         )
 
-    if user and req.conversation_id is not None:
-        conv = await asyncio.to_thread(db.get_conversation, req.conversation_id, user["id"])
-        if conv:
-            await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
-            reliability_kwargs = {}
-            confidence = getattr(result, "confidence", None)
-            decision = getattr(result, "decision", None)
-            if confidence is not None and decision is not None:
-                reliability_kwargs = {
-                    "confidence_level": confidence.level,
-                    "confidence_reasons": confidence.reasons,
-                    "answerability_kind": decision.kind,
-                }
-            await asyncio.to_thread(
-                db.add_message,
-                req.conversation_id,
-                "assistant",
-                result.answer,
-                **reliability_kwargs,
-            )
-        else:
-            logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
+    if conversation is not None:
+        await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
+        reliability_kwargs = {}
+        confidence = getattr(result, "confidence", None)
+        decision = getattr(result, "decision", None)
+        if confidence is not None and decision is not None:
+            reliability_kwargs = {
+                "confidence_level": confidence.level,
+                "confidence_reasons": confidence.reasons,
+                "answerability_kind": decision.kind,
+            }
+        await asyncio.to_thread(
+            db.add_message,
+            req.conversation_id,
+            "assistant",
+            result.answer,
+            **reliability_kwargs,
+        )
 
     return QueryResponse(answer=result.answer, sources=result.sources)
 
@@ -267,6 +281,19 @@ async def query_stream(
 ):
     db = get_user_db()
     target_kb = req.kb_id or "rag_docs"
+
+    # B-01：SSE 端点同样在进入生成、甚至解析 pipeline 之前完成归属校验，否则流已经
+    # 开出去了才发现是别人的对话。
+    session_id = req.session_id
+    conversation = None
+    if user and req.conversation_id is not None:
+        conversation = await asyncio.to_thread(
+            db.get_conversation, req.conversation_id, user["id"]
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="对话不存在或无权访问")
+        session_id = f"conv_{req.conversation_id}"
+
     if target_kb != "rag_docs":
         require_kb_view(db, target_kb, user)
         await asyncio.to_thread(_audit_org_event, db, user, "answer_requested", target_kb)
@@ -281,10 +308,6 @@ async def query_stream(
             current_pipeline = get_pipeline()
             if current_pipeline is None:
                 return JSONResponse(status_code=400, content={"error": "尚未索引文档"})
-
-    session_id = req.session_id
-    if user and req.conversation_id is not None:
-        session_id = f"conv_{req.conversation_id}"
 
     async def event_generator():
         answer_buffer = ""
@@ -331,10 +354,23 @@ async def query_stream(
                 elif kind == "done":
                     reliability = parsed.get("reliability")
                     continue
+                elif kind == "error":
+                    # 熔断/准备失败是终止事件：不补 done（done 会让前端把这次失败当成
+                    # 一次正常收尾）。内存与轨迹由 pipeline 负责，这里已无回答可落库。
+                    yield event
+                    return
                 yield event
-        except Exception:
+        except Exception as error:
             logger.exception("流式查询中途失败")
-            payload = {"type": "error", "reason": "流式生成失败，请稍后重试"}
+            cause = circuit_open_cause(error)
+            if cause is not None:
+                payload = {
+                    "type": "error",
+                    "reason": DEGRADED_ANSWER_TEXT,
+                    "degraded": True,
+                }
+            else:
+                payload = {"type": "error", "reason": "流式生成失败，请稍后重试"}
             yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
             return
 
@@ -348,21 +384,17 @@ async def query_stream(
                 target_kb,
                 req.doc_name,
             )
-        if user and req.conversation_id is not None and answer_buffer:
-            conv = await asyncio.to_thread(db.get_conversation, req.conversation_id, user["id"])
-            if conv:
-                await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
-                persistence_key = f"stream:{req.conversation_id}:{hashlib.sha256(req.question.encode('utf-8')).hexdigest()[:16]}"
-                assistant_message_id = await asyncio.to_thread(
-                    db.persist_assistant_answer_with_citations,
-                    req.conversation_id,
-                    answer_buffer,
-                    citation_records,
-                    persistence_key,
-                    **(reliability or {}),
-                )
-            else:
-                logger.warning("对话 %s 不存在或不属于用户 %s，跳过消息保存", req.conversation_id, user["id"])
+        if conversation is not None and answer_buffer:
+            await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
+            persistence_key = f"stream:{req.conversation_id}:{hashlib.sha256(req.question.encode('utf-8')).hexdigest()[:16]}"
+            assistant_message_id = await asyncio.to_thread(
+                db.persist_assistant_answer_with_citations,
+                req.conversation_id,
+                answer_buffer,
+                citation_records,
+                persistence_key,
+                **(reliability or {}),
+            )
         done_payload: dict = {"type": "done", "assistant_message_id": assistant_message_id}
         if reliability is not None:
             # 判定层的结论必须转给客户端：前端读的正是 `done.reliability.answerability_kind`
@@ -426,7 +458,7 @@ async def regenerate(
         if current_pipeline is None:
             raise HTTPException(status_code=400, detail="尚未索引文档")
 
-    session_id = f"conv_{req.conversation_id}"
+    session_id = current_pipeline._memory_session_id(f"conv_{req.conversation_id}", user)
     prepared, error = current_pipeline._prepare_context(user_question, session_id, None, user=user, kb_id="rag_docs")
     if error:
         raise HTTPException(status_code=400, detail=error)
