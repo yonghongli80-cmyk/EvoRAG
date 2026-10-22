@@ -423,13 +423,14 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 | 3.9 | `0e62637` | 改写触发阈值 0.5 → 0.55（`RAG_JEV_REWRITE_PROBABILITY`） | 3 轮完整基准；p95 由 10.2s 降到 7.7s，改写率仍失败且不单调 |
 | 3.10 | `f5212d6` | locust 工作负载接受 `created` 上传与预期 403/404；隔离实例路径修正 | 8 用户 / 60s：73 请求、0 失败、0% 错误 |
 | 3.11 | `969cf95` | locust 汇总按 `(method, name)` 元组格式化，退出码归 0 | 30s 复跑：30 请求、0 失败、exit 0 |
+| 3.12 | `a6016fd` | 具体查询（型号+属性）跳过改写，仅 Jev 路径与兜底 | 3 轮基准 **PASS**：rewrite 0.250、P95 5.40s、route/top5/refusal 全过 |
 | 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
 
 - 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
   `RAG_REWRITE_DUAL_RERANK_MODE=below_threshold`（阈值 0.5）。
 - 回滚：`RAG_QUERY_REWRITE_CACHE_ENABLED=false` + `RAG_REWRITE_DUAL_RERANK_MODE=off`，
   逐字节回到 2026-10-21 之前的行为。
-- 全量套件（含新增用例）：**2354 passed / 0 failed，32:57**（2026-10-22；含 sync `kb_id`、脱敏守卫、Docker 规则、标签、温度、路由护栏与阈值用例）。
+- 全量套件（含新增用例）：**2357 passed / 0 failed，38:56**（2026-10-22；含 sync `kb_id`、脱敏守卫、Docker 规则、标签、温度、路由护栏、具体查询门控与阈值用例）。
 - 真机复现（2026-10-21，停 8080 释放 Qdrant 后 `verify_rewrite_stability.py --dual`）：
   6 轮产生 5 个不同改写，**3 轮触发双路重排**，top 分 **0.531–0.701**，未跨 0.35；
   最坏改写「如何查询副厂配件明细？」被原问题重排救回 **0.701** → **PASS**。服务已恢复，`/health` healthy。
@@ -441,12 +442,15 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 - 同进程对照（2026-10-21）：同一 pipeline 交替执行 `query` / `query_stream`，两者均
   `decision=answerable`、`sources=5`，差异只在生成措辞。因此“同步拒答/流式作答”的根因是
   同步接口丢 `kb_id`（已修），不是 Jev 判定分叉；若要求逐字一致，需产品决定是否把生成温度降到 0。
-- 基准（2026-10-22，24 例 × 3 run，`--user-id 1`，阈值 0.55）：new **P50 2382.9ms PASS**、
-  **P95 7726.8ms PASS**（old 10516.8ms，目标 8413.5ms）、**route 1.000 PASS**、
-  **top5 1.000 PASS**、**refusal 1.000 / 12 PASS**；**rewrite FAIL**：ordinary 0.354
-  vs 目标 0.281（old 0.938）。阈值 0.5 的那轮 3 run 是 rewrite 0.312 / P95 10222.7ms，
-  说明改写率受预判概率波动支配，0.5 → 0.55 不是单调改善；保留 0.55 是因为该轮 P95 过线，
-  不宣称 rewrite 已解决。
+- 基准（2026-10-22，24 例 × 3 run，`--user-id 1`，阈值 0.55 + 具体查询改写门控）：
+  **verdict PASS，exit 0**。new **P50 1621.0ms**、**P95 5399.8ms**（目标 6176.0ms）、
+  **route 1.000**、**top5 1.000**、**refusal 1.000 / 12**、**ordinary rewrite 0.250**
+  （目标 0.281；old 0.938）。old 链路的改写率保持 0.938，未被优化污染，A/B 基准公平。
+- 改写门控：问题同时带“型号 token + 属性词”（如 `r50电池价格`、`富士 X-S20 电池…型号`）时
+  不再改写；只作用于 Jev 主链路与它的 legacy 兜底（`stage is not None`），旧链路保持原行为。
+  这削掉了 `real-017/018/025` 的无效改写，把 ordinary 从 0.375 降到 0.250。
+- 历史对照：0.5 阈值 3 run 是 rewrite 0.312 / P95 10222.7ms；0.55 且无门控是 0.354 / P95
+  7726.8ms；说明只拧阈值不单调，真正有效的是具体查询门控。
 - 首轮单次基准（2026-10-21，24 例 × 1 run）保留作对照：route 0.833、P95 6314.7ms FAIL、
   refusal 0.750/4；三处都已被上述修复改善。
 - Jev 脱敏价格守卫：`real-017/018` 在 active 路径均为 `fixed/insufficient_evidence`，
