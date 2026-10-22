@@ -72,6 +72,8 @@ Client ──TLS──> LB / Reverse Proxy
 - 2026-10-21 单进程基线（用于后续对照）：RAG `/query` 20 样本 / 5 并发，P50 **10.8s**、
   P95 **17.0s**、P99 **17.9s**（含生成）；轻接口 `/health` P99 928ms、`/knowledge-bases`
   P99 318ms（20 并发 × 200 次）。尾延迟主要来自生成，不是检索准备。
+- 2026-10-22 完整 locust 套件（隔离实例，8 用户 / 60s）：73 请求、0 失败，P50 530ms、
+  P95 13s、P99 19s、QPS 1.7。混合负载受 LLM 生成主导。
 - 给 `scripts/locustfile.py` 补一次可复现的压测档案：固定用户数、思考时间、目标 KB、`--user-id`；
   产出 P50/P95/P99、错误率、RPS。
 - 增加只读 `/metrics`（或 OpenTelemetry exporter）：请求量/延迟、检索/重排/生成分段耗时、

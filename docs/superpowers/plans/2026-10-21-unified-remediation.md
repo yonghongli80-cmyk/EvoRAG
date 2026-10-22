@@ -421,6 +421,7 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
 | 3.7 | `476e4f0` | locustfile 支持用既有账号登录（`RAG_LOAD_USERNAME`/`RAG_LOAD_PASSWORD`） | locust 2.46.7 已用清华源安装 |
 | 3.8 | `948243c` | 路由确定性护栏：裸型号 → clarification；结构化 KB 的聚合问题 → structured | 18 个路由用例；四例子集 route 1.000、refusal 1.000/2 |
 | 3.9 | `0e62637` | 改写触发阈值 0.5 → 0.55（`RAG_JEV_REWRITE_PROBABILITY`） | 3 轮完整基准；p95 由 10.2s 降到 7.7s，改写率仍失败且不单调 |
+| 3.10 | `f5212d6` | locust 工作负载接受 `created` 上传与预期 403/404；隔离实例路径修正 | 8 用户 / 60s：73 请求、0 失败、0% 错误 |
 | 升级 | `0a089f2` + tag `upgrade-plan-2026-10-21` | `UPGRADE.md`（154 行） | 路线图，未实施 |
 
 - 默认值：`RAG_QUERY_REWRITE_CACHE_ENABLED=true`（进程内 LRU 512）、
@@ -473,5 +474,9 @@ stash@{0}: On main: wip: pre-plan implementation (rewrite cache/dual-rerank, cou
   §11.3 的验收命令复跑。
 - 压测环境：`locust 2.46.7` 已用清华源安装；`scripts/locustfile.py` 新增
   `RAG_LOAD_USERNAME` / `RAG_LOAD_PASSWORD`，可直接用既有账号登录（自注册默认关闭）。
-  未跑完整 locust 套件：它的任务包含上传/删除等写操作，避免污染本地数据；本轮 P99 用
-  只读 `/query` 探针测得（见上）。
+  Windows 下 locust 解析 `pyproject.toml` 会因 GBK 报错，运行前需 `PYTHONUTF8=1`。
+- 完整 locust 套件（2026-10-22）：独立 worktree + 数据/Qdrant 副本，8090 实例，8 用户 / 60s：
+  **73 请求、0 失败、0.0% 错误率**；P50 **530ms**、P95 **13000ms**、P99 **19000ms**、QPS 1.7。
+  首轮 6 个失败全部是脚本/隔离问题（`created` 被当失败、KB 创建 403/404 未标成功、
+  副本 DB 绝对路径导致下载 500），修脚本与副本路径后归零；产品接口本身未改。
+  隔离实例已停止、worktree 已删除，主服务 8080 已恢复。
