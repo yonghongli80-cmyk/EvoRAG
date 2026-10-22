@@ -13,10 +13,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from fastapi import HTTPException
-
-from rag.api_security import require_doc_view
 from rag.materials.models import CitationLocation, MaterialLocationQuery
+from rag.org_auth.models import OrgRole
+from rag.org_auth.repository import OrgRepository, is_org_policy
+from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
 
 
@@ -42,18 +42,42 @@ class MaterialLocationResult:
 
 
 def _visible_documents(db: UserDB, user: dict) -> dict[int, dict]:
-    """Map of visible, non-deleted, current document permissions by id."""
-    visible = {}
-    for doc in db.list_document_permissions_all():
-        full = db.get_document_permission_by_id(doc["id"])
-        if full is None or full.get("deleted_at") or full["current_version_id"] is None:
+    """Map of visible, non-deleted, current document permissions by id.
+
+    One query loads every live document with its current version, and
+    authorization is decided once per knowledge base instead of once per
+    document (D observation: the previous loop performed a permission lookup and
+    a current-version lookup for every row).  The decision is equivalent to
+    :func:`rag.api_security.require_doc_view`:
+
+    * organization KB: one READ authorization covers every document of the KB;
+    * legacy KB: the batched ``get_accessible_doc_names`` projection applies the
+      same owner/public/shared rules as ``check_doc_permission``;
+    * administrators see every live document.
+    """
+    rows = db.material_repo.list_material_documents_with_current_version()
+    documents_by_kb: dict[str, list[dict]] = {}
+    for row in rows:
+        documents_by_kb.setdefault(row["kb_id"], []).append(row)
+
+    visible: dict[int, dict] = {}
+    for kb_id, documents in documents_by_kb.items():
+        policy = OrgRepository(db).get_kb_policy(kb_id)
+        if is_org_policy(policy):
+            if OrgAuthorizationService(db).authorize(
+                int(user["id"]), kb_id, OrgRole.READ
+            ).allowed:
+                for document in documents:
+                    visible[int(document["id"])] = document
             continue
-        try:
-            require_doc_view(db, full["doc_name"], full["kb_id"], user)
-        except HTTPException:
+        if user.get("is_admin"):
+            for document in documents:
+                visible[int(document["id"])] = document
             continue
-        else:
-            visible[full["id"]] = full
+        allowed_names = set(db.get_accessible_doc_names(kb_id, user["id"]))
+        for document in documents:
+            if document["doc_name"] in allowed_names:
+                visible[int(document["id"])] = document
     return visible
 
 
@@ -101,7 +125,19 @@ class MaterialLocator:
 
         docs = dict(visible)
         versions = {}
-        for document_id in list(docs):
+        for document_id, document in list(docs.items()):
+            if document.get("current_version_id") is None:
+                docs.pop(document_id, None)
+                continue
+            if document.get("current_filename") is not None:
+                # The batched visibility query already carries the current
+                # version, so no per-document lookup is needed here.
+                versions[document_id] = {
+                    "id": document["current_version_id"],
+                    "original_filename": document["current_filename"],
+                    "validity_status": document.get("current_validity_status"),
+                }
+                continue
             current = self.db.get_current_document_version(document_id)
             if current is None:
                 docs.pop(document_id, None)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import os
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -247,3 +249,126 @@ def test_copyfileobj_bounded_rejects_oversized_stream():
         _copyfileobj_bounded(src, dst, max_bytes=500, chunk_size=128)
     assert exc_info.value.reason_code == "entry_size_exceeded"
 
+
+
+# ---------------------------------------------------------------------------
+# D-06: 7z members are streamed to disk under the entry cap, never read whole
+# ---------------------------------------------------------------------------
+
+SEVENZ_CAP = REGISTRY.resolve("bundle.7z", None, None).capability
+assert SEVENZ_CAP is not None and SEVENZ_CAP.archive_container
+
+
+def build_7z(tmp_path: Path, entries: dict[str, bytes], name: str = "bundle.7z") -> Path:
+    import py7zr
+
+    source_dir = tmp_path / f"7z-source-{uuid.uuid4().hex}"
+    source_dir.mkdir()
+    archive = tmp_path / name
+    with py7zr.SevenZipFile(archive, "w") as seven_zip:
+        for index, (entry_name, data) in enumerate(entries.items()):
+            member = source_dir / f"member-{index}.bin"
+            member.write_bytes(data)
+            seven_zip.write(member, entry_name)
+    return archive
+
+
+def test_7z_manifest_lists_and_approves_supported_children(tmp_path):
+    archive = build_7z(tmp_path, {"a.pdf": PDF_A, "nested/b.pdf": PDF_B})
+
+    manifest = inspect_archive(archive, SEVENZ_CAP, LIMITS)
+
+    assert manifest.backend == "7z"
+    assert manifest.state == "ok"
+    assert {e.normalized_path for e in manifest.entries if e.state == "approved"} == {
+        "a.pdf",
+        "nested/b.pdf",
+    }
+
+
+def test_7z_confirmation_activates_streamed_children(tmp_path, archive_service):
+    archive = build_7z(tmp_path, {"a.pdf": PDF_A, "b.pdf": PDF_B})
+
+    preview = archive_service.upload_zip(
+        "bundle.7z", "kb-1", archive_service.actor, archive
+    )
+    result = archive_service.confirm(
+        preview.manifest_id,
+        archive_service.actor,
+        preview.supported_ids,
+        expected_version=0,
+        idempotency_key="arc-7z",
+    )
+
+    assert result.status == "confirmed"
+    assert archive_service.current_children() == ["a.pdf", "b.pdf"]
+
+
+def test_7z_oversized_member_is_rejected_without_promoting(tmp_path, archive_service):
+    # Incompressible padding keeps the archive inside the compression-ratio limit
+    # so the rejection under test is the per-entry streaming cap, not the manifest.
+    archive = build_7z(
+        tmp_path,
+        {"ok.pdf": PDF_A, "big.pdf": os.urandom(LIMITS.entry_bytes + 1)},
+    )
+
+    preview = archive_service.upload_zip(
+        "bundle.7z", "kb-1", archive_service.actor, archive
+    )
+    result = archive_service.confirm(
+        preview.manifest_id,
+        archive_service.actor,
+        preview.supported_ids,
+        expected_version=0,
+        idempotency_key="arc-7z-big",
+    )
+
+    assert result.status == "confirmed"
+    assert result.created_children == ("ok.pdf",)
+    assert [entry["reason_code"] for entry in result.rejected_entries] == [
+        "entry_size_exceeded"
+    ]
+    assert archive_service.current_children() == ["ok.pdf"]
+
+
+def test_7z_extraction_never_materializes_the_member_in_memory(
+    tmp_path, monkeypatch
+):
+    import py7zr
+
+    from rag.materials.archives import _extract_entry
+
+    def _fail_read(self, *args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("SevenZipFile.read() would load the member into memory")
+
+    monkeypatch.setattr(py7zr.SevenZipFile, "read", _fail_read, raising=False)
+    archive = build_7z(tmp_path, {"a.pdf": PDF_A * 2000})
+    destination = tmp_path / "member.bin"
+
+    _extract_entry(archive, "7z", "a.pdf", destination, max_bytes=LIMITS.entry_bytes)
+
+    assert destination.read_bytes() == PDF_A * 2000
+
+
+def test_7z_extraction_stops_at_the_entry_cap(tmp_path):
+    from rag.materials.archives import ArchiveRejected, _extract_entry
+
+    archive = build_7z(tmp_path, {"a.pdf": b"x" * (2 * 1024 * 1024)})
+    destination = tmp_path / "member.bin"
+
+    with pytest.raises(ArchiveRejected) as caught:
+        _extract_entry(archive, "7z", "a.pdf", destination, max_bytes=64 * 1024)
+
+    assert caught.value.reason_code == "entry_size_exceeded"
+    assert not destination.exists()
+
+
+def test_7z_extraction_without_a_bound_is_refused(tmp_path):
+    from rag.materials.archives import ArchiveConfirmationError, _extract_entry
+
+    archive = build_7z(tmp_path, {"a.pdf": PDF_A})
+
+    with pytest.raises(ArchiveConfirmationError) as caught:
+        _extract_entry(archive, "7z", "a.pdf", tmp_path / "member.bin", max_bytes=None)
+
+    assert "archive_entry_limit_required" in str(caught.value)

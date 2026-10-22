@@ -23,6 +23,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rag.api_security import require_doc_edit
 from rag.generator import generate_structured
+from rag.org_auth.models import OrgRole
+from rag.org_auth.repository import OrgRepository, is_org_policy
+from rag.org_auth.service import OrgAuthorizationService
+from rag.repositories.material_repo import ensure_organization_batch_item_columns
 from rag.user_db import UserDB
 
 MIN_CONFIDENCE = 0.70
@@ -111,18 +115,51 @@ def _instruction_hash(instruction: OrganizationInstruction) -> str:
 
 
 def _default_candidate_docs(db: UserDB, user: dict) -> dict[int, dict]:
-    """Authorized, editable, non-deleted documents with a current version."""
-    candidates = {}
-    for doc in db.list_document_permissions_all():
-        full = db.get_document_permission_by_id(doc["id"])
-        if full is None or full.get("deleted_at") or full["current_version_id"] is None:
+    """Authorized, editable, non-deleted documents with a current version.
+
+    The document/current-version rows are loaded in one query and edit
+    authorization is resolved once per knowledge base instead of once per
+    document (D observation: locator/organizer N+1).  This is the batched form
+    of :func:`rag.api_security.require_doc_edit`.
+    """
+    rows = db.material_repo.list_material_documents_with_current_version()
+    documents_by_kb: dict[str, list[dict]] = {}
+    for row in rows:
+        documents_by_kb.setdefault(row["kb_id"], []).append(row)
+
+    user_id = int(user["id"])
+    candidates: dict[int, dict] = {}
+    for kb_id, documents in documents_by_kb.items():
+        policy = OrgRepository(db).get_kb_policy(kb_id)
+        if is_org_policy(policy):
+            if not OrgAuthorizationService(db).authorize(
+                user_id, kb_id, OrgRole.MANAGE
+            ).allowed:
+                continue
+            for document in documents:
+                if not document.get("protected"):
+                    candidates[int(document["id"])] = document
             continue
-        try:
-            require_doc_edit(db, full["doc_name"], full["kb_id"], user)
-        except HTTPException:
+        if user.get("is_admin"):
+            for document in documents:
+                if not document.get("protected"):
+                    candidates[int(document["id"])] = document
             continue
-        else:
-            candidates[full["id"]] = full
+        document_ids = [int(document["id"]) for document in documents]
+        shared_ids = db.get_shared_doc_ids_for_user(user_id, document_ids)
+        edit_shared_ids = {
+            document_id
+            for document_id in shared_ids
+            if db.is_document_shared(document_id, user_id, permission="edit")
+        }
+        for document in documents:
+            if document.get("protected"):
+                continue
+            document_id = int(document["id"])
+            if int(document["owner_id"]) == user_id or (
+                document.get("scope") == "shared" and document_id in edit_shared_ids
+            ):
+                candidates[document_id] = document
     return candidates
 
 
@@ -141,6 +178,17 @@ class OrganizationService:
         self.candidate_docs = candidate_docs or _default_candidate_docs
         self.allowed_types = allowed_types
         self.allowed_tags = allowed_tags
+        # The D-10 rollback payload lives in columns added by a compatibility
+        # step for databases created before the fix (see material_repo).
+        self._rollback_payload_columns_ready = False
+
+    def _ensure_rollback_payload_columns(self) -> None:
+        if self._rollback_payload_columns_ready:
+            return
+        with self.db._lock:
+            ensure_organization_batch_item_columns(self.db._conn)
+            self.db._conn.commit()
+        self._rollback_payload_columns_ready = True
 
     def preview(self, instruction: OrganizationInstruction, actor: dict) -> OrganizationPreview:
         candidates = self.candidate_docs(self.db, actor)
@@ -236,6 +284,8 @@ class OrganizationService:
         if not (actor.get("is_admin") or proposal["actor_id"] == actor["id"]):
             raise OrganizationError("no_confirm_permission")
 
+        self._ensure_rollback_payload_columns()
+
         items = self.db.list_organization_items(proposal_id)
         selected = [item for item in items if item["id"] in selected_item_ids and item["status"] == "executable"]
         authorized_ids: set[int] = set()
@@ -251,27 +301,46 @@ class OrganizationService:
                 continue
             authorized_ids.add(int(item["document_id"]))
 
+        status = "applied"
         with self.db._lock, self.db.transaction(immediate=True):
             batch_id = self.db._create_organization_batch_in_tx(proposal_id, actor["id"], idempotency_key)
             batch_items = []
             for item in selected:
-                status, reason_code, before, after, before_version, after_version = self._apply_item_in_tx(item, authorized_ids)
+                applied = self._apply_item_in_tx(item, authorized_ids)
                 row_id = self._record_batch_item_in_tx(
-                    batch_id, item["document_id"], before, after, before_version, after_version, status, reason_code
+                    batch_id,
+                    item["document_id"],
+                    applied["before_path"],
+                    applied["after_path"],
+                    applied["before_version"],
+                    applied["after_version"],
+                    applied["status"],
+                    applied["reason_code"],
+                    before_tags_json=applied["before_tags_json"],
+                    after_tags_json=applied["after_tags_json"],
+                    before_document_type=applied["before_document_type"],
+                    after_document_type=applied["after_document_type"],
                 )
                 batch_items.append(
-                    OrganizationBatchItem(id=row_id, document_id=item["document_id"], status=status, reason_code=reason_code)
+                    OrganizationBatchItem(id=row_id, document_id=item["document_id"], status=applied["status"], reason_code=applied["reason_code"])
                 )
-            if batch_items and all(i.status != "applied" for i in batch_items):
+            if batch_items:
+                applied_count = sum(1 for i in batch_items if i.status == "applied")
+                if applied_count == 0:
+                    status = "conflict"
+                elif applied_count != len(batch_items):
+                    status = "partial"
+            if status != "applied":
                 self.db._conn.execute(
-                    "UPDATE material_organization_batches SET status='conflict' WHERE id=?",
-                    (batch_id,),
+                    "UPDATE material_organization_batches SET status=? WHERE id=?",
+                    (status, batch_id),
                 )
         return OrganizationBatchResult(
-            batch_id=batch_id, proposal_id=proposal_id, status="applied", items=tuple(batch_items)
+            batch_id=batch_id, proposal_id=proposal_id, status=status, items=tuple(batch_items)
         )
 
-    def _apply_item_in_tx(self, item: dict, authorized_ids: set[int]):
+    def _apply_item_in_tx(self, item: dict, authorized_ids: set[int]) -> dict:
+        """Apply one item, returning the real status plus the rollback payload."""
         doc = self.db._conn.execute(
             "SELECT id, doc_name, kb_id, owner_id, scope, metadata_version, deleted_at, "
             "logical_path, tags_json, document_type "
@@ -279,11 +348,11 @@ class OrganizationService:
             (item["document_id"],),
         ).fetchone()
         if doc is None:
-            return "permission_conflict", "document_missing", None, None, 0, 0
+            return self._conflict("document_missing", None, None)
         if doc["deleted_at"] is not None:
-            return "permission_conflict", "deleted", doc["logical_path"], None, 0, 0
+            return self._conflict("deleted", doc["logical_path"], doc["tags_json"], doc["document_type"])
         if int(doc["id"]) not in authorized_ids:
-            return "permission_conflict", "acl", doc["logical_path"], None, 0, 0
+            return self._conflict("acl", doc["logical_path"], doc["tags_json"], doc["document_type"])
         before_version = doc["metadata_version"]
         after_path = item["target_path"]
         after_type = item["document_type"]
@@ -291,23 +360,84 @@ class OrganizationService:
         removed_tags = set(json.loads(item["remove_tags"] or "[]"))
         added_tags = set(json.loads(item["add_tags"] or "[]"))
         after_tags = sorted(current_tags - removed_tags | added_tags)
+        after_tags_json = json.dumps(after_tags, ensure_ascii=False)
         updated = self.db._conn.execute(
             "UPDATE document_permissions "
             "SET logical_path=?, tags_json=?, document_type=?, metadata_version=metadata_version+1 "
             "WHERE id=? AND metadata_version=? AND deleted_at IS NULL",
-            (after_path, json.dumps(after_tags, ensure_ascii=False), after_type, doc["id"], before_version),
+            (after_path, after_tags_json, after_type, doc["id"], before_version),
         )
         if updated.rowcount != 1:
-            return "metadata_conflict", "version_changed", doc["logical_path"], None, before_version, before_version
-        return "applied", "", doc["logical_path"], after_path, before_version, before_version + 1
+            return self._conflict(
+                "version_changed",
+                doc["logical_path"],
+                doc["tags_json"],
+                doc["document_type"],
+                before_version=before_version,
+            )
+        return {
+            "status": "applied",
+            "reason_code": "",
+            "before_path": doc["logical_path"],
+            "after_path": after_path,
+            "before_version": before_version,
+            "after_version": before_version + 1,
+            "before_tags_json": doc["tags_json"] or "[]",
+            "after_tags_json": after_tags_json,
+            "before_document_type": doc["document_type"] or "",
+            "after_document_type": after_type or "",
+        }
 
-    def _record_batch_item_in_tx(self, batch_id, document_id, before, after, before_version, after_version, status, reason_code):
+    @staticmethod
+    def _conflict(
+        reason_code: str,
+        before_path: str | None,
+        before_tags_json: str | None,
+        before_document_type: str | None = None,
+        *,
+        before_version: int = 0,
+    ) -> dict:
+        return {
+            "status": "metadata_conflict" if reason_code == "version_changed" else "permission_conflict",
+            "reason_code": reason_code,
+            "before_path": before_path,
+            "after_path": None,
+            "before_version": before_version,
+            "after_version": before_version,
+            "before_tags_json": before_tags_json,
+            "after_tags_json": None,
+            "before_document_type": before_document_type,
+            "after_document_type": None,
+        }
+
+    def _record_batch_item_in_tx(
+        self,
+        batch_id,
+        document_id,
+        before,
+        after,
+        before_version,
+        after_version,
+        status,
+        reason_code,
+        *,
+        before_tags_json=None,
+        after_tags_json=None,
+        before_document_type=None,
+        after_document_type=None,
+    ):
         cur = self.db._conn.execute(
             "INSERT INTO material_organization_batch_items "
             "(batch_id, document_id, before_logical_path, after_logical_path, "
-            "before_metadata_version, after_metadata_version, status, reason_code) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (batch_id, document_id, before or "", after or "", before_version, after_version, status, reason_code),
+            "before_metadata_version, after_metadata_version, status, reason_code, "
+            "before_tags_json, after_tags_json, before_document_type, after_document_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                batch_id, document_id, before or "", after or "",
+                before_version, after_version, status, reason_code,
+                before_tags_json, after_tags_json,
+                before_document_type, after_document_type,
+            ),
         )
         return int(cur.lastrowid)
 
@@ -317,12 +447,18 @@ class OrganizationService:
             raise OrganizationError("batch_missing")
         if not (actor.get("is_admin") or batch["actor_id"] == actor["id"]):
             raise OrganizationError("no_rollback_permission")
+        self._ensure_rollback_payload_columns()
         batch_items = self.db.list_organization_batch_items(batch_id)
         with self.db._lock, self.db.transaction(immediate=True):
             items = []
             for row in batch_items:
                 if row["status"] == "rolled_back":
                     items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="rolled_back", reason_code=""))
+                    continue
+                if row["status"] != "applied":
+                    # Never applied by this batch (primary conflict), so there is
+                    # nothing to undo; keep the original status visible.
+                    items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status=row["status"], reason_code=row["reason_code"]))
                     continue
                 current = self.db._conn.execute(
                     "SELECT metadata_version, logical_path FROM document_permissions WHERE id=?",
@@ -331,12 +467,28 @@ class OrganizationService:
                 if current is None or current["metadata_version"] != row["after_metadata_version"]:
                     items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="metadata_conflict", reason_code="changed_since"))
                     continue
-                self.db._conn.execute(
-                    "UPDATE document_permissions "
-                    "SET logical_path=?, metadata_version=? "
-                    "WHERE id=? AND metadata_version=?",
-                    (row["before_logical_path"], row["before_metadata_version"], row["document_id"], row["after_metadata_version"]),
-                )
+                if row["before_tags_json"] is None:
+                    # Batch recorded before the D-10 payload columns existed.
+                    self.db._conn.execute(
+                        "UPDATE document_permissions "
+                        "SET logical_path=?, metadata_version=? "
+                        "WHERE id=? AND metadata_version=?",
+                        (row["before_logical_path"], row["before_metadata_version"], row["document_id"], row["after_metadata_version"]),
+                    )
+                else:
+                    self.db._conn.execute(
+                        "UPDATE document_permissions "
+                        "SET logical_path=?, tags_json=?, document_type=?, metadata_version=? "
+                        "WHERE id=? AND metadata_version=?",
+                        (
+                            row["before_logical_path"],
+                            row["before_tags_json"],
+                            row["before_document_type"] or "",
+                            row["before_metadata_version"],
+                            row["document_id"],
+                            row["after_metadata_version"],
+                        ),
+                    )
                 self.db._conn.execute(
                     "UPDATE material_organization_batch_items SET status='rolled_back' WHERE id=?",
                     (row["id"],),

@@ -1,4 +1,17 @@
-"""Lightweight idempotent SQL schema migration manager for SQLite."""
+"""Legacy SQL-file migration manager for SQLite (not used at runtime).
+
+.. note::
+   **Dead code, annotated 2026-10 (D observation).**  Application startup runs
+   :func:`rag.db_migrations.run_migrations` over
+   :data:`rag.db_migrations.USER_DB_MIGRATIONS`; nothing in ``rag/`` imports this
+   module.  It survives only because ``rag.db`` re-exports
+   :class:`Migrator`/:func:`run_migrations` for external scripts, and its own
+   unit tests in ``tests/test_db_connection.py`` exercise the file-based path.
+
+   Do not add application migrations here: add them to
+   ``rag.db_migrations.USER_DB_MIGRATIONS`` (or ``rag/db/migrations/*.sql`` if an
+   operator script still calls this manager).
+"""
 
 from __future__ import annotations
 
@@ -11,7 +24,11 @@ _DEFAULT_MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 class Migrator:
-    """Idempotent SQL schema migrator tracking applied files in schema_migrations."""
+    """Idempotent SQL-file schema migrator tracking files in ``schema_migrations``.
+
+    Legacy: kept for operator scripts and existing tests only.  The runtime
+    schema runner is :func:`rag.db_migrations.run_migrations`.
+    """
 
     def __init__(
         self,

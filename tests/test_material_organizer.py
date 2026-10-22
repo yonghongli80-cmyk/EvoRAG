@@ -41,13 +41,20 @@ class OrganizationFixture:
     def _generate(self, messages, model):
         return OrganizationProposalModel.model_validate(self.model.return_value or {"items": []})
 
-    def seed(self, filename, owner="alice", logical_path="", document_type=""):
+    def seed(
+        self,
+        filename,
+        owner="alice",
+        logical_path="",
+        document_type="",
+        tags_json="[]",
+    ):
         owner_id = self.alice_id if owner == "alice" else self.hr_id
         doc_id = self.db.create_document_permission(filename, "kb-1", owner_id, 1, False)
         with self.db._lock:
             self.db._conn.execute(
-                "UPDATE document_permissions SET logical_path=?, document_type=? WHERE id=?",
-                (logical_path, document_type, doc_id),
+                "UPDATE document_permissions SET logical_path=?, document_type=?, tags_json=? WHERE id=?",
+                (logical_path, document_type, tags_json, doc_id),
             )
             self.db._conn.commit()
         version_id = self.db.create_document_version(
@@ -166,3 +173,118 @@ def test_confirmed_move_then_rollback_restores_previous_path(organizer_fixture):
     result = f.rollback(batch.id, key="undo-1")
     assert result.items[0].status == "rolled_back"
     assert f.path(batch.document_id) == "未整理"
+
+
+# ---------------------------------------------------------------------------
+# D-10: rollback restores tags/document_type and conflicts report real status
+# ---------------------------------------------------------------------------
+
+
+def _proposal_for(f, items):
+    f.model.return_value = {"items": items}
+    proposal = f.preview("整理", user=f.alice())
+    selected = tuple(item.id for item in proposal.executable_items)
+    return proposal, selected
+
+
+def test_rollback_restores_tags_and_document_type(organizer_fixture):
+    f = organizer_fixture
+    doc_id = f.seed(
+        "tech-stack.pdf",
+        owner="alice",
+        logical_path="未整理",
+        document_type="contract",
+        tags_json='["hr", "2026"]',
+    )
+    proposal, selected = _proposal_for(
+        f,
+        [
+            {
+                "document_id": doc_id,
+                "target_path": "技术/架构",
+                "document_type": "reference",
+                "add_tags": ["tech"],
+                "remove_tags": ["2026"],
+                "confidence": 0.9,
+                "reason": "整理",
+            }
+        ],
+    )
+    batch = f.service.confirm(proposal.id, selected, f.alice(), None, "org-tags")
+    after = f.db.get_document_permission_by_id(doc_id)
+    assert batch.status == "applied"
+    assert after["logical_path"] == "技术/架构"
+    assert after["document_type"] == "reference"
+    assert after["tags_json"] == '["hr", "tech"]'
+
+    result = f.rollback(batch.batch_id, key="undo-tags")
+    restored = f.db.get_document_permission_by_id(doc_id)
+    assert result.status == "rolled_back"
+    assert restored["logical_path"] == "未整理"
+    assert restored["document_type"] == "contract"
+    assert restored["tags_json"] == '["hr", "2026"]'
+
+
+def test_batch_conflict_returns_the_real_status(organizer_fixture):
+    f = organizer_fixture
+    proposal, selected = _proposal_for(
+        f,
+        [
+            {
+                "document_id": f.contract_id,
+                "target_path": "入职材料",
+                "confidence": 0.9,
+            }
+        ],
+    )
+    # Revoking edit access between preview and confirm makes the item conflict.
+    f.revoke_edit(f.contract_id, "alice")
+
+    result = f.service.confirm(proposal.id, selected, f.alice(), None, "org-conflict")
+
+    assert result.status == "conflict"
+    assert result.items[0].status == "permission_conflict"
+    assert f.db.get_organization_batch_by_id(result.batch_id)["status"] == "conflict"
+    assert f.path(f.contract_id) == "未整理"
+
+
+def test_partial_batch_reports_partial_and_rolls_back_only_applied_items(
+    organizer_fixture,
+):
+    f = organizer_fixture
+    second_id = f.seed("员工手册.pdf", owner="alice", logical_path="未整理")
+    proposal, selected = _proposal_for(
+        f,
+        [
+            {
+                "document_id": f.contract_id,
+                "target_path": "入职材料",
+                "document_type": "onboarding",
+                "confidence": 0.9,
+            },
+            {
+                "document_id": second_id,
+                "target_path": "制度",
+                "confidence": 0.9,
+            },
+        ],
+    )
+    f.revoke_edit(second_id, "alice")
+
+    result = f.service.confirm(proposal.id, selected, f.alice(), None, "org-partial")
+
+    assert result.status == "partial"
+    statuses = {item.document_id: item.status for item in result.items}
+    assert statuses == {f.contract_id: "applied", second_id: "permission_conflict"}
+    assert f.db.get_organization_batch_by_id(result.batch_id)["status"] == "partial"
+    assert f.path(f.contract_id) == "入职材料"
+
+    rollback = f.rollback(result.batch_id, key="undo-partial")
+    rollback_statuses = {item.document_id: item.status for item in rollback.items}
+    # The conflicting item was never applied, so it is not "rolled back".
+    assert rollback_statuses == {
+        f.contract_id: "rolled_back",
+        second_id: "permission_conflict",
+    }
+    assert f.path(f.contract_id) == "未整理"
+    assert f.path(second_id) == "未整理"

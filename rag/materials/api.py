@@ -319,12 +319,24 @@ async def get_archive_manifest(request: Request, manifest_id: int, user: dict = 
     except HTTPException as exc:
         raise HTTPException(status_code=404, detail="manifest_not_found") from exc
     entries = db.list_material_archive_entries(manifest_id)
+    # CAS token for ``POST /materials/archives/{id}/confirm``: the confirm route
+    # compares ``expected_version`` against the container's current version_no
+    # (0 while the container has no live version yet).  Returning it here lets a
+    # client confirm without guessing/omitting the optimistic-concurrency value.
+    current_container_version = db.get_current_document_version(
+        manifest["container_document_id"]
+    )
     return {
         "manifest_id": manifest["id"],
         "container_document_id": manifest["container_document_id"],
         "status": manifest["status"],
         "entry_count": manifest["entry_count"],
         "expires_at": manifest["expires_at"],
+        "expected_version": (
+            int(current_container_version["version_no"])
+            if current_container_version is not None
+            else 0
+        ),
         "entries": [
             {
                 "id": entry["id"],
@@ -456,6 +468,16 @@ async def list_recycle(request: Request, user: dict = Depends(require_user)):
         elif user.get("is_admin") or item["owner_id"] == user["id"] or item["deleted_by"] == user["id"]:
             visible.append(item)
     items = visible
+    # The restore endpoint is CAS-guarded by ``expected_metadata_version``.
+    # ``list_recycled_documents`` does not project that column, so read the few
+    # visible tombstones' current version once each and surface it to the client
+    # instead of requiring an omitted (or guessed) CAS value.
+    metadata_versions: dict[int, int] = {}
+    for item in items:
+        document = db.get_document_permission_by_id(item["id"])
+        metadata_versions[item["id"]] = (
+            int(document["metadata_version"]) if document is not None else 0
+        )
     return {
         "items": [
             {
@@ -464,6 +486,7 @@ async def list_recycle(request: Request, user: dict = Depends(require_user)):
                 "deleted_at": item["deleted_at"],
                 "deleted_by": item["deleted_by"],
                 "restore_until": item["restore_until"],
+                "metadata_version": metadata_versions[item["id"]],
             }
             for item in items
         ]

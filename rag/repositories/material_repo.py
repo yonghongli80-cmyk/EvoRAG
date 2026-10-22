@@ -2,11 +2,86 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from typing import Any
 
 from rag.repositories.base import BaseRepository
+
+logger = logging.getLogger(__name__)
+
+#: FTS5 reports an invalid ``MATCH`` expression through ``OperationalError``.
+#: These fragments identify a *query* error (the caller's text), which is the
+#: only class of failure the repository may turn into "no hits"; anything else
+#: (locked database, missing table, corrupt index) must reach the caller.
+_FTS_SYNTAX_ERROR_HINTS = (
+    "fts5: syntax error",
+    "unterminated string",
+    "unknown special query",
+    "no such column",
+    "unrecognized token",
+    "malformed match",
+)
+
+
+def _is_fts_syntax_error(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return any(hint in message for hint in _FTS_SYNTAX_ERROR_HINTS)
+
+
+def _fts_phrase_query(text: str) -> str:
+    """Turn free user text into a safe FTS5 expression.
+
+    Every whitespace-separated token is wrapped in quotes (the FTS5 string
+    syntax) and embedded double quotes are doubled, so operators such as
+    ``AND``/``OR``/``NOT``/``NEAR``, wildcards (``*``), column filters (``:``),
+    parentheses, and punctuation like ``C++`` are searched literally instead of
+    being parsed as query syntax.  Tokens are joined by whitespace, which FTS5
+    treats as an implicit ``AND`` — the same ranking semantics a raw multi-word
+    query had before escaping.
+    """
+    phrases = []
+    for token in text.split():
+        escaped = token.replace('"', '""')
+        phrases.append(f'"{escaped}"')
+    return " ".join(phrases)
+
+
+#: D-10 rollback payload.  The baseline schema creates the batch-items table;
+#: these columns record what an organization batch changed so a rollback can put
+#: tags and document_type back, not only the logical path.
+_ORGANIZATION_BATCH_ITEM_PAYLOAD_COLUMNS = (
+    ("before_tags_json", "TEXT"),
+    ("after_tags_json", "TEXT"),
+    ("before_document_type", "TEXT"),
+    ("after_document_type", "TEXT"),
+)
+
+
+def ensure_organization_batch_item_columns(conn: sqlite3.Connection) -> None:
+    """Widen an already-created database with the D-10 rollback payload columns.
+
+    New databases get the columns from their baseline schema; this compatibility
+    step exists for databases created before the fix.  It is idempotent and
+    tolerates a concurrent creator (SQLite reports ``duplicate column name``).
+    """
+    existing = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(material_organization_batch_items)")
+    }
+    if not existing:  # table not installed yet; the caller's insert will decide
+        return
+    for name, sql_type in _ORGANIZATION_BATCH_ITEM_PAYLOAD_COLUMNS:
+        if name in existing:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE material_organization_batch_items ADD COLUMN {name} {sql_type}"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
 
 class MaterialRepository(BaseRepository):
@@ -274,6 +349,9 @@ class MaterialRepository(BaseRepository):
             conn.commit()
 
     def search_material_search_fts(self, text: str, limit: int = 50) -> list[dict[str, Any]]:
+        match = _fts_phrase_query(text)
+        if not match:
+            return []
         with self.cm.read_connection() as conn:
             try:
                 rows = conn.execute(
@@ -282,11 +360,50 @@ class MaterialRepository(BaseRepository):
                     "JOIN document_versions dv ON dv.id = f.version_id AND dv.status = 'current' "
                     "JOIN document_permissions dp ON dp.id = f.document_id AND dp.deleted_at IS NULL "
                     "WHERE material_search_fts MATCH ? LIMIT ?",
-                    (text, limit),
+                    (match, limit),
                 ).fetchall()
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                if not _is_fts_syntax_error(exc):
+                    # A locked/corrupt/missing schema is not "no results".
+                    logger.error(
+                        "material FTS query failed: %s", exc, extra={"metric": "material_fts_error"}
+                    )
+                    raise
+                # Escaping above makes this reachable only for exotic tokens;
+                # keep the "invalid query means no hits" contract but make it
+                # observable instead of silently indistinguishable from a miss.
+                logger.warning(
+                    "material FTS query rejected as invalid syntax",
+                    extra={"metric": "material_fts_syntax_error"},
+                )
                 return []
         return [dict(r) for r in rows]
+
+    def list_material_documents_with_current_version(self) -> list[dict[str, Any]]:
+        """Load live material documents together with their current version.
+
+        Material location and organization used to call
+        ``get_document_permission_by_id`` and ``get_current_document_version``
+        once per document (D observation: locator/organizer N+1).  This single
+        query returns the same row shape for every live document, so callers can
+        then resolve authorization once per knowledge base.
+        """
+        with self.cm.read_connection() as conn:
+            rows = conn.execute(
+                "SELECT dp.id, dp.doc_name, dp.kb_id, dp.owner_id, dp.scope, "
+                "dp.protected, dp.current_version_id, dp.logical_path, "
+                "dp.document_type, dp.tags_json, dp.subject_user_id, dp.updated_at, "
+                "dp.metadata_version, dp.deleted_at, "
+                "dv.original_filename AS current_filename, "
+                "dv.validity_status AS current_validity_status, "
+                "dv.version_no AS current_version_no "
+                "FROM document_permissions dp "
+                "JOIN document_versions dv "
+                "ON dv.id = dp.current_version_id AND dv.status = 'current' "
+                "WHERE dp.deleted_at IS NULL "
+                "ORDER BY dp.id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def create_organization_proposal(
         self, actor_id: int, instruction_hash: str, expires_at: float
@@ -396,16 +513,24 @@ class MaterialRepository(BaseRepository):
         after_metadata_version: int,
         status: str,
         reason_code: str,
+        *,
+        before_tags_json: str | None = None,
+        after_tags_json: str | None = None,
+        before_document_type: str | None = None,
+        after_document_type: str | None = None,
     ) -> int:
         with self.cm.write_connection() as conn:
             cur = conn.execute(
                 "INSERT INTO material_organization_batch_items "
                 "(batch_id, document_id, before_logical_path, after_logical_path, "
-                "before_metadata_version, after_metadata_version, status, reason_code) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "before_metadata_version, after_metadata_version, status, reason_code, "
+                "before_tags_json, after_tags_json, before_document_type, after_document_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     batch_id, document_id, before_logical_path, after_logical_path,
                     before_metadata_version, after_metadata_version, status, reason_code,
+                    before_tags_json, after_tags_json,
+                    before_document_type, after_document_type,
                 ),
             )
             conn.commit()

@@ -304,3 +304,73 @@ def test_uploaded_material_job_activates_its_version(isolated_api, make_user):
     current = isolated_api.app.state.user_db.get_current_document_version(body["document_id"])
     assert current is not None
     assert current["id"] == body["version_id"]
+
+
+def test_archive_manifest_preview_exposes_the_confirm_cas_version(
+    isolated_api, make_user
+):
+    _, headers = make_user("alice-archive-cas")
+    upload = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("cas.zip", zip_bytes({"a.pdf": b"%PDF-1.4\nA"}), "application/zip")},
+    )
+    manifest_id = upload.json()["manifest_id"]
+    preview = isolated_api.get(f"/materials/archives/{manifest_id}", headers=headers).json()
+
+    # The container has no live version until the archive is confirmed.
+    assert preview["expected_version"] == 0
+    supported_ids = [
+        entry["id"] for entry in preview["entries"] if entry["state"] == "approved"
+    ]
+    confirmed = isolated_api.post(
+        f"/materials/archives/{manifest_id}/confirm",
+        headers=headers,
+        json={
+            "selected_entry_ids": supported_ids,
+            "expected_version": preview["expected_version"],
+            "idempotency_key": "cas-1",
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    # A second upload of the same container sees the confirmed version as the
+    # CAS token, so the client never needs to omit the field.
+    second = isolated_api.post(
+        "/materials/upload",
+        headers=headers,
+        files={"file": ("cas.zip", zip_bytes({"b.pdf": b"%PDF-1.4\nB"}), "application/zip")},
+    )
+    second_preview = isolated_api.get(
+        f"/materials/archives/{second.json()['manifest_id']}", headers=headers
+    ).json()
+    assert second_preview["expected_version"] == 1
+
+
+def test_recycle_list_exposes_metadata_version_for_restore_cas(isolated_api, make_user):
+    _, headers = make_user("alice-recycle-cas")
+    db = isolated_api.app.state.user_db
+    alice = db.get_user_by_username("alice-recycle-cas")
+    doc_id = db.create_document_permission("recycle-cas.pdf", "rag_docs", alice["id"])
+    assert isolated_api.delete(f"/materials/{doc_id}", headers=headers).status_code == 200
+
+    listing = isolated_api.get("/materials/recycle", headers=headers).json()
+    item = next(entry for entry in listing["items"] if entry["document_id"] == doc_id)
+    stored = db.get_document_permission_by_id(doc_id)
+    assert item["metadata_version"] == stored["metadata_version"] == 2
+
+    restored = isolated_api.post(
+        f"/materials/{doc_id}/restore",
+        headers=headers,
+        json={"expected_metadata_version": item["metadata_version"]},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["metadata_version"] == item["metadata_version"] + 1
+
+    # The stale token is rejected instead of silently succeeding.
+    stale = isolated_api.post(
+        f"/materials/{doc_id}/restore",
+        headers=headers,
+        json={"expected_metadata_version": item["metadata_version"]},
+    )
+    assert stale.status_code == 409

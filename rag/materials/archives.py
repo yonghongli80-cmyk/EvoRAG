@@ -25,7 +25,8 @@ import stat
 import time
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def _rar_backend_available() -> bool:
         return False
 
 
-def _iter_zip_entries(path: Path) -> list[dict]:
+def _iter_zip_entries(path: Path) -> Iterator[dict]:
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
             yield {
@@ -204,7 +205,7 @@ def _iter_zip_entries(path: Path) -> list[dict]:
             }
 
 
-def _iter_7z_entries(path: Path) -> list[dict]:
+def _iter_7z_entries(path: Path) -> Iterator[dict]:
     import py7zr
 
     with py7zr.SevenZipFile(path) as sf:
@@ -219,7 +220,7 @@ def _iter_7z_entries(path: Path) -> list[dict]:
             }
 
 
-def _iter_rar_entries(path: Path) -> list[dict]:
+def _iter_rar_entries(path: Path) -> Iterator[dict]:
     import rarfile
 
     with rarfile.RarFile(path) as rf:
@@ -264,25 +265,31 @@ def inspect_archive(
     else:
         raise ArchiveValidationError(f"not an archive container: {capability.key}")
 
-    return _build_manifest(list(entries_iter), limits, backend=capability.key)
+    return _build_manifest(entries_iter, limits, backend=capability.key)
 
 
-def _build_manifest(raw_entries: list[dict], limits: ArchiveLimits, backend: str) -> ArchiveManifest:
-    files = [e for e in raw_entries if not e["is_dir"]]
-    total_compressed = sum(e.get("compressed") or 0 for e in raw_entries)
-    total_bytes = sum(e["size"] for e in files)
+def _build_manifest(
+    raw_entries, limits: ArchiveLimits, backend: str
+) -> ArchiveManifest:
+    """Validate archive headers as they are enumerated, never all at once.
 
-    if total_compressed > limits.archive_bytes:
-        return _rejected("compressed_size_exceeded", backend)
-    if len(files) > limits.entry_count:
-        return _rejected("entry_count_exceeded", backend)
-    if total_bytes > limits.expanded_bytes:
-        return _rejected("expanded_size_exceeded", backend)
-    if total_compressed and total_bytes / total_compressed > limits.ratio:
-        return _rejected("compression_ratio_exceeded", backend)
-
-    entries = []
+    The iterator is consumed with early rejection so a container that declares
+    millions of entries cannot be materialized into a list before the entry-count
+    check runs (same class of bug as the 7z member read in D-06).
+    """
+    entries: list[ArchiveEntry] = []
+    total_compressed = 0
+    total_bytes = 0
+    file_count = 0
+    inspected = 0
+    max_inspected = limits.entry_count * 2 + 64
     for e in raw_entries:
+        inspected += 1
+        if inspected > max_inspected:
+            return _rejected("entry_count_exceeded", backend)
+        total_compressed += e.get("compressed") or 0
+        if total_compressed > limits.archive_bytes:
+            return _rejected("compressed_size_exceeded", backend)
         if e["is_dir"]:
             entries.append(
                 ArchiveEntry(
@@ -297,6 +304,12 @@ def _build_manifest(raw_entries: list[dict], limits: ArchiveLimits, backend: str
                 )
             )
             continue
+        file_count += 1
+        total_bytes += e["size"]
+        if file_count > limits.entry_count:
+            return _rejected("entry_count_exceeded", backend)
+        if total_bytes > limits.expanded_bytes:
+            return _rejected("expanded_size_exceeded", backend)
         normalized, reason = _validate_entry(
             e["name"], e.get("encrypted", False), e.get("mode", 0), limits
         )
@@ -313,13 +326,16 @@ def _build_manifest(raw_entries: list[dict], limits: ArchiveLimits, backend: str
             )
         )
 
+    if total_compressed and total_bytes / total_compressed > limits.ratio:
+        return _rejected("compression_ratio_exceeded", backend)
+
     approved = [e for e in entries if e.state == "approved"]
     state = "ok" if approved else "no_approved_entries"
     return ArchiveManifest(
         state=state,
         reason_code="",
         entries=tuple(entries),
-        entry_count=len(files),
+        entry_count=file_count,
         total_bytes=total_bytes,
         total_compressed_bytes=total_compressed,
         backend=backend,
@@ -363,30 +379,111 @@ def _copyfileobj_bounded(src, dst, max_bytes: int, chunk_size: int = _CHUNK) -> 
     return total
 
 
+def _extract_1zip_bounded(source_path: Path, entry_name: str, dest: Path, max_bytes: int) -> None:
+    with zipfile.ZipFile(source_path) as zf, zf.open(entry_name) as src, open(dest, "wb") as out:
+        _copyfileobj_bounded(src, out, max_bytes, _CHUNK)
+
+
+def _extract_7z_bounded(
+    source_path: Path, entry_name: str, dest: Path, max_bytes: int
+) -> None:
+    """Stream one 7z member to ``dest`` while enforcing the size cap.
+
+    The historical implementation called ``SevenZipFile.read([name])``, which
+    decompresses the member completely into memory *before* any limit check, so
+    a crafted archive could exhaust RAM (D-06).  py7zr's ``WriterFactory`` API
+    hands decompressed chunks to a writer as they arrive; the writer below stops
+    the stream at ``max_bytes`` so peak memory stays at the decompressor block
+    instead of the full member.  When no bound is supplied the caller has asked
+    for an unbounded 7z read, which is refused rather than performed.
+    """
+    import py7zr
+    from py7zr.io import Py7zIO, WriterFactory
+
+    class _BoundedWriter(Py7zIO):
+        def __init__(self) -> None:
+            # The writer owns this handle for the duration of the decompression
+            # stream; py7zr calls ``write``/``flush``/``close`` on the object, so
+            # a ``with`` block cannot describe its lifetime (SIM115 is expected).
+            self._handle = open(dest, "wb")  # noqa: SIM115
+            self._written = 0
+            self._closed = False
+
+        def write(self, data: bytes) -> int:
+            self._written += len(data)
+            if self._written > max_bytes:
+                self._abort()
+                raise ArchiveRejected(
+                    "entry_size_exceeded",
+                    f"extracted stream exceeded {max_bytes} bytes",
+                )
+            self._handle.write(data)
+            return len(data)
+
+        def read(self, size: int | None = None) -> bytes:  # pragma: no cover - write-only
+            return b""
+
+        def seek(self, offset: int, whence: int = 0) -> int:  # pragma: no cover
+            return 0
+
+        def flush(self) -> None:
+            self._handle.flush()
+
+        def size(self) -> int:
+            return self._written
+
+        def close(self) -> None:
+            if not self._closed:
+                self._closed = True
+                self._handle.close()
+
+        def _abort(self) -> None:
+            self.close()
+            with suppress(OSError):
+                dest.unlink(missing_ok=True)
+
+    class _SingleMemberFactory(WriterFactory):
+        def __init__(self) -> None:
+            self._created = False
+
+        def create(self, filename: str) -> Py7zIO:
+            if self._created:
+                # Duplicate member names are refused instead of interleaving two
+                # decompression streams into one staging file.
+                raise ArchiveRejected("duplicate_entry", "archive member is duplicated")
+            self._created = True
+            return _BoundedWriter()
+
+    with py7zr.SevenZipFile(source_path) as archive:
+        archive.extract(
+            path=None,
+            targets=[entry_name],
+            factory=_SingleMemberFactory(),
+        )
+
+
 def _extract_entry(
     source_path: Path, backend: str, entry_name: str, dest: Path, max_bytes: int | None = None
 ) -> None:
     """Stream one approved archive member to ``dest`` (never ``extractall``)."""
-    copy_fn = (
-        (lambda s, d: _copyfileobj_bounded(s, d, max_bytes, _CHUNK))
-        if max_bytes is not None
-        else (lambda s, d: shutil.copyfileobj(s, d, _CHUNK))
-    )
     if backend == "zip":
-        with zipfile.ZipFile(source_path) as zf, zf.open(entry_name) as src, open(dest, "wb") as out:
-            copy_fn(src, out)
+        if max_bytes is not None:
+            _extract_1zip_bounded(source_path, entry_name, dest, max_bytes)
+        else:
+            with zipfile.ZipFile(source_path) as zf, zf.open(entry_name) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out, _CHUNK)
     elif backend == "7z":
-        import py7zr
-
-        with py7zr.SevenZipFile(source_path) as sf:
-            data = sf.read([entry_name])
-        stream = data[entry_name]
-        stream.seek(0)
-        with open(dest, "wb") as out:
-            copy_fn(stream, out)
+        if max_bytes is None:
+            raise ArchiveConfirmationError("archive_entry_limit_required")
+        _extract_7z_bounded(source_path, entry_name, dest, max_bytes)
     elif backend == "rar":
         import rarfile
 
+        copy_fn = (
+            (lambda s, d: _copyfileobj_bounded(s, d, max_bytes, _CHUNK))
+            if max_bytes is not None
+            else (lambda s, d: shutil.copyfileobj(s, d, _CHUNK))
+        )
         with rarfile.RarFile(source_path) as rf, rf.open(entry_name) as src, open(dest, "wb") as out:
             copy_fn(src, out)
     else:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -87,6 +88,12 @@ class ParsedWorkbook:
 
 _INTEGER = re.compile(r"^[+-]?\d+$")
 _DECIMAL = re.compile(r"^[+-]?(?:\d+\.\d*|\d*\.\d+)$")
+
+#: Leading characters Excel/LibreOffice may evaluate as a formula in a text cell.
+#: A CSV import is untrusted input, so text cells that start with one of these
+#: are neutralized with an apostrophe prefix instead of being stored verbatim.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_FORMULA_ESCAPE = "'"
 
 
 def parse_spreadsheet(path: Path, fmt: str, mapping: ImportMapping | None) -> ParsedWorkbook:
@@ -196,10 +203,15 @@ def _xlsx_cell(sheet_cell, row_number, column, cached_sheet, formula_cells):
 def _parse_csv(path: Path, mapping: ImportMapping | None) -> ParsedWorkbook:
     text = _decode_csv(path)
     try:
+        # Sniff only a prefix of the decoded text; the dialect object is reused below.
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",\t;|")
     except csv.Error:
         dialect = csv.excel
-    records = list(csv.reader(text.splitlines(), dialect))
+    # Feed the reader the decoded text directly.  ``str.splitlines()`` would cut a
+    # quoted field that contains a newline into two physical lines, shifting every
+    # following record by one row; ``csv.reader`` reassembles quoted newlines when
+    # it consumes an iterable of lines that keeps the record terminator.
+    records = list(csv.reader(io.StringIO(text, newline=""), dialect))
     if not records:
         records = [[]]
     width = max((len(row) for row in records), default=0)
@@ -258,7 +270,21 @@ def _csv_cell(value: str) -> ParsedCell:
             return ParsedCell(Decimal(normalized))
         except InvalidOperation:
             pass
-    return ParsedCell(value)
+    return ParsedCell(_neutralize_formula_prefix(value))
+
+
+def _neutralize_formula_prefix(value: str) -> str:
+    """Store an untrusted CSV text cell so no client evaluates it as a formula.
+
+    ``=`` opens a formula in Excel/Calc and ``+``/``-``/``@`` are the other
+    characters that spreadsheet clients may evaluate when a cell is coerced to
+    a formula.  The value is kept readable but prefixed with an apostrophe, the
+    spreadsheet-native "this is text" marker.  Numeric cells never reach here:
+    they were already converted by :func:`_csv_cell`.
+    """
+    if value.startswith(_FORMULA_PREFIXES):
+        return f"{_FORMULA_ESCAPE}{value}"
+    return value
 
 
 def _first_nonempty_row(sheet) -> int | None:

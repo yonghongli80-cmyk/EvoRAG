@@ -21,7 +21,7 @@ from rag.document_version_store import (
     resolve_version_path,
 )
 from rag.materials.jobs import enqueue_latest_index_job
-from rag.spreadsheets.audit import compute_risk_flags
+from rag.spreadsheets.audit import compute_risk_flags, document_sensitive_domain
 from rag.spreadsheets.edit_models import (
     RequestMeta,
     SpreadsheetEditAccepted,
@@ -110,7 +110,12 @@ class SpreadsheetEditService:
             return SpreadsheetEditUnchanged()
 
         content_hash = hashlib.sha256(staging.read_bytes()).hexdigest()
-        audit_changes = tuple(self._audit_change(change) for change in changes)
+        # D-09: record the sensitive-domain flag while the document is known, so
+        # the audit trail itself marks values that a later viewer may not see.
+        sensitive = 1 if document_sensitive_domain(self.db, document["kb_id"]) is not None else 0
+        audit_changes = tuple(
+            self._audit_change(change, sensitive) for change in changes
+        )
         recent = self.db.count_recent_spreadsheet_edits(
             actor["id"], document_id, self.clock() - 600
         )
@@ -445,7 +450,7 @@ class SpreadsheetEditService:
         )
 
     @classmethod
-    def _audit_change(cls, change: CellChange) -> dict[str, object]:
+    def _audit_change(cls, change: CellChange, sensitive: int = 0) -> dict[str, object]:
         return {
             "sheet_key": change.sheet_key,
             "sheet_name_snapshot": change.sheet_name,
@@ -454,7 +459,7 @@ class SpreadsheetEditService:
             "old_value_json": cls._json_value(change.old_value),
             "new_value_type": change.new_value_type,
             "new_value_json": cls._json_value(change.new_value),
-            "sensitive": 0,
+            "sensitive": 1 if sensitive else 0,
         }
 
     def _mark_failed(self, session_id: int, version_id: int) -> None:

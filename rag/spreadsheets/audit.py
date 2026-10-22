@@ -6,6 +6,43 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from rag.org_auth.repository import OrgRepository
+
+#: ``kb_org_policies.kb_type`` value that makes a knowledge base a sensitive
+#: domain.  Cell values edited inside such a KB are audit-redacted unless the
+#: viewer holds the matching ``org_sensitive_qualifications`` grant (D-09).
+SENSITIVE_KB_TYPE = "sensitive"
+
+
+def document_sensitive_domain(db, kb_id: str) -> str | None:
+    """Return the knowledge base's sensitivity domain, or ``None``.
+
+    A document is "in a sensitive domain" when its KB policy classifies the KB
+    as ``sensitive``; the policy also names the domain (for example
+    ``finance``).  Legacy KBs without an organization policy are not sensitive
+    domains.
+    """
+    policy = OrgRepository(db).get_kb_policy(kb_id)
+    if not policy or policy.get("kb_type") != SENSITIVE_KB_TYPE:
+        return None
+    return str(policy.get("sensitivity") or "")
+
+
+def viewer_holds_sensitivity_grant(db, user: Mapping[str, Any], domain: str | None) -> bool:
+    """Return *True* when the viewer may read values of *domain*.
+
+    Qualification is deliberately independent of ``is_admin``: company
+    administrators bypass organization role checks for management, but they do
+    not automatically hold a sensitive-domain clearance, and an audit viewer
+    must not learn payroll/finance values just by being an administrator.
+    """
+    if domain is None:
+        return False
+    person = OrgRepository(db).get_person_for_user(int(user["id"]))
+    if person is None:
+        return False
+    return domain in OrgRepository(db).qualifications(person["person_code"])
+
 
 def compute_risk_flags(
     operation: str,
@@ -152,6 +189,8 @@ def get_spreadsheet_audit_detail(db, user: Mapping[str, Any], session_id: int):
             (session_id,),
         ).fetchone()
     summary = _audit_summary(dict(row))
+    domain = document_sensitive_domain(db, row["kb_id"])
+    qualified = viewer_holds_sensitivity_grant(db, user, domain)
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for change in changes:
         key = (change["sheet_key"], change["sheet_name_snapshot"])
@@ -160,8 +199,17 @@ def get_spreadsheet_audit_detail(db, user: Mapping[str, Any], session_id: int):
             "old_value_type": change["old_value_type"],
             "new_value_type": change["new_value_type"],
         }
-        if change["sensitive"]:
+        # A row is sensitive when it was recorded inside a sensitive domain, or
+        # when the document's current policy says so (covers rows written before
+        # the flag existed).  Values stay hidden when the viewer cannot show a
+        # grant for the domain; if the domain label is gone the check fails
+        # closed instead of exposing the values.
+        sensitive = bool(change["sensitive"]) or domain is not None
+        if sensitive and not qualified:
             item["redacted"] = True
+            item["redaction_reason"] = (
+                "sensitivity_required" if domain is not None else "sensitivity_domain_unknown"
+            )
         else:
             item["old_value"] = json.loads(change["old_value_json"])
             item["new_value"] = json.loads(change["new_value_json"])

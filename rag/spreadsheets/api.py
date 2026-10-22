@@ -32,6 +32,14 @@ router = APIRouter()
 # even when the caller still holds a dataset path (D-02).
 _READABLE_VERSION_STATUSES = frozenset({"current", "historical"})
 
+#: Hard caps for the row endpoint's non-editable annotations (D-07).  A merged
+#: range can legitimately cover the whole grid (``A1:XFD1048576``); expanding it
+#: cell by cell allocates billions of addresses from one request, so annotations
+#: are limited to the returned page and to a fixed budget.  Cells outside the
+#: budget are represented by ``merged_ranges`` plus the truncation flag instead.
+MAX_MERGED_CELL_ANNOTATIONS = 4096
+MAX_NON_EDITABLE_CELLS = 20_000
+
 
 @router.get("/admin/spreadsheet-changes")
 def spreadsheet_change_audits(
@@ -293,16 +301,50 @@ def rows(
                 (sheet_key,),
             ).fetchall()
         }
+        page_rows = [row[0] for row in result]
+        first_row = page_rows[0] if page_rows else 0
+        last_row = page_rows[-1] if page_rows else 0
+        merged_ranges: list[str] = []
+        merged_annotations = 0
+        truncated = False
         for merged_row in connection.execute(
             "SELECT range_ref FROM merged_ranges WHERE sheet_key = ?", (sheet_key,)
         ).fetchall():
-            min_col, min_row, max_col, max_row = range_boundaries(merged_row[0])
-            for row_number in range(min_row, max_row + 1):
+            merged_ref = str(merged_row[0])
+            try:
+                min_col, min_row, max_col, max_row = range_boundaries(merged_ref)
+            except (TypeError, ValueError):
+                continue
+            if None in (min_col, min_row, max_col, max_row):
+                continue
+            if not page_rows or max_row < first_row or min_row > last_row:
+                continue
+            merged_ranges.append(merged_ref)
+            # Only the cells of this merge that are on the returned page can be
+            # relevant to the caller; the expansion budget is checked before any
+            # address is materialized.
+            window_min_row = max(min_row, first_row)
+            window_max_row = min(max_row, last_row)
+            window_cells = (window_max_row - window_min_row + 1) * (
+                max_col - min_col + 1
+            )
+            if (
+                merged_annotations + window_cells > MAX_MERGED_CELL_ANNOTATIONS
+                or len(non_editable) + window_cells > MAX_NON_EDITABLE_CELLS
+            ):
+                truncated = True
+                continue
+            merged_annotations += window_cells
+            for row_number in range(window_min_row, window_max_row + 1):
                 for column_number in range(min_col, max_col + 1):
                     if (column_number, row_number) != (min_col, min_row):
                         non_editable.add(
                             f"{get_column_letter(column_number)}{row_number}"
                         )
+        non_editable_cells = sorted(non_editable)
+        if len(non_editable_cells) > MAX_NON_EDITABLE_CELLS:
+            non_editable_cells = non_editable_cells[:MAX_NON_EDITABLE_CELLS]
+            truncated = True
         try:
             require_doc_version_edit(db, document_id, user)
             can_edit = document.get("current_version_id") == version_id
@@ -324,7 +366,9 @@ def rows(
             ],
             "can_edit": can_edit,
             "current_version_id": document.get("current_version_id"),
-            "non_editable_cells": sorted(non_editable),
+            "non_editable_cells": non_editable_cells,
+            "merged_ranges": merged_ranges,
+            "non_editable_cells_truncated": truncated,
         }
     finally:
         connection.close()
