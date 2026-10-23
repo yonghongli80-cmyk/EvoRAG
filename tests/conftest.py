@@ -50,7 +50,6 @@ PRESEEDED_ENVIRONMENT = {
     "RAG_EVOLUTION_WORKER_ENABLED": "false",
     "RAG_EVOLUTION_CANDIDATE_ENABLED": "false",
     "RAG_EVOLUTION_CANDIDATE_CANARY_PERCENT": "0",
-    "RAG_EVOLUTION_CANDIDATE_SHADOW_SAMPLE_RATE": "0",
     "RAG_EVOLUTION_SANDBOX_ALLOW_UNISOLATED": "false",
     "RAG_EVOLUTION_DIAGNOSIS_LABELS_PATH": "",
     "RAG_EVOLUTION_SANDBOX_DATA_SNAPSHOT": "",
@@ -67,7 +66,6 @@ PRESEEDED_ENVIRONMENT = {
     "RAG_EVOLUTION_DB_PATH": str(_SESSION_SANDBOX / "evolution.db"),
     "RAG_DOCUMENT_VERSIONS_ROOT": str(_SESSION_SANDBOX / "document_versions"),
     "RAG_STRUCTURED_DATASETS_ROOT": str(_SESSION_SANDBOX / "structured_datasets"),
-    "RAG_MATERIAL_EMBEDDING_CACHE_PATH": str(_SESSION_SANDBOX / "embedding_cache.sqlite3"),
     "RAG_BACKUP_ROOT": str(_SESSION_SANDBOX / "backups"),
 }
 # Assigned (not setdefault): a developer shell exporting RAG_AUTH_ENABLED=true must not
@@ -125,7 +123,6 @@ def neutralized_settings(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(settings, "evolution_worker_enabled", False)
     monkeypatch.setattr(settings, "evolution_candidate_enabled", False)
     monkeypatch.setattr(settings, "evolution_candidate_canary_percent", 0)
-    monkeypatch.setattr(settings, "evolution_candidate_shadow_sample_rate", 0.0)
     monkeypatch.setattr(settings, "evolution_sandbox_allow_unisolated", False)
     monkeypatch.setattr(settings, "evolution_diagnosis_labels_path", "")
     monkeypatch.setattr(settings, "evolution_sandbox_data_snapshot", "")
@@ -168,7 +165,6 @@ def sandbox_api_storage(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(settings, "bm25_db_path", str(sandbox / "bm25_index.db"))
     monkeypatch.setattr(settings, "evolution_db_path", str(sandbox / "evolution.db"))
     monkeypatch.setattr(settings, "backup_root", str(sandbox / "backups"))
-    monkeypatch.setattr(settings, "material_embedding_cache_path", str(sandbox / "embedding_cache.sqlite3"))
     monkeypatch.setattr(settings, "document_versions_root", str(versions_root))
     monkeypatch.setattr(settings, "structured_datasets_root", str(structured_root))
     monkeypatch.setattr(api.app.state, "user_db", db)

@@ -715,6 +715,21 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             )
             conn.commit()
     rebuild_document_versions_status(conn)
+    # The job_scope index below needs the column before the script creates it
+    # on an already-existing database; a missing table is fine (the script
+    # creates it with the column).
+    try:
+        conn.execute("SELECT job_scope FROM document_index_jobs LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute(
+                "ALTER TABLE document_index_jobs "
+                "ADD COLUMN job_scope TEXT NOT NULL DEFAULT 'material'"
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).lower():
+                raise
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS document_index_jobs (
@@ -837,15 +852,6 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             "ADD COLUMN source_path TEXT NOT NULL DEFAULT ''"
         )
         conn.commit()
-    # Scope index jobs: material and wiki ids are separate id spaces.
-    try:
-        conn.execute(
-            "ALTER TABLE document_index_jobs ADD COLUMN job_scope TEXT NOT NULL DEFAULT 'material'"
-        )
-        conn.commit()
-    except sqlite3.OperationalError as exc:
-        if "duplicate column" not in str(exc).lower():
-            raise
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS material_archive_import_results (
