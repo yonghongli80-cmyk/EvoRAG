@@ -25,5 +25,11 @@ def _local_imports() -> int:
 
 def test_god_modules_do_not_grow_past_the_frozen_budget():
     assert _lines(ROOT / "rag" / "api.py") <= 830
-    assert _lines(ROOT / "rag" / "pipeline.py") <= 1760
-    assert _local_imports() <= 155
+    assert _lines(ROOT / "rag" / "pipeline.py") <= 1150
+    assert _local_imports() <= 150
+
+
+def test_pipeline_split_modules_stay_within_their_frozen_budgets():
+    assert _lines(ROOT / "rag" / "pipeline_bindings.py") <= 80
+    assert _lines(ROOT / "rag" / "pipeline_prepare.py") <= 750
+    assert _lines(ROOT / "rag" / "pipeline_jev.py") <= 550
