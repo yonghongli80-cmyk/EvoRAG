@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 
 from rag.stage_timing import current_stage_timings, measure_call, measure_stream, request_stage_timing_scope
+
+_TERMINAL_STATE_KEY = "_pipeline_terminal_state"
+
+
+def _claim_terminal(state):
+    if state["claimed"]:
+        return False
+    state["claimed"] = True
+    return True
 
 
 def _trace_stage_timings(prepared):
@@ -10,6 +19,14 @@ def _trace_stage_timings(prepared):
     collector = current_stage_timings()
     if collector is not None:
         timings.update(collector.snapshot())
+    return timings
+
+
+def _seal_trace_stage_timings(prepared):
+    timings = dict((prepared or {}).get("stage_timings") or {})
+    collector = current_stage_timings()
+    if collector is not None:
+        timings.update(collector.seal())
     return timings
 
 
@@ -149,16 +166,20 @@ async def query_stream(
     time = bindings['time']
     sid = owner._memory_session_id(session_id, user)
     start_time = time.time()
+    terminal_state = {"claimed": False}
 
     try:
         prepared, error = await asyncio.to_thread(
             owner._prepare_context, question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id
         )
-    except Exception as exc:
+    except BaseException as exc:
         # 准备阶段就可能失败（实测：检索到的证据缺版本元数据时 build_evidence_bundle
         # 抛 ValueError）。此前这类请求以 HTTP 200 + error 事件收场，却没有轨迹、没有
         # 观测、没有跳过记录——运营侧连"有请求失败了"都看不到（2026-09-30 踩到）。
-        await asyncio.to_thread(owner._record_stream_failure, question, start_time, None, exc)
+        if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            await _persist_cancelled_trace(bindings, owner, question, start_time, None, terminal_state)
+        elif isinstance(exc, Exception) and _claim_terminal(terminal_state):
+            await asyncio.to_thread(owner._record_stream_failure, question, start_time, None, exc)
         raise
     if error:
         yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
@@ -167,27 +188,51 @@ async def query_stream(
             stage_timings=_trace_stage_timings({}),
             decision_metadata={"execution_outcome": "success"},
         )
+        _claim_terminal(terminal_state)
         await asyncio.to_thread(owner.tracker.save, trace)
         owner._submit_failure_observation(trace, None, error)
         return
 
+    prepared[_TERMINAL_STATE_KEY] = terminal_state
     stream_iterator = owner._stream_prepared(
         question, prepared, sid, start_time, model=model, models=models
     )
     try:
         async for event in stream_iterator:
             yield event
-    except Exception as exc:
+    except BaseException as exc:
         # 流式中途失败：同样先留痕再分类。已准备好的判定统计量与问题集版本照旧写进
         # 轨迹，所以这次失败仍然可归因。异常继续上抛，端点照旧给客户端一个 error 事件。
-        await asyncio.to_thread(
-            owner._record_stream_failure, question, start_time, prepared, exc
-        )
+        if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            await _persist_cancelled_trace(bindings, owner, question, start_time, prepared, terminal_state)
+        elif isinstance(exc, Exception) and _claim_terminal(terminal_state):
+            await asyncio.to_thread(owner._record_stream_failure, question, start_time, prepared, exc)
         raise
     finally:
         close_iterator = getattr(stream_iterator, "aclose", None)
         if close_iterator is not None:
             await close_iterator()
+
+
+async def _persist_cancelled_trace(bindings, owner, question, start_time, prepared, terminal_state):
+    """Persist one frozen cancellation snapshot only while this request has no final trace."""
+    if not _claim_terminal(terminal_state):
+        return
+    ExecutionTrace = bindings['ExecutionTrace']
+    time = bindings['time']
+    metadata = dict((prepared or {}).get("decision_metadata") or {})
+    metadata["execution_outcome"] = "cancelled"
+    trace = ExecutionTrace(
+        question=question,
+        route="error",
+        answer="",
+        total_ms=(time.time() - start_time) * 1000,
+        chunk_hashes=(prepared or {}).get("chunk_hashes") or [],
+        stage_timings=_seal_trace_stage_timings(prepared),
+        decision_metadata=metadata,
+    )
+    with suppress(Exception):
+        await bindings['asyncio'].to_thread(owner.tracker.save, trace)
 
 
 async def stream_prepared(
@@ -216,6 +261,13 @@ async def stream_prepared(
     is_degraded_answer = bindings['is_degraded_answer']
     logger = bindings['logger']
     time = bindings['time']
+    terminal_state = prepared.setdefault(_TERMINAL_STATE_KEY, {"claimed": False})
+
+    async def record_terminal_failure(error):
+        if _claim_terminal(terminal_state):
+            await asyncio.to_thread(
+                owner._record_stream_failure, question, start_time, prepared, error
+            )
     # 轨迹 route 的默认值就是路由决策本身。竞技场（多模型并行）只是 RAG 路由之上的
     # 一种执行模式——``prepared["route"]`` 仍是 "rag"，轨迹另记 "arena"，让审计能区分
     # "单模型回答"与"竞技场合并回答"。下游按 route 分支的地方（recorder 的 blocked、
@@ -230,6 +282,7 @@ async def stream_prepared(
         await asyncio.to_thread(owner.memory.add_message, sid, "assistant", prepared["answer"])
         if await asyncio.to_thread(owner.memory.should_summarize, sid):
             await asyncio.to_thread(owner.memory.summarize_old_rounds, sid)
+        _claim_terminal(terminal_state)
         yield 'data: {"type": "done"}\n\n'
         return
 
@@ -262,9 +315,7 @@ async def stream_prepared(
             # 所有被选中的模型都处于熔断/停用状态：没有模型会产出 token，这不是答案。
             error = CircuitOpenError("llm_pool_arena")
             logger.warning("arena generation degraded: every selected provider is unavailable")
-            await asyncio.to_thread(
-                owner._record_stream_failure, question, start_time, prepared, error
-            )
+            await record_terminal_failure(error)
             yield _degraded_sse_event()
             return
         model_answers: dict[str, str] = {}
@@ -312,9 +363,7 @@ async def stream_prepared(
                 if cause is None:
                     raise
                 logger.warning("stream generation degraded: %s is open", cause.service)
-                await asyncio.to_thread(
-                    owner._record_stream_failure, question, start_time, prepared, cause
-                )
+                await record_terminal_failure(cause)
                 yield _degraded_sse_event()
                 return
         else:
@@ -328,9 +377,7 @@ async def stream_prepared(
                         yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
             except CircuitOpenError as error:
                 logger.warning("stream generation degraded because the generator breaker is open")
-                await asyncio.to_thread(
-                    owner._record_stream_failure, question, start_time, prepared, error
-                )
+                await record_terminal_failure(error)
                 yield _degraded_sse_event()
                 return
         sources = prepared["sources"]
@@ -340,9 +387,7 @@ async def stream_prepared(
         # 防御旧 provider 仍把降级文案当 token 流回来：不写 memory、不发 done。
         error = CircuitOpenError("generator")
         logger.warning("stream generation degraded: the degradation copy was streamed as tokens")
-        await asyncio.to_thread(
-            owner._record_stream_failure, question, start_time, prepared, error
-        )
+        await record_terminal_failure(error)
         yield _degraded_sse_event()
         return
 
@@ -364,6 +409,8 @@ async def stream_prepared(
         stage_timings=_trace_stage_timings(prepared),
         decision_metadata=_trace_decision_metadata(prepared, "success"),
     )
+    if not _claim_terminal(terminal_state):
+        return
     await asyncio.to_thread(owner.tracker.save, trace)
     owner._submit_failure_observation(trace, prepared)
 
