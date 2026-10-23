@@ -2,7 +2,7 @@
 
 
 def test_summary_returns_counts(isolated_api, make_user):
-    _, headers = make_user("alice")
+    _, headers = make_user("admin", is_admin=True)
 
     response = isolated_api.get(
         "/knowledge-operations/summary", headers=headers
@@ -12,6 +12,18 @@ def test_summary_returns_counts(isolated_api, make_user):
     body = response.json()
     for key in ("open", "overdue", "outdated", "not_useful", "stale_knowledge_bases"):
         assert key in body
+
+
+def test_summary_requires_admin(isolated_api, make_user):
+    _, member_headers = make_user("member")
+
+    anonymous = isolated_api.get("/knowledge-operations/summary")
+    member = isolated_api.get(
+        "/knowledge-operations/summary", headers=member_headers
+    )
+
+    assert anonymous.status_code == 401
+    assert member.status_code == 403
 
 
 def test_change_document_owner_requires_admin(isolated_api, make_user):

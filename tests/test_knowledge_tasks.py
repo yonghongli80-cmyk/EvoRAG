@@ -188,3 +188,49 @@ def test_owner_transition_resolves_task(isolated_api, seeded_task):
 
     assert response.status_code == 200
     assert response.json()["status"] == "resolved"
+
+
+def test_task_summary_counts_stale_knowledge_bases_by_latest_live_current_document(
+    db, monkeypatch
+):
+    import rag.repositories.chat_repo as chat_repo
+    from config import settings
+
+    owner_id = db.create_user("summary-owner", "Password-123!")
+    now = 2_000_000_000.0
+    monkeypatch.setattr(chat_repo.time, "time", lambda: now)
+    monkeypatch.setattr(settings, "knowledge_stale_days", 180)
+    cutoff = now - 180 * 86400
+
+    def add_document(name, kb_id, updated_at=None, *, current=True, deleted=False):
+        doc_id = db.create_document_permission(name, kb_id, owner_id)
+        if current:
+            version_id = db.create_document_version(
+                doc_id, name, f"{name}.pdf", f"hash-{name}", owner_id
+            )
+            db.activate_document_version(doc_id, version_id, kb_id, name)
+        with db.cm.write_connection() as conn:
+            conn.execute(
+                "UPDATE document_permissions SET updated_at = ?, deleted_at = ? WHERE id = ?",
+                (updated_at if updated_at is not None else cutoff - 10, now if deleted else None, doc_id),
+            )
+            conn.commit()
+        return doc_id
+
+    # Two stale files share a KB, while a separate KB is independently stale.
+    add_document("old-a.pdf", "old-shared")
+    add_document("old-b.pdf", "old-shared")
+    add_document("old-c.pdf", "old-separate")
+    # One recent current document makes the mixed KB current as a whole.
+    add_document("mixed-old.pdf", "mixed", cutoff - 20)
+    add_document("mixed-new.pdf", "mixed", cutoff + 20)
+    # Deleted documents and rows without a current version do not qualify.
+    add_document("tombstone.pdf", "tombstone", deleted=True)
+    add_document("no-current.pdf", "no-current", current=False)
+
+    summary = db.task_summary()
+
+    assert summary["stale_knowledge_bases"] == 2
+    assert set(summary) == {
+        "open", "overdue", "outdated", "not_useful", "stale_knowledge_bases"
+    }

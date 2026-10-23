@@ -751,8 +751,10 @@ class ChatRepository(BaseRepository):
             ).fetchone()["cnt"]
             stale_cutoff = now - settings.knowledge_stale_days * 86400
             stale_count = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM document_permissions "
-                "WHERE current_version_id IS NOT NULL AND updated_at < ?",
+                "SELECT COUNT(*) AS cnt FROM ("
+                "SELECT kb_id FROM document_permissions "
+                "WHERE deleted_at IS NULL AND current_version_id IS NOT NULL "
+                "GROUP BY kb_id HAVING MAX(updated_at) < ?)",
                 (stale_cutoff,),
             ).fetchone()["cnt"]
         return {

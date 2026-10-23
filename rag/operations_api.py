@@ -8,7 +8,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from rag.api_security import require_doc_view, require_personal_document_acl, require_user
+from rag.api_security import (
+    require_admin,
+    require_doc_view,
+    require_personal_document_acl,
+    require_user,
+)
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.repository import OrgRepository, is_org_policy
 
@@ -237,7 +242,7 @@ def list_all_tasks(
 
 
 @router.get("/knowledge-operations/summary")
-def operations_summary(request: Request, user: dict = Depends(require_user)) -> dict:
+def operations_summary(request: Request, user: dict = Depends(require_admin)) -> dict:
     return request.app.state.user_db.task_summary()
 
 
