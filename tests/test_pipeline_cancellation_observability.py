@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -108,6 +109,72 @@ def test_provider_await_cancellation_persists_once_without_failure_observation()
         assert saves[0].route == "error"
         assert saves[0].decision_metadata["execution_outcome"] == "cancelled"
         assert closed == [True]
+        recorder.submit.assert_not_called()
+        pipeline.memory.add_message.assert_not_called()
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize("close_mode", ["cancel", "aclose"])
+def test_cancelled_trace_save_failure_is_logged_without_replacing_cancellation(caplog, close_mode):
+    started = asyncio.Event()
+    never = asyncio.Event()
+    closed = []
+    recorder = MagicMock()
+    pipeline = _pipeline(failure_recorder=recorder)
+    sentinel = "SENSITIVE_SENTINEL synthetic question"
+    pipeline.tracker.save.side_effect = OSError(sentinel)
+
+    async def provider(_messages):
+        try:
+            started.set()
+            if close_mode == "aclose":
+                yield "first token"
+            await never.wait()
+            yield "unreachable"
+        finally:
+            closed.append(True)
+
+    try:
+        with (
+            patch("rag.pipeline.generate_stream", side_effect=provider),
+            caplog.at_level(logging.WARNING, logger="rag.pipeline"),
+        ):
+            async def cancel_provider_wait():
+                stream = pipeline.query_stream(QUESTION, session_id="cancel-test")
+                if close_mode == "aclose":
+                    first = _payload(await anext(stream))
+                    await stream.aclose()
+                    return [first]
+                task = asyncio.create_task(anext(stream))
+                await started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+                return [_payload(line) async for line in stream]
+
+            events = asyncio.run(cancel_provider_wait())
+
+        diagnostics = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "rag.pipeline"
+        ]
+        [diagnostic] = [
+            message for message in diagnostics
+            if "cancelled trace persistence failed" in message
+        ]
+        assert "stage=cancelled_trace_persistence" in diagnostic
+        assert "error_type=OSError" in diagnostic
+        assert sentinel not in " ".join(diagnostics)
+        assert QUESTION not in " ".join(diagnostics)
+        assert closed == [True]
+        expected_events = [] if close_mode == "cancel" else [
+            {"type": "token", "content": "first token"}
+        ]
+        assert events == expected_events
+        assert all(event["type"] != "done" for event in events)
+        assert pipeline.tracker.save.call_count == 1
         recorder.submit.assert_not_called()
         pipeline.memory.add_message.assert_not_called()
     finally:

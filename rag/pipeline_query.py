@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import aclosing, suppress
+from contextlib import aclosing
 
 from rag.logging_config import set_route
 from rag.stage_timing import current_stage_timings, measure_call, measure_stream, request_stage_timing_scope
@@ -241,8 +241,13 @@ async def _persist_cancelled_trace(bindings, owner, question, start_time, prepar
         stage_timings=_seal_trace_stage_timings(prepared),
         decision_metadata=metadata,
     )
-    with suppress(Exception):
+    try:
         await bindings['asyncio'].to_thread(owner.tracker.save, trace)
+    except Exception as exc:
+        bindings['logger'].warning(
+            "cancelled trace persistence failed stage=cancelled_trace_persistence error_type=%s",
+            type(exc).__name__,
+        )
 
 
 async def stream_prepared(
