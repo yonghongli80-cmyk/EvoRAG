@@ -171,3 +171,45 @@ def test_admin_can_assign_an_unassigned_kb_to_an_org(isolated_api, make_user):
     )
     assert unknown.status_code == 404
     assert admin["id"] != member["id"]
+
+
+def test_org_person_write_rejects_unknown_codes_and_sensitive_domains(
+    isolated_api, make_user
+):
+    _admin, headers = make_user("admin", is_admin=True)
+    member, _ = make_user("member")
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('ROOT','集团','company')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P1',?,'甲','专员')",
+            (member["id"],),
+        )
+
+    invalid_org = isolated_api.patch(
+        "/organization/people/P1",
+        headers=headers,
+        json={"manager_org_codes": ["MISSING"]},
+    )
+    assert invalid_org.status_code == 400
+
+    invalid_sensitivity = isolated_api.patch(
+        "/organization/people/P1",
+        headers=headers,
+        json={"sensitivities": ["unknown"]},
+    )
+    assert invalid_sensitivity.status_code == 400
+
+    valid = isolated_api.patch(
+        "/organization/people/P1",
+        headers=headers,
+        json={"manager_org_codes": ["ROOT"], "sensitivities": ["hr"]},
+    )
+    assert valid.status_code == 200
+    with db.locked_read() as conn:
+        event = conn.execute(
+            "SELECT details_json FROM org_audit_events "
+            "WHERE action='person_updated' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert event is not None and "manager_org_codes" in event["details_json"]

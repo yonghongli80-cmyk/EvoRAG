@@ -180,14 +180,52 @@ class PersonUpdate(BaseModel):
     sensitivities: list[str] | None = None
 
 
+_SENSITIVITY_DOMAINS = frozenset({"finance", "hr", "customer"})
+
+
+def _validate_org_codes(conn, codes: list[str] | None) -> None:
+    if codes is None:
+        return
+    wanted = {str(code).strip() for code in codes if str(code).strip()}
+    if not wanted:
+        return
+    placeholders = ",".join("?" for _ in wanted)
+    found = {
+        row[0]
+        for row in conn.execute(
+            f"SELECT code FROM org_units WHERE active=1 AND code IN ({placeholders})",
+            tuple(wanted),
+        )
+    }
+    missing = wanted - found
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"无效组织编号: {', '.join(sorted(missing))}",
+        )
+
+
 @router.patch("/organization/people/{person_code}")
 def update_person(person_code: str, body: PersonUpdate, request: Request, user: dict = Depends(require_user)):
     _company_admin(user)
     db = _db(request)
+    changed = [
+        name
+        for name in ("active", "job_title", "primary_org_code", "secondary_org_codes",
+                     "manager_org_codes", "sensitivities")
+        if getattr(body, name) is not None
+    ]
+    if body.sensitivities is not None and not set(body.sensitivities).issubset(_SENSITIVITY_DOMAINS):
+        raise HTTPException(status_code=400, detail="无效敏感域")
     with db.locked_transaction(immediate=True) as conn:
         row = conn.execute("SELECT user_id FROM org_people WHERE person_code=?", (person_code,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="资源不存在")
+        _validate_org_codes(
+            conn, [body.primary_org_code] if body.primary_org_code else None
+        )
+        _validate_org_codes(conn, body.secondary_org_codes)
+        _validate_org_codes(conn, body.manager_org_codes)
         if body.active is not None:
             conn.execute("UPDATE org_people SET active=?,security_version=security_version+1 WHERE person_code=?", (int(body.active), person_code))
         if body.job_title is not None:
@@ -223,7 +261,15 @@ def update_person(person_code: str, body: PersonUpdate, request: Request, user: 
             conn.execute("DELETE FROM org_sensitive_qualifications WHERE person_code=?", (person_code,))
             conn.executemany("INSERT INTO org_sensitive_qualifications VALUES(?,?)", ((person_code, value) for value in body.sensitivities))
             conn.execute("UPDATE org_people SET security_version=security_version+1 WHERE person_code=?", (person_code,))
-    OrgAuditService(db).record(int(user["id"]), "person_updated", "person", person_code, "success", "admin_update")
+    OrgAuditService(db).record(
+        int(user["id"]),
+        "person_updated",
+        "person",
+        person_code,
+        "success",
+        "admin_update",
+        {"changed": changed},
+    )
     return {"status": "updated"}
 
 
