@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import sys
 import threading
@@ -391,7 +390,7 @@ def auto_index_on_startup():
         changed = list(current_hashes)
 
     def _init_admin():
-        admin_username = os.getenv("INIT_ADMIN_USERNAME")
+        admin_username = settings.init_admin_username
         if not admin_username:
             return
         target = user_db.get_user_by_username(admin_username)

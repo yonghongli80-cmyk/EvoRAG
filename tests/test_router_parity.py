@@ -126,6 +126,7 @@ GOLDEN_BASELINE: set[tuple[str, tuple[str, ...]]] = {
     ("/organization/audit", ("GET",)),
     ("/organization/grants", ("POST",)),
     ("/organization/grants/{grant_id}", ("DELETE",)),
+    ("/organization/knowledge-bases/{kb_id}/policy", ("PUT",)),
     ("/organization/people/{person_code}", ("PATCH",)),
     ("/organization/preview/{user_id}", ("GET",)),
     ("/organization/tree", ("GET",)),

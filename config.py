@@ -1,14 +1,8 @@
 from pathlib import Path
 from typing import Literal
 
-from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
-
-# pydantic-settings reads .env into Settings, but a handful of legacy consumers
-# (logging, JWT secret, INIT_ADMIN_USERNAME) still read os.environ directly.
-# Load once before those modules import so `cp .env.example .env` is effective.
-load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -83,6 +77,15 @@ class Settings(BaseSettings):
     allow_initial_passwords_remote: bool = False
     login_failure_limit: int = Field(default=5, ge=1)
     login_failure_window_seconds: int = Field(default=900, ge=1)
+    jwt_secret: str = ""
+    init_admin_username: str = Field(
+        default="",
+        validation_alias=AliasChoices("INIT_ADMIN_USERNAME", "RAG_INIT_ADMIN_USERNAME"),
+    )
+
+    # 日志（由 rag.logging_config 消费，不再直接读 os.environ）
+    log_level: str = "INFO"
+    log_json: bool = False
 
     # 外部数据源可能携带连接凭据；未显式开启前不暴露相关接口。
     data_sources_enabled: bool = False
@@ -129,6 +132,11 @@ class Settings(BaseSettings):
     material_worker_enabled: bool = True
     material_worker_count: int = 2
     material_embedding_slots: int = 4
+    # Legacy Office 转换（未接入生产主链路，但能力探测仍读取这些开关）
+    legacy_office_enabled: bool = False
+    legacy_office_launcher: str = ""
+    legacy_office_timeout_seconds: int = 60
+    legacy_office_max_memory_mb: int = 512
 
     # 权威数据备份
     backup_enabled: bool = True

@@ -1,7 +1,6 @@
 """Centralized logging configuration for RAGv3."""
 
 import logging
-import os
 import sys
 from contextvars import ContextVar
 
@@ -31,11 +30,13 @@ def setup_logging(level: str = None, json_format: bool = False) -> None:
     """Configure root logger.
 
     Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR). Default from RAG_LOG_LEVEL env var, fallback INFO.
-        json_format: If True, output JSON lines. Default from RAG_LOG_JSON env var.
+        level: Log level (DEBUG, INFO, WARNING, ERROR). Default from RAG_LOG_LEVEL, fallback INFO.
+        json_format: If True, output JSON lines. Default from RAG_LOG_JSON.
     """
-    level = level or os.environ.get("RAG_LOG_LEVEL", "INFO")
-    json_format = json_format or os.environ.get("RAG_LOG_JSON", "0") == "1"
+    from config import settings
+
+    level = level or settings.log_level or "INFO"
+    json_format = json_format or settings.log_json
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))

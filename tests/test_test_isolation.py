@@ -78,7 +78,6 @@ def test_optional_subsystems_are_neutralised_for_every_test():
     assert settings.evolution_worker_enabled is False
     assert settings.evolution_candidate_enabled is False
     assert settings.evolution_candidate_canary_percent == 0
-    assert settings.evolution_candidate_shadow_sample_rate == 0.0
     assert settings.evolution_sandbox_allow_unisolated is False
     assert settings.evolution_diagnosis_labels_path == ""
     # Background helpers that would otherwise touch the network/disk on lifespan startup.

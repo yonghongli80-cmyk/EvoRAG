@@ -21,8 +21,8 @@ _JWT_SECRET_FILE = Path(__file__).resolve().parent.parent / "data" / "jwt_secret
 
 
 def _load_or_create_secret(secret_file: Path = _JWT_SECRET_FILE) -> str:
-    """Load JWT secret from env > file > generate new."""
-    env_secret = os.environ.get("RAG_JWT_SECRET")
+    """Load JWT secret from Settings/env > file > generate new."""
+    env_secret = (settings.jwt_secret or "").strip()
     if env_secret:
         return env_secret
     if secret_file.exists():
