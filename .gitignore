@@ -86,3 +86,7 @@ data/index_state.json
 # Python virtual environments
 .venv/
 venv/
+
+# Local dev-assistant material (skill data + one-off debug probes); not product code
+/.claude/
+/scratch/
