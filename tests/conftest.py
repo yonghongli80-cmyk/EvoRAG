@@ -37,6 +37,21 @@ _SESSION_SANDBOX = Path(tempfile.mkdtemp(prefix="ragv3-test-session-"))
 atexit.register(shutil.rmtree, _SESSION_SANDBOX, ignore_errors=True)
 
 PRESEEDED_ENVIRONMENT = {
+    # Fake provider credentials let client constructors run without host .env values.
+    # Provider JSON and routing fields are pinned because they can embed credentials or
+    # redirect requests; TypeSafe remains blank because Jev uses empty-key as its off switch.
+    "RAG_DEEPSEEK_API_KEY": "ragv3-tests-only-generation-key",
+    "RAG_DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    "RAG_DEEPSEEK_AUTH_HEADER": "",
+    "RAG_LLM_PROVIDERS_JSON": "[]",
+    "RAG_LLM_DEFAULT_MODEL": "deepseek",
+    "RAG_BAILIAN_API_KEY": "ragv3-tests-only-embedding-key",
+    "RAG_BAILIAN_BASE_URL": "https://api.siliconflow.cn/v1",
+    "RAG_RERANK_PROVIDER": "siliconflow",
+    "RAG_RERANK_MODEL": "",
+    "RAG_RERANK_BASE_URL": "",
+    "RAG_RERANK_API_KEY": "",
+    "RAG_TYPESAFE_API_KEY": "",
     # Auth: most tests call endpoints anonymously; the auth-enabled subset opts back in.
     # tests/test_auth_enabled_smoke.py is the counterweight for this default.
     "RAG_AUTH_ENABLED": "false",

@@ -104,6 +104,55 @@ def test_suite_uses_a_fixed_jwt_secret_instead_of_the_repository_secret_file():
     assert os.environ["RAG_JWT_SECRET"] == rag.auth._JWT_SECRET
 
 
+def test_model_clients_use_isolated_credentials_and_provider_configuration(monkeypatch):
+    """Real client constructors must use test credentials, even when host env is poisoned."""
+    from langchain_openai import ChatOpenAI
+
+    from config import settings
+    from rag.llm_pool.models import load_provider_configs_from_settings
+
+    generation_key = "ragv3-tests-only-generation-key"
+    embedding_key = "ragv3-tests-only-embedding-key"
+
+    assert settings.deepseek_api_key == generation_key
+    assert settings.deepseek_base_url == "https://api.deepseek.com"
+    assert settings.deepseek_auth_header == ""
+    assert settings.bailian_api_key == embedding_key
+    assert settings.bailian_base_url == "https://api.siliconflow.cn/v1"
+    assert settings.llm_providers_json == "[]"
+    assert settings.llm_default_model == "deepseek"
+    assert settings.rerank_provider == "siliconflow"
+    assert settings.rerank_base_url == ""
+    assert settings.rerank_api_key == ""
+    assert settings.typesafe_api_key == ""
+
+    generation_client = ChatOpenAI(
+        model=settings.deepseek_model,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+    )
+    assert generation_client.root_client.api_key == generation_key
+    assert str(generation_client.root_client.base_url).startswith("https://api.deepseek.com")
+
+    import rag.embedder as embedder
+
+    monkeypatch.setattr(embedder, "client", None)
+    assert embedder.embed([]) == []
+    assert embedder.client.api_key == embedding_key
+    assert str(embedder.client.base_url).startswith("https://api.siliconflow.cn/v1")
+
+    providers = load_provider_configs_from_settings(settings)
+    assert [(provider.provider_id, provider.api_key) for provider in providers] == [
+        ("deepseek", generation_key)
+    ]
+
+    from rag.reranker import Reranker
+
+    reranker = Reranker()
+    assert reranker.provider == "siliconflow"
+    assert reranker.api_key == embedding_key
+
+
 def test_tests_do_not_mutate_global_settings_directly():
     """Use ``monkeypatch.setattr(settings, ...)``: direct writes silence later tests.
 
