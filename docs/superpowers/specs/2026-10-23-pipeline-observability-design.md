@@ -38,6 +38,7 @@
 - 成功/生成异常/熔断/部分 token 后失败都封存真实已发生时长，不制造成功回答、done 或记忆。
 - CancelledError 和显式 aclose 必须传播，及时关闭上游 iterator。取消若未落终态则保存一条 route=error、decision_metadata.execution_outcome=cancelled 的部分轨迹，不进入故障演化队列；成功 done/已处理终态之后关闭不得再落取消轨迹。不新增 SSE 事件。
 - 准备通过 to_thread 执行时，取消不等待无法中断的底层线程收尾。立即封存 collector：在取消边界计入正在执行区间到此刻的实际耗时，之后迟到的 finish/update 忽略，不修改已保存轨迹。该记录不是后台线程最终成本；测试用事件协调验证取消先返回、线程后完成且无二次落盘/串漏。
+- 终态写入先后顺序有界：成功/失败终态已发起持久化（包括 to_thread 正在写库）时，该在先终态拥有本次请求的最终记录权，取消不再追加第二个终态。写库不能被假装成功，非取消上下文中的保存异常照旧传播；Agent 子路径已有的非终态故障观测不被这条规则删掉。增加阻塞保存事件回归覆盖“提交成功 trace 途中取消”竞态。
 - 新 execution_outcome 仅允许 success/failed/degraded/cancelled；非法值不落盘。stage 只接受已知键、非 bool、有限且非负数。
 - /metrics 新增 stage=rerank/generation，沿用 stage/route/quantile 标签和既有指标名，旧 series 不变。无调用无 duration 样本；无 request_id/kb_id 等高基数标签。既有未知 trace route 仍归 other，保留旧 total_ms 语义。
 

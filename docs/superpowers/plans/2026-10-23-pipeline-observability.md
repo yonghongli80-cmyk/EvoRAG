@@ -28,10 +28,10 @@
 **Files:** Create rag/pipeline_bindings.py、rag/pipeline_prepare.py、rag/pipeline_jev.py；Modify rag/pipeline.py、tests/test_architecture_budget.py；Create tests/test_pipeline_split_compat.py。
 **Interfaces:** PipelineBindings(namespace: Mapping[str, Any]) 提供只读实时名称读取；facade 传 MappingProxyType(globals())，不能冻结 callables 或反向 import facade。迁移函数沿用原方法参数，在内部函数增加 owner/bindings；原 facade 方法签名逐一保留。
 **Ownership:** prepare 接管历史路由/用户 session key/改写缓存、rerank、prepare_context/standard、候选检索/ACL/注入/可靠性/structured helpers 与来源过滤；Jev 接管 _jev_active、_structured_field_names、_submit_shadow_case、_prepare_context_with_jev、_prepare_rag_with_jev、_attach_jev_stage。纯 helper 可兼容导出。保留 _prepare_context_legacy = _prepare_context_standard。
-- [ ] 新建兼容特征测试：保留 RAGPipeline 构造与所有既有方法签名（对照 BASE8294753 AST/inspect，不运行第二副生产实现）、QueryResult 五字段与原路径、alias 身份；实际调用验证构造后 patch rewrite_query/instance prepare 仍生效，不只测 import。
-- [ ] 将 pipeline 上限先收紧为1150并添加新模块上限（bindings80、prepare750、jev550），在旧代码上记录结构要求 RED。既有行为特征测试应先通过，不故意损坏生产行为来制造 RED。
-- [ ] 迁移职责并保留薄委托、实例 override 和实时 facade patch 面；不变更路由/ACL/cache/清洗/生命周期逻辑，不新增循环/局部 import 绕行。
-- [ ] 运行 tests/test_pipeline_split_compat.py、test_pipeline.py、test_pipeline_jev.py、test_pipeline_dual_rerank.py、test_pipeline_multiturn_routing.py、test_pipeline_rewrite_cache.py、test_pipeline_clean.py、test_pipeline_lifecycle.py、test_pipeline_spreadsheet_query.py、test_agent_permission_filter.py、test_architecture_budget.py 及改动文件 Ruff。GREEN 后独立提交与任务报告。
+- [x] 新建兼容特征测试：保留 RAGPipeline 构造与所有既有方法签名（对照 BASE8294753 AST/inspect，不运行第二副生产实现）、QueryResult 五字段与原路径、alias 身份；实际调用验证构造后 patch rewrite_query/instance prepare 仍生效，不只测 import。
+- [x] 将 pipeline 上限先收紧为1150并添加新模块上限（bindings80、prepare750、jev550），在旧代码上记录结构要求 RED。既有行为特征测试应先通过，不故意损坏生产行为来制造 RED。
+- [x] 迁移职责并保留薄委托、实例 override 和实时 facade patch 面；不变更路由/ACL/cache/清洗/生命周期逻辑，不新增循环/局部 import 绕行。
+- [x] 运行 tests/test_pipeline_split_compat.py、test_pipeline.py、test_pipeline_jev.py、test_pipeline_dual_rerank.py、test_pipeline_multiturn_routing.py、test_pipeline_rewrite_cache.py、test_pipeline_clean.py、test_pipeline_lifecycle.py、test_pipeline_spreadsheet_query.py、test_agent_permission_filter.py、test_architecture_budget.py 及改动文件 Ruff。GREEN 后独立提交与任务报告。
 
 ### Task 2: 拆分查询执行与诊断，收紧最终架构预算
 **Files:** Create rag/pipeline_query.py、rag/pipeline_diagnostics.py；Modify rag/pipeline.py、tests/test_pipeline_split_compat.py、tests/test_architecture_budget.py。
@@ -47,7 +47,7 @@
 **Contract:** 保存 rerank_ms / generation_ms；新执行结果字段 execution_outcome 仅success/failed/degraded/cancelled。保留 preparation_ms 旧含重排口径，不相加。最终答案 generation 不覆盖 Agent/路由/改写/Jev 内部调用；arena 计合并事件流等待，不求并行模型之和。
 - [ ] 写 RED 行为回归：单/双 rerank 精确累计、无候选不造样本；普通与Jev prepared 都带真实重排时长；同步生成和 fixed/structured/blocked/cache 的有/无样本；可控 perf_counter 和离线 provider，不 sleep 拼墙钟。
 - [ ] 写 RED 流式回归：默认/balanced/arena 的逐次 anext 时间累计；模拟消费暂停不计 generation；异常/熔断/部分 token 后失败保留实测，未成功不得写答案记忆或伪 done。
-- [ ] 写 RED 取消回归：首次 yield 后 aclose、provider await 中取消、准备线程被事件阻塞时取消、done 后关闭。取消重新传播，上游关闭；未终态保存一条 cancelled 部分trace、不进入FailureObserver；封存含活动区间，取消不等后台准备线程，释放线程后无二次落盘/改动封存值/污染另一请求。
+- [ ] 写 RED 取消回归：首次 yield 后 aclose、provider await 中取消、准备线程被事件阻塞时取消、done 后关闭、终态 to_thread 保存被事件阻塞时取消。取消重新传播，上游关闭；未终态保存一条 cancelled 部分trace、不进入FailureObserver；封存含活动区间，取消不等后台准备线程，释放线程后无二次落盘/改动封存值/污染另一请求。终态写入已经发起时由在先终态拥有最终记录权，不追加取消终态；非取消上下文的保存异常仍传播，既有Agent非终态观测保持。
 - [ ] 在 tracker 允许新 stage 和有界 outcome；非法键、bool、负值、NaN/inf/非数值不入计时；SQLite表结构与旧列/JSON键不变。/metrics 输出两个新增 stage、沿用旧 series 与标签，不新增 request_id/kb_id 标签。端到端读真实临时SQLite，核对旧preparation/Jev与新stage样本。
 - [ ] 实现请求计时/实际调用钩子与封存，保持同一失败只经既有适当路径记录；直接 private prepare 也有collector；不以差值/整段Agent充当生成耗时。stage_timing上限220。
 - [ ] 跑新 timing、tracker、system metrics、兼容/架构、pipeline/stream/dual_rerank/Jev/arena、breaker、eventloop、done reliability 与 structured observability；改动文件 Ruff。GREEN 后独立提交与报告。
