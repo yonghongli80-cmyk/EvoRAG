@@ -6,7 +6,6 @@ import logging
 import re
 import sys
 import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -54,7 +53,7 @@ from rag.kb_metadata import generate_toc as generate_toc
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.llm_pool import get_llm_pool_router as get_llm_pool_router
 from rag.loader import load as load_document
-from rag.logging_config import set_request_id, setup_logging
+from rag.logging_config import logging_context, normalize_request_id, setup_logging
 from rag.login_throttle import LoginThrottle
 from rag.materials.api import router as materials_router
 from rag.materials.supervisor import MaterialWorkerSupervisor
@@ -468,11 +467,11 @@ async def browser_session_middleware(request, call_next):
 
 @app.middleware("http")
 async def request_id_middleware(request, call_next):
-    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4())[:8])
-    set_request_id(request_id)
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    return response
+    request_id = normalize_request_id(request.headers.get("X-Request-ID"))
+    with logging_context(request_id=request_id):
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
 
 
 # Vue Router SPA fallback

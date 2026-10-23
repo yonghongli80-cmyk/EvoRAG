@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from rag.logging_config import set_route
+
 
 def _jev_active(bindings, owner, effective_kb_id: str) -> bool:
     """Active Jev routing requires mode=active and an allowlisted knowledge base."""
@@ -92,6 +94,7 @@ def _prepare_context_with_jev(bindings,
     route_decision = owner._route_with_history_correction(
         question, session_id, capabilities
     )
+    set_route(route_decision.route)
     preflight = route_decision.preflight
     stage = {
         "_started": started,
@@ -196,6 +199,7 @@ def _prepare_rag_with_jev(bindings,
     enterprise_request, effective_kb_id, route_decision, stage,
 ):
     """RAG 主链路：原问题检索（除非策略请求改写），Jev 候选判断，最多一次改写重试。"""
+    set_route("rag")
     Chunk = bindings['Chunk']
     _RETRIEVAL_OVERSAMPLE = bindings['_RETRIEVAL_OVERSAMPLE']
     _drop_redacted_price_evidence = bindings['_drop_redacted_price_evidence']

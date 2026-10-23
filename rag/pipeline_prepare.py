@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rag.logging_config import set_route
 from rag.models import Chunk
 from rag.stage_timing import measure_call, preparation_stage_timing_scope
 
@@ -180,6 +181,7 @@ def _prepare_context(bindings, owner, question: str, session_id: str, doc_name: 
     question = sanitize_input(question)
     guard = check_injection(question)
     if guard.blocked:
+        set_route("blocked")
         return None, f"请求被安全策略拦截：{guard.reason}"
 
     enterprise_request = getattr(owner, "_enterprise_mode", False) or kb_id is not None
@@ -194,6 +196,7 @@ def _prepare_context(bindings, owner, question: str, session_id: str, doc_name: 
         )
         decision = decide_answerability(bundle)
         confidence = assess_confidence(bundle, decision)
+        set_route("fixed")
         return {
             "route": "fixed",
             "answer": fixed_decision_copy(decision.kind),
@@ -213,6 +216,7 @@ def _prepare_context(bindings, owner, question: str, session_id: str, doc_name: 
         sources = cached.get("sources") or [{"doc_name": "缓存", "chunk_index": 0}]
         if user is not None and owner._user_db is not None:
             sources = owner._filter_sources_by_permission(sources, cache_key_kb, user)
+        set_route("cached")
         return {"route": "cached", "answer": cached.get("answer", ""), "context": [], "sources": sources}, None
 
     if owner._jev_active(effective_kb_id):
@@ -259,6 +263,7 @@ def _prepare_context_standard(bindings,
     structured_clarification = None
     if structured is not None:
         if not owner._is_structured_clarification(structured):
+            set_route("structured")
             return structured, None
         # 澄清不抢检索（2026-10-19）：问句里出现字段名并不等于表格里就有可直接算出的东西。
         # "r50相关价格" 会被判成结构化，但规划器只会回一句"请指明字段"，而文档里其实有价格。
@@ -268,6 +273,7 @@ def _prepare_context_standard(bindings,
     # 企业模式里 agent 路由只有"固定拒答"一个结局（typed evidence 限制），先问一次路由
     # 模型再拒答等于每条企业问答白付一次模型调用，还放大尾延迟（A-07）。直接走 RAG。
     route = "rag" if enterprise_request else _agent_mod.route_question(question)
+    set_route(route)
 
     if route == "agent":
         prepared = {"route": "agent", "question": question}

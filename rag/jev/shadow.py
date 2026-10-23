@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from rag.jev.policy import KbCapabilities
+from rag.logging_config import wrap_logging_context
 from rag.models import Chunk
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class ShadowEvaluator:
                 self._dropped += 1
             return False
         try:
-            self._executor.submit(self._run, case)
+            self._executor.submit(wrap_logging_context(self._run), case)
         except RuntimeError:
             self._slots.release()
             with self._lock:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import aclosing, suppress
 
+from rag.logging_config import set_route
 from rag.stage_timing import current_stage_timings, measure_call, measure_stream, request_stage_timing_scope
 
 _TERMINAL_STATE_KEY = "_pipeline_terminal_state"
@@ -55,9 +56,11 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
     try:
         prepared, error = owner._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
     except Exception as error:
+        set_route("error")
         owner._record_stream_failure(question, start_time, None, error)
         raise
     if error:
+        set_route("blocked")
         trace = ExecutionTrace(
             question=question, route="blocked", answer=error, total_ms=0,
             stage_timings=_trace_stage_timings({}),
@@ -66,6 +69,7 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
         owner.tracker.save(trace)
         owner._submit_failure_observation(trace, None, error)
         return QueryResult(answer=error, context=[], sources=[])
+    set_route((prepared or {}).get("route", "other"))
 
     if prepared["route"] == "cached":
         owner.memory.add_message(sid, "user", question)
@@ -177,11 +181,14 @@ async def query_stream(
         # 抛 ValueError）。此前这类请求以 HTTP 200 + error 事件收场，却没有轨迹、没有
         # 观测、没有跳过记录——运营侧连"有请求失败了"都看不到（2026-09-30 踩到）。
         if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            set_route("error")
             await _persist_cancelled_trace(bindings, owner, question, start_time, None, terminal_state)
         elif isinstance(exc, Exception) and _claim_terminal(terminal_state):
+            set_route("error")
             await asyncio.to_thread(owner._record_stream_failure, question, start_time, None, exc)
         raise
     if error:
+        set_route("blocked")
         yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
         trace = ExecutionTrace(
             question=question, route="blocked", answer=error, total_ms=0,
@@ -193,6 +200,7 @@ async def query_stream(
         owner._submit_failure_observation(trace, None, error)
         return
 
+    set_route((prepared or {}).get("route", "other"))
     prepared[_TERMINAL_STATE_KEY] = terminal_state
     stream_iterator = owner._stream_prepared(
         question, prepared, sid, start_time, model=model, models=models
@@ -204,8 +212,10 @@ async def query_stream(
         # 流式中途失败：同样先留痕再分类。已准备好的判定统计量与问题集版本照旧写进
         # 轨迹，所以这次失败仍然可归因。异常继续上抛，端点照旧给客户端一个 error 事件。
         if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            set_route("error")
             await _persist_cancelled_trace(bindings, owner, question, start_time, prepared, terminal_state)
         elif isinstance(exc, Exception) and _claim_terminal(terminal_state):
+            set_route("error")
             await asyncio.to_thread(owner._record_stream_failure, question, start_time, prepared, exc)
         raise
     finally:
@@ -305,6 +315,7 @@ async def stream_prepared(
         sources = []
         tool_calls = [ToolCall(**c) for c in captured_calls]
     elif models and len(models) > 1:
+        set_route("arena")
         router = get_llm_pool_router()
         arena_targets = [
             router.providers[provider_id]

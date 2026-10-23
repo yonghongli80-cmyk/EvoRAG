@@ -42,6 +42,7 @@ from rag.jev.service import JevDecisionService
 from rag.jev.shadow import ShadowCase, ShadowComparison, ShadowEvaluator  # noqa: F401 - public facade patch surface
 from rag.llm_pool import get_llm_pool_router  # noqa: F401 - public facade patch surface
 from rag.loader import load
+from rag.logging_config import request_logging_context_scope
 from rag.models import Chunk
 from rag.pipeline_bindings import PipelineBindings
 from rag.pipeline_diagnostics import _exception_frame  # noqa: F401 - public facade patch surface
@@ -542,9 +543,11 @@ class RAGPipeline:
     def _filter_sources_by_permission(self, sources: list, kb_id: str, user: dict) -> list:
         return _pipeline_prepare._filter_sources_by_permission(_binding_for(self), self, sources, kb_id, user)
 
+    @request_logging_context_scope
     def query(self, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None) -> QueryResult:
         return _pipeline_query.query(_binding_for(self), self, question, top_k, session_id, doc_name, tags, user, kb_id)
 
+    @request_logging_context_scope
     async def query_stream(
         self,
         question: str,
