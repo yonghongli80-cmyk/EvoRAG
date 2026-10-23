@@ -20,9 +20,20 @@ _JWT_ALGORITHM: str = "HS256"
 _JWT_SECRET_FILE = Path(__file__).resolve().parent.parent / "data" / "jwt_secret.txt"
 
 
+def _dotenv_secret() -> str:
+    """Read RAG_JWT_SECRET from the repository .env without exporting it."""
+    env_file = _JWT_SECRET_FILE.parent.parent / ".env"
+    try:
+        from dotenv import dotenv_values
+
+        return (dotenv_values(env_file).get("RAG_JWT_SECRET") or "").strip()
+    except Exception:
+        return ""
+
+
 def _load_or_create_secret(secret_file: Path = _JWT_SECRET_FILE) -> str:
-    """Load JWT secret from Settings/env > file > generate new."""
-    env_secret = (settings.jwt_secret or "").strip()
+    """Load JWT secret from process env > .env > file > generate new."""
+    env_secret = (os.environ.get("RAG_JWT_SECRET") or _dotenv_secret()).strip()
     if env_secret:
         return env_secret
     if secret_file.exists():

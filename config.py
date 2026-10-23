@@ -77,7 +77,6 @@ class Settings(BaseSettings):
     allow_initial_passwords_remote: bool = False
     login_failure_limit: int = Field(default=5, ge=1)
     login_failure_window_seconds: int = Field(default=900, ge=1)
-    jwt_secret: str = ""
     init_admin_username: str = Field(
         default="",
         validation_alias=AliasChoices("INIT_ADMIN_USERNAME", "RAG_INIT_ADMIN_USERNAME"),
