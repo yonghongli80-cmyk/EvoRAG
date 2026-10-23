@@ -94,16 +94,22 @@ describe('api interceptor', () => {
     responseErrorInterceptor = calls[0]?.[1]
   })
 
-  it('does not install a local-storage bearer interceptor', () => {
+  it('captures session ownership without installing a local-storage bearer token', async () => {
     localStorage.setItem('rag_token', 'current-token')
-    expect(mockRequestInterceptorUse).not.toHaveBeenCalled()
+    const { registerSessionResetHandler } = await import('../api')
+    registerSessionResetHandler(() => {}, () => 7)
+    const requestInterceptor = mockRequestInterceptorUse.mock.calls[0]?.[0]
+    const config = requestInterceptor({ headers: {} })
+
+    expect(config.authSessionGeneration).toBe(7)
+    expect(config.headers.Authorization).toBeUndefined()
   })
 
   it('401 response rejects without relying on browser token storage', async () => {
     const error = { response: { status: 401 } }
 
     await expect(responseErrorInterceptor(error)).rejects.toBeDefined()
-    expect(mockRequestInterceptorUse).not.toHaveBeenCalled()
+    expect(mockRequestInterceptorUse).toHaveBeenCalledTimes(1)
   })
 
   it('does not redirect an unauthenticated login page back to itself', async () => {

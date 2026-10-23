@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 from rag.vector_store import (
     _ensure_collection_name,
     add_to_collection,
-    delete_doc,
 )
 from rag.wiki.chunker import MarkdownASTChunker
 from rag.wiki.models import WikiPage
@@ -77,8 +76,6 @@ class WikiIndexer:
         if not page:
             return 0
 
-        _ensure_collection_name(page.kb_id)
-
         stale_titles = self._stale_titles(page, old_title)
         wiki_chunks = self._chunker.chunk_page(page)
         std_chunks = [
@@ -87,30 +84,45 @@ class WikiIndexer:
             )
             for wc in wiki_chunks
         ]
-        if not std_chunks:
-            # An emptied page has nothing to add first; its old points must go.
-            for title in stale_titles:
-                delete_doc(page.kb_id, title, chunk_kind="wiki")
-            return 0
+        # Embed before opening the writer transaction. A slow/outdated embed must
+        # not block edits; the revision is checked again under SQLite's writer lock.
+        embeddings: list[list[float]] = []
+        if std_chunks:
+            embed_fn = self._get_embed_fn()
+            embeddings = embed_fn([c.text for c in std_chunks])
+            if len(embeddings) != len(std_chunks):
+                raise ValueError("wiki embedding count does not match chunk count")
 
-        # Embed before touching the index: an embedding outage must not leave the
-        # page with no points at all.
-        embed_fn = self._get_embed_fn()
-        embeddings = embed_fn([c.text for c in std_chunks])
-        if len(embeddings) != len(std_chunks):
-            raise ValueError("wiki embedding count does not match chunk count")
+        with self._store.transaction(immediate=True) as conn:
+            current = conn.execute(
+                "SELECT kb_id, current_revision_id FROM wiki_pages WHERE id = ?", (page_id,)
+            ).fetchone()
+            if (
+                current is None
+                or str(current["kb_id"]) != page.kb_id
+                or int(current["current_revision_id"]) != page.current_revision_id
+            ):
+                return 0
 
-        stale_point_ids = self._collect_point_ids(page.kb_id, stale_titles)
-        add_to_collection(
-            collection_name=page.kb_id,
-            chunks=std_chunks,
-            embeddings=embeddings,
-            tags=list(page.tags),
-            document_id=page.id,
-            document_version_id=page.current_revision_id,
-            updated_at=page.updated_at,
-        )
-        self._delete_point_ids(page.kb_id, stale_point_ids)
+            stale_titles.extend(
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT title FROM wiki_revisions WHERE page_id = ?", (page_id,)
+                )
+            )
+            stale_point_ids = self._collect_point_ids(page.kb_id, page.id, stale_titles, conn)
+            if std_chunks:
+                _ensure_collection_name(page.kb_id)
+                add_to_collection(
+                    collection_name=page.kb_id,
+                    chunks=std_chunks,
+                    embeddings=embeddings,
+                    tags=list(page.tags),
+                    document_id=page.id,
+                    document_version_id=page.current_revision_id,
+                    updated_at=page.updated_at,
+                )
+            self._delete_point_ids(page.kb_id, stale_point_ids)
         return len(std_chunks)
 
     def _stale_titles(self, page: WikiPage, old_title: str | None) -> list[str]:
@@ -126,8 +138,8 @@ class WikiIndexer:
         titles.discard("")
         return sorted(titles)
 
-    def _collect_point_ids(self, kb_id: str, titles: list[str]) -> list[str]:
-        """Point ids of the wiki chunks currently indexed under ``titles``."""
+    def _collect_point_ids(self, kb_id: str, page_id: int, titles: list[str], conn) -> list[str]:
+        """Collect this page's points and safe legacy title-only points."""
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
         from rag.vector_store import _get_client
@@ -135,7 +147,25 @@ class WikiIndexer:
         client = _get_client()
         if not client.collection_exists(kb_id):
             return []
-        point_ids: list[str] = []
+        point_ids: set[str] = set()
+        page_id_filter = Filter(
+            must=[
+                FieldCondition(key="document_id", match=MatchValue(value=page_id)),
+                FieldCondition(key="chunk_kind", match=MatchValue(value="wiki")),
+            ]
+        )
+        offset = None
+        while True:
+            records, offset = client.scroll(
+                collection_name=kb_id,
+                limit=_SCROLL_PAGE,
+                offset=offset,
+                scroll_filter=page_id_filter,
+                with_payload=True,
+            )
+            point_ids.update(str(record.id) for record in records)
+            if offset is None:
+                break
         for title in titles:
             offset = None
             while True:
@@ -149,12 +179,23 @@ class WikiIndexer:
                             FieldCondition(key="chunk_kind", match=MatchValue(value="wiki")),
                         ]
                     ),
-                    with_payload=False,
+                    with_payload=True,
                 )
-                point_ids.extend(str(record.id) for record in records)
+                owner = conn.execute(
+                    "SELECT id FROM wiki_pages WHERE kb_id = ? AND title = ? AND id != ? LIMIT 1",
+                    (kb_id, title, page_id),
+                ).fetchone()
+                for record in records:
+                    payload = record.payload or {}
+                    point_owner = payload.get("document_id")
+                    if point_owner is not None:
+                        if str(point_owner) == str(page_id):
+                            point_ids.add(str(record.id))
+                    elif owner is None:
+                        point_ids.add(str(record.id))
                 if offset is None:
                     break
-        return point_ids
+        return sorted(point_ids)
 
     def _delete_point_ids(self, kb_id: str, point_ids: list[str]) -> int:
         """Delete exactly the collected ids so freshly written points survive."""
@@ -182,17 +223,32 @@ class WikiIndexer:
         title: str | None = None,
     ) -> None:
         """Remove indexed points for a Wiki page across dense and sparse stores."""
-        target_kb = kb_id
-        target_title = title
+        with self._store.transaction(immediate=True) as conn:
+            row = conn.execute("SELECT kb_id, title FROM wiki_pages WHERE id = ?", (page_id,)).fetchone()
+            target_kb = kb_id or (str(row["kb_id"]) if row else None)
+            target_title = title or (str(row["title"]) if row else None)
+            if target_kb:
+                titles = [target_title] if target_title else []
+                if row:
+                    titles.extend(str(r[0]) for r in conn.execute(
+                        "SELECT title FROM wiki_revisions WHERE page_id = ?", (page_id,)
+                    ))
+                ids = self._collect_point_ids(target_kb, page_id, titles, conn)
+                self._delete_point_ids(target_kb, ids)
 
-        if target_kb is None or target_title is None:
-            page = self._store.get_page(page_id)
-            if page is not None:
-                target_kb = target_kb or page.kb_id
-                target_title = target_title or page.title
-
-        if target_kb and target_title:
-            delete_doc(target_kb, target_title, chunk_kind="wiki")
+    def delete_page_and_index(self, page_id: int) -> bool:
+        """Delete vectors and the page atomically with respect to other indexers."""
+        with self._store.transaction(immediate=True) as conn:
+            row = conn.execute("SELECT kb_id, title FROM wiki_pages WHERE id = ?", (page_id,)).fetchone()
+            if row is None:
+                return False
+            titles = [str(row["title"])]
+            titles.extend(str(r[0]) for r in conn.execute(
+                "SELECT title FROM wiki_revisions WHERE page_id = ?", (page_id,)
+            ))
+            ids = self._collect_point_ids(str(row["kb_id"]), page_id, titles, conn)
+            self._delete_point_ids(str(row["kb_id"]), ids)
+            return self._store.delete_page(page_id)
 
     def reindex_all(self, kb_id: str) -> dict[str, int]:
         """Reindex all pages in a knowledge base."""

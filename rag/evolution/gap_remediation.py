@@ -13,8 +13,7 @@ from typing import Any
 from config import settings
 from rag.evolution.gaps import (
     DEFAULT_PROBE_LIMIT,
-    aggregate_missing_terms,
-    missing_terms_for,
+    probe_questions,
     ticket_from_payload,
 )
 from rag.evolution.store import FailureTraceStore
@@ -33,8 +32,10 @@ class GapRemediationService:
         retrieval_reader: Any | None = None,
     ) -> None:
         self._trace_store = trace_store
-        self._wiki_store = wiki_store or WikiStore()
+        self._owns_wiki_store = wiki_store is None
+        self._wiki_store = wiki_store if wiki_store is not None else WikiStore()
         self._reader = retrieval_reader
+        self._owns_reader = False
 
     def _ensure_reader(self) -> Any:
         if self._reader is not None:
@@ -42,7 +43,26 @@ class GapRemediationService:
         from rag.evolution.worker import AdminReadOnlyRetrievalReader
 
         self._reader = AdminReadOnlyRetrievalReader(settings.users_db_path)
+        self._owns_reader = True
         return self._reader
+
+    def close(self) -> None:
+        """Close only resources created by this service instance."""
+        if self._owns_reader:
+            close = getattr(self._reader, "close", None)
+            if callable(close):
+                close()
+            self._reader = None
+            self._owns_reader = False
+        if self._owns_wiki_store:
+            self._wiki_store.close()
+            self._owns_wiki_store = False
+
+    def __enter__(self) -> GapRemediationService:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
     def link_ticket_to_wiki(
         self,
@@ -72,7 +92,9 @@ class GapRemediationService:
             author_id=author_id,
         )
 
-        self._trace_store.update_gap_ticket(ticket_id, updated_ticket)
+        self._trace_store.link_gap_ticket_remediation(
+            ticket_id, updated_ticket.remediation or {}
+        )
         logger.info(
             "gap_ticket_linked_to_wiki ticket=%s page=%s author=%s",
             ticket_id,
@@ -98,7 +120,7 @@ class GapRemediationService:
 
         payload = ticket_row.get("payload") or {}
         ticket_obj = ticket_from_payload(payload)
-        questions = list(ticket_obj.question_samples[:probe_limit])
+        questions = list(ticket_obj.question_samples)
         if not questions:
             return {
                 "ticket_id": ticket_id,
@@ -109,27 +131,33 @@ class GapRemediationService:
             }
 
         reader = self._ensure_reader()
-        per_question: list[tuple[str, ...]] = []
-        probed = 0
-
-        for q in questions:
-            try:
-                chunks = reader.retrieve(q, kb_id=ticket_obj.kb_id) or []
-            except Exception:
-                logger.exception("gap_ticket_recheck_probe_failed kb=%s q=%s", ticket_obj.kb_id, q)
-                continue
-            probed += 1
-            texts = [getattr(c, "text", "") or "" for c in chunks]
-            per_question.append(missing_terms_for(q, texts))
-
-        missing_now = aggregate_missing_terms(per_question)
-        covered = [term for term in ticket_obj.missing_terms if term not in set(missing_now)]
+        probe = probe_questions(
+            questions,
+            lambda question: reader.retrieve(question, kb_id=ticket_obj.kb_id),
+            probe_limit=probe_limit,
+            preserve_terms=ticket_obj.missing_terms,
+        )
+        if probe.failed:
+            logger.warning(
+                "gap_ticket_recheck_incomplete kb=%s probed=%s expected=%s failed=%s",
+                ticket_obj.kb_id,
+                probe.probed,
+                probe.expected,
+                probe.failed,
+            )
+        missing_now = probe.missing_terms
+        covered = (
+            [term for term in ticket_obj.missing_terms if term not in set(missing_now)]
+            if probe.complete
+            else []
+        )
         now = time.time()
 
         updated_ticket = ticket_obj.with_recheck(
             missing_terms=missing_now,
             covered_terms=covered,
-            probed=probed,
+            probed=probe.probed,
+            expected=probe.expected,
             now=now,
         )
 
@@ -146,8 +174,8 @@ class GapRemediationService:
             "ticket_id": ticket_id,
             "verdict": (updated_ticket.recheck or {}).get("verdict"),
             "status": updated_ticket.status,
-            "covered_terms": covered,
-            "still_missing": list(missing_now),
+            "covered_terms": list((updated_ticket.recheck or {}).get("covered_terms", covered)),
+            "still_missing": list(updated_ticket.missing_terms),
         }
 
     def get_ticket_remediation(self, ticket_id: int) -> dict[str, Any] | None:

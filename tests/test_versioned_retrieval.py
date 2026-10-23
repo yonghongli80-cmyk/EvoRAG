@@ -28,7 +28,7 @@ class FakeVersionRetriever:
         self.history = history
 
     def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None, allowed_wiki_revision_ids=None):
-        if validity_statuses is not None and "valid" in validity_statuses:
+        if allowed_version_ids and 2 in allowed_version_ids:
             return list(self.current)[:top_k]
         return list(self.history)[:top_k]
 
@@ -49,6 +49,12 @@ class _FakeDB:
             "owner_id": 1,
             "current_version_id": 2,
         }
+
+    def get_document_permission_by_id(self, document_id):
+        return self.get_document_permission("policy.pdf", "rag_docs")
+
+    def list_document_permissions_all(self):
+        return [{"id": 7}]
 
     def list_document_versions(self, document_id):
         return [
@@ -89,26 +95,21 @@ class _RecordingRetriever:
 
     def retrieve(self, query, top_k=5, doc_name=None, tags=None, allowed_version_ids=None, validity_statuses=None, allowed_wiki_revision_ids=None):
         self.allowed_version_ids.append(allowed_version_ids)
-        if validity_statuses is not None and "valid" in validity_statuses:
+        if allowed_version_ids and 2 in allowed_version_ids:
             return [chunk("current", version_id=2, is_current=True)]
         return [chunk("history", version_id=1, is_current=False)]
 
 
-def test_admin_bypasses_version_visibility_filters():
-    """Administrators see every document; the chunk-level filter already bypasses for them.
-
-    ``filter_chunks_by_permission`` returns chunks unfiltered for admins and the tags
-    endpoint lists every permission, so version visibility must not silently empty the
-    candidate set for an admin whose account owns nothing.
-    """
+def test_admin_uses_current_then_historical_version_scopes():
+    """Admins see all legal versions while still preferring the current version."""
     retriever = _RecordingRetriever()
 
     result = retrieve_current_then_history(
-        retriever, "policy", top_k=3, user=ADMIN, user_db=_NoVisibleVersionsDB(), kb_id="rag_docs"
+        retriever, "policy", top_k=3, user=ADMIN, user_db=DB, kb_id="rag_docs"
     )
 
     assert [item.text for item in result] == ["current", "history"]
-    assert retriever.allowed_version_ids == [None, None]
+    assert retriever.allowed_version_ids == [{2}, {1}]
 
 
 def test_non_admin_without_visible_versions_still_returns_empty():

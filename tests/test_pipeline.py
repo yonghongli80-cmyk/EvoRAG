@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from rag.models import Chunk
 from rag.pipeline import RAGPipeline
 from rag.reliability import fixed_decision_copy
+from rag.user_db import UserDB
 
 
 @patch("rag.pipeline.Reranker")
@@ -648,26 +649,31 @@ def test_enterprise_never_uses_the_legacy_agent_route():
     pipeline.close()
 
 
-def test_invisible_chunks_never_reach_enterprise_reranker():
+def test_invisible_chunks_never_reach_enterprise_reranker(tmp_path):
+    user_db = UserDB(str(tmp_path / "users.db"))
+    owner_id = user_db.create_user("visible-owner", "Password-123!")
+    visible_doc_id = user_db.create_document_permission("visible.txt", "rag_docs", owner_id)
+    visible_version_id = user_db.create_document_version(
+        visible_doc_id, "visible.txt", str(tmp_path / "visible.txt"), "visible-hash", owner_id
+    )
+    user_db.activate_document_version(
+        visible_doc_id, visible_version_id, "rag_docs", "visible.txt"
+    )
+    private_owner_id = user_db.create_user("private-owner", "Password-456!")
+    private_doc_id = user_db.create_document_permission("private.txt", "rag_docs", private_owner_id)
+    private_version_id = user_db.create_document_version(
+        private_doc_id, "private.txt", str(tmp_path / "private.txt"), "private-hash", private_owner_id
+    )
+    user_db.activate_document_version(private_doc_id, private_version_id, "rag_docs", "private.txt")
     visible = Chunk(
         text="visible", doc_name="visible.txt", chunk_index=0,
-        document_id=1, document_version_id=11,
+        document_id=visible_doc_id, document_version_id=visible_version_id,
     )
     invisible = Chunk(
         text="private", doc_name="private.txt", chunk_index=0,
-        document_id=2, document_version_id=22,
+        document_id=private_doc_id, document_version_id=private_version_id,
     )
-    user = {"id": 7, "permission_level": 1, "is_admin": False}
-    user_db = MagicMock()
-    user_db.get_accessible_doc_names.return_value = ["visible.txt"]
-    user_db.get_document_permission.return_value = {
-        "id": 1,
-        "current_version_id": 11,
-    }
-    user_db.list_document_versions.return_value = []
-    user_db.get_document_permissions_by_names.return_value = {
-        "visible.txt": {"id": 1},
-    }
+    user = {"id": owner_id, "permission_level": 1, "is_admin": False}
     feedback_processor = MagicMock()
     feedback_processor.get_weights.return_value = {}
 
@@ -691,6 +697,7 @@ def test_invisible_chunks_never_reach_enterprise_reranker():
     assert reranker_cls.return_value.rerank.call_args.args[1] == [visible]
     generate.assert_not_called()
     pipeline.close()
+    user_db.close()
 
 
 def test_evolution_disabled_by_default_builds_no_recorder():

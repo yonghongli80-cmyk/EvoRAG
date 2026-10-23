@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 from rag.agent import RAGAgent, create_agent_tools
 from rag.pipeline import RAGPipeline
+from rag.user_db import UserDB
 
 # ── SQL 工具：明确来源或禁用 ────────────────────────────────────────────────
 
@@ -96,17 +97,32 @@ def _build_pipeline(**kwargs):
     return pipeline
 
 
-def test_enterprise_requests_skip_the_legacy_router_model_call(monkeypatch):
+def _create_enterprise_version_db(tmp_path):
+    db = UserDB(str(tmp_path / "users.db"))
+    owner_id = db.create_user("enterprise-owner", "Password-123!")
+    document_id = db.create_document_permission("policy.md", "kb1", owner_id)
+    file_path = tmp_path / "policy.md"
+    file_path.write_text("policy", encoding="utf-8")
+    version_id = db.create_document_version(
+        document_id, "policy.md", str(file_path), "policy-hash", owner_id
+    )
+    db.activate_document_version(document_id, version_id, "kb1", "policy.md")
+    return db, document_id, version_id
+
+
+def test_enterprise_requests_skip_the_legacy_router_model_call(monkeypatch, tmp_path):
     from config import settings
     from rag.models import Chunk
 
     monkeypatch.setattr(settings, "jev_mode", "off")
     user = {"id": 7, "permission_level": 1, "is_admin": True}
+    user_db, document_id, version_id = _create_enterprise_version_db(tmp_path)
     chunk = Chunk(
         text="年假为 7 天", doc_name="policy.md", chunk_index=0,
-        document_id=7, document_version_id=70, rerank_score=0.9, score_source="reranker",
+        document_id=document_id, document_version_id=version_id,
+        rerank_score=0.9, score_source="reranker",
     )
-    pipeline = _build_pipeline(kb_id="kb1", user_db=MagicMock())
+    pipeline = _build_pipeline(kb_id="kb1", user_db=user_db)
     pipeline.retriever.retrieve.return_value = [chunk]
 
     with patch("rag.agent.route_question") as mock_route, \
@@ -116,6 +132,8 @@ def test_enterprise_requests_skip_the_legacy_router_model_call(monkeypatch):
 
     mock_route.assert_not_called()
     assert result.answer == "7 天"
+    pipeline.close()
+    user_db.close()
 
 
 def test_non_enterprise_requests_still_use_the_router(monkeypatch):
@@ -135,17 +153,19 @@ def test_non_enterprise_requests_still_use_the_router(monkeypatch):
     mock_route.assert_called_once()
 
 
-def test_enterprise_agent_route_is_not_reachable_so_the_copy_is_not_emitted(monkeypatch):
+def test_enterprise_agent_route_is_not_reachable_so_the_copy_is_not_emitted(monkeypatch, tmp_path):
     """企业模式跳过路由后，legacy 的 agent 分支不再产生"资料冲突"式拒答。"""
     from config import settings
     from rag.models import Chunk
 
     monkeypatch.setattr(settings, "jev_mode", "off")
+    user_db, document_id, version_id = _create_enterprise_version_db(tmp_path)
     chunk = Chunk(
         text="年假为 7 天", doc_name="policy.md", chunk_index=0,
-        document_id=7, document_version_id=70, rerank_score=0.9, score_source="reranker",
+        document_id=document_id, document_version_id=version_id,
+        rerank_score=0.9, score_source="reranker",
     )
-    pipeline = _build_pipeline(kb_id="kb1", user_db=MagicMock())
+    pipeline = _build_pipeline(kb_id="kb1", user_db=user_db)
     pipeline.retriever.retrieve.return_value = [chunk]
 
     with patch("rag.agent.route_question", return_value="agent") as mock_route, \
@@ -163,6 +183,8 @@ def test_enterprise_agent_route_is_not_reachable_so_the_copy_is_not_emitted(monk
     assert "冲突" not in (prepared.get("answer") or "")
     agent_run.assert_not_called()
     mock_generate.assert_not_called()
+    pipeline.close()
+    user_db.close()
 
 
 def test_jev_tool_route_in_enterprise_uses_the_same_accurate_copy(monkeypatch):

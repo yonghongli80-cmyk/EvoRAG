@@ -38,28 +38,44 @@ export function isAbortError(error: any): boolean {
   )
 }
 
-export type SessionResetHandler = () => void
+export type SessionResetHandler = (
+  status?: number,
+  request?: { authProbeGeneration?: number; authSessionGeneration?: number },
+) => boolean | void
 
 let sessionResetHandler: SessionResetHandler | null = null
+let sessionGenerationProvider: (() => number) | null = null
 
 /**
  * Register the routine that drops account-scoped client state when the session
  * becomes invalid. Auth imports this module, so the hook lives here to avoid a
  * circular dependency with the stores.
  */
-export function registerSessionResetHandler(handler: SessionResetHandler | null): void {
+export function registerSessionResetHandler(
+  handler: SessionResetHandler | null,
+  getSessionGeneration?: (() => number) | null,
+): void {
   sessionResetHandler = handler
+  sessionGenerationProvider = handler ? getSessionGeneration ?? null : null
 }
 
-function notifySessionReset(): void {
+function notifySessionReset(status: number, error: any, requestContext?: object): boolean | void {
   const handler = sessionResetHandler
   if (!handler) return
   try {
-    handler()
+    return handler(status, error?.config ?? requestContext)
   } catch {
     // A reset failure must never hide the original HTTP error.
   }
 }
+
+api.interceptors.request.use((config) => {
+  if (sessionGenerationProvider) {
+    ;(config as typeof config & { authSessionGeneration?: number }).authSessionGeneration =
+      sessionGenerationProvider()
+  }
+  return config
+})
 
 /**
  * Accept both FastAPI's `detail` and the legacy/hand-written `error` payloads.
@@ -84,7 +100,22 @@ export function shouldRedirectToLogin(pathname: string): boolean {
   return pathname !== '/login'
 }
 
-async function rejectRequest(error: any): Promise<never> {
+function cancelStaleResponse(response: any): any {
+  const requestGeneration = response?.config?.authSessionGeneration
+  if (
+    sessionGenerationProvider
+    && requestGeneration !== undefined
+    && requestGeneration !== sessionGenerationProvider()
+  ) {
+    const error = new Error('Request belongs to an expired session')
+    error.name = 'CanceledError'
+    Object.assign(error, { code: 'ERR_CANCELED' })
+    throw error
+  }
+  return response
+}
+
+async function rejectRequest(error: any, requestContext?: object): Promise<never> {
   // A deliberate abort (stop button, conversation switch, logout) is not a
   // transport failure: surface no toast and never bounce the user to /login.
   if (isAbortError(error)) throw error
@@ -92,13 +123,18 @@ async function rejectRequest(error: any): Promise<never> {
   if (error.response) {
     const { status, data } = error.response
     if (status === 401) {
-      notifySessionReset()
-      if (shouldRedirectToLogin(window.location.pathname)) {
+      const shouldHandleSessionError = notifySessionReset(status, error, requestContext)
+      if (
+        shouldHandleSessionError !== false
+        && shouldRedirectToLogin(window.location.pathname)
+      ) {
         window.location.href = '/login'
       }
     } else if (status === 403) {
-      notifySessionReset()
-      ElMessage.error('权限不足，无法执行此操作')
+      const shouldHandleSessionError = notifySessionReset(status, error, requestContext)
+      if (shouldHandleSessionError !== false) {
+        ElMessage.error('权限不足，无法执行此操作')
+      }
     } else if (status >= 500) {
       ElMessage.error(extractApiErrorMessage(data, '服务器错误，请稍后重试'))
     }
@@ -112,11 +148,14 @@ async function rejectRequest(error: any): Promise<never> {
 }
 
 api.interceptors.response.use(
-  (response) => response,
+  cancelStaleResponse,
   rejectRequest
 )
 
 export async function streamRequest(path: string, init: RequestInit): Promise<Response> {
+  const requestContext = sessionGenerationProvider
+    ? { authSessionGeneration: sessionGenerationProvider() }
+    : undefined
   const url = `${API_BASE.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
   const headers = new Headers(init.headers)
   const requestInit = { ...init, headers, credentials: 'same-origin' as const }
@@ -128,7 +167,7 @@ export async function streamRequest(path: string, init: RequestInit): Promise<Re
     // stopped stream quietly instead of showing an error (E-05).
     if (isAbortError(error)) throw error
     if (!error.code) error.code = 'ERR_NETWORK'
-    return rejectRequest(error)
+    return rejectRequest(error, requestContext)
   }
 
   if (!response.ok) {
@@ -141,7 +180,16 @@ export async function streamRequest(path: string, init: RequestInit): Promise<Re
     }
     const error: any = new Error(extractApiErrorMessage(data, '请求失败'))
     error.response = { status: response.status, data }
-    return rejectRequest(error)
+    return rejectRequest(error, requestContext)
+  }
+  if (
+    sessionGenerationProvider
+    && requestContext?.authSessionGeneration !== sessionGenerationProvider()
+  ) {
+    const error = new Error('Request belongs to an expired session')
+    error.name = 'CanceledError'
+    Object.assign(error, { code: 'ERR_CANCELED' })
+    throw error
   }
   return response
 }

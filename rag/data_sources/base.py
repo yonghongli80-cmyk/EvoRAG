@@ -51,28 +51,53 @@ def safe_requests_get(
     """
     current_url = url
     redirect_count = 0
+    credential_origin = _url_origin(url)
+    credentials_allowed = True
+    request_kwargs = dict(kwargs)
 
     while True:
         validate_external_url(current_url)
+        if not credentials_allowed:
+            request_kwargs.pop("auth", None)
+            request_kwargs.pop("cookies", None)
+            request_kwargs.pop("params", None)
         resp = requests.get(
             current_url,
-            headers=headers,
+            headers=headers if credentials_allowed else {},
             timeout=timeout,
             allow_redirects=False,
-            **kwargs,
+            **request_kwargs,
         )
         if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
             redirect_count += 1
             if redirect_count > max_redirects:
+                resp.close()
                 raise ValueError(f"重定向次数过多（超过 {max_redirects} 次）")
             location = resp.headers.get("Location")
             if not location:
                 return resp
             next_url = urljoin(current_url, location)
-            validate_external_url(next_url)
+            try:
+                validate_external_url(next_url)
+            except Exception:
+                resp.close()
+                raise
+            if _url_origin(next_url) != credential_origin:
+                credentials_allowed = False
+            resp.close()
             current_url = next_url
             continue
         return resp
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    port = parsed.port
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, hostname, port
 
 
 class DataSource(ABC):

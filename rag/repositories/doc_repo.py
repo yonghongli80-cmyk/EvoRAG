@@ -626,7 +626,8 @@ class DocRepository(BaseRepository):
     def get_citation_state(self, document_id: int) -> str:
         with self.cm.read_connection() as conn:
             row = conn.execute(
-                "SELECT state FROM answer_citations WHERE document_id = ? "
+                "SELECT state FROM answer_citations WHERE source_kind = 'document' "
+                "AND document_id = ? "
                 "ORDER BY CASE state WHEN 'purged_by_retention_policy' THEN 0 ELSE 1 END "
                 "LIMIT 1",
                 (document_id,),

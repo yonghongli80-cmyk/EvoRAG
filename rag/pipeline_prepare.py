@@ -476,6 +476,10 @@ def _finalize_rag_context(bindings,
     sources = [
         {
             "doc_name": c.doc_name,
+            "source_name": c.doc_name,
+            "source_kind": "wiki" if c.chunk_kind == "wiki" else "document",
+            "chunk_kind": c.chunk_kind,
+            "kb_id": effective_kb_id,
             "chunk_index": c.chunk_index,
             "text_preview": c.text[:100],
             "document_id": c.document_id,

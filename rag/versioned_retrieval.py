@@ -12,10 +12,10 @@ vs document version 7). They therefore travel as **two separate scopes** —
 which for wiki points is the revision id). Merging them into one set made a
 visible wiki revision unlock a colliding document version.
 
-Administrators bypass visibility filters here exactly as they do at the chunk
-level (``filter_chunks_by_permission``) and in the tags endpoint: both scopes are
-``None`` for an admin, which the retriever translates into "no version filter"
-instead of an empty candidate set.
+Administrators see every live document in the selected knowledge base, while
+still using SQLite's current-version pointer and retrievable version states.
+This keeps high-scoring history from outranking current content and excludes
+recycled or purged versions.
 """
 
 from __future__ import annotations
@@ -102,39 +102,62 @@ def _visible_permissions(user_db, user, kb_id) -> list[dict]:
     The permission lookup used to run twice per request (once for the current scope, once for
     the historical one). One list now feeds both (A-09).
     """
-    if not hasattr(user_db, "get_document_permission_by_id"):
+    if user.get("is_admin"):
+        if not hasattr(user_db, "list_document_permissions_all"):
+            return []
+        document_ids = {
+            permission["id"] for permission in user_db.list_document_permissions_all()
+        }
+    elif not hasattr(user_db, "get_document_permission_by_id"):
         return [
             permission
             for name in user_db.get_accessible_doc_names(
                 kb_id, user["id"], user.get("permission_level", 1)
             )
             if (permission := user_db.get_document_permission(name, kb_id)) is not None
+            and permission.get("deleted_at") is None
+            and not permission.get("purge_state")
         ]
-    document_ids = _visible_document_ids(user_db, user, kb_id)
+    else:
+        document_ids = _visible_document_ids(user_db, user, kb_id)
     if document_ids is None:
         return []
     permissions = []
     for document_id in document_ids:
         permission = user_db.get_document_permission_by_id(document_id)
-        if permission is not None:
+        if (
+            permission is not None
+            and permission.get("kb_id") == kb_id
+            and permission.get("deleted_at") is None
+            and not permission.get("purge_state")
+        ):
             permissions.append(permission)
     return permissions
 
 
-def _visible_document_version_ids(user_db, user, kb_id) -> tuple[set[int], set[int]]:
-    """(current version ids, historical version ids) in one pass over the visible documents."""
+def _visible_document_version_ids(
+    user_db, user, kb_id
+) -> tuple[set[int], set[int], dict[int, str]]:
+    """Return SQLite-authorized current/history ids and their validity states."""
     current: set[int] = set()
     historical: set[int] = set()
+    validity_by_version: dict[int, str] = {}
     for permission in _visible_permissions(user_db, user, kb_id):
-        if permission.get("current_version_id"):
-            current.add(permission["current_version_id"])
+        current_version_id = permission.get("current_version_id")
         for version in user_db.list_document_versions(permission["id"]):
-            if (
-                version["status"] != "current"
-                or version["validity_status"] == "confirmed_outdated"
-            ):
+            if version["id"] == current_version_id and version["status"] == "current":
+                # SQLite validity is authoritative. A current pointer explicitly
+                # confirmed as outdated remains eligible only for historical fallback.
+                if version.get("validity_status", "valid") == "valid":
+                    current.add(version["id"])
+                    validity_by_version[version["id"]] = "valid"
+                elif version.get("validity_status") == "confirmed_outdated":
+                    historical.add(version["id"])
+                    validity_by_version[version["id"]] = "confirmed_outdated"
+            elif version["status"] == "historical":
                 historical.add(version["id"])
-    return current, historical
+                validity_by_version[version["id"]] = version.get("validity_status", "valid")
+    return current, historical, validity_by_version
 
 
 #: Only the revision id is needed for visibility. ``list_pages`` selects ``SELECT *`` —
@@ -192,17 +215,25 @@ def _visible_version_scopes(
     user_db, user, kb_id, wiki_store=None
 ) -> tuple[VersionScope, VersionScope]:
     """(current scope, historical scope) for one request, computed in a single pass."""
+    current, historical, _validity = _visible_version_scope_info(
+        user_db, user, kb_id, wiki_store
+    )
+    return current, historical
+
+
+def _visible_version_scope_info(user_db, user, kb_id, wiki_store=None):
+    """Return both version scopes plus SQLite validity metadata for their documents."""
     if user is None or user_db is None:
         empty = VersionScope(documents=set(), wiki=set())
-        return empty, empty
-    if user.get("is_admin"):
-        unrestricted = VersionScope(documents=None, wiki=None)
-        return unrestricted, unrestricted
-    current_documents, historical_documents = _visible_document_version_ids(user_db, user, kb_id)
+        return empty, empty, {}
+    current_documents, historical_documents, validity = _visible_document_version_ids(
+        user_db, user, kb_id
+    )
     current_wiki = _visible_wiki_revision_ids(user_db, user, kb_id, wiki_store)
     return (
         VersionScope(documents=current_documents, wiki=current_wiki),
         VersionScope(documents=historical_documents, wiki=set()),
+        validity,
     )
 
 
@@ -247,7 +278,7 @@ def retrieve_current_then_history(
             **kwargs,
         )
 
-    current_scope, historical_scope = _visible_version_scopes(
+    current_scope, historical_scope, validity_by_version = _visible_version_scope_info(
         user_db, user, kb_id, wiki_store=wiki_store
     )
     if current_scope.is_empty() and historical_scope.is_empty():
@@ -260,8 +291,11 @@ def retrieve_current_then_history(
             top_k=top_k,
             doc_name=doc_name,
             tags=tags,
-            validity_statuses={"valid"},
         )
+        current = [
+            replace(item, is_current=True, validity_status="valid", historical_weight=1.0)
+            for item in current
+        ]
     if len(current) >= min(top_k, 3):
         return current
 
@@ -274,7 +308,15 @@ def retrieve_current_then_history(
             validity_statuses=set(),
         )
         rebuilt = [
-            replace(c, historical_weight=settings.historical_result_weight) for c in fallback
+            replace(
+                c,
+                is_current=False,
+                validity_status=validity_by_version.get(
+                    c.document_version_id, c.validity_status
+                ),
+                historical_weight=settings.historical_result_weight,
+            )
+            for c in fallback
         ]
         merged = list(current)
         for chunk in rebuilt:

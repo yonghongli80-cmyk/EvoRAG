@@ -70,8 +70,9 @@ def recycle_fixture(tmp_path):
     with db._lock, db.transaction(immediate=True):
         db._conn.execute(
             "INSERT INTO answer_citations "
-            "(assistant_message_id, document_id, document_version_id, chunk_index, section_title, text_preview, rank) "
-            "VALUES (?, ?, ?, 0, '', '合同正文预览', 1)",
+            "(assistant_message_id, document_id, document_version_id, chunk_index, section_title, "
+            "text_preview, rank, source_kind, kb_id, source_name) "
+            "VALUES (?, ?, ?, 0, '', '合同正文预览', 1, 'document', 'kb-1', 'contract.pdf')",
             (message_id, doc_id, version_id),
         )
 

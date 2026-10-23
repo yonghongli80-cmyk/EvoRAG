@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -74,7 +75,9 @@ def test_stream_preparation_does_not_delay_health_request(tmp_path, monkeypatch)
         yield "answer"
 
     monkeypatch.setattr(settings, "auth_enabled", False)
-    monkeypatch.setattr(settings, "analysis_db_path", str(tmp_path / "analysis.db"))
+    users_db_path = tmp_path / "users.db"
+    sqlite3.connect(users_db_path).close()
+    monkeypatch.setattr(settings, "users_db_path", str(users_db_path))
     health_client = MagicMock()
     health_client.get_collections.return_value = []
 

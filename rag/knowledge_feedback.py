@@ -40,6 +40,31 @@ def submit_knowledge_feedback(
         raise FeedbackValidationError("assistant message does not belong to the user")
 
     citations = db.get_answer_citations(assistant_message_id)
+    if kind == "outdated":
+        from rag.citation_resolution import resolve_legacy_citation
+
+        def resolve_or_unresolved(citation):
+            try:
+                return resolve_legacy_citation(db, citation)
+            except Exception:  # noqa: BLE001 - uncertain legacy sources are not feedback targets
+                return {**citation, "source_kind": "legacy"}
+
+        selected = next((c for c in citations if c.get("id") == citation_id), None)
+        if selected is not None:
+            selected = resolve_or_unresolved(selected)
+            source_kind = selected.get("source_kind") or "legacy"
+            if source_kind != "document":
+                reason = "unresolved" if source_kind == "legacy" else "wiki"
+                raise FeedbackValidationError(
+                    f"outdated feedback cannot target {reason} citations"
+                )
+        elif citation_id is None and any(
+            resolve_or_unresolved(citation).get("source_kind") != "document"
+            for citation in citations
+        ):
+            raise FeedbackValidationError(
+                "outdated feedback requires an unambiguous document citation"
+            )
     if kind == "outdated" and len(citations) > 1 and citation_id is None:
         raise FeedbackValidationError("select a citation for outdated feedback")
     if citation_id is not None and not any(

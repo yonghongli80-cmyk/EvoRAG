@@ -1,1 +1,0 @@
-import{n as e}from"./_plugin-vue_export-helper-OBpb9IWo.js";import{t}from"./index-BUZp2nRJ.js";async function n(t,n,r=`reject`){return(await e.post(`/knowledge-bases/${n}/documents/link`,{document_id:t,duplicate_action:r})).data}async function r(n){let r=t();return(await e.get(`/documents/${n}/versions`,{headers:r.getAuthHeaders()})).data.versions}export{n,r as t};

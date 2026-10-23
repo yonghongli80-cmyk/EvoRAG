@@ -1489,12 +1489,19 @@ def test_rollback_reverts_restarts_and_records_the_status(
     assert response.status_code == 200
     body = response.json()
     assert body["reverted"] is True
-    assert body["status"] == "rolled_back"
+    assert body["status"] == "canary"
+    assert body["steps"]["operation_status"] == "pending_restart_health_check"
+    assert body["steps"]["status_after_restart"] == "rolled_back"
     assert body["steps"]["import_smoke"] is True and body["steps"]["target_tests"] is True
     assert calls["revert"] == 1 and calls["apply"] == 0
     assert calls["restart"] == 1
     # 助手必须知道这是"回滚"，失败时才应当把补丁**重新应用**而不是再反向一次。
     assert calls["spawn_kwargs"]["direction"] == "revert"
+    from rag.evolution.service_control import clear_operation_marker
+
+    operation = calls["spawn_kwargs"]["operation"]
+    assert CandidateStore(store).get_candidate(candidate_id)["status"] == "canary"
+    clear_operation_marker(operation["marker_path"], operation["operation_id"])
     store.close()
 
 

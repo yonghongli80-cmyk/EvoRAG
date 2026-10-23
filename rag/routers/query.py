@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hashlib
 import json as _json
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,8 +16,13 @@ from pydantic import BaseModel, Field
 
 import rag.evolution.store as store_mod
 from config import settings
-from rag.api_security import get_user_db, require_kb_view, require_user
-from rag.citations import CitationRecord
+from rag.api_security import get_user_db, require_doc_view, require_kb_view, require_user
+from rag.citation_resolution import resolve_legacy_citation
+from rag.citations import (
+    CitationRecord,
+    citation_records_from_sources,
+    citation_response,
+)
 from rag.context import (
     _get_or_create_pipeline,
     get_failure_recorder,
@@ -43,6 +48,7 @@ from rag.resilience import (
 from rag.suggest import suggest_questions
 from rag.tracker import ExecutionTrace
 from rag.user_db import UserDB
+from rag.wiki.store import get_wiki_store
 
 logger = logging.getLogger(__name__)
 
@@ -249,8 +255,11 @@ async def query(
         )
 
     if conversation is not None:
-        await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
-        reliability_kwargs = {}
+        reliability_kwargs = {
+            "confidence_level": "unavailable",
+            "confidence_reasons": (),
+            "answerability_kind": "answerable",
+        }
         confidence = getattr(result, "confidence", None)
         decision = getattr(result, "decision", None)
         if confidence is not None and decision is not None:
@@ -260,10 +269,12 @@ async def query(
                 "answerability_kind": decision.kind,
             }
         await asyncio.to_thread(
-            db.add_message,
+            db.chat_repo.persist_exchange_with_citations,
             req.conversation_id,
-            "assistant",
+            req.question,
             result.answer,
+            citation_records_from_sources(result.sources, target_kb),
+            f"query:{uuid.uuid4().hex}",
             **reliability_kwargs,
         )
 
@@ -298,6 +309,11 @@ async def query_stream(
         if conversation is None:
             raise HTTPException(status_code=404, detail="对话不存在或无权访问")
         session_id = f"conv_{req.conversation_id}"
+    persistence_key = (
+        f"stream:{req.conversation_id}:{uuid.uuid4().hex}"
+        if conversation is not None
+        else None
+    )
 
     if target_kb != "rag_docs":
         require_kb_view(db, target_kb, user)
@@ -343,19 +359,11 @@ async def query_stream(
                 if kind == "token":
                     answer_buffer += parsed.get("content", "")
                 elif kind == "sources":
-                    for source in parsed.get("sources", []):
-                        if source.get("document_id") and source.get("document_version_id"):
-                            citation_records.append(
-                                CitationRecord(
-                                    document_id=source["document_id"],
-                                    document_version_id=source["document_version_id"],
-                                    chunk_index=source.get("chunk_index", 0),
-                                    section_title=source.get("section_title") or "",
-                                    text_preview=source.get("text_preview", "")[:200],
-                                    rank=source.get("rank", 0),
-                                    is_historical=bool(source.get("is_historical", False)),
-                                )
-                            )
+                    citation_records.extend(
+                        citation_records_from_sources(
+                            parsed.get("sources", []), target_kb
+                        )
+                    )
                 elif kind == "done":
                     reliability = parsed.get("reliability")
                     continue
@@ -380,26 +388,39 @@ async def query_stream(
             return
 
         assistant_message_id = None
-        if reliability and reliability.get("answerability_kind") == "insufficient_evidence":
-            await asyncio.to_thread(
-                _record_refusal_task,
-                db,
-                user,
-                req.question,
-                target_kb,
-                req.doc_name,
-            )
-        if conversation is not None and answer_buffer:
-            await asyncio.to_thread(db.add_message, req.conversation_id, "user", req.question)
-            persistence_key = f"stream:{req.conversation_id}:{hashlib.sha256(req.question.encode('utf-8')).hexdigest()[:16]}"
-            assistant_message_id = await asyncio.to_thread(
-                db.persist_assistant_answer_with_citations,
-                req.conversation_id,
-                answer_buffer,
-                citation_records,
-                persistence_key,
-                **(reliability or {}),
-            )
+        try:
+            if reliability and reliability.get("answerability_kind") == "insufficient_evidence":
+                await asyncio.to_thread(
+                    _record_refusal_task,
+                    db,
+                    user,
+                    req.question,
+                    target_kb,
+                    req.doc_name,
+                )
+            if conversation is not None and answer_buffer:
+                assistant_message_id = await asyncio.to_thread(
+                    db.chat_repo.persist_exchange_with_citations,
+                    req.conversation_id,
+                    req.question,
+                    answer_buffer,
+                    citation_records,
+                    persistence_key,
+                    **(reliability or {}),
+                )
+        except Exception as error:
+            logger.exception("流式查询持久化失败")
+            cause = circuit_open_cause(error)
+            if cause is not None:
+                payload = {
+                    "type": "error",
+                    "reason": DEGRADED_ANSWER_TEXT,
+                    "degraded": True,
+                }
+            else:
+                payload = {"type": "error", "reason": "流式生成失败，请稍后重试"}
+            yield f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
+            return
         done_payload: dict = {"type": "done", "assistant_message_id": assistant_message_id}
         if reliability is not None:
             # 判定层的结论必须转给客户端：前端读的正是 `done.reliability.answerability_kind`
@@ -471,24 +492,54 @@ def _regenerate_target_kb(db: UserDB, message_id: int, reliability: dict) -> str
         citations = db.get_answer_citations(message_id)
     except Exception:  # noqa: BLE001 - inference must never break regenerate
         logger.debug("could not read citations for regenerate", exc_info=True)
+        raise HTTPException(
+            status_code=409,
+            detail="历史来源无法确定，无法安全重新生成",
+        ) from None
+    if not citations:
         return _REGENERATE_DEFAULT_KB
     kb_ids: set[str] = set()
+    unresolved = False
     for citation in citations:
+        try:
+            citation = resolve_legacy_citation(db, citation)
+        except Exception:  # noqa: BLE001 - uncertain source must stop regeneration
+            logger.debug("could not resolve a legacy citation for regenerate", exc_info=True)
+            unresolved = True
+            continue
+        kind = citation.get("source_kind") or "legacy"
+        if kind == "wiki":
+            kb_id = str(citation.get("kb_id") or "").strip()
+            if kb_id:
+                kb_ids.add(kb_id)
+            continue
+        if kind != "document":
+            unresolved = True
+            continue
+        stored_kb_id = str(citation.get("kb_id") or "").strip()
+        if stored_kb_id:
+            kb_ids.add(stored_kb_id)
+            continue
         document_id = citation.get("document_id")
         if not document_id:
             continue
         document = db.get_document_permission_by_id(int(document_id))
         if document is not None and document.get("kb_id"):
             kb_ids.add(str(document["kb_id"]))
+        else:
+            unresolved = True
+    if unresolved:
+        raise HTTPException(
+            status_code=409,
+            detail="历史来源无法确定，无法安全重新生成",
+        )
     if len(kb_ids) == 1:
         return kb_ids.pop()
     return _REGENERATE_DEFAULT_KB
 
 
-def _persist_regenerated_reliability(
-    db: UserDB, message_id: int, prepared: dict
-) -> dict:
-    """Persist the new assessment for a regenerated answer, or invalidate the old one.
+def _regenerated_reliability(prepared: dict) -> dict:
+    """Return the new assessment, clearing stale values when absent.
 
     Leaving the previous confidence/answerability attached would present the old
     judgment as if it described the new text (A-06). A route without an
@@ -513,18 +564,6 @@ def _persist_regenerated_reliability(
             "confidence_reasons": [],
             "answerability_kind": "answerable",
         }
-    reasons_json = _json.dumps(reliability["confidence_reasons"], ensure_ascii=False)
-    with db.locked_transaction() as conn:
-        conn.execute(
-            "UPDATE chat_messages SET confidence_level = ?, "
-            "confidence_reasons_json = ?, answerability_kind = ? WHERE id = ?",
-            (
-                reliability["confidence_level"],
-                reasons_json,
-                reliability["answerability_kind"],
-                message_id,
-            ),
-        )
     return reliability
 
 
@@ -617,14 +656,25 @@ async def regenerate(
     if output_check.filtered:
         new_answer = output_check.text
 
-    await asyncio.to_thread(db.update_message, req.message_id, new_answer, user["id"])
-    reliability = await asyncio.to_thread(
-        _persist_regenerated_reliability, db, req.message_id, prepared
+    reliability = _regenerated_reliability(prepared)
+    citations = citation_records_from_sources(prepared.get("sources", []), target_kb)
+    await asyncio.to_thread(
+        db.chat_repo.replace_assistant_answer_with_citations,
+        req.message_id,
+        user["id"],
+        new_answer,
+        citations,
+        reliability,
+    )
+    persisted_message = {"id": req.message_id, "role": "assistant"}
+    refreshed_message = await asyncio.to_thread(
+        _attach_authorized_message_sources, db, [persisted_message], user
     )
     return {
         "message_id": req.message_id,
         "answer": new_answer,
         "reliability": reliability,
+        "sources": refreshed_message[0]["sources"],
     }
 
 
@@ -714,4 +764,65 @@ async def get_conversation_messages(
     user: dict = Depends(require_user),
 ):
     db = get_user_db()
-    return await asyncio.to_thread(db.get_messages, cid, user["id"])
+    messages = await asyncio.to_thread(db.get_messages, cid, user["id"])
+    return await asyncio.to_thread(_attach_authorized_message_sources, db, messages, user)
+
+
+def _attach_authorized_message_sources(db: UserDB, messages: list[dict], user: dict) -> list[dict]:
+    """Attach only citations whose source still exists and remains visible."""
+    wiki_store = None
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        sources = []
+        for citation in db.get_answer_citations(int(message["id"])):
+            try:
+                citation = resolve_legacy_citation(db, citation, wiki_store)
+            except Exception:  # noqa: BLE001 - unresolved legacy sources stay hidden
+                logger.debug("could not resolve a legacy citation", exc_info=True)
+                continue
+            kind = citation.get("source_kind") or "legacy"
+            try:
+                if kind == "wiki":
+                    if wiki_store is None:
+                        wiki_store = get_wiki_store()
+                    kb_id = str(citation.get("kb_id") or "")
+                    require_kb_view(db, kb_id, user)
+                    page = wiki_store.get_page(int(citation["document_id"]))
+                    revision = wiki_store.get_revision(int(citation["document_version_id"]))
+                    if (
+                        not page
+                        or page.kb_id != kb_id
+                        or not revision
+                        or revision.page_id != page.id
+                    ):
+                        continue
+                    sources.append(
+                        {
+                            "citation_id": citation["id"],
+                            "document_id": page.id,
+                            "document_version_id": revision.id,
+                            "source_kind": "wiki",
+                            "kb_id": kb_id,
+                            "source_name": citation.get("source_name") or page.title,
+                            "doc_name": citation.get("source_name") or page.title,
+                            "chunk_index": citation.get("chunk_index", 0),
+                            "section_title": citation.get("section_title") or "",
+                            "text_preview": citation.get("text_preview") or "",
+                            "rank": citation.get("rank", 0),
+                            "is_historical": bool(citation.get("is_historical", 0)),
+                            "wiki_url": f"/wiki/pages/{page.id}",
+                        }
+                    )
+                    continue
+                if kind != "document":
+                    continue
+                document = db.get_document_permission_by_id(int(citation["document_id"]))
+                if not document or document.get("deleted_at") is not None:
+                    continue
+                require_doc_view(db, document["doc_name"], document["kb_id"], user)
+                sources.append(citation_response(db, citation, user))
+            except HTTPException:
+                continue
+        message["sources"] = sources
+    return messages

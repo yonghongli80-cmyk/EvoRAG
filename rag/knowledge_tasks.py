@@ -181,6 +181,8 @@ class TaskService:
         citation = self._db.get_answer_citation_by_id(citation_id)
         if citation is None:
             return None
+        if (citation.get("source_kind") or "document") != "document":
+            return None
         return self._db.get_document_permission_by_id(citation["document_id"])
 
     def _record_outdated(self, feedback: dict) -> int | None:
@@ -204,7 +206,8 @@ class TaskService:
             row = self._db._conn.execute(
                 "SELECT COUNT(DISTINCT f.user_id) AS cnt FROM feedback f "
                 "JOIN answer_citations c ON c.id = f.citation_id "
-                "WHERE c.document_id = ? AND f.kind = 'outdated' AND f.created_at >= ?",
+                "WHERE c.source_kind = 'document' AND c.document_id = ? "
+                "AND f.kind = 'outdated' AND f.created_at >= ?",
                 (document_id, cutoff),
             ).fetchone()
         return int(row["cnt"])

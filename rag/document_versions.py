@@ -283,7 +283,7 @@ def migrate_staged_document_versions(
         from rag.user_db import UserDB
 
         migrate_staged_document_versions(
-            UserDB(settings.user_db_path), Path(settings.document_versions_root)
+            UserDB(settings.users_db_path), Path(settings.document_versions_root)
         )
     """
     staging_root = (versions_root / "staging").resolve()

@@ -173,6 +173,9 @@ def create_tables(conn: sqlite3.Connection) -> None:
             rank INTEGER NOT NULL,
             is_historical INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+            source_kind TEXT NOT NULL DEFAULT 'legacy',
+            kb_id TEXT NOT NULL DEFAULT '',
+            source_name TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(assistant_message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
         );
 
@@ -902,4 +905,35 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             "ADD COLUMN state TEXT NOT NULL DEFAULT 'available'"
         )
         conn.commit()
+
+    citation_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(answer_citations)")
+    }
+    for name, declaration in (
+        ("source_kind", "TEXT NOT NULL DEFAULT 'legacy'"),
+        ("kb_id", "TEXT NOT NULL DEFAULT ''"),
+        ("source_name", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in citation_columns:
+            conn.execute(f"ALTER TABLE answer_citations ADD COLUMN {name} {declaration}")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS citation_domain_migrations ("
+        "name TEXT PRIMARY KEY, applied_at REAL NOT NULL DEFAULT (strftime('%s','now'))"
+        ")"
+    )
+    migration = conn.execute(
+        "SELECT 1 FROM citation_domain_migrations WHERE name='legacy-source-domain-v1'"
+    ).fetchone()
+    if migration is None:
+        # Databases that already ran the first source-kind migration have old rows
+        # defaulted to 'document'. Isolate them once; new writes explicitly store a
+        # source kind and subsequent starts never rewrite those rows.
+        conn.execute(
+            "UPDATE answer_citations SET source_kind='legacy' "
+            "WHERE source_kind='document' AND kb_id='' AND source_name=''"
+        )
+        conn.execute(
+            "INSERT INTO citation_domain_migrations(name) VALUES('legacy-source-domain-v1')"
+        )
+    conn.commit()
 

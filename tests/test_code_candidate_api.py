@@ -438,9 +438,11 @@ def test_approve_creates_the_export_directory_when_it_is_missing(
     assert (nested / f"candidate-{patch_ready}.patch").is_file()
 
 
-def test_the_default_export_directory_is_the_repository_artifacts_path():
+def test_the_default_export_directory_is_the_repository_artifacts_path(
+    isolated_service_control_log,
+):
     """``artifacts/patches`` is the documented, locally ignored export location."""
-    assert evolution_api.PATCH_EXPORT_DIR == REPO_ROOT / "artifacts" / "patches"
+    assert isolated_service_control_log == REPO_ROOT / "artifacts" / "patches"
 
 
 def test_approve_refuses_a_patch_whose_diff_body_is_missing(

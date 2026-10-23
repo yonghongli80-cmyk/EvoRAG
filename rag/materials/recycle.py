@@ -227,6 +227,27 @@ def purge_document(
         )
         removed_bytes += dataset_bytes
 
+    for path in [*version_files, *dataset_files]:
+        path.unlink(missing_ok=True)
+    if vector_store is not None:
+        vector_store.delete_document(document_id)
+
+    # Keep the tombstone, version paths, and dataset rows intact until every
+    # external cleanup succeeds. A retry can then find artifacts after a partial
+    # unlink or a transient vector-store failure.
+    with db._lock, db.transaction(immediate=True):
+        doc = db._conn.execute(
+            "SELECT * FROM document_permissions WHERE id = ?", (document_id,)
+        ).fetchone()
+        if doc is None:
+            raise RecycleError("document_missing")
+        if doc["purge_state"] == PURGED_STATE:
+            return PurgeResult(document_id, "already_purged", removed_bytes)
+        if doc["deleted_at"] is None:
+            raise RecycleError("not_tombstoned")
+        if now <= (doc["restore_until"] or 0):
+            raise RecycleError("restore_window_open")
+
         db._conn.execute(
             "UPDATE document_versions SET status='purged' WHERE document_id = ?",
             (document_id,),
@@ -250,17 +271,11 @@ def purge_document(
                 "DELETE FROM vector_flag_repairs WHERE document_id = ?", (document_id,)
             )
         db._conn.execute(
-            "UPDATE answer_citations SET state=?, text_preview='' WHERE document_id = ?",
+            "UPDATE answer_citations SET state=?, text_preview='' "
+            "WHERE source_kind='document' AND document_id = ?",
             (PURGED_STATE, document_id),
         )
         _append_audit(db, document_id, 0, "purge", now)
-
-    for path in [*version_files, *dataset_files]:
-        with suppress(OSError):
-            path.unlink(missing_ok=True)
-    if vector_store is not None:
-        with suppress(Exception):
-            vector_store.delete_document(document_id)
     if versions_root is not None:
         _prune_empty_dirs(versions_root / str(document_id))
     if structured_datasets_root is not None:

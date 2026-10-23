@@ -17,10 +17,9 @@ Two repository fixtures are used:
 * ``sandbox_repo`` — a tiny purpose-built git repository. Fast, hermetic, and in
   full control of clean/dirty state, so every refusal branch and the benchmark
   replay are exercised deterministically.
-* ``cloned_repo`` — a throwaway ``git clone`` of this repository at ``HEAD``:
-  real code, a real ``tests/test_reranker.py``, and its own ``.git``, so the
-  green path runs against the real thing without depending on the shared working
-  tree being clean (two other lanes are editing it while this is written).
+* ``cloned_repo`` — a throwaway clone with this checkout's Git-visible working
+  tree snapshot committed as its baseline, including tracked edits and new
+  source files required by the active test environment.
 
 The benchmark replay is injected through the sandbox's child-process seam, so no
 test ever calls a model, a vector store, or the live pipeline.
@@ -41,6 +40,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -251,7 +251,7 @@ def sandbox_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture(scope="module")
 def cloned_repo(tmp_path_factory) -> Path:
-    """A throwaway clone of this repository at HEAD: real code, private ``.git``."""
+    """Clone the current Git-visible source snapshot into an isolated repository."""
     repo = tmp_path_factory.mktemp("cloned-repo") / "clone"
     subprocess.run(
         ["git", "clone", "--quiet", "--no-hardlinks", str(REPO_ROOT), str(repo)],
@@ -263,6 +263,80 @@ def cloned_repo(tmp_path_factory) -> Path:
     )
     _git(repo, "config", "user.email", "sandbox@example.invalid")
     _git(repo, "config", "user.name", "Sandbox Probe")
+
+    tracked_patch = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        check=True,
+        timeout=300,
+    ).stdout
+    if tracked_patch:
+        subprocess.run(
+            ["git", "apply", "--binary", "-"],
+            cwd=str(repo),
+            input=tracked_patch,
+            capture_output=True,
+            check=True,
+            timeout=300,
+        )
+
+    untracked_output = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    copied_untracked_sources: list[Path] = []
+    allowed_roots = {"rag", "tests", "scripts"}
+    denied_parts = {".git", ".venv", "artifacts", "node_modules", "__pycache__"}
+    for raw_path in untracked_output.split(b"\0"):
+        if not raw_path:
+            continue
+        relative = Path(raw_path.decode("utf-8"))
+        if (
+            not relative.parts
+            or relative.parts[0] not in allowed_roots
+            or relative.suffix not in {".py", ".pyi"}
+            or any(part in denied_parts or part.startswith(".env") for part in relative.parts)
+        ):
+            continue
+        source = REPO_ROOT / relative
+        if source.is_symlink() or not source.is_file():
+            continue
+        if not source.resolve().is_relative_to(REPO_ROOT.resolve()):
+            continue
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied_untracked_sources.append(relative)
+
+    changed_paths = subprocess.run(
+        ["git", "diff", "--name-only", "-z", "HEAD", "--", "rag"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    for raw_path in changed_paths.split(b"\0"):
+        if not raw_path:
+            continue
+        relative = Path(raw_path.decode("utf-8"))
+        source = REPO_ROOT / relative
+        if source.is_file() and source.suffix == ".py":
+            assert (repo / relative).read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    for relative in copied_untracked_sources:
+        assert (repo / relative).read_text(encoding="utf-8") == (
+            REPO_ROOT / relative
+        ).read_text(encoding="utf-8")
+
+    _git(repo, "add", "-A")
+    if subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=str(repo), check=False
+    ).returncode != 0:
+        _git(repo, "commit", "--quiet", "-m", "sandbox working-tree snapshot")
+    assert is_clean(repo)
     return repo
 
 

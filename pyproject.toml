@@ -33,8 +33,10 @@ dependencies = [
     "xlrd>=2.0,<3",
     "py7zr>=1.0,<2",
     "rarfile>=4.2,<5",
-    "llama-index-core>=0.14.23,<0.15",
+    "llama-index-workflows>=2.23.2,<3",
     "typesafe-sdk>=0.7,<0.8",
+    "markdown-it-py>=4,<5",
+    "portalocker>=3.2,<4",
 ]
 
 [project.optional-dependencies]

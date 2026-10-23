@@ -857,8 +857,8 @@ def get_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> dict:
     store = _open_candidate_store()
     if store is None:
         raise HTTPException(status_code=404, detail="观测数据库不存在")
-    _reconcile_rollout(store)
     row = _require_candidate(store, candidate_id)
+    _reconcile_rollout(store)
     payload = _serialize_candidate(row, canary_percent=rollout.percent_for(candidate_id))
     payload["gate_log"] = [_serialize_gate_entry(entry) for entry in row["gate_log"]]
     payload["audit"] = [
@@ -946,7 +946,10 @@ def canary_candidate(
             for candidate in store.list_candidates(
                 status=EvolutionStatus.CANARY.value, limit=MAX_CANDIDATE_ROWS
             )
-            if candidate["id"] != candidate_id
+            if (
+                candidate["id"] != candidate_id
+                and candidate["artifact_type"] == QUESTION_SET_ARTIFACT_TYPE
+            )
         ]
         if live:
             raise HTTPException(
@@ -1620,23 +1623,26 @@ def remediate_gap_ticket_wiki(
     service = GapRemediationService(trace_store=store, wiki_store=wiki_store)
 
     try:
-        link_res = service.link_ticket_to_wiki(
-            ticket_id=ticket_id,
-            page_id=body.page_id,
-            author_id=user.get("username"),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            link_res = service.link_ticket_to_wiki(
+                ticket_id=ticket_id,
+                page_id=body.page_id,
+                author_id=user.get("username"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    recheck_res = None
-    if body.auto_recheck:
-        recheck_res = service.recheck_ticket(ticket_id=ticket_id)
+        recheck_res = None
+        if body.auto_recheck:
+            recheck_res = service.recheck_ticket(ticket_id=ticket_id)
 
-    return {
-        "ticket_id": ticket_id,
-        "remediation": link_res["remediation"],
-        "recheck": recheck_res,
-    }
+        return {
+            "ticket_id": ticket_id,
+            "remediation": link_res["remediation"],
+            "recheck": recheck_res,
+        }
+    finally:
+        service.close()
 
 
 @router.get("/gap-tickets/{ticket_id}/remediation", summary="获取工单关联的补录资产详情")
@@ -1654,10 +1660,13 @@ def get_gap_ticket_remediation(
     wiki_store = get_wiki_store()
     service = GapRemediationService(trace_store=store, wiki_store=wiki_store)
 
-    detail = service.get_ticket_remediation(ticket_id)
-    if not detail:
-        raise HTTPException(status_code=404, detail="未找到关联资产信息")
-    return detail
+    try:
+        detail = service.get_ticket_remediation(ticket_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail="未找到关联资产信息")
+        return detail
+    finally:
+        service.close()
 
 
 class ApplyRequest(BaseModel):
@@ -1687,10 +1696,21 @@ def _apply_lease():
     a CLI or a second API process is refused the same way.
     """
     from rag.evolution.host_lock import HostLocked, host_measurement_lock
-    from rag.evolution.service_control import apply_lock_path
+    from rag.evolution.service_control import apply_lock_path, operation_marker_path
 
     try:
         with host_measurement_lock(apply_lock_path(REPO_ROOT)):
+            marker = operation_marker_path(REPO_ROOT)
+            if marker.exists():
+                try:
+                    pending = json.loads(marker.read_text(encoding="utf-8"))
+                    detail = (
+                        f"上一操作 #{pending.get('candidate_id')} 尚未完成；"
+                        f"请先检查 {pending.get('patch_file')} 与运维日志"
+                    )
+                except (OSError, json.JSONDecodeError):
+                    detail = f"上一操作结果未确认；请检查 {marker} 与运维日志"
+                raise HTTPException(status_code=409, detail=detail)
             yield
     except HostLocked as error:
         raise HTTPException(
@@ -1715,9 +1735,10 @@ def apply_code_candidate(
     operations are serialized with every other apply/rollback, and the restart helper inherits the
     same lease so a second apply cannot start while the process is being swapped.
 
-    The outcome is returned in the response and appended to ``artifacts/service-control.log``. The
-    evolution audit table is deliberately not used: its action column is CHECK-constrained to the
-    three diagnosis decisions, and rebuilding a table to record an operational event is not worth it.
+    The outcome is returned in the response and detailed diagnostics are appended to
+    ``artifacts/service-control.log``. Candidate status transitions use the candidate lifecycle
+    audit; operational diagnostics remain in the service-control log because the diagnosis audit
+    has a separate, constrained action vocabulary.
     """
     store = _open_candidate_store()
     if store is None:
@@ -1734,9 +1755,11 @@ def _apply_code_candidate_locked(
     The preconditions are read **after** the lease is taken, so the state this run acts on cannot be
     changed by another apply between the read and the write.
     """
-    from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
         apply_patch,
+        arm_operation_marker,
+        clear_operation_marker,
+        create_operation_artifact,
         import_smoke,
         log_line,
         patch_state,
@@ -1744,6 +1767,7 @@ def _apply_code_candidate_locked(
         run_target_tests,
         service_log_path,
         spawn_restart_helper,
+        verify_operation_artifact,
     )
 
     row = _require_candidate(store, candidate_id)
@@ -1770,10 +1794,38 @@ def _apply_code_candidate_locked(
 
     steps: dict = {"patch_state": state}
     applied_now = state == "not_applied"
+    operation = None
+    if payload.restart:
+        try:
+            operation = create_operation_artifact(
+                REPO_ROOT,
+                diff,
+                candidate_id=int(row["id"]),
+                database_path=settings.evolution_db_path,
+                direction="apply",
+                expected_status=EvolutionStatus.CANARY.value,
+                compensation_status=EvolutionStatus.ROLLED_BACK.value,
+                actor_id=str(user["id"]),
+                applied_now=applied_now,
+            )
+        except OSError as error:
+            raise HTTPException(
+                status_code=500, detail="重启操作快照创建失败；工作树未修改"
+            ) from error
+        if not verify_operation_artifact(operation):
+            raise HTTPException(status_code=500, detail="补丁快照校验失败；未修改工作树")
     if applied_now:
         try:
             apply_patch(REPO_ROOT, diff)
-        except RuntimeError as error:
+        except Exception as error:
+            if patch_state(REPO_ROOT, diff) == "applied":
+                try:
+                    revert_patch(REPO_ROOT, diff)
+                except Exception as revert_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"应用异常且补偿失败：{revert_error}（需人工检查工作树）",
+                    ) from revert_error
             raise HTTPException(status_code=409, detail=str(error)) from error
 
     def _revert_and_refuse(reason: str, detail: str, status_code: int = 409) -> None:
@@ -1783,19 +1835,29 @@ def _apply_code_candidate_locked(
                 log_line(
                     service_log_path(REPO_ROOT), f"candidate {candidate_id}: reverted ({reason})"
                 )
-            except RuntimeError as revert_error:  # pragma: no cover - needs a broken tree
+            except Exception as revert_error:
                 raise HTTPException(
                     status_code=500,
                     detail=f"{reason}；且回滚也失败：{revert_error}（需要人工处理）",
                 ) from revert_error
         raise HTTPException(status_code=status_code, detail=detail)
 
-    smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    try:
+        smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    except Exception as error:
+        _revert_and_refuse(
+            "import_smoke", f"导入检查异常：{type(error).__name__}；已把补丁放回", 500
+        )
     steps["import_smoke"] = smoke_ok
     if not smoke_ok:
         _revert_and_refuse("import_smoke", f"应然后无法导入：{smoke_why}")
 
-    tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    try:
+        tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    except Exception as error:
+        _revert_and_refuse(
+            "target_tests", f"目标测试异常：{type(error).__name__}；已把补丁放回", 500
+        )
     steps["target_tests"] = tests_ok
     if not tests_ok:
         _revert_and_refuse("target_tests", f"目标测试未通过：{tests_why}")
@@ -1806,30 +1868,78 @@ def _apply_code_candidate_locked(
     # 落地、哪些还没，而 `_clusters_with_open_candidates` 正是按状态判断"这个聚类还有没有未决"。
     # rolled_back 侧也是同一个坑的另一面：回滚若不先写 canary，状态就到不了 rolled_back。
     if row["status"] != EvolutionStatus.CANARY.value:
-        store.advance_candidate(
-            candidate_id,
-            EvolutionStatus.CANARY.value,
-            actor_id=str(user["id"]),
-            note=f"应用前置：补丁已进入工作树，状态与事实对齐（进入观察）｜{payload.note}".strip("｜"),
-        )
+        try:
+            store.advance_candidate(
+                candidate_id,
+                EvolutionStatus.CANARY.value,
+                actor_id=str(user["id"]),
+                note=f"应用前置：补丁已进入工作树，状态与事实对齐（进入观察）｜{payload.note}".strip("｜"),
+            )
+        except Exception as error:
+            if applied_now:
+                try:
+                    revert_patch(REPO_ROOT, diff)
+                except Exception as revert_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"候选状态写入失败且补丁补偿失败：{revert_error}（需人工检查工作树）",
+                    ) from revert_error
+            raise HTTPException(status_code=500, detail="候选状态写入失败；补丁已补偿") from error
     # 无论刚才有没有写、状态都是 canary：调用方据此知道"这一条现在说的是事实"。
     steps["status_after_apply"] = EvolutionStatus.CANARY.value
 
     restart_path = ""
     if payload.restart:
-        restart_path = str(
-            spawn_restart_helper(
-                repo_root=REPO_ROOT,
-                patch_file=_patch_export_path(int(row["id"])),
-                candidate_id=int(row["id"]),
-                test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
-                # 助手必须能停掉**当前**服务（否则端口一直被占，新代码永远起不来）。
-                service_pid=os.getpid(),
+        assert operation is not None
+        marker_armed = False
+        try:
+            arm_operation_marker(operation)
+            marker_armed = True
+            restart_path = str(
+                spawn_restart_helper(
+                    repo_root=REPO_ROOT,
+                    patch_file=operation["patch_file"],
+                    candidate_id=int(row["id"]),
+                    test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
+                    service_pid=os.getpid(),
+                    operation=operation,
+                )
             )
-        )
+        except Exception as error:
+            try:
+                if applied_now:
+                    if not verify_operation_artifact(operation):
+                        raise RuntimeError("operation patch snapshot hash mismatch")
+                    operation_diff = Path(operation["patch_file"]).read_text(encoding="utf-8")
+                    revert_patch(REPO_ROOT, operation_diff)
+                    store.advance_candidate(
+                        candidate_id,
+                        EvolutionStatus.ROLLED_BACK.value,
+                        actor_id=str(user["id"]),
+                        note=f"启动重启助手失败后已补偿应用｜operation={operation['operation_id']}",
+                    )
+                if marker_armed:
+                    clear_operation_marker(operation["marker_path"], operation["operation_id"])
+            except Exception as compensate_error:
+                log_line(
+                    service_log_path(REPO_ROOT),
+                    f"candidate {candidate_id}: helper launch failed and compensation failed; "
+                    f"operation={operation['operation_id']} artifact={operation['patch_file']} "
+                    f"error={type(compensate_error).__name__}: {compensate_error}",
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"重启助手启动失败且补偿未完成；操作标记保留：{operation['marker_path']}",
+                ) from compensate_error
+            raise HTTPException(
+                status_code=500,
+                detail=f"重启助手未启动；补丁已补偿，operation={operation['operation_id']}",
+            ) from error
         steps["restart_requested"] = True
+        steps["operation_status"] = "pending_restart_health_check"
     else:
         steps["restart_requested"] = False
+        steps["operation_status"] = "applied"
         steps["warning"] = "未请求重启 ⇒ 全量测试没有跑；请自行确认后再上线"
 
     log_line(
@@ -1914,9 +2024,11 @@ def _rollback_code_candidate_locked(
     store: CandidateStore, candidate_id: int, payload: RollbackRequest, user: dict
 ) -> dict:
     """The rollback body, run inside the lease (preconditions read under it)."""
-    from rag.evolution.models import EvolutionStatus
     from rag.evolution.service_control import (
         apply_patch,
+        arm_operation_marker,
+        clear_operation_marker,
+        create_operation_artifact,
         import_smoke,
         log_line,
         patch_is_committed,
@@ -1926,6 +2038,7 @@ def _rollback_code_candidate_locked(
         run_target_tests,
         service_log_path,
         spawn_restart_helper,
+        verify_operation_artifact,
     )
 
     row = _require_candidate(store, candidate_id)
@@ -1959,6 +2072,26 @@ def _rollback_code_candidate_locked(
         )
 
     steps: dict = {"patch_state": state}
+    operation = None
+    if payload.restart:
+        try:
+            operation = create_operation_artifact(
+                REPO_ROOT,
+                diff,
+                candidate_id=int(row["id"]),
+                database_path=settings.evolution_db_path,
+                direction="revert",
+                expected_status=EvolutionStatus.CANARY.value,
+                compensation_status=EvolutionStatus.CANARY.value,
+                actor_id=str(user["id"]),
+                applied_now=False,
+            )
+        except OSError as error:
+            raise HTTPException(
+                status_code=500, detail="回滚操作快照创建失败；工作树未修改"
+            ) from error
+        if not verify_operation_artifact(operation):
+            raise HTTPException(status_code=500, detail="补丁快照校验失败；未修改工作树")
     # 状态先与事实对齐：补丁是**已应用**的，那就是"已上线、在观察"。这一步也让 canary → rolled_back
     # 成为合法转移（approved_for_canary 不能直接到 rolled_back）。
     if row["status"] != EvolutionStatus.CANARY.value:
@@ -1971,7 +2104,20 @@ def _rollback_code_candidate_locked(
 
     try:
         revert_patch(REPO_ROOT, diff)
-    except RuntimeError as error:
+    except Exception as error:
+        if patch_state(REPO_ROOT, diff) == "not_applied":
+            try:
+                apply_patch(REPO_ROOT, diff)
+            except Exception as restore_error:
+                log_line(
+                    service_log_path(REPO_ROOT),
+                    f"candidate {candidate_id}: reverse patch failed after tree change; "
+                    f"restore failed: {type(restore_error).__name__}: {restore_error}",
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"反向应用异常且补丁恢复失败：{restore_error}（需人工检查工作树）",
+                ) from restore_error
         raise HTTPException(status_code=409, detail=str(error)) from error
 
     def _restore_and_refuse(reason: str, detail: str, status_code: int = 409) -> None:
@@ -1981,46 +2127,95 @@ def _rollback_code_candidate_locked(
                 service_log_path(REPO_ROOT),
                 f"candidate {candidate_id}: rollback refused, patch put back ({reason})",
             )
-        except RuntimeError as restore_error:  # pragma: no cover - needs a broken tree
+        except Exception as restore_error:
             raise HTTPException(
                 status_code=500,
                 detail=f"{reason}；且恢复补丁也失败：{restore_error}（需要人工处理）",
             ) from restore_error
         raise HTTPException(status_code=status_code, detail=detail)
 
-    smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    try:
+        smoke_ok, smoke_why = import_smoke(REPO_ROOT)
+    except Exception as error:
+        _restore_and_refuse("import_smoke", f"导入检查异常：{type(error).__name__}；已把补丁放回", 500)
     steps["import_smoke"] = smoke_ok
     if not smoke_ok:
         _restore_and_refuse("import_smoke", f"回滚之后无法导入：{smoke_why}；已把补丁放回")
 
-    tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    try:
+        tests_ok, tests_why = run_target_tests(REPO_ROOT, tuple(row.get("test_paths") or ()))
+    except Exception as error:
+        _restore_and_refuse("target_tests", f"目标测试异常：{type(error).__name__}；已把补丁放回", 500)
     steps["target_tests"] = tests_ok
     if not tests_ok:
         _restore_and_refuse("target_tests", f"回滚之后目标测试未通过：{tests_why}；已把补丁放回")
 
-    updated = store.advance_candidate(
-        candidate_id,
-        EvolutionStatus.ROLLED_BACK.value,
-        actor_id=str(user["id"]),
-        note=f"回滚：反向应用 + 目标测试通过｜{payload.note}".strip("｜"),
-    )
-
     restart_path = ""
     if payload.restart:
-        restart_path = str(
-            spawn_restart_helper(
-                repo_root=REPO_ROOT,
-                patch_file=_patch_export_path(int(row["id"])),
-                candidate_id=int(row["id"]),
-                test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
-                service_pid=os.getpid(),
-                direction="revert",
+        assert operation is not None
+        marker_armed = False
+        try:
+            arm_operation_marker(operation)
+            marker_armed = True
+            restart_path = str(
+                spawn_restart_helper(
+                    repo_root=REPO_ROOT,
+                    patch_file=operation["patch_file"],
+                    candidate_id=int(row["id"]),
+                    test_scope=str(getattr(settings, "evolution_apply_test_scope", "full") or "full"),
+                    service_pid=os.getpid(),
+                    direction="revert",
+                    operation={**operation, "success_status": EvolutionStatus.ROLLED_BACK.value},
+                )
             )
-        )
+        except Exception as error:
+            try:
+                if not verify_operation_artifact(operation):
+                    raise RuntimeError("operation patch snapshot hash mismatch")
+                operation_diff = Path(operation["patch_file"]).read_text(encoding="utf-8")
+                apply_patch(REPO_ROOT, operation_diff)
+                if marker_armed:
+                    clear_operation_marker(operation["marker_path"], operation["operation_id"])
+            except Exception as compensate_error:
+                log_line(
+                    service_log_path(REPO_ROOT),
+                    f"candidate {candidate_id}: helper launch failed and patch restore failed; "
+                    f"operation={operation['operation_id']} artifact={operation['patch_file']} "
+                    f"error={type(compensate_error).__name__}: {compensate_error}",
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"重启助手启动失败且补丁恢复失败；操作标记保留：{operation['marker_path']}",
+                ) from compensate_error
+            raise HTTPException(
+                status_code=500,
+                detail=f"重启助手未启动；补丁已放回观察状态，operation={operation['operation_id']}",
+            ) from error
         steps["restart_requested"] = True
+        steps["operation_status"] = "pending_restart_health_check"
+        steps["status_after_restart"] = EvolutionStatus.ROLLED_BACK.value
+        final_status = EvolutionStatus.CANARY.value
     else:
+        try:
+            updated = store.advance_candidate(
+                candidate_id,
+                EvolutionStatus.ROLLED_BACK.value,
+                actor_id=str(user["id"]),
+                note=f"回滚：反向应用 + 目标测试通过｜{payload.note}".strip("｜"),
+            )
+        except Exception as error:
+            try:
+                apply_patch(REPO_ROOT, diff)
+            except Exception as compensate_error:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"状态记录失败且补丁恢复失败：{compensate_error}（需人工检查工作树）",
+                ) from compensate_error
+            raise HTTPException(status_code=500, detail="状态记录失败；补丁已放回") from error
         steps["restart_requested"] = False
+        steps["operation_status"] = "rolled_back"
         steps["warning"] = "未请求重启 ⇒ 全量测试没有跑，运行中的服务仍是旧代码"
+        final_status = updated["status"] if isinstance(updated, dict) else EvolutionStatus.ROLLED_BACK.value
 
     log_line(
         service_log_path(REPO_ROOT),
@@ -2029,7 +2224,7 @@ def _rollback_code_candidate_locked(
     )
     return {
         "reverted": True,
-        "status": updated["status"] if isinstance(updated, dict) else EvolutionStatus.ROLLED_BACK.value,
+        "status": final_status,
         "steps": steps,
         "restart_helper": restart_path,
         "revert_command": _revert_command(int(row["id"])),
@@ -2245,6 +2440,13 @@ def regenerate_code_candidate(
 def decide_code_candidate(
     candidate_id: int, payload: CodePatchDecision, user: dict = Depends(_admin_user)
 ) -> dict:
+    with _apply_lease():
+        return _decide_code_candidate_locked(candidate_id, payload, user)
+
+
+def _decide_code_candidate_locked(
+    candidate_id: int, payload: CodePatchDecision, user: dict
+) -> dict:
     """Layer 4 for a code patch: one audited administrator decision.
 
     The order is fixed and it is what makes the trail truthful. An unknown action
@@ -2278,6 +2480,11 @@ def decide_code_candidate(
     if row["artifact_type"] != CODE_PATCH_ARTIFACT_TYPE:
         raise HTTPException(status_code=404, detail="候选不存在")
     new_status = target["new_status"]
+    if payload.action != "close_out_merged" and row["status"] != EvolutionStatus.AWAITING_VERIFICATION.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"补丁状态 {row['status']} 不允许 {payload.action}（仅待审核候选可决策）",
+        )
     if new_status not in EVOLUTION_TRANSITIONS.get(row["status"], ()):
         # Checked here as well as inside the store so the 409 leaves no trace:
         # a rejected decision must not be able to write an audit row.
@@ -2326,8 +2533,10 @@ def rollback_candidate(candidate_id: int, user: dict = Depends(_admin_user)) -> 
     store = _open_candidate_store()
     if store is None:
         raise HTTPException(status_code=404, detail="观测数据库不存在")
-    _reconcile_rollout(store)
     row = _require_candidate(store, candidate_id)
+    if row["artifact_type"] != "jev_question_set":
+        raise HTTPException(status_code=404, detail="候选不存在")
+    _reconcile_rollout(store)
     if row["status"] == EvolutionStatus.ROLLED_BACK.value:
         # Idempotent: the registration is already gone and the percentage is 0.
         rollout.deactivate(candidate_id)

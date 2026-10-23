@@ -57,7 +57,7 @@ class UserDB:
             self.db_path = str(connection_manager.db_path)
         else:
             if db_path is None:
-                db_path = str(settings.user_db_path)
+                db_path = str(settings.users_db_path)
             self.db_path = str(db_path)
             self.cm = ConnectionManager(self.db_path, busy_timeout_ms=30000, timeout=30.0)
 

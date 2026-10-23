@@ -221,10 +221,17 @@ def isolated_service_control_log(tmp_path_factory, monkeypatch):
     one place that decides the destination, so pointing it at a temp directory covers every writer:
     the endpoints, ``spawn_restart_helper`` and the detached helper's own ``log`` entry.
     """
+    import rag.evolution.api as evolution_api
     import rag.evolution.service_control as control
 
     sandbox = tmp_path_factory.mktemp("service-control-log")
+    default_export_dir = evolution_api.PATCH_EXPORT_DIR
     monkeypatch.setattr(control, "service_log_path", lambda repo_root: sandbox / control.LOG_NAME)
+    # Patch exports are addressed through PATCH_EXPORT_DIR while the copy commands retain their
+    # production-relative form. Keep each test's files private so a prior approval cannot change
+    # the exported flag observed by a later candidate-detail test.
+    monkeypatch.setattr(evolution_api, "PATCH_EXPORT_DIR", sandbox / "patches")
+    return default_export_dir
 
 
 @pytest.fixture(autouse=True)

@@ -229,8 +229,7 @@ def delete_page(
     db = get_user_db(request)
     require_kb_edit(db, page.kb_id, user)
 
-    indexer.delete_page(page_id, kb_id=page.kb_id, title=page.title)
-    deleted = store.delete_page(page_id)
+    deleted = indexer.delete_page_and_index(page_id)
     return {"deleted": deleted, "id": page_id}
 
 

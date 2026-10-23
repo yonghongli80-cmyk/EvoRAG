@@ -575,12 +575,28 @@ def _regenerate_fixture(isolated_api, make_user):
 
 def _link_answer_to_kb(db: UserDB, message_id: int, kb_id: str, owner_id: int) -> int:
     document_id = db.create_document_permission("policy.pdf", kb_id, owner_id)
+    document_version_id = db.create_document_version(
+        document_id, "policy.pdf", "unused", "policy-hash", owner_id
+    )
     with db.locked_transaction() as conn:
         conn.execute(
             "INSERT INTO answer_citations "
             "(assistant_message_id, document_id, document_version_id, chunk_index, "
-            "section_title, text_preview, rank, is_historical) VALUES(?,?,?,?,?,?,?,?)",
-            (message_id, document_id, 1, 0, "", "", 0, 1),
+            "section_title, text_preview, rank, is_historical, source_kind, kb_id, source_name) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                message_id,
+                document_id,
+                document_version_id,
+                0,
+                "",
+                "",
+                0,
+                1,
+                "document",
+                kb_id,
+                "policy.pdf",
+            ),
         )
     return document_id
 
@@ -685,6 +701,13 @@ def test_regenerate_invalidates_stale_reliability_without_a_new_assessment(
             "WHERE id = ?",
             (message_id,),
         )
+        conn.execute(
+            "INSERT INTO answer_citations "
+            "(assistant_message_id, document_id, document_version_id, chunk_index, "
+                "section_title, text_preview, rank, is_historical, source_kind, kb_id, source_name) "
+                "VALUES(?, 999, 999, 0, '', 'stale source', 0, 0, 'document', 'rag_docs', 'stale.pdf')",
+            (message_id,),
+        )
     pipeline = _FakePipeline(
         {
             "route": "rag",
@@ -708,3 +731,5 @@ def test_regenerate_invalidates_stale_reliability_without_a_new_assessment(
     reliability = db.get_message_reliability(message_id, owner["id"])
     assert reliability["confidence_level"] == "unavailable"
     assert reliability["confidence_reasons"] == []
+    assert db.get_answer_citations(message_id) == []
+    assert response.json()["sources"] == []

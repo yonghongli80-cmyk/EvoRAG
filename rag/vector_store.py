@@ -320,7 +320,10 @@ def add_to_collection(
     with _write_lock.write():
         client = _get_client()
         if not client.collection_exists(collection_name):
-            raise ValueError(f"集合 {collection_name} 不存在，请先创建知识库")
+            if collection_name == COLLECTION_NAME:
+                _ensure_collection()
+            else:
+                raise ValueError(f"集合 {collection_name} 不存在，请先创建知识库")
         versioned_write = document_version_id is not None or any(
             chunk.document_version_id is not None for chunk in chunks
         )

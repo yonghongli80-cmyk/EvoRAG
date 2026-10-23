@@ -12,19 +12,22 @@ for the port to free, starts the service the same way the operator does, polls `
 the service does not come back — reverts the patch and starts it again, so a bad deployment ends with
 the previous code running rather than with nothing running.
 
-Everything it learns is logged to ``artifacts/service-control.log``. The evolution audit table is not
-used: its action column is CHECK-constrained to the three diagnosis decisions, and rebuilding a table
-to record an operational event is not worth it.
+Operational diagnostics are logged to ``artifacts/service-control.log``. Candidate status changes
+are also recorded through the candidate store's checked lifecycle transition and audit transaction;
+the separate diagnosis audit retains its constrained action vocabulary.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 #: Where the helper appends what it did, next to the exported patches it acts on.
@@ -50,8 +53,9 @@ def service_log_path(repo_root: str | Path) -> Path:
 
 
 #: The apply/rollback lease (C-11, 2026-10-22). One file next to the operational log, created with
-#: the same atomic ``O_CREAT | O_EXCL`` protocol as the host A/B lock (:mod:`rag.evolution.host_lock`).
+#: the same OS-backed lease abstraction as the host A/B lock (:mod:`rag.evolution.host_lock`).
 LOCK_NAME = "evolution-apply.lock"
+OPERATION_MARKER_NAME = "evolution-apply.pending.json"
 
 #: How long the detached restart helper waits for the request that spawned it to release the lease.
 #: The request holds it until its response is built, so a few seconds is the normal case; the wait
@@ -69,6 +73,78 @@ def apply_lock_path(repo_root: str | Path) -> Path:
     ``artifacts/`` directory.
     """
     return service_log_path(repo_root).parent / LOCK_NAME
+
+
+def operation_marker_path(repo_root: str | Path) -> Path:
+    """Reservation that closes the API-release/helper-acquire lease handoff gap."""
+    return service_log_path(repo_root).parent / OPERATION_MARKER_NAME
+
+
+def create_operation_artifact(
+    repo_root: str | Path,
+    diff: str,
+    *,
+    candidate_id: int,
+    database_path: str | Path,
+    direction: str,
+    expected_status: str,
+    compensation_status: str,
+    actor_id: str,
+    applied_now: bool,
+) -> dict:
+    """Persist an operation-specific patch snapshot and the metadata its helper must verify."""
+    operation_id = uuid.uuid4().hex
+    directory = service_log_path(repo_root).parent / "evolution-operations"
+    directory.mkdir(parents=True, exist_ok=True)
+    snapshot = directory / f"candidate-{int(candidate_id)}-{operation_id}.patch"
+    content = str(diff).encode("utf-8")
+    with snapshot.open("xb") as handle:
+        handle.write(content)
+    with contextlib.suppress(OSError):
+        snapshot.chmod(0o444)
+    return {
+        "operation_id": operation_id,
+        "candidate_id": int(candidate_id),
+        "patch_file": str(snapshot),
+        "patch_sha256": hashlib.sha256(content).hexdigest(),
+        "database_path": str(Path(database_path).resolve()),
+        "direction": "revert" if direction == "revert" else "apply",
+        "expected_status": str(expected_status),
+        "compensation_status": str(compensation_status),
+        "actor_id": str(actor_id),
+        "applied_now": bool(applied_now),
+        "marker_path": str(operation_marker_path(repo_root)),
+    }
+
+
+def verify_operation_artifact(operation: dict) -> bool:
+    """Verify that the helper's exact patch snapshot is still the one authorized."""
+    try:
+        content = Path(operation["patch_file"]).read_bytes()
+    except (OSError, KeyError, TypeError):
+        return False
+    return hashlib.sha256(content).hexdigest() == operation.get("patch_sha256")
+
+
+def arm_operation_marker(operation: dict) -> None:
+    """Reserve the lease handoff; an existing marker requires operator recovery."""
+    path = Path(operation["marker_path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(operation, handle, ensure_ascii=False, sort_keys=True)
+
+
+def clear_operation_marker(marker_path: str | Path, operation_id: str) -> bool:
+    """Remove only this operation's reservation, never another operation's marker."""
+    path = Path(marker_path)
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if marker.get("operation_id") != operation_id:
+        return False
+    path.unlink()
+    return True
 
 
 class _HeldLease:
@@ -317,6 +393,7 @@ def log_line(log_path: str | Path, message: str) -> None:
 HELPER_SOURCE = '''\
 """Restart the service after an approved patch, and undo it if the service does not come back."""
 import json
+import hashlib
 import os
 import signal
 import socket
@@ -380,17 +457,19 @@ def stop_service():
     """
     pid = int(COMMAND.get("service_pid") or 0)
     if not pid or pid == os.getpid():
-        return
+        return True
     time.sleep(int(COMMAND.get("grace", 3)))
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as error:
         log(f"could not stop pid {pid}: {type(error).__name__}")
-        return
+        return False
     deadline = time.time() + 30
     while time.time() < deadline and not port_free():
         time.sleep(1)
-    log(f"stopped service pid {pid}")
+    stopped = port_free()
+    log(f"stopped service pid {pid}" if stopped else f"service pid {pid} did not release the port")
+    return stopped
 
 
 def undo():
@@ -406,6 +485,66 @@ def undo():
     args.append(COMMAND["patch_file"])
     result = subprocess.run(args, capture_output=True, text=True)
     log(f"undo ({'re-applied' if reapply else 'reverted'}): exit {result.returncode}")
+    return result.returncode == 0
+
+
+def advance_candidate_status(status, note):
+    """Use the candidate store's checked transition and audit transaction."""
+    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.store import FailureTraceStore
+
+    trace_store = FailureTraceStore(COMMAND["database_path"])
+    try:
+        candidates = CandidateStore(trace_store)
+        candidate = candidates.get_candidate(int(COMMAND["candidate_id"]))
+        expected_current = str(COMMAND["expected_status"])
+        if candidate is None or candidate["status"] != expected_current:
+            got = None if candidate is None else candidate["status"]
+            log(f"candidate status mismatch: expected {expected_current}, got {got}")
+            return False
+        candidates.advance_candidate(
+            int(COMMAND["candidate_id"]), str(status),
+            actor_id=str(COMMAND["actor_id"]), note=note,
+        )
+        return True
+    except Exception as error:
+        log(f"candidate lifecycle update failed: {type(error).__name__}: {error}")
+        return False
+    finally:
+        trace_store.close()
+
+
+def record_compensation():
+    if COMMAND.get("direction") != "apply" or not COMMAND.get("applied_now"):
+        return True
+    return advance_candidate_status(
+        COMMAND["compensation_status"],
+        f"helper补偿：应用失败后已反向应用补丁（operation={COMMAND['operation_id']}）",
+    )
+
+
+def record_success():
+    status = COMMAND.get("success_status")
+    if not status:
+        return True
+    return advance_candidate_status(
+        status,
+        f"helper完成：补丁操作及服务健康检查成功（operation={COMMAND['operation_id']}）",
+    )
+
+
+def compensate_and_report(reason):
+    if COMMAND.get("direction") != "revert" and not COMMAND.get("applied_now"):
+        log(f"{reason}; patch predates this operation, leaving it untouched")
+        return True
+    log(f"{reason}; restoring the pre-operation tree")
+    if not undo():
+        log("compensation failed; operation marker retained and no restart will follow")
+        return False
+    if not record_compensation():
+        log("tree restored but candidate state could not be reconciled; marker retained")
+        return False
+    return True
 
 
 def full_suite_passes():
@@ -438,7 +577,27 @@ def main():
         log("another apply/rollback still holds the lease; not restarting")
         return
     try:
-        run()
+        marker_path = Path(COMMAND["marker_path"])
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            digest = hashlib.sha256(Path(COMMAND["patch_file"]).read_bytes()).hexdigest()
+        except (OSError, json.JSONDecodeError) as error:
+            log(f"operation artifact unavailable: {type(error).__name__}; marker retained")
+            return
+        if marker.get("operation_id") != COMMAND.get("operation_id"):
+            log("operation marker belongs to another operation; no action taken")
+            return
+        if digest != COMMAND.get("patch_sha256") or digest != marker.get("patch_sha256"):
+            log("operation patch snapshot hash mismatch; marker retained for manual recovery")
+            return
+        if run():
+            try:
+                marker_path.unlink()
+                log("operation completed; lease handoff marker cleared")
+            except OSError as error:
+                log(f"operation completed but marker could not be cleared: {type(error).__name__}")
+        else:
+            log("operation outcome uncertain; marker retained; inspect operation artifact before retry")
     finally:
         lease.release()
 
@@ -446,43 +605,65 @@ def main():
 def run():
     if COMMAND.get("test_scope") == "full" and not full_suite_passes():
         log("full suite failed; undoing this run's change and NOT restarting")
-        undo()
-        return
-    stop_service()
+        return compensate_and_report("full suite failed")
+    if not stop_service():
+        log("service could not be stopped; no restart will follow")
+        return False
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
         time.sleep(1)
     if not port_free():
-        log("port never freed; not starting anything")
-        return
-    start()
+        if not compensate_and_report("port never freed"):
+            return False
+        return restart_previous_service()
+    try:
+        start()
+    except Exception as error:
+        if not compensate_and_report(f"service could not start: {type(error).__name__}"):
+            return False
+        return restart_previous_service()
     deadline = time.time() + int(COMMAND["timeout"])
     while time.time() < deadline:
         if healthy():
             log("service healthy after restart")
-            return
+            if record_success():
+                return True
+            log("service is healthy but candidate status was not finalized; marker retained")
+            return False
         time.sleep(2)
     log("service did not become healthy; undoing this run's change and restarting")
     # 先结束**自己刚拉起**的那个进程（否则端口被它占着，回滚后的新实例起不来）。
     started = STARTED.get("process")
     if started is not None and started.poll() is None:
-        started.terminate()
         try:
+            started.terminate()
             started.wait(timeout=20)
-        except Exception:
-            pass
-    undo()
+        except Exception as error:
+            log(f"new service process could not be stopped: {type(error).__name__}")
+            return False
+    if not compensate_and_report("service health check failed"):
+        return False
+    return restart_previous_service()
+
+
+def restart_previous_service():
+    """Restore the pre-operation code and make a best effort to bring it back online."""
     deadline = time.time() + 60
     while time.time() < deadline and not port_free():
         time.sleep(1)
-    start()
+    try:
+        start()
+    except Exception as error:
+        log(f"previous service could not restart: {type(error).__name__}")
+        return False
     deadline = time.time() + int(COMMAND["timeout"])
     while time.time() < deadline:
         if healthy():
             log("service healthy after rollback")
-            return
+            return True
         time.sleep(2)
     log("service still not healthy after rollback; a human is needed")
+    return False
 
 
 if __name__ == "__main__":
@@ -505,6 +686,7 @@ def spawn_restart_helper(
     grace_s: int = 3,
     direction: str = "apply",
     lock_wait_s: float = HELPER_LOCK_WAIT_S,
+    operation: dict | None = None,
 ) -> Path:
     """Write the helper to disk and start it detached; returns the helper's path.
 
@@ -515,7 +697,9 @@ def spawn_restart_helper(
     the helper waits (bounded by ``lock_wait_s``) instead of failing fast.
     """
     root = Path(repo_root)
-    helper = root / "artifacts" / f"restart-candidate-{int(candidate_id)}.py"
+    operation = dict(operation or {})
+    operation_id = str(operation.get("operation_id") or uuid.uuid4().hex)
+    helper = service_log_path(root).parent / f"restart-candidate-{int(candidate_id)}-{operation_id}.py"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(HELPER_SOURCE, encoding="utf-8")
     command = {
@@ -532,6 +716,15 @@ def spawn_restart_helper(
         "service_pid": int(service_pid if service_pid is not None else os.getpid()),
         # 这份助手是替哪一次动作善后的：apply ⇒ 失败时反向；revert ⇒ 失败时重新应用。
         "direction": "revert" if str(direction) == "revert" else "apply",
+        "operation_id": operation_id,
+        "patch_sha256": str(operation.get("patch_sha256") or ""),
+        "database_path": str(operation.get("database_path") or ""),
+        "expected_status": str(operation.get("expected_status") or ""),
+        "compensation_status": str(operation.get("compensation_status") or ""),
+        "success_status": str(operation.get("success_status") or ""),
+        "actor_id": str(operation.get("actor_id") or "system"),
+        "applied_now": bool(operation.get("applied_now", False)),
+        "marker_path": str(operation.get("marker_path") or ""),
         "grace": int(grace_s),
         "log": str(service_log_path(root)),
         # 继承应用请求的租约（C-11）：同一个文件，助手开工前先取到它。
@@ -559,17 +752,23 @@ def spawn_restart_helper(
 __all__ = [
     "HELPER_LOCK_WAIT_S",
     "LOCK_NAME",
+    "OPERATION_MARKER_NAME",
     "LOG_NAME",
     "LOG_DIR_ENV",
     "acquire_apply_lease",
     "apply_lock_path",
+    "arm_operation_marker",
     "apply_patch",
     "import_smoke",
     "log_line",
     "patch_state",
+    "operation_marker_path",
     "revert_patch",
     "run_full_suite",
     "run_target_tests",
     "service_log_path",
     "spawn_restart_helper",
+    "clear_operation_marker",
+    "create_operation_artifact",
+    "verify_operation_artifact",
 ]

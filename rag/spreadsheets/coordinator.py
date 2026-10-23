@@ -114,7 +114,7 @@ class SpreadsheetQueryCoordinator:
                 "structured query failed (%s, %s): %s", error_code, type(exc).__name__, exc
             )
             self._audit(user, dataset_ids, planning.plan.model_dump(), "failed", error_code, 0, started)
-            return self._remember(cache_key, SpreadsheetQueryOutcome("failed", error_code=error_code))
+            return SpreadsheetQueryOutcome("failed", error_code=error_code)
         facts = tuple(ComputedFact(f"{value.metric.column_key} {value.metric.function}", value.canonical) for value in result.values)
         if result.rows:
             facts = tuple(

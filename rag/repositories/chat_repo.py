@@ -345,6 +345,20 @@ class ChatRepository(BaseRepository):
             ).fetchone()
         return dict(row) if row else None
 
+    def resolve_legacy_citation_domain(
+        self, citation_id: int, source_kind: str, kb_id: str, source_name: str
+    ) -> bool:
+        """Persist a conservative legacy-source resolution once."""
+        if source_kind not in {"document", "wiki"}:
+            raise ValueError("source kind must be resolved")
+        with self.cm.transaction(immediate=True) as conn:
+            cursor = conn.execute(
+                "UPDATE answer_citations SET source_kind=?, kb_id=?, source_name=? "
+                "WHERE id=? AND source_kind='legacy'",
+                (source_kind, kb_id, source_name, citation_id),
+            )
+            return cursor.rowcount == 1
+
     def count_distinct_feedback_users(self, question_hash: str, days: int) -> int:
         cutoff = time.time() - days * 86400
         with self.cm.read_connection() as conn:
@@ -715,7 +729,8 @@ class ChatRepository(BaseRepository):
                     "SELECT DISTINCT u.username FROM feedback f "
                     "JOIN answer_citations c ON c.id = f.citation_id "
                     "JOIN users u ON u.id = f.user_id "
-                    "WHERE c.document_id = ? AND f.kind = 'outdated' AND f.created_at >= ?",
+                    "WHERE c.source_kind = 'document' AND c.document_id = ? "
+                    "AND f.kind = 'outdated' AND f.created_at >= ?",
                     (task["document_id"], cutoff),
                 ).fetchall()
             else:
@@ -805,8 +820,8 @@ class ChatRepository(BaseRepository):
             conn.execute(
                 "INSERT INTO answer_citations "
                 "(assistant_message_id, document_id, document_version_id, chunk_index, "
-                "section_title, text_preview, rank, is_historical) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "section_title, text_preview, rank, is_historical, source_kind, kb_id, source_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     assistant_message_id,
                     citation.document_id,
@@ -816,6 +831,9 @@ class ChatRepository(BaseRepository):
                     citation.text_preview,
                     citation.rank,
                     int(citation.is_historical),
+                    getattr(citation, "source_kind", "document"),
+                    getattr(citation, "kb_id", ""),
+                    getattr(citation, "source_name", ""),
                 ),
             )
 
@@ -869,20 +887,105 @@ class ChatRepository(BaseRepository):
             insert_cit_fn(message_id, citations)
             return message_id
 
+    def persist_exchange_with_citations(
+        self,
+        conversation_id: int,
+        question: str,
+        answer: str,
+        citations: list,
+        persistence_key: str,
+        *,
+        confidence_level: str = "unavailable",
+        confidence_reasons: tuple[str, ...] | list[str] = (),
+        answerability_kind: str = "answerable",
+    ) -> int:
+        """Persist one user/assistant exchange and its citations atomically."""
+        with self.cm.transaction(immediate=True):
+            self._insert_message_in_tx(conversation_id, "user", question)
+            return self.persist_assistant_answer_with_citations(
+                conversation_id,
+                answer,
+                citations,
+                persistence_key,
+                confidence_level=confidence_level,
+                confidence_reasons=confidence_reasons,
+                answerability_kind=answerability_kind,
+            )
+
+    def replace_assistant_answer_with_citations(
+        self,
+        message_id: int,
+        user_id: int | str,
+        answer: str,
+        citations: list,
+        reliability: dict,
+    ) -> None:
+        """Atomically replace an owned answer, its citations, and its reliability."""
+        confidence_level = reliability["confidence_level"]
+        reasons_json = self._serialize_reliability(
+            confidence_level,
+            reliability["confidence_reasons"],
+            reliability["answerability_kind"],
+        )
+        citations_hash = self._citations_hash(citations)
+        with self.cm.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT m.conversation_id FROM chat_messages m "
+                "JOIN conversations c ON c.id=m.conversation_id "
+                "WHERE m.id=? AND m.role='assistant' AND c.user_id=?",
+                (message_id, int(user_id)),
+            ).fetchone()
+            if row is None:
+                raise ValueError("assistant message does not belong to the user")
+            conn.execute(
+                "UPDATE feedback SET citation_id=NULL WHERE citation_id IN "
+                "(SELECT id FROM answer_citations WHERE assistant_message_id=?)",
+                (message_id,),
+            )
+            conn.execute(
+                "DELETE FROM answer_citations WHERE assistant_message_id=?", (message_id,)
+            )
+            conn.execute(
+                "UPDATE chat_messages SET content=?, citations_hash=?, citation_count=?, "
+                "confidence_level=?, confidence_reasons_json=?, answerability_kind=? "
+                "WHERE id=?",
+                (
+                    answer,
+                    citations_hash,
+                    len(citations),
+                    confidence_level,
+                    reasons_json,
+                    reliability["answerability_kind"],
+                    message_id,
+                ),
+            )
+            self._insert_answer_citations_in_tx(message_id, citations)
+
     @staticmethod
     def _citations_hash(citations: list) -> str:
-        rows = sorted(
-            (
-                c.document_id,
-                c.document_version_id,
-                c.chunk_index,
-                c.section_title,
-                c.text_preview,
-                c.rank,
-                int(c.is_historical),
+        rows = []
+        for citation in citations:
+            row = (
+                citation.document_id,
+                citation.document_version_id,
+                citation.chunk_index,
+                citation.section_title,
+                citation.text_preview,
+                citation.rank,
+                int(citation.is_historical),
             )
-            for c in citations
-        )
+            if getattr(citation, "source_kind", "document") == "document":
+                rows.append(row)
+            else:
+                rows.append(
+                    row
+                    + (
+                        citation.source_kind,
+                        getattr(citation, "kb_id", ""),
+                        getattr(citation, "source_name", ""),
+                    )
+                )
+        rows.sort()
         digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8"))
         return digest.hexdigest()
 
@@ -891,9 +994,11 @@ class ChatRepository(BaseRepository):
             rows = conn.execute(
                 "SELECT c.id, c.document_id, c.document_version_id, c.chunk_index, "
                 "c.section_title, c.text_preview, c.rank, c.is_historical, c.created_at, "
+                "c.source_kind, c.kb_id, c.source_name, "
                 "v.version_no, v.original_filename, v.created_at AS version_created_at "
                 "FROM answer_citations c "
-                "LEFT JOIN document_versions v ON v.id = c.document_version_id "
+                "LEFT JOIN document_versions v ON c.source_kind = 'document' "
+                "AND v.id = c.document_version_id AND v.document_id = c.document_id "
                 "WHERE c.assistant_message_id = ? ORDER BY c.rank",
                 (assistant_message_id,),
             ).fetchall()

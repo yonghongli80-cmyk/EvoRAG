@@ -789,25 +789,62 @@ class FailureTraceStore:
             )
             self._conn.commit()
 
+    def link_gap_ticket_remediation(
+        self, ticket_id: int, remediation: dict, *, now: float | None = None
+    ) -> None:
+        """Atomically update only the linked asset, preserving concurrent ticket fields."""
+        now_ts = float(time.time() if now is None else now)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT payload FROM knowledge_gap_tickets WHERE id = ?", (int(ticket_id),)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("gap ticket not found")
+                payload = json.loads(row["payload"] or "{}")
+                payload["remediation"] = remediation
+                self._conn.execute(
+                    "UPDATE knowledge_gap_tickets SET payload = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload, ensure_ascii=False), now_ts, int(ticket_id)),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
     def record_gap_recheck(self, ticket_id: int, ticket, *, now: float) -> None:
-        """Write back one re-check: payload, occurrences and status only.
+        """Atomically write only coverage/status/recheck fields from a re-check.
 
         Still nothing here can move a cluster, a candidate or a gate — a ticket records what the
         corpus holds, and the state machines do not read this table.
         """
         with self._lock:
-            self._conn.execute(
-                "UPDATE knowledge_gap_tickets SET payload = ?, occurrences = ?, status = ?, "
-                "updated_at = ? WHERE id = ?",
-                (
-                    json.dumps(ticket.to_payload(), ensure_ascii=False),
-                    int(ticket.occurrences),
-                    str(ticket.status),
-                    float(now),
-                    int(ticket_id),
-                ),
-            )
-            self._conn.commit()
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT payload FROM knowledge_gap_tickets WHERE id = ?", (int(ticket_id),)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("gap ticket not found")
+                payload = json.loads(row["payload"] or "{}")
+                updated = ticket.to_payload()
+                for key in ("missing_terms", "status", "recheck"):
+                    payload[key] = updated[key]
+                self._conn.execute(
+                    "UPDATE knowledge_gap_tickets SET payload = ?, status = ?, updated_at = ? "
+                    "WHERE id = ?",
+                    (
+                        json.dumps(payload, ensure_ascii=False),
+                        str(payload["status"]),
+                        float(now),
+                        int(ticket_id),
+                    ),
+                )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def gap_ticket_cluster_ids(self) -> set[int]:
         """Cluster ids that already have a ticket, so a round never drafts a second one."""

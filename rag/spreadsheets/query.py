@@ -248,7 +248,14 @@ def _connect(path) -> sqlite3.Connection:
     """Open one dataset read-only and register the exact decimal aggregate."""
     connection = sqlite3.connect(f"file:{Path(path).resolve().as_posix()}?mode=ro", uri=True)
     connection.create_aggregate("rag_decimal_sum", 1, _ExactDecimalSum)
+    connection.create_collation("rag_decimal", _compare_decimal)
     return connection
+
+
+def _compare_decimal(left: str, right: str) -> int:
+    """Compare canonical decimal text without converting through binary floats."""
+    left_value, right_value = Decimal(left), Decimal(right)
+    return (left_value > right_value) - (left_value < right_value)
 
 
 def _open_dataset(scope: QueryScope, dataset_id: int):
@@ -447,9 +454,12 @@ def _partial_aggregate(
         return _PartialAggregate(
             rows, first_row, last_row, distinct=tuple(row[0] for row in distinct)
         )
+    aggregate = _AGGREGATE_EXPRESSIONS[function].format(column=quoted_column)
+    if function in {"min", "max"} and inferred == "decimal":
+        aggregate = f"{function.upper()}({quoted_column} COLLATE rag_decimal)"
     column_count, value = connection.execute(
         f"SELECT COUNT({quoted_column}), "
-        f"{_AGGREGATE_EXPRESSIONS[function].format(column=quoted_column)} "
+        f"{aggregate} "
         f"FROM {quoted_sheet}{where}",
         parameters,
     ).fetchone()
@@ -486,10 +496,8 @@ def _merge_partials(partials, function: str, inferred: str) -> str:
     if not candidates:
         return ""
     pick = min if function == "min" else max
-    if inferred in {"integer", "boolean"}:
-        # Numeric columns store numbers, so their extremes compare as numbers;
-        # every other type is stored as text (canonical decimals included) and
-        # compares as text, exactly as the pre-pushdown Python aggregate did.
+    if inferred in {"integer", "decimal", "boolean"}:
+        # Numeric columns compare numerically; text columns retain lexical order.
         return pick(candidates, key=Decimal)
     return pick(candidates)
 
@@ -499,7 +507,7 @@ def _filter_sql(filters, columns, sheet_key, plan_sheet_key=None):
     for item in filters:
         # A filter may declare its own sheet; it then has to be the sheet being
         # read, which is the same cross-sheet rule as before but now explicit.
-        filter_sheet, _ = _resolve_column(
+        filter_sheet, inferred = _resolve_column(
             columns,
             item.column_key,
             item.sheet_key if item.sheet_key is not None else plan_sheet_key,
@@ -507,22 +515,23 @@ def _filter_sql(filters, columns, sheet_key, plan_sheet_key=None):
         if filter_sheet != sheet_key:
             raise StructuredQueryInputError("cross_sheet_unsupported", "cross-sheet filters are not supported")
         quoted = _quoted_column(item.column_key)
+        compared = f"{quoted} COLLATE rag_decimal" if inferred == "decimal" else quoted
         if item.operator == "contains":
             clauses.append(f"{quoted} LIKE ?")
             values.append(f"%{item.value}%")
         elif item.operator == "between":
             if len(item.values) != 2:
                 raise StructuredQueryInputError("invalid_filter", "between requires exactly two values")
-            clauses.append(f"{quoted} BETWEEN ? AND ?")
+            clauses.append(f"{compared} BETWEEN ? AND ?")
             values.extend(item.values)
         elif item.operator == "in":
             if not item.values:
                 raise StructuredQueryInputError("invalid_filter", "in requires values")
-            clauses.append(f"{quoted} IN ({', '.join('?' for _ in item.values)})")
+            clauses.append(f"{compared} IN ({', '.join('?' for _ in item.values)})")
             values.extend(item.values)
         else:
             op = {"eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[item.operator]
-            clauses.append(f"{quoted} {op} ?")
+            clauses.append(f"{compared} {op} ?")
             values.append(item.value)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, values
@@ -546,4 +555,7 @@ def _aggregate(values, function: str, inferred: str) -> str:
         return format(result, "f")
     if not meaningful:
         return ""
+    if inferred == "decimal":
+        key = Decimal
+        return str((min if function == "min" else max)(meaningful, key=key))
     return str(min(meaningful) if function == "min" else max(meaningful))

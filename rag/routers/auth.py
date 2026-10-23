@@ -162,9 +162,13 @@ async def logout(response: Response):
 async def get_me(request: Request, user: dict = Depends(require_user)):
     db = get_user_db(request)
     profile = await asyncio.to_thread(OrgRepository(db).get_profile_for_user, user["id"])
-    result = {"id": user["id"], "username": user["username"]}
+    result = {
+        "id": user["id"],
+        "username": user["username"],
+        "is_admin": bool(user.get("is_admin")),
+    }
     if profile is not None:
-        result.update({"is_admin": bool(user.get("is_admin")), "profile": asdict(profile)})
+        result.update({"profile": asdict(profile)})
     return result
 
 

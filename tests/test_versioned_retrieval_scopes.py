@@ -50,6 +50,9 @@ class _DocDB:
         self.permission_calls += 1
         return {"id": 7, "doc_name": "policy.pdf", "kb_id": "rag_docs", "current_version_id": 5}
 
+    def list_document_permissions_all(self):
+        return [{"id": 7}]
+
     def list_document_versions(self, document_id):
         self.version_calls += 1
         return [
@@ -81,7 +84,7 @@ class _ScopeRecordingRetriever:
                 validity_statuses=validity_statuses,
             )
         )
-        if validity_statuses is not None and "valid" in validity_statuses:
+        if allowed_version_ids and 5 in allowed_version_ids:
             return list(self.current)[:top_k]
         return list(self.history)[:top_k]
 
@@ -265,11 +268,15 @@ def test_retrieve_current_then_history_passes_both_scopes(wiki_visible):
     assert first.allowed_wiki_revision_ids == {7}
 
 
-def test_admin_scopes_stay_unrestricted():
-    current, historical = _visible_version_scopes(_DocDB(), ADMIN, "rag_docs")
+def test_admin_scopes_stay_current_first_and_wiki_scoped(wiki_visible):
+    current, historical = _visible_version_scopes(
+        _DocDB(), ADMIN, "rag_docs", wiki_store=_WikiStore({11: [7]})
+    )
 
-    assert current.documents is None and current.wiki is None
-    assert historical.documents is None and historical.wiki is None
+    assert current.documents == {5}
+    assert current.wiki == {7}
+    assert historical.documents == {4}
+    assert historical.wiki == set()
 
 
 # ── A-09：一次请求只扫一遍 wiki，且只读必要列 ───────────────────────────────

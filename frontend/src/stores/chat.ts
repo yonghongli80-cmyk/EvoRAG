@@ -68,6 +68,8 @@ export const useChatStore = defineStore('chat', () => {
 
   let _requestSeq = 0
   let _activeAbort: AbortController | null = null
+  let _sendReservationSeq = 0
+  let _sendReservationId: number | null = null
   /** Invalidates in-flight conversation loads so only the newest may land. */
   let _convRequestSeq = 0
   let _convLoadAbort: AbortController | null = null
@@ -104,6 +106,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   function reset() {
     stopStreaming()
+    _sendReservationId = null
     invalidateConversationRequests()
     conversations.value = []
     currentConvId.value = null
@@ -146,6 +149,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function resetModeState(mode: ChatMode) {
     if (activeMode.value === mode) return
+    stopStreaming()
     activeMode.value = mode
     invalidateConversationRequests()
     conversations.value = []
@@ -189,12 +193,15 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function createConversation(mode: ChatMode = 'file') {
+    stopStreaming()
     resetModeState(mode)
     // Save current selection before switching
     if (currentConvId.value !== null) {
       _selectedFilesByConv.set(currentConvId.value, selectedFile.value)
     }
+    const seq = invalidateConversationRequests()
     const res = await api.post('/conversations', { mode })
+    if (seq !== _convRequestSeq || activeMode.value !== mode) return undefined
     conversations.value.unshift(res.data)
     _selectedFilesByConv.delete(res.data.id)
     currentConvId.value = res.data.id
@@ -264,11 +271,18 @@ export const useChatStore = defineStore('chat', () => {
   async function sendMessage(question: string, mode?: ChatMode, kbId?: string) {
     // One stream at a time: the stop button (E-05) is the escape hatch, not a
     // second concurrent generation.
-    if (isStreaming.value) return
+    if (isStreaming.value || _sendReservationId !== null) return
 
     // Auto-create conversation if none exists
-    if (!currentConvId.value && mode) {
-      await createConversation(mode)
+    const reservationId = ++_sendReservationSeq
+    _sendReservationId = reservationId
+    try {
+      if (!currentConvId.value && mode) {
+        const created = await createConversation(mode)
+        if (_sendReservationId !== reservationId || !created || currentConvId.value !== created.id) return
+      }
+    } finally {
+      if (_sendReservationId === reservationId) _sendReservationId = null
     }
     const conversationId = currentConvId.value
 
@@ -454,7 +468,9 @@ export const useChatStore = defineStore('chat', () => {
       if (answer) {
         try {
           const suggestRes = await api.post('/suggest', { question, answer })
-          suggestedQuestions.value = suggestRes.data.questions || []
+          if (isOwner() && currentConvId.value === conversationId) {
+            suggestedQuestions.value = suggestRes.data.questions || []
+          }
         } catch {
           // Suggestions are non-critical, ignore errors
         }
@@ -519,6 +535,13 @@ export const useChatStore = defineStore('chat', () => {
       })
       if (activeRequestId.value !== requestId) return
       msg.content = res.data.answer
+      msg.sources = Array.isArray(res.data.sources) ? res.data.sources : []
+      const reliability = res.data.reliability
+      msg.confidence_level = reliability?.confidence_level || 'unavailable'
+      msg.confidence_reasons = Array.isArray(reliability?.confidence_reasons)
+        ? reliability.confidence_reasons
+        : []
+      msg.answerability_kind = reliability?.answerability_kind || 'answerable'
     } catch {
       // Ignore
     } finally {

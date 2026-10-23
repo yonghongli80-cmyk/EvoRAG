@@ -46,9 +46,9 @@ def client():
 
 
 def _sqlite_ready(monkeypatch, tmp_path):
-    db = tmp_path / "analysis.db"
+    db = tmp_path / "users.db"
     sqlite3.connect(db).close()
-    monkeypatch.setattr(settings, "analysis_db_path", str(db))
+    monkeypatch.setattr(settings, "users_db_path", str(db))
 
 
 def _qdrant_ready(monkeypatch):
@@ -119,7 +119,7 @@ def test_ready_reports_remote_mode_when_qdrant_url_is_set(client, monkeypatch, t
 
 def test_ready_returns_503_when_sqlite_is_unavailable(client, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        settings, "analysis_db_path", str(tmp_path / "missing-dir" / "analysis.db")
+        settings, "users_db_path", str(tmp_path / "missing-dir" / "users.db")
     )
     _qdrant_ready(monkeypatch)
     _no_redis(monkeypatch)
@@ -137,8 +137,8 @@ def test_ready_returns_503_when_sqlite_is_unavailable(client, monkeypatch, tmp_p
 
 def test_ready_sqlite_probe_does_not_create_a_missing_database(client, monkeypatch, tmp_path):
     """只读探针不能在 GET 上顺手创建一个空库。"""
-    target = tmp_path / "missing-dir" / "analysis.db"
-    monkeypatch.setattr(settings, "analysis_db_path", str(target))
+    target = tmp_path / "missing-dir" / "users.db"
+    monkeypatch.setattr(settings, "users_db_path", str(target))
     _qdrant_ready(monkeypatch)
     _no_redis(monkeypatch)
 

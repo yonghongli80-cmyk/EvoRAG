@@ -8,7 +8,9 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from rag.wiki.models import WikiPage, WikiRevision, compute_content_sha256, extract_wiki_links
@@ -84,6 +86,31 @@ class WikiStore:
                 """
             )
             self._conn.commit()
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = False):
+        """Hold the store lock and a transaction without committing a caller's work."""
+        with self._lock:
+            owns_transaction = not self._conn.in_transaction
+            savepoint = f"wiki_sp_{uuid.uuid4().hex}"
+            if owns_transaction:
+                self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            else:
+                self._conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                yield self._conn
+            except BaseException:
+                if owns_transaction:
+                    self._conn.rollback()
+                else:
+                    self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+                raise
+            else:
+                if owns_transaction:
+                    self._conn.commit()
+                else:
+                    self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     @staticmethod
     def _row_to_page(row: sqlite3.Row) -> WikiPage:
@@ -280,6 +307,13 @@ class WikiStore:
             kb_id = str(cur_row["kb_id"])
             self._sync_outgoing_links(page_id, kb_id, new_content)
             if new_title != old_title:
+                # Links to the old name must stop following this page after a
+                # rename. A later page reusing that title can then claim them.
+                self._conn.execute(
+                    "UPDATE wiki_links SET target_page_id = NULL "
+                    "WHERE target_page_id = ? AND target_title = ?",
+                    (page_id, old_title),
+                )
                 self._resolve_inbound_links(page_id, kb_id, new_title)
             self._conn.commit()
 
@@ -357,12 +391,11 @@ class WikiStore:
         return pages
 
     def delete_page(self, page_id: int) -> bool:
-        with self._lock:
-            self._conn.execute("DELETE FROM wiki_revisions WHERE page_id = ?", (page_id,))
-            self._conn.execute("DELETE FROM wiki_links WHERE source_page_id = ?", (page_id,))
-            self._conn.execute("UPDATE wiki_links SET target_page_id = NULL WHERE target_page_id = ?", (page_id,))
-            cursor = self._conn.execute("DELETE FROM wiki_pages WHERE id = ?", (page_id,))
-            self._conn.commit()
+        with self.transaction(immediate=True) as conn:
+            conn.execute("DELETE FROM wiki_revisions WHERE page_id = ?", (page_id,))
+            conn.execute("DELETE FROM wiki_links WHERE source_page_id = ?", (page_id,))
+            conn.execute("UPDATE wiki_links SET target_page_id = NULL WHERE target_page_id = ?", (page_id,))
+            cursor = conn.execute("DELETE FROM wiki_pages WHERE id = ?", (page_id,))
             return cursor.rowcount > 0
 
     def get_revisions(self, page_id: int) -> list[WikiRevision]:

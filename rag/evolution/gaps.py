@@ -19,7 +19,7 @@ kind of thing the ticket asks a human to judge.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 # Quoted from the evidence module on purpose: the term rules must be identical to the ones the
@@ -34,6 +34,72 @@ DEFAULT_TERM_LIMIT = 12
 
 #: How many questions one ticket's coverage probe may re-retrieve.
 DEFAULT_PROBE_LIMIT = 8
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """Coverage findings plus whether every sampled question was actually checked."""
+
+    missing_terms: tuple[str, ...]
+    probed: int
+    expected: int
+    failed: int
+
+    @property
+    def complete(self) -> bool:
+        return self.expected > 0 and self.probed == self.expected
+
+
+def probe_questions(
+    questions: Sequence[str],
+    retrieve: Callable[[str], Sequence],
+    *,
+    probe_limit: int = DEFAULT_PROBE_LIMIT,
+    preserve_terms: Sequence[str] = (),
+) -> ProbeResult:
+    """Probe a bounded sample without treating failed or skipped questions as covered."""
+    sampled = tuple(questions)
+    count = max(0, int(probe_limit))
+    attempted = sampled[:count]
+    per_question: list[tuple[str, ...]] = []
+    unverified: list[str] = list(sampled[count:])
+    still_missing_by_question: list[set[str]] = []
+    probed = 0
+    for question in attempted:
+        try:
+            chunks = retrieve(question) or []
+        except Exception:
+            unverified.append(question)
+            continue
+        probed += 1
+        texts = [getattr(chunk, "text", "") or "" for chunk in chunks]
+        missing_for_question = missing_terms_for(
+            question, texts, limit=max(DEFAULT_TERM_LIMIT, len(_question_terms(question)))
+        )
+        per_question.append(missing_for_question)
+        still_missing_by_question.append(set(missing_for_question))
+
+    missing = list(aggregate_missing_terms(per_question))
+    for question in unverified:
+        unverified_terms = missing_terms_for(
+            question, [], limit=max(DEFAULT_TERM_LIMIT, len(_question_terms(question)))
+        )
+        still_missing_by_question.append(set(unverified_terms))
+        for term in unverified_terms:
+            if term not in missing:
+                missing.append(term)
+    still_missing_old: list[str] = []
+    for term in preserve_terms:
+        if any(term.lower() in question_missing for question_missing in still_missing_by_question):
+            still_missing_old.append(term.lower())
+    additional = [term for term in dict.fromkeys(missing) if term not in still_missing_old]
+    missing = [*still_missing_old, *additional[: max(0, DEFAULT_TERM_LIMIT - len(still_missing_old))]]
+    return ProbeResult(
+        missing_terms=tuple(missing),
+        probed=probed,
+        expected=len(sampled),
+        failed=len(sampled) - probed,
+    )
 
 
 @dataclass(frozen=True)
@@ -103,6 +169,7 @@ class KnowledgeGapTicket:
         covered_terms: Sequence[str],
         probed: int,
         now: float,
+        expected: int | None = None,
     ) -> KnowledgeGapTicket:
         """A copy carrying one deterministic re-check, and the status that follows from it.
 
@@ -110,16 +177,33 @@ class KnowledgeGapTicket:
         upload covered it — and ``open`` otherwise, with the still-missing terms replacing the
         old list so the next round asks about what is actually left.
         """
-        verdict = recheck_verdict(previous_missing=self.missing_terms, missing_now=missing_terms)
+        expected_count = int(probed if expected is None else expected)
+        complete = expected_count > 0 and int(probed) == expected_count
+        if complete:
+            final_missing = tuple(missing_terms)
+            final_covered = tuple(covered_terms)
+            final_status = "content_added" if not final_missing else "open"
+            verdict = recheck_verdict(previous_missing=self.missing_terms, missing_now=final_missing)
+        else:
+            final_missing = (
+                tuple(self.missing_terms)
+                if int(probed) <= 0
+                else tuple(dict.fromkeys((*self.missing_terms, *missing_terms)))
+            )
+            final_covered = ()
+            final_status = self.status
+            verdict = "inconclusive"
         return replace(
             self,
-            missing_terms=tuple(missing_terms),
-            status="content_added" if not missing_terms else "open",
+            missing_terms=final_missing,
+            status=final_status,
             recheck={
                 "checked_at": float(now),
                 "probed": int(probed),
-                "covered_terms": list(covered_terms),
-                "still_missing": list(missing_terms),
+                "expected": expected_count,
+                "failed": max(0, expected_count - int(probed)),
+                "covered_terms": list(final_covered),
+                "still_missing": list(final_missing),
                 "verdict": verdict,
             },
         )
@@ -252,10 +336,12 @@ __all__ = [
     "DEFAULT_QUESTION_LIMIT",
     "DEFAULT_TERM_LIMIT",
     "KnowledgeGapTicket",
+    "ProbeResult",
     "aggregate_missing_terms",
     "build_ticket",
     "missing_terms_for",
     "question_samples",
+    "probe_questions",
     "recheck_verdict",
     "ticket_from_payload",
 ]

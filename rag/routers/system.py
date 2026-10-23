@@ -148,9 +148,13 @@ def _probe_sqlite() -> dict[str, str]:
     文件不存在时直接判失败，避免就绪探针顺手创建一个空库。
     """
     try:
-        if not Path(settings.analysis_db_path).is_file():
-            raise FileNotFoundError(settings.analysis_db_path)
-        conn = sqlite3.connect(settings.analysis_db_path, timeout=_PROBE_TIMEOUT_SECONDS)
+        db_path = Path(settings.users_db_path)
+        if not db_path.is_file():
+            raise FileNotFoundError(str(db_path))
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(
+            uri, uri=True, timeout=_PROBE_TIMEOUT_SECONDS
+        )
         try:
             conn.execute("SELECT 1").fetchone()
         finally:
@@ -439,16 +443,9 @@ def health():
         logger.error("Qdrant 健康检查失败: %s", e)
         components["qdrant"] = "error"
 
-    try:
-        conn = sqlite3.connect(settings.analysis_db_path)
-        try:
-            conn.execute("SELECT 1")
-        finally:
-            conn.close()
-        components["sqlite"] = "ok"
-    except Exception as e:
-        logger.error("SQLite 健康检查失败: %s", e)
-        components["sqlite"] = "error"
+    components["sqlite"] = (
+        "ok" if _probe_sqlite()["status"] == "ok" else "error"
+    )
 
     status = "healthy" if all(v == "ok" for v in components.values()) else "degraded"
     payload = {"status": status, "components": components}

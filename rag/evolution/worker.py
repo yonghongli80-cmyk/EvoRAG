@@ -964,13 +964,7 @@ def _clusters_with_open_candidates(candidate_store, artifact_type: str) -> set[i
     members would otherwise yield a hundred variants of the same idea, which is how a review queue
     turns into a heap nobody can choose from.
     """
-    return {
-        int(row["cluster_id"])
-        for row in candidate_store.list_candidates()
-        if row.get("cluster_id") is not None
-        and row.get("artifact_type") == artifact_type
-        and str(row.get("status") or "") in _OPEN_CANDIDATE_STATUSES
-    }
+    return candidate_store.clusters_with_open_candidates(artifact_type)
 
 
 def _eligible_patch_items(store, candidate_store) -> list[dict]:
@@ -999,11 +993,7 @@ def _eligible_patch_items(store, candidate_store) -> list[dict]:
         observation_id = draft.get("observation_id")
         if observation_id is not None:
             newest_draft.setdefault(int(observation_id), draft)
-    have_patch = {
-        (int(row["observation_id"]), row["artifact_type"])
-        for row in candidate_store.list_candidates()
-        if row.get("observation_id") is not None
-    }
+    have_patch = candidate_store.observation_candidate_keys(CODE_PATCH_ARTIFACT_TYPE)
     open_clusters = _clusters_with_open_candidates(candidate_store, CODE_PATCH_ARTIFACT_TYPE)
     items: list[dict] = []
     for cluster in store.list_clusters():
@@ -1164,11 +1154,7 @@ def _eligible_question_set_items(store, candidate_store) -> list[dict]:
         observation_id = draft.get("observation_id")
         if observation_id is not None:
             newest_draft.setdefault(int(observation_id), draft)
-    have_candidate = {
-        (int(row["observation_id"]), row["artifact_type"])
-        for row in candidate_store.list_candidates()
-        if row.get("observation_id") is not None
-    }
+    have_candidate = candidate_store.observation_candidate_keys(QUESTION_SET_ARTIFACT_TYPE)
     open_clusters = _clusters_with_open_candidates(candidate_store, QUESTION_SET_ARTIFACT_TYPE)
     items: list[dict] = []
     for cluster in store.list_clusters():
@@ -1344,9 +1330,8 @@ def make_evolution_gap_ticket_step(
     becomes a request to add content that must not be handed over.
     """
     from rag.evolution.gaps import (
-        aggregate_missing_terms,
         build_ticket,
-        missing_terms_for,
+        probe_questions,
         question_samples,
         ticket_from_payload,
     )
@@ -1397,23 +1382,23 @@ def make_evolution_gap_ticket_step(
                 )()
             return reader
 
-        def probe(questions, kb_id):
-            """Deterministic re-retrieval: the missing terms of each question, and how many ran."""
-            probed = 0
-            per_question: list[tuple[str, ...]] = []
-            for question in questions[:probe_limit]:
-                try:
-                    chunks = ensure_reader().retrieve(question, kb_id=kb_id) or []
-                except Exception:
-                    logger.exception("evolution_gap_probe_failed kb=%s", kb_id)
-                    continue
-                probed += 1
-                per_question.append(
-                    missing_terms_for(
-                        question, [getattr(chunk, "text", "") or "" for chunk in chunks]
-                    )
+        def probe(questions, kb_id, *, preserve_terms=()):
+            """Return conservative coverage and the count of questions actually checked."""
+            result = probe_questions(
+                questions,
+                lambda question: ensure_reader().retrieve(question, kb_id=kb_id),
+                probe_limit=probe_limit,
+                preserve_terms=preserve_terms,
+            )
+            if result.failed:
+                logger.warning(
+                    "evolution_gap_probe_incomplete kb=%s probed=%s expected=%s failed=%s",
+                    kb_id,
+                    result.probed,
+                    result.expected,
+                    result.failed,
                 )
-            return per_question, probed
+            return result
 
         try:
             for cluster in store.list_clusters():
@@ -1432,19 +1417,19 @@ def make_evolution_gap_ticket_step(
                 if not members:
                     outcome["tickets_pending"] += 1
                     continue
-                per_question, probed = probe(
+                probe_result = probe(
                     question_samples(members, limit=question_limit), cluster.get("kb_id")
                 )
                 ticket = build_ticket(
                     cluster,
                     members,
-                    missing_terms=aggregate_missing_terms(per_question),
-                    probed_questions=probed,
+                    missing_terms=probe_result.missing_terms,
+                    probed_questions=probe_result.probed,
                     question_limit=question_limit,
                 )
                 store.add_gap_ticket(ticket)
                 outcome["tickets_created"] += 1
-                outcome["ticket_questions_probed"] += probed
+                outcome["ticket_questions_probed"] += probe_result.probed
                 logger.info(
                     "evolution_gap_ticket_created cluster=%s kb=%s occurrences=%s terms=%s",
                     cluster.get("id"),
@@ -1463,14 +1448,24 @@ def make_evolution_gap_ticket_step(
                 if not questions:
                     continue
                 ticket = ticket_from_payload(payload)
-                per_question, probed = probe(questions, row.get("kb_id"))
-                missing_now = aggregate_missing_terms(per_question)
+                probe_result = probe(
+                    questions, row.get("kb_id"), preserve_terms=ticket.missing_terms
+                )
+                missing_now = probe_result.missing_terms
                 outcome["tickets_rechecked"] += 1
-                if tuple(missing_now) == tuple(ticket.missing_terms):
+                if probe_result.complete and tuple(missing_now) == tuple(ticket.missing_terms):
                     continue  # 没有变化就不写，避免无谓的行更新
-                covered = [term for term in ticket.missing_terms if term not in set(missing_now)]
+                covered = (
+                    [term for term in ticket.missing_terms if term not in set(missing_now)]
+                    if probe_result.complete
+                    else []
+                )
                 updated = ticket.with_recheck(
-                    missing_terms=missing_now, covered_terms=covered, probed=probed, now=now
+                    missing_terms=missing_now,
+                    covered_terms=covered,
+                    probed=probe_result.probed,
+                    expected=probe_result.expected,
+                    now=now,
                 )
                 store.record_gap_recheck(int(row["id"]), updated, now=now)
                 outcome["tickets_updated"] += 1

@@ -551,11 +551,27 @@ describe('chat store', () => {
 
   // ── regenerate ──────────────────────────────────────────
   it('regenerate calls /regenerate', async () => {
-    vi.mocked(api.post).mockResolvedValue({ data: { answer: 'New answer' } } as any)
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      answer: 'New answer',
+      sources: [{ doc_name: 'new.pdf', chunk_index: 2 }],
+      reliability: {
+        confidence_level: 'high',
+        confidence_reasons: ['fresh'],
+        answerability_kind: 'answerable'
+      }
+    } } as any)
 
     const store = useChatStore()
     store.currentConvId = 7
-    store.messages = [{ id: 20, role: 'assistant', content: 'Old' }]
+    store.messages = [{
+      id: 20,
+      role: 'assistant',
+      content: 'Old',
+      sources: [{ doc_name: 'old.pdf', chunk_index: 0 }],
+      confidence_level: 'low',
+      confidence_reasons: ['stale'],
+      answerability_kind: 'insufficient_evidence'
+    }]
 
     await store.regenerate(0)
 
@@ -564,6 +580,32 @@ describe('chat store', () => {
       { conversation_id: 7, message_id: 20 }
     )
     expect(store.messages[0].content).toBe('New answer')
+    expect(store.messages[0].sources).toEqual([{ doc_name: 'new.pdf', chunk_index: 2 }])
+    expect(store.messages[0].confidence_level).toBe('high')
+    expect(store.messages[0].confidence_reasons).toEqual(['fresh'])
+    expect(store.messages[0].answerability_kind).toBe('answerable')
+  })
+
+  it('regenerate clears stale sources and reliability when response omits them', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { answer: 'New answer' } } as any)
+    const store = useChatStore()
+    store.currentConvId = 7
+    store.messages = [{
+      id: 20,
+      role: 'assistant',
+      content: 'Old',
+      sources: [{ doc_name: 'old.pdf', chunk_index: 0 }],
+      confidence_level: 'high',
+      confidence_reasons: ['stale'],
+      answerability_kind: 'answerable'
+    }]
+
+    await store.regenerate(0)
+
+    expect(store.messages[0].sources).toEqual([])
+    expect(store.messages[0].confidence_level).toBe('unavailable')
+    expect(store.messages[0].confidence_reasons).toEqual([])
+    expect(store.messages[0].answerability_kind).toBe('answerable')
   })
 
   it('regenerate does nothing for non-assistant message', async () => {

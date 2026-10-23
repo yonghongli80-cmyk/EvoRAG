@@ -20,7 +20,9 @@ def test_bearer_token_resolves_full_database_user(isolated_api, make_user):
     response = isolated_api.get("/me", headers=headers)
 
     assert response.status_code == 200
-    assert response.json() == {"id": user["id"], "username": "alice"}
+    assert response.json() == {
+        "id": user["id"], "username": "alice", "is_admin": False
+    }
 
 
 def test_malformed_bearer_prefix_is_rejected_with_401(isolated_api, make_user):
@@ -39,7 +41,9 @@ def test_configured_api_key_resolves_a_real_user(isolated_api, make_user, monkey
     response = isolated_api.get("/me", headers={"X-API-Key": "key-123"})
 
     assert response.status_code == 200
-    assert response.json() == {"id": user["id"], "username": "service-admin"}
+    assert response.json() == {
+        "id": user["id"], "username": "service-admin", "is_admin": True
+    }
 
 
 def test_api_uses_the_isolated_database(isolated_api):

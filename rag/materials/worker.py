@@ -41,6 +41,8 @@ from rag.materials.recycle import (
     scan_due_purges,
 )
 from rag.models import Chunk
+from rag.org_auth.models import KnowledgeBaseType, OrgRole
+from rag.org_auth.policy import AuthorizationContext, resolve_role, role_allows
 from rag.spreadsheets.chunker import DatasetMetadata
 from rag.spreadsheets.migration import dataset_schema_mirror
 from rag.spreadsheets.parser import parse_spreadsheet
@@ -63,6 +65,120 @@ class _StaleVersionError(Exception):
 
 class _PermissionRevokedError(Exception):
     pass
+
+
+def _org_kb_edit_allowed_in_tx(conn, kb_id: str, user_id: int) -> bool | None:
+    """Recheck organization KB manage access on the activation writer connection.
+
+    ``None`` means this is a personal/legacy KB and its document ACL applies.
+    Keeping all reads on ``conn`` makes this decision see the same snapshot as
+    the activation transaction, including uncommitted policy changes.
+    """
+    policy = conn.execute(
+        "SELECT * FROM kb_org_policies WHERE kb_id = ?", (kb_id,)
+    ).fetchone()
+    if policy is None or policy["kb_type"] not in {
+        "company_public", "organization", "sensitive", "unassigned"
+    }:
+        return None
+
+    user = conn.execute(
+        "SELECT is_admin FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    if user is None:
+        return False
+    person = conn.execute(
+        "SELECT person_code, active FROM org_people WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    company_admin = bool(user["is_admin"])
+    kb_type = KnowledgeBaseType(policy["kb_type"])
+
+    # Match OrgAuthorizationService: users without an org profile are treated
+    # as active; global admins retain their company-wide bypass.
+    if person is None:
+        decision = resolve_role(AuthorizationContext(
+            True, company_admin, True, bool(policy["active"]), kb_type,
+            policy["sensitivity"], True, False, False, OrgRole.NONE, False,
+        ))
+        return role_allows(decision.role, OrgRole.MANAGE)
+
+    if not bool(person["active"]):
+        return False
+
+    def descendants(code: str | None) -> set[str]:
+        if not code:
+            return set()
+        rows = conn.execute(
+            "WITH RECURSIVE tree(code) AS ("
+            " SELECT code FROM org_units WHERE code = ? AND active = 1"
+            " UNION ALL"
+            " SELECT child.code FROM org_units child JOIN tree parent"
+            " ON child.parent_code = parent.code WHERE child.active = 1"
+            ") SELECT code FROM tree",
+            (code,),
+        ).fetchall()
+        return {row["code"] for row in rows}
+
+    target = policy["org_code"]
+    target_tree = descendants(target)
+    memberships = {
+        row["org_code"]
+        for row in conn.execute(
+            "SELECT m.org_code FROM org_memberships m "
+            "JOIN org_units u ON u.code = m.org_code "
+            "WHERE m.person_code = ? AND u.active = 1",
+            (person["person_code"],),
+        ).fetchall()
+    }
+    member = bool(memberships & target_tree)
+    scopes = [row["org_code"] for row in conn.execute(
+        "SELECT org_code FROM org_manager_scopes WHERE person_code = ?",
+        (person["person_code"],),
+    ).fetchall()]
+    manager = bool(target) and any(target in descendants(scope) for scope in scopes)
+    grants = conn.execute(
+        "SELECT subject_type, subject_id, role, effect FROM kb_org_grants "
+        "WHERE kb_id = ? AND active = 1",
+        (kb_id,),
+    ).fetchall()
+    matched_grants = []
+    for grant in grants:
+        matches_user = (
+            grant["subject_type"] == "user" and grant["subject_id"] == str(user_id)
+        )
+        matches_org = (
+            grant["subject_type"] == "org"
+            and bool(memberships & descendants(grant["subject_id"]))
+        )
+        if matches_user or matches_org:
+            matched_grants.append(grant)
+    denied = any(grant["effect"] == "deny" for grant in matched_grants)
+    allowed_roles = [
+        OrgRole(grant["role"])
+        for grant in matched_grants
+        if grant["effect"] == "allow"
+    ]
+    allow_role = (
+        OrgRole.MANAGE if OrgRole.MANAGE in allowed_roles
+        else OrgRole.READ if allowed_roles else OrgRole.NONE
+    )
+    unit = conn.execute(
+        "SELECT active FROM org_units WHERE code = ?", (target,)
+    ).fetchone() if target else None
+    qualifications = {
+        row["sensitivity"]
+        for row in conn.execute(
+            "SELECT sensitivity FROM org_sensitive_qualifications WHERE person_code = ?",
+            (person["person_code"],),
+        ).fetchall()
+    }
+    decision = resolve_role(AuthorizationContext(
+        bool(person["active"]), company_admin, bool(unit and unit["active"]),
+        bool(policy["active"]), kb_type, policy["sensitivity"],
+        policy["sensitivity"] in qualifications if policy["sensitivity"] else True,
+        member, manager, allow_role, denied,
+    ))
+    return role_allows(decision.role, OrgRole.MANAGE)
 
 
 @dataclass(frozen=True)
@@ -605,7 +721,7 @@ def process_index_job(job: dict, services: WorkerServices) -> JobResult:
                 raise _StaleVersionError()
             if edit_session is not None:
                 current = db._conn.execute(
-                    "SELECT current_version_id, owner_id, scope, protected "
+                    "SELECT current_version_id, owner_id, scope, protected, deleted_at "
                     "FROM document_permissions WHERE id = ?",
                     (document_id,),
                 ).fetchone()
@@ -618,18 +734,25 @@ def process_index_job(job: dict, services: WorkerServices) -> JobResult:
                     "WHERE doc_id=? AND user_id=? AND permission='edit'",
                     (document_id, edit_session["actor_user_id"]),
                 ).fetchone()
+                org_edit = _org_kb_edit_allowed_in_tx(
+                    db._conn, document["kb_id"], edit_session["actor_user_id"]
+                )
+                personal_edit = (
+                    actor is not None
+                    and (
+                        bool(actor["is_admin"])
+                        or current is not None
+                        and current["owner_id"] == edit_session["actor_user_id"]
+                        or current is not None
+                        and current["scope"] == "shared"
+                        and shared_edit is not None
+                    )
+                )
                 allowed = (
                     current is not None
                     and not bool(current["protected"])
-                    and actor is not None
-                    and (
-                        bool(actor["is_admin"])
-                        or current["owner_id"] == edit_session["actor_user_id"]
-                        or (
-                            current["scope"] == "shared"
-                            and shared_edit is not None
-                        )
-                    )
+                    and current["deleted_at"] is None
+                    and (personal_edit if org_edit is None else org_edit)
                 )
                 if not allowed:
                     raise _PermissionRevokedError()

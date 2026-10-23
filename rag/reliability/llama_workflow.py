@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from llama_index.core.workflow import StartEvent, StopEvent, Workflow, step
+from workflows import Workflow, step
+from workflows.events import StartEvent, StopEvent
 
 from config import settings
 from rag.reliability.comparison import (

@@ -33,6 +33,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 from config import settings
 from rag.evolution.candidates import JevQuestionSetCandidate
@@ -281,6 +282,18 @@ class CandidateStore:
         if row is None:
             raise KeyError("observation not found")
 
+    @contextmanager
+    def _write_transaction(self):
+        """Serialize cross-connection read/modify/write operations and roll back failures."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
+
     def _insert_audit(
         self, actor_id: str, action: str, candidate_id: int, note: str, now: float | None = None
     ) -> int:
@@ -348,7 +361,7 @@ class CandidateStore:
                 "created_at": now,
             }
         ]
-        with self._lock:
+        with self._lock, self._write_transaction():
             self._require_cluster(int(cluster_id))
             if observation_id is not None:
                 self._require_observation(int(observation_id))
@@ -384,7 +397,6 @@ class CandidateStore:
             # The audit row needs the new candidate id, so it follows the
             # INSERT inside the same transaction and precedes any advance.
             self._insert_audit(str(model) or "generator", "generate", candidate_id, note, now)
-            self._conn.commit()
         return candidate_id
 
     def record_inconclusive_gate(
@@ -404,29 +416,29 @@ class CandidateStore:
         """
         now = time.time()
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM candidates WHERE id = ?", (int(id),)
-            ).fetchone()
-            if row is None:
-                raise KeyError("candidate not found")
-            candidate_id = int(row["id"])
-            self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
-            gate_log = _decode_json(row["gate_log"])
-            if not isinstance(gate_log, list):
-                gate_log = []
-            gate_log.append(
-                {
-                    "gate": str(gate),
-                    "result": _INCONCLUSIVE_GATE_RESULT,
-                    "detail": "" if gate_detail is None else str(gate_detail),
-                    "created_at": now,
-                }
-            )
-            self._conn.execute(
-                "UPDATE candidates SET gate_log = ? WHERE id = ?",
-                (json.dumps(gate_log, ensure_ascii=False), candidate_id),
-            )
-            self._conn.commit()
+            with self._write_transaction():
+                row = self._conn.execute(
+                    "SELECT * FROM candidates WHERE id = ?", (int(id),)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("candidate not found")
+                candidate_id = int(row["id"])
+                self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
+                gate_log = _decode_json(row["gate_log"])
+                if not isinstance(gate_log, list):
+                    gate_log = []
+                gate_log.append(
+                    {
+                        "gate": str(gate),
+                        "result": _INCONCLUSIVE_GATE_RESULT,
+                        "detail": "" if gate_detail is None else str(gate_detail),
+                        "created_at": now,
+                    }
+                )
+                self._conn.execute(
+                    "UPDATE candidates SET gate_log = ? WHERE id = ?",
+                    (json.dumps(gate_log, ensure_ascii=False), candidate_id),
+                )
             updated = self._conn.execute(
                 "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
             ).fetchone()
@@ -466,30 +478,30 @@ class CandidateStore:
             raise ValueError("a gate entry needs a gate name")
         now = time.time()
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM candidates WHERE id = ?", (int(id),)
-            ).fetchone()
-            if row is None:
-                raise KeyError("candidate not found")
-            candidate_id = int(row["id"])
-            self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
-            gate_log = _decode_json(row["gate_log"])
-            if not isinstance(gate_log, list):
-                gate_log = []
-            entry = {
-                "gate": str(gate),
-                "result": result,
-                "detail": "" if gate_detail is None else str(gate_detail),
-                "created_at": now,
-            }
-            if gate_metrics:
-                entry["metrics"] = gate_metrics
-            gate_log.append(entry)
-            self._conn.execute(
-                "UPDATE candidates SET gate_log = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(gate_log, ensure_ascii=False), now, candidate_id),
-            )
-            self._conn.commit()
+            with self._write_transaction():
+                row = self._conn.execute(
+                    "SELECT * FROM candidates WHERE id = ?", (int(id),)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("candidate not found")
+                candidate_id = int(row["id"])
+                self._insert_audit(str(actor_id), _DEFAULT_AUDIT_ACTION, candidate_id, str(note), now)
+                gate_log = _decode_json(row["gate_log"])
+                if not isinstance(gate_log, list):
+                    gate_log = []
+                entry = {
+                    "gate": str(gate),
+                    "result": result,
+                    "detail": "" if gate_detail is None else str(gate_detail),
+                    "created_at": now,
+                }
+                if gate_metrics:
+                    entry["metrics"] = gate_metrics
+                gate_log.append(entry)
+                self._conn.execute(
+                    "UPDATE candidates SET gate_log = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(gate_log, ensure_ascii=False), now, candidate_id),
+                )
             updated = self._conn.execute(
                 "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
             ).fetchone()
@@ -524,46 +536,45 @@ class CandidateStore:
         """
         now = time.time()
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM candidates WHERE id = ?", (int(id),)
-            ).fetchone()
-            if row is None:
-                raise KeyError("candidate not found")
-            current = row["status"]
-            if new_status not in EVOLUTION_TRANSITIONS.get(current, ()):
-                raise ValueError(f"invalid transition: {current} -> {new_status}")
-            candidate_id = int(row["id"])
-            self._insert_audit(
-                str(actor_id),
-                _AUDIT_ACTION_BY_STATUS.get(new_status, _DEFAULT_AUDIT_ACTION),
-                candidate_id,
-                str(note),
-                now,
-            )
-            gate_log = _decode_json(row["gate_log"])
-            if not isinstance(gate_log, list):
-                gate_log = []
-            if gate is not None:
-                entry = {
-                    "gate": str(gate),
-                    "result": _GATE_RESULT_BY_STATUS.get(new_status, _DEFAULT_GATE_RESULT),
-                    "detail": "" if gate_detail is None else str(gate_detail),
-                    "created_at": now,
-                }
-                # 结构化指标随条目一起落库（JSON 列，老条目没有这个键 ⇒ 向前兼容）。
-                if gate_metrics:
-                    entry["metrics"] = gate_metrics
-                gate_log.append(entry)
-            self._conn.execute(
-                "UPDATE candidates SET status = ?, gate_log = ?, updated_at = ? WHERE id = ?",
-                (
-                    str(new_status),
-                    json.dumps(gate_log, ensure_ascii=False),
-                    now,
+            with self._write_transaction():
+                row = self._conn.execute(
+                    "SELECT * FROM candidates WHERE id = ?", (int(id),)
+                ).fetchone()
+                if row is None:
+                    raise KeyError("candidate not found")
+                current = row["status"]
+                if new_status not in EVOLUTION_TRANSITIONS.get(current, ()):
+                    raise ValueError(f"invalid transition: {current} -> {new_status}")
+                candidate_id = int(row["id"])
+                self._insert_audit(
+                    str(actor_id),
+                    _AUDIT_ACTION_BY_STATUS.get(new_status, _DEFAULT_AUDIT_ACTION),
                     candidate_id,
-                ),
-            )
-            self._conn.commit()
+                    str(note),
+                    now,
+                )
+                gate_log = _decode_json(row["gate_log"])
+                if not isinstance(gate_log, list):
+                    gate_log = []
+                if gate is not None:
+                    entry = {
+                        "gate": str(gate),
+                        "result": _GATE_RESULT_BY_STATUS.get(new_status, _DEFAULT_GATE_RESULT),
+                        "detail": "" if gate_detail is None else str(gate_detail),
+                        "created_at": now,
+                    }
+                    if gate_metrics:
+                        entry["metrics"] = gate_metrics
+                    gate_log.append(entry)
+                self._conn.execute(
+                    "UPDATE candidates SET status = ?, gate_log = ?, updated_at = ? WHERE id = ?",
+                    (
+                        str(new_status),
+                        json.dumps(gate_log, ensure_ascii=False),
+                        now,
+                        candidate_id,
+                    ),
+                )
             updated = self._conn.execute(
                 "SELECT * FROM candidates WHERE id = ?", (candidate_id,)
             ).fetchone()
@@ -605,6 +616,26 @@ class CandidateStore:
                 (int(observation_id),),
             ).fetchall()
         return [_decode_candidate_row(row) for row in rows]
+
+    def observation_candidate_keys(self, artifact_type: str) -> set[tuple[int, str]]:
+        """All observations with a candidate of this type, without API pagination."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT observation_id FROM candidates "
+                "WHERE artifact_type = ? AND observation_id IS NOT NULL",
+                (str(artifact_type),),
+            ).fetchall()
+        return {(int(row["observation_id"]), str(artifact_type)) for row in rows}
+
+    def clusters_with_open_candidates(self, artifact_type: str) -> set[int]:
+        """Clusters with any open candidate, independent of the candidate page size."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT cluster_id FROM candidates WHERE artifact_type = ? "
+                f"AND status IN ({_OPEN_STATUS_PLACEHOLDERS}) AND cluster_id IS NOT NULL",
+                (str(artifact_type), *OPEN_CANDIDATE_STATUSES),
+            ).fetchall()
+        return {int(row["cluster_id"]) for row in rows}
 
     def observations_awaiting_code_patch(self, limit: int) -> list[dict]:
         """Approved clusters' member observations that have no **open** code patch yet.
@@ -736,9 +767,8 @@ class CandidateStore:
         ``ValueError`` and writes nothing, and the CHECK constraint is the second
         gate for any other writer.
         """
-        with self._lock:
+        with self._lock, self._write_transaction():
             audit_id = self._insert_audit(actor_id, action, candidate_id, note)
-            self._conn.commit()
         return audit_id
 
     def list_audit(self, candidate_id: int | None = None) -> list[dict]:
