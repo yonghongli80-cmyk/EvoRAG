@@ -723,6 +723,7 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             version_id INTEGER NOT NULL,
             content_hash TEXT NOT NULL,
             job_type TEXT NOT NULL DEFAULT 'material_index',
+            job_scope TEXT NOT NULL DEFAULT 'material',
             status TEXT NOT NULL DEFAULT 'queued',
             payload_hash TEXT NOT NULL DEFAULT '',
             available_at REAL NOT NULL,
@@ -736,6 +737,9 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_document_index_jobs_active
         ON document_index_jobs(document_id, status);
+
+        CREATE INDEX IF NOT EXISTS idx_document_index_jobs_scope
+        ON document_index_jobs(job_scope, document_id, status);
 
         CREATE TABLE IF NOT EXISTS material_archive_manifests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -833,6 +837,15 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             "ADD COLUMN source_path TEXT NOT NULL DEFAULT ''"
         )
         conn.commit()
+    # Scope index jobs: material and wiki ids are separate id spaces.
+    try:
+        conn.execute(
+            "ALTER TABLE document_index_jobs ADD COLUMN job_scope TEXT NOT NULL DEFAULT 'material'"
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS material_archive_import_results (

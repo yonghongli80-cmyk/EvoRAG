@@ -230,12 +230,13 @@ def enqueue_wiki_reindex_job(
         with db._lock, db.transaction(immediate=True):
             cursor = db._conn.execute(
                 "INSERT INTO document_index_jobs "
-                "(document_id, version_id, content_hash, job_type, status, "
+                "(document_id, version_id, content_hash, job_type, job_scope, status, "
                 " available_at, created_at, updated_at) "
-                "SELECT ?, 0, ?, ?, 'queued', ?, ?, ? "
+                "SELECT ?, 0, ?, ?, 'wiki', 'queued', ?, ?, ? "
                 "WHERE NOT EXISTS ("
                 "  SELECT 1 FROM document_index_jobs WHERE document_id = ? "
-                "  AND job_type = ? AND status IN ('queued','retry','running'))",
+                "  AND job_scope = 'wiki' AND job_type = ? "
+                "  AND status IN ('queued','retry','running'))",
                 (
                     page_id,
                     str(revision_id),

@@ -106,6 +106,10 @@ class UserDB:
 
     def _create_tables(self) -> None:
         create_tables(self._conn)
+        # Material/job tables live in a separate schema for historical reasons;
+        # a fresh database that skips this call has no document_index_jobs and
+        # the wiki retry enqueue silently fails. Keep the two in one place.
+        create_material_schema(self._conn)
 
     def _rebuild_document_versions_status(self) -> None:
         rebuild_document_versions_status(self._conn)

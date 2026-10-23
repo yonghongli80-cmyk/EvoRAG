@@ -95,13 +95,15 @@ class MaterialRepository(BaseRepository):
         with self.cm.transaction(immediate=True) as conn:
             conn.execute(
                 "UPDATE document_index_jobs SET status='cancelled', updated_at=? "
-                "WHERE document_id=? AND status IN ('queued','retry','running')",
+                "WHERE document_id=? AND job_scope='material' "
+                "AND status IN ('queued','retry','running')",
                 (now, document_id),
             )
             cur = conn.execute(
                 "INSERT INTO document_index_jobs "
-                "(document_id, version_id, content_hash, status, available_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                "(document_id, version_id, content_hash, job_type, job_scope, status, "
+                " available_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'material_index', 'material', 'queued', ?, ?, ?)",
                 (document_id, version_id, content_hash, not_before, now, now),
             )
             return int(cur.lastrowid)
