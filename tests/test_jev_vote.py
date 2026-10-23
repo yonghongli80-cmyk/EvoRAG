@@ -103,18 +103,21 @@ def test_an_early_split_keeps_sampling_until_a_majority_exists():
     assert result.value[0].answer_evidence >= 0.5
 
 
-def test_voting_splits_itself_evenly_and_still_returns_a_verdict():
+def test_voting_splits_itself_evenly_and_still_returns_a_verdict(monkeypatch):
     """投满之后仍然 1:1（轮数为偶数或序列恰好对半）时，返回结论而不是 ``unstable``。
 
     这里的裁决口径是"平票时按未命中选择"——与"证据不足就拒答"一致：拿不准时不作答。
     它是确定的（同一输入永远同一个结果），不是随机的。
     """
-    client = ScriptedClient([0.9, 0.1, 0.1, 0.1])
+    monkeypatch.setattr(settings, "jev_vote_rounds", 2)
+    client = ScriptedClient([0.9, 0.1])
     result = judge(client)
 
-    assert client.calls == 3
+    assert client.calls == 2
     assert result.available is True
     assert result.value is not None
+    # A tie is a "no answer evidence" verdict, not the last sample's value.
+    assert result.value[0].answer_evidence == 0.0
 
 
 def test_vote_rounds_of_one_keeps_the_single_call_behaviour(monkeypatch):

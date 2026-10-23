@@ -227,14 +227,21 @@ class JevClient:
             kind = failures[-1] if failures else "service"
             return JevBatchResult(available=False, failure_kind=kind, duration_ms=totals_ms)
         tied = [index for index in range(len(chunk_ids)) if yes[index] == no[index]]
+        judgments = list(latest)
         if tied:
             # 平票按"未命中"裁决：拿不准就不作答，与"证据不足就拒答"同向。
+            # 返回值必须与日志一致：把平票项的 answer_evidence 置 0，而不是让
+            # 最后一轮的采样值决定是否采纳（A-11）。
+            for index in tied:
+                judgments[index] = judgments[index].model_copy(
+                    update={"answer_evidence": 0.0}
+                )
             logger.info(
                 "Jev passages: %d/%d chunk(s) tied, decided as no answer evidence",
                 len(tied),
                 len(chunk_ids),
             )
-        return JevBatchResult(available=True, value=tuple(latest), duration_ms=totals_ms)
+        return JevBatchResult(available=True, value=tuple(judgments), duration_ms=totals_ms)
 
     def _resolve_question_set(
         self, stage: str, chunk_ids: Sequence[str] | None
