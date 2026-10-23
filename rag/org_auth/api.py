@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from rag.api_security import require_user
 from rag.org_auth.audit import OrgAuditService
@@ -18,6 +20,74 @@ def _db(request: Request):
 def _company_admin(user: dict) -> None:
     if not user.get("is_admin"):
         raise HTTPException(status_code=404, detail="资源不存在")
+
+
+class KnowledgeBasePolicyRequest(BaseModel):
+    """Assign a legacy/unassigned KB to an organization policy."""
+
+    org_code: str = Field(min_length=1, max_length=64)
+    kb_type: Literal["organization", "company_public", "sensitive"] = "organization"
+    sensitivity: str | None = Field(default=None, max_length=64)
+
+
+@router.put("/organization/knowledge-bases/{kb_id}/policy")
+def assign_knowledge_base_policy(
+    kb_id: str,
+    body: KnowledgeBasePolicyRequest,
+    request: Request,
+    user: dict = Depends(require_user),
+):
+    """Move an unassigned knowledge base under an explicit organization policy.
+
+    This is the administrative step the 2026-08-20 migration defers: legacy KBs
+    stay owner/admin-only until an admin assigns them. Reusing the existing
+    ``kb_org_policies`` table keeps reads/writes on the same authorization path.
+    """
+    _company_admin(user)
+    db = _db(request)
+    with db.locked_transaction() as conn:
+        if conn.execute("SELECT 1 FROM kb_metadata WHERE kb_id=?", (kb_id,)).fetchone() is None:
+            raise HTTPException(status_code=404, detail="资源不存在")
+        if (
+            conn.execute(
+                "SELECT 1 FROM org_units WHERE code=? AND active=1", (body.org_code,)
+            ).fetchone()
+            is None
+        ):
+            raise HTTPException(status_code=404, detail="组织不存在")
+        if body.kb_type == "sensitive" and not (body.sensitivity or "").strip():
+            raise HTTPException(status_code=400, detail="敏感库必须指定敏感域")
+        existing = conn.execute(
+            "SELECT 1 FROM kb_org_policies WHERE kb_id=?", (kb_id,)
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type,sensitivity,active) "
+                "VALUES(?,?,?,?,1)",
+                (kb_id, body.org_code, body.kb_type, body.sensitivity),
+            )
+        else:
+            conn.execute(
+                "UPDATE kb_org_policies SET org_code=?, kb_type=?, sensitivity=?, active=1 "
+                "WHERE kb_id=?",
+                (body.org_code, body.kb_type, body.sensitivity, kb_id),
+            )
+    OrgAuditService(db).record(
+        int(user["id"]),
+        "kb_policy_assigned",
+        "knowledge_base",
+        kb_id,
+        "success",
+        body.org_code,
+        {"kb_type": body.kb_type, "sensitivity": body.sensitivity},
+    )
+    return {
+        "kb_id": kb_id,
+        "org_code": body.org_code,
+        "kb_type": body.kb_type,
+        "sensitivity": body.sensitivity,
+    }
+
 
 
 @router.get("/login/accounts")

@@ -120,3 +120,54 @@ def test_admin_can_revoke_grant_and_invalidate_subject_token(isolated_api, make_
 
     assert revoked.status_code == 200
     assert resolve_principal(db, f"Bearer {token}", None) is None
+
+
+def test_admin_can_assign_an_unassigned_kb_to_an_org(isolated_api, make_user):
+    admin, admin_headers = make_user("admin", is_admin=True)
+    member, member_headers = make_user("member")
+    db = isolated_api.app.state.user_db
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEAM','协作组','team')")
+        conn.execute(
+            "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+            "VALUES('P1',?,'甲','专员')",
+            (member["id"],),
+        )
+        conn.execute("INSERT INTO org_memberships VALUES('P1','TEAM',1)")
+        conn.execute("INSERT INTO kb_metadata(kb_id,name) VALUES('kb','待归属库')")
+        conn.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) "
+            "VALUES('kb',NULL,'unassigned')"
+        )
+
+    assert isolated_api.get("/knowledge-bases/kb", headers=member_headers).status_code == 404
+
+    assigned = isolated_api.put(
+        "/organization/knowledge-bases/kb/policy",
+        headers=admin_headers,
+        json={"org_code": "TEAM", "kb_type": "organization"},
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json()["org_code"] == "TEAM"
+    assert isolated_api.get("/knowledge-bases/kb", headers=member_headers).status_code == 200
+    with db.locked_read() as conn:
+        row = conn.execute(
+            "SELECT org_code,kb_type FROM kb_org_policies WHERE kb_id='kb'"
+        ).fetchone()
+    assert (row["org_code"], row["kb_type"]) == ("TEAM", "organization")
+
+    denied = isolated_api.put(
+        "/organization/knowledge-bases/kb/policy",
+        headers=member_headers,
+        json={"org_code": "TEAM", "kb_type": "organization"},
+    )
+    assert denied.status_code == 404
+
+    unknown = isolated_api.put(
+        "/organization/knowledge-bases/kb/policy",
+        headers=admin_headers,
+        json={"org_code": "MISSING", "kb_type": "organization"},
+    )
+    assert unknown.status_code == 404
+    assert admin["id"] != member["id"]
