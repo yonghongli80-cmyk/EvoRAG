@@ -84,7 +84,7 @@ def request_logging_context_scope(function):
     """Scope a whole sync query or each individual advance/close of a stream."""
     def effective_kb(owner, args, kwargs):
         explicit = kwargs.get("kb_id", args[6] if len(args) > 6 else None)
-        return explicit or getattr(owner, "_kb_id", "-") or "-"
+        return explicit or getattr(owner, "_kb_id", "rag_docs") or "rag_docs"
 
     if isasyncgenfunction(function):
         @wraps(function)

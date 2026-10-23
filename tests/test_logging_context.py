@@ -120,6 +120,16 @@ def test_sync_query_scope_uses_effective_kb_and_restores_parent(monkeypatch):
         assert _read_fields() == ("sync-request", "parent-kb", "agent")
 
 
+def test_sync_query_scope_uses_prepare_default_when_owner_has_no_kb_id(monkeypatch):
+    import rag.pipeline as pipeline
+
+    owner = object.__new__(RAGPipeline)
+    monkeypatch.setattr(pipeline._pipeline_query, "query", lambda *args: _read_fields())
+
+    with _logging_context(request_id="sync-request"):
+        assert owner.query("question") == ("sync-request", "rag_docs", "-")
+
+
 def test_public_query_stream_remains_an_async_generator():
     assert inspect.isasyncgenfunction(RAGPipeline.query_stream)
 
