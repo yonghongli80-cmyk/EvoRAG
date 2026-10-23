@@ -209,6 +209,19 @@ def _generate(fake: FakeModel, cluster: dict, member: dict, trace, *, drafts=Non
 # ------------------------------------------------------------------
 
 
+def test_free_text_payload_is_bounded(tmp_path):
+    """C-12: rationale/expected_effect cannot grow without bound."""
+    trace, cluster, member = seeded(tmp_path)
+    fake = FakeModel(json.dumps(_preflight_answer(rationale="x" * 2001), ensure_ascii=False))
+
+    with pytest.raises(CandidateUnavailable) as excinfo:
+        _generate(fake, cluster, member, trace)
+
+    assert excinfo.value.reason == "invalid"
+    assert "rationale" in excinfo.value.detail
+    assert "2000" in excinfo.value.detail
+
+
 def test_small_text_rewrite_yields_a_contract_complete_candidate(tmp_path):
     trace, cluster, member = seeded(tmp_path)
     fake = FakeModel(json.dumps(_preflight_answer(), ensure_ascii=False))

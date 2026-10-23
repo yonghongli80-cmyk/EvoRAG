@@ -86,6 +86,7 @@ _ANSWER_FIELDS: tuple[str, ...] = (
 #: The confirmed diagnosis fields rendered into the prompt and checked here.
 _DRAFT_FIELDS: tuple[str, ...] = tuple(DiagnosisDraft.model_fields)
 _CONFIDENCES: tuple[str, ...] = get_args(DiagnosisDraft.model_fields["confidence"].annotation)
+_MAX_FREE_TEXT_CHARS = 2_000
 
 _TIMEOUT_ERRORS: tuple[type[BaseException], ...] = (TimeoutError, openai.APITimeoutError)
 _RATE_LIMIT_ERRORS: tuple[type[BaseException], ...] = (openai.RateLimitError,)
@@ -365,6 +366,11 @@ def _validate_completion(text: str, base_version: str) -> dict:
         value = answer[name]
         if not isinstance(value, str) or not value.strip():
             raise CandidateUnavailable(REASON_INVALID, f"{name} must be a non-empty string")
+        if len(value) > _MAX_FREE_TEXT_CHARS:
+            raise CandidateUnavailable(
+                REASON_INVALID,
+                f"{name} must be at most {_MAX_FREE_TEXT_CHARS} characters",
+            )
     if answer["confidence"] not in _CONFIDENCES:
         raise CandidateUnavailable(REASON_INVALID, "confidence must be one of low/medium/high")
     if not isinstance(answer["payload"], dict):
