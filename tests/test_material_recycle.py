@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -358,6 +360,65 @@ def test_worker_cancels_a_purge_for_a_still_restorable_document(recycle_fixture)
     assert f.db.get_index_job(job_id)["status"] == "cancelled"
     assert f.db.get_document_permission_by_id(f.doc_id)["purge_state"] == ""
     assert (f.versions_root / "v1.pdf").exists() is True
+
+
+def test_worker_retries_purge_after_vector_delete_recovers(recycle_fixture):
+    """A failed vector delete must retry the persistent purge and clean old version points."""
+    f = recycle_fixture
+    clock_now = time.time()
+    f.delete(f.doc_id, f.actor, now=clock_now - 31 * 86400)
+    worker = f.worker()
+
+    class FailOnceVectorStore:
+        def __init__(self):
+            self.failed = False
+
+        def delete_version(self, kb_id, version_id):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("vector store temporarily unavailable")
+            f.vector_store.delete_version(kb_id, version_id)
+
+    worker.services = replace(worker.services, vector_store=FailOnceVectorStore())
+    first = worker.run(batch=1, now=clock_now)
+    job = f.db.get_index_job(first[0].job_id)
+
+    assert [result.status for result in first] == ["retry"]
+    assert job["status"] == "retry"
+    assert f.db.get_document_permission_by_id(f.doc_id)["purge_state"] == PURGED_STATE
+    assert f.db.get_document_permission_by_id(f.doc_id)["current_version_id"] is None
+    assert f.vector_store.deleted_versions == []
+
+    second = worker.run(batch=1, now=job["available_at"])
+
+    assert [result.status for result in second] == ["done"]
+    assert f.db.get_index_job(job["id"])["status"] == "done"
+    assert f.vector_store.deleted_versions == [("kb-1", f.version_id)]
+
+
+def test_worker_fails_purge_after_vector_delete_attempts_are_exhausted(recycle_fixture):
+    """Persistent vector deletion failures exhaust the normal material job budget."""
+    f = recycle_fixture
+    clock_now = time.time()
+    f.delete(f.doc_id, f.actor, now=clock_now - 31 * 86400)
+    worker = f.worker()
+    worker.max_attempts = 2
+
+    class AlwaysFailVectorStore:
+        def delete_version(self, _kb_id, _version_id):
+            raise RuntimeError("vector store unavailable")
+
+    worker.services = replace(worker.services, vector_store=AlwaysFailVectorStore())
+    first = worker.run(batch=1, now=clock_now)
+    retry_job = f.db.get_index_job(first[0].job_id)
+
+    assert [result.status for result in first] == ["retry"]
+    assert retry_job["status"] == "retry"
+
+    second = worker.run(batch=1, now=retry_job["available_at"])
+
+    assert [result.status for result in second] == ["failed"]
+    assert f.db.get_index_job(retry_job["id"])["status"] == "failed"
 
 
 def test_restore_cancels_a_queued_purge_job(recycle_fixture):

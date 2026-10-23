@@ -402,6 +402,7 @@ def process_purge_job(
                 version_id,
                 document_id,
             )
+            raise
     return JobResult(job["id"], "done", 0, 0, 0)
 
 
