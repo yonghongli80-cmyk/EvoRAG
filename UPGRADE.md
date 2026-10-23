@@ -241,3 +241,16 @@ Client ──TLS──> LB / Reverse Proxy
 | 测试 | 新增 `tests/test_system_ready_metrics.py`、`tests/test_vector_store_remote.py`、`tests/test_qdrant_deployment.py`；`tests/test_router_parity.py` 基线加入 `/ready`、`/metrics` |
 | 验证 | 新增用例 30 passed；`test_api` / 部署与 Compose / `test_vector_store*` / `test_stream_eventloop_nonblocking` / router parity 等回归通过；本次改动文件 `ruff check` 全绿（全树当时仍有其它并行工作流修改中的文件报错） |
 | 未做/阻塞 | **Docker daemon 不可用**：未 pull 镜像、未启动容器、未验证健康检查/API key/持久卷、未做 snapshot 迁移、未做双进程验收；Compose 仅静态校验。rerank/generation 独立分段需 `pipeline.py`/`reranker.py`/`generator.py` 钩子（超出 S7 边界）。未提交 Git |
+
+
+## 10. 2026-10-23：pipeline 与观测代码补齐（隔离分支）
+
+`codex/pipeline-observability` 将入口按准备/Jev/查询/诊断拆分，保留签名、QueryResult、
+实时 facade 替换接缝和 ACL 证据门禁；入口 615 行（上限1000）、api 822 行、局部导入150。
+直接 rerank/generation、取消部分轨迹与终态防重、三字段日志及 shadow 日志隔离均有离线回归。
+首次全量暴露独立准备日志 route 残留，已定位生产边界并修复，保留原失败断言与失败证据。
+修复后源码 `af32f43` 全后端 **2879 passed / 3 skipped / 1 既有警告**，退出码0；
+JUnit 2882项、0失败/0错误，全树Ruff通过，分项与整分支代码审查通过。
+本轮未合并或推送 main，原服务未重启。Docker/Qdrant 运行、迁移与双进程、新负载/P99、
+PostgreSQL/共享Redis/对象存储/多副本和自动 shadow 采样仍按既有计划待办。
+完整口径、结果与本机证据路径见最新交接和 `docs/phase0-observability-and-baseline.md`。
