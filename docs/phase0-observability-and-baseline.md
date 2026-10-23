@@ -2,7 +2,7 @@
 
 本文件是 `UPGRADE.md` Phase 0/1 的实施说明与可复现压测档案。范围：
 
-* Phase 0：只读 `/ready`、只读 `/metrics`、可复现的 P50/P95/P99 采集命令与基线记录。
+* Phase 0：只读 `/ready`、只读 `/metrics`、直接重排/生成分段、可复现的 P50/P95/P99 采集命令与基线记录。
 * Phase 1（配置面）：`RAG_QDRANT_URL` / `RAG_QDRANT_API_KEY`、`_get_client()` 的本地/远程分支、
   Compose 的 `qdrant` 服务、`.env.example` 说明。
 * **Docker daemon 当前不可用**：Phase 1 只完成代码/配置/静态测试，未拉镜像、未启动容器、
@@ -77,18 +77,32 @@
 | `rag_query_traces` | gauge | 从 `memory.db` 最近窗口读到的执行轨迹条数（上限 500） |
 | `rag_query_duration_seconds{route,quantile}` + `_count`/`_sum` | summary | 端到端查询耗时（含生成），**按 route 拆分**（`rag`/`structured`/`tool`/`clarification`/`legacy`/`fixed`/`arena`/`blocked`/`error`，未知归 `other`）；缺少 `total_ms` 的历史行不计入 |
 | `rag_query_stage_samples{stage,route}` | gauge | 带有该分段耗时的轨迹条数；0/缺失表示"本窗口没测到"，不是"耗时为 0" |
-| `rag_query_stage_duration_seconds{stage,route,quantile}` + `_count`/`_sum` | summary | 已落盘的分段耗时：`preparation` / `jev_preflight` / `jev_passages`，按 route 拆分 |
+| `rag_query_stage_duration_seconds{stage,route,quantile}` + `_count`/`_sum` | summary | 已落盘的分段耗时：`preparation` / `jev_preflight` / `jev_passages` / `rerank` / `generation`，按 route 拆分 |
 | `rag_dependency_healthy{component}` | gauge | 与 `/ready` 同一组探针；1=ok、0=error；`skipped` 的组件不出现 |
 | `rag_llm_provider_healthy{provider}` | gauge | LLM 池中该 provider 是否未被熔断 |
 | `rag_llm_inflight_requests{provider}` | gauge | LLM 并发门内的在途请求数 |
 
-### 2.1 已知缺口（如实记录）
+### 2.1 分段口径与限制
 
-* **重排（rerank）与生成（generation）没有独立分段计时**。现有落盘数据里只有
-  `preparation_ms`（准备阶段，含检索与重排）与 `total_ms`（含生成）；`rerank`/`generation`
-  的单独耗时需要在 `rag/pipeline.py`、`rag/reranker.py`、`rag/generator.py` 增加钩子，
-  这三个文件不在本次 S7 的改动边界（由检索/降级工作流负责）。不把
-  `total_ms - preparation_ms` 当作"生成耗时"上报——那会混入记忆写入、输出检查等后处理。
+2026-10-23 补齐于 `codex/pipeline-observability` 隔离分支；本轮是否集成及最终测试结果见
+[`handoff-2026-10-23.md`](handoff-2026-10-23.md)。原服务没有因本轮离线验证而重启。
+
+* `rerank_ms` 由 `rag/pipeline_prepare.py` 包围每次真实 reranker 调用，以
+  `time.perf_counter()` 直接测量；双次重排累计两次，Jev 回退走同一入口，无调用不产生样本。
+* `generation_ms` 由 `rag/pipeline_query.py` 测量最终 RAG 答案生成。同步覆盖完整生成调用；
+  默认、balanced、arena 流式累计每次 `await anext()` 的等待，排除 yield 后消费方暂停。
+  arena 测量合并事件流等待，不把并行供应商耗时相加。重试/退避在调用内部时计入。
+* Agent、改写、路由及 Jev 内部模型调用不计作最终答案 generation；fixed/structured/blocked/cache
+  未调用生成器时也没有 generation 样本。沿用缓存路径原有的轨迹行为，不为指标另造缓存轨迹。
+* `preparation_ms` 保留 Jev 准备全段、含重排的旧口径；`rerank_ms` 是嵌套区间，二者不可相加。
+  `total_ms` 沿用原查询口径，不用 `total_ms - preparation_ms` 推算 generation。
+* `rag/stage_timing.py` 提供请求独立、线程安全的累计器；SQLite 仍用原 `details.stage_timings`
+  JSON，没有迁移表。计时只接受已知键、有限非负且非 bool 的数值；历史非法分段也不进入指标。
+  新 `decision_metadata.execution_outcome` 仅允许 success/failed/degraded/cancelled。
+* 取消在没有终态写入时保存一条内部 `route=error`、`execution_outcome=cancelled` 轨迹，
+  不写答案记忆、不向失败演化队列提交取消，也不新增 SSE 完成事件。准备线程无法安全中断：
+  取消立即封存活动区间截至取消点的时长，不等线程；迟到更新忽略，所以该快照不代表后台最终成本。
+  若终态持久化已经发起，沿用在先终态，不因取消再追加一条。已有 Agent 非终态故障观测保留。
 * `preparation` / `jev_preflight` / `jev_passages` 三个 stage 只有在 Jev 路径
   （`RAGPipeline._attach_jev_stage`）才落盘；`rag_query_stage_samples` 缺失或为 0 时就该按
   "未采集"读，而不是"很快"。
@@ -97,6 +111,13 @@
 * 执行轨迹的百分位按 `route` 分组后才可比：同一窗口里 `rag` 可能包含慢的准备/生成，
   `fixed`/`error` 往往是毫秒级，混在一起算分位数会得到无意义的"下降"。窗口是最近 500 条，
   不是进程生命周期；`_count` 就是该 route 的样本数。
+
+日志 JSON 与文本均含 `request_id`、`kb_id`、`route`，缺省为 `-`。route 是有界逻辑执行路由，
+不是 HTTP 路径；尚未决策时为 `-`，未知值归 `other`。KB 来自有效请求/实例 KB，标识中的控制字符
+在文本格式中转义。合法 `X-Request-ID` 保留并回传；空值、控制字符和超过 128 字符的值替换为 UUID。
+同步查询覆盖全段，流式仅在每次推进/关闭时绑定，yield 前恢复消费方原上下文。
+`asyncio.to_thread` 与 Jev shadow 线程也带日志字段；shadow 只捕获三个字段，不复制业务 Context。
+这些字段仅用于日志，指标标签和原有 HTTP 路由模板统计保持不变。
 
 ### 2.2 抓取
 
@@ -295,7 +316,7 @@ WSL 2.7.14/WSLService 已安装运行，WSL 未列出 Linux 发行版；Hypervis
 也未拉取/运行容器。8080 既有服务仍可连接。用户选择先完成代码整改，以下运行验收保持待执行。
 
 1. 在 Docker 可用环境完成 4.3 的迁移与双进程验收，并把结果补进 `UPGRADE.md` Phase 1 与第 3.5 节。
-2. 给 `pipeline.py` / `reranker.py` / `generator.py` 加分段计时（由检索/降级工作流评审），
-   再在 `/metrics` 增加 `rerank`、`generation` stage；不要用差值冒充。
+2. 本轮分支已补直接 `rerank` / `generation` 分段与 `/metrics` 展示；集成后采集真实负载，
+   核对样本覆盖及 P99。离线回归不能代替部署验收或压测，不从旧分位数补造新结果。
 3. 若需要准备的 P99，给 `scripts/benchmark_jev_retrieval.py` 增加原始样本输出（或分位数参数）。
 4. 生产抓取：给 Prometheus 配管理员 Bearer token；`/ready` 用于摘流，`/health` 继续做容器健康检查。

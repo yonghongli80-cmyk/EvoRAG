@@ -67,11 +67,11 @@
 ### Task 5: 请求日志字段与并发/流式上下文隔离
 **Files:** Modify rag/logging_config.py、rag/api.py、rag/pipeline.py、rag/pipeline_prepare.py、rag/pipeline_jev.py、rag/pipeline_query.py、rag/jev/shadow.py；Create tests/test_logging_context.py；必要时扩 tests/test_pipeline_stage_timing.py、tests/test_jev_shadow.py。
 **Interfaces:** 保留 get_request_id()/set_request_id()；新增 get_kb_id()/get_route() 和 scoped logging_context(*, request_id=None, kb_id=None, route=None)。None表示保留当前值，显式"-"表示未知；内部 token finally reset。wrap_logging_context(callback) 仅捕获三个日志值，回调执行时绑定/恢复，不复制其它业务ContextVar。日志 route 是逻辑执行路由，与HTTP metrics route模板不同。Task3 的每次iterator推进/关闭作用域叠加日志绑定。
-- [ ] 写 RED：JSON/文本格式都有 request_id/kb_id/route；未知默认"-"；合法请求ID保留，空/控制字符/超过128字符的ID替换随机ID并回响应头；KB日志控制字符安全处理，不新增正文/身份/凭据字段。
-- [ ] 写 RED：两个并发请求在 async 与 to_thread 中各有正确字段；同步/异常后恢复；同一task交替推进两条流、yield期间消费方日志、aclose/取消/done后恢复；嵌套上下文回到原值，不只恢复默认值。用事件/barrier控制，不用sleep。
-- [ ] 写 RED：Jev ShadowEvaluator自有executor中的比较/日志回调继承提交时的request_id/kb_id/route；复用worker处理第二个请求不串漏。另设业务ContextVar哨兵验证没有整Context复制，shadow队列/丢弃/关闭/比较行为保持原状。
-- [ ] 实现中间件请求上下文和 pipeline有效KB/已知逻辑route上下文；rerank/生成/诊断日志能看到本次标识；准备未判路由时"-"，未知路由other；非pipeline日志缺失字段用"-"。不修改SSE、请求授权或现有有效ID响应契约。
-- [ ] 跑新日志、stage timing、pipeline/stream、system metrics、eventloop、test_jev_shadow.py、multi-model API/请求ID相关回归和架构预算；api<=830、局部imports<=150，改动文件 Ruff。GREEN 后独立提交与报告。
+- [x] 写 RED：JSON/文本格式都有 request_id/kb_id/route；未知默认"-"；合法请求ID保留，空/控制字符/超过128字符的ID替换随机ID并回响应头；KB日志控制字符安全处理，不新增正文/身份/凭据字段。
+- [x] 写 RED：两个并发请求在 async 与 to_thread 中各有正确字段；同步/异常后恢复；同一task交替推进两条流、yield期间消费方日志、aclose/取消/done后恢复；嵌套上下文回到原值，不只恢复默认值。用事件/barrier控制，不用sleep。
+- [x] 写 RED：Jev ShadowEvaluator自有executor中的比较/日志回调继承提交时的request_id/kb_id/route；复用worker处理第二个请求不串漏。另设业务ContextVar哨兵验证没有整Context复制，shadow队列/丢弃/关闭/比较行为保持原状。
+- [x] 实现中间件请求上下文和 pipeline有效KB/已知逻辑route上下文；rerank/生成/诊断日志能看到本次标识；准备未判路由时"-"，未知路由other；非pipeline日志缺失字段用"-"。不修改SSE、请求授权或现有有效ID响应契约。
+- [x] 跑新日志、stage timing、pipeline/stream、system metrics、eventloop、test_jev_shadow.py、multi-model API/请求ID相关回归和架构预算；api<=830、局部imports<=150，改动文件 Ruff。GREEN 后独立提交与报告。
 
 ### Task 6: 集成验收、文档与整分支审查（统筹）
 **Files:** docs/handoff-2026-10-23.md、docs/README.md、docs/phase0-observability-and-baseline.md、UPGRADE.md、本计划；不增加生产行为。

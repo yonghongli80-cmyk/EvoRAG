@@ -1,6 +1,6 @@
 # RAGv3 生产化升级方案（多实例）
 
-> **状态：Phase 0 部分实施、Phase 1 配置面落地；运行时迁移未执行（Docker daemon 不可用）。** 日期：2026-10-22。
+> **状态：Phase 0 分段计时与日志上下文代码补齐（本轮分支待集成），新负载验收待执行；Phase 1 配置面落地，运行时迁移未执行。** 日期：2026-10-23。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
 > 单机缺陷的修复见 [`docs/superpowers/plans/2026-10-21-unified-remediation.md`](docs/superpowers/plans/2026-10-21-unified-remediation.md)。
 > 原则：**不 big-bang**，每个阶段独立可回滚，上一阶段验收不过不进下一阶段。
@@ -19,7 +19,7 @@
 | 缓存/锁 | Redis 只用于 LLM 池并发门 | Redis 承担共享缓存、限流、分布式锁 |
 | 文件 | 本地上传/版本/结构化数据集目录 | 对象存储（S3/MinIO），DB 只存 key |
 | 后台任务 | 素材/演化/备份 worker 在 API 进程内 | 独立 worker 部署，租约 + 幂等 |
-| 可观测 | 基准有 P50/P95，无 P99/指标/追踪 | P50/P95/P99、指标、追踪、告警、SLO |
+| 可观测 | `/ready`、管理员 `/metrics`、执行轨迹与直接分段已实现；有历史 P50/P95/P99 压测档案 | 持续采样、告警、SLO 与部署验收 |
 | 安全 | JWT/Cookie、组织 ACL；TLS 靠外部 | TLS、密钥管理、限流、审计、PITR |
 
 **顺序**：Phase 0 观测基线 → Phase 1 Qdrant server → Phase 2 PostgreSQL → Phase 3 Redis 共享缓存/锁 →
@@ -37,10 +37,10 @@ Phase 4 对象存储 → Phase 5 多副本与独立 worker → Phase 6 安全与
 | Qdrant | `QdrantClient(path=settings.qdrant_path)`，或 `url=settings.qdrant_url`（Phase 1 已加，默认空） | **进程级独占目录**，第二个进程打不开；基准/沙箱必须停服务 | `rag/vector_store.py::_get_client` |
 | SQLite | `ConnectionManager`：单写连接 + 线程本地只读连接 | 多副本写会锁；WAL 放共享盘不安全 | `rag/db/connection.py` |
 | SQL 方言 | 56 张表、`INSERT OR IGNORE`、`lastrowid`、`PRAGMA`、FTS5 | 不能直接换 Postgres | `rag/repositories/schema.py`、`rag/db/migrations/` |
-| Redis | 只给 LLM 池并发门用 | 答案缓存 `cached=None`；改写缓存是进程内 | `rag/llm_pool/router.py:192`、`pipeline.py:501` |
+| Redis | 只给 LLM 池并发门用 | 答案缓存 `cached=None`；改写缓存是进程内 | `rag/llm_pool/router.py`、`rag/pipeline_prepare.py` |
 | 文件 | `data/upload`、`data/document_versions`、`data/structured_datasets` | 本机盘；Docker `COPY . .` 有带入风险 | `rag/context.py:27`、`.dockerignore` |
 | Worker | 素材/演化/备份在 API 进程内启动 | 多副本会重复跑 | `rag/api.py` lifespan |
-| 观测 | 基准算 P50/P95；`locustfile.py` 有 P99 口径；`/ready`（依赖就绪）与 `/metrics`（Prometheus 文本）已加 | 仍无 rerank/generation 独立分段与追踪 | `rag/routers/system.py`、`docs/phase0-observability-and-baseline.md` |
+| 观测 | `/ready`、`/metrics` 与执行轨迹；rerank/generation 直接测量；日志统一请求/KB/逻辑路由 | 新负载采样与部署验收继续跟踪 | `rag/stage_timing.py`、`rag/logging_config.py`、`docs/phase0-observability-and-baseline.md` |
 
 ---
 
@@ -84,12 +84,14 @@ Client ──TLS──> LB / Reverse Proxy
 - **[x] `/metrics`**（只读，管理员鉴权）：Prometheus 文本格式，输出请求量/延迟（P50/P95/P99）、
   检索阶段耗时、执行轨迹分段、依赖健康、LLM 池并发；不含问题文本/文档名/原始路径/凭据。
   HTTP 计数由 `rag/api.py` 中间件按路由模板采集，检索耗时在 `rag/vector_store.py` 采集。
-- **[ ] rerank/generation 独立分段**：需要 `pipeline.py`/`reranker.py`/`generator.py` 钩子，
-  不在本工作流边界；在此之前 `/metrics` 只报已落盘的 `preparation`/`jev_*` 分段，不用差值冒充。
-- **[ ] 结构化日志补 `request_id`、`kb_id`、`route`**：`request_id` 已由日志过滤器注入，
-  `route`/`rewrite_dual_rerank` 已进执行轨迹的 metadata；`kb_id` 与 `route` 尚未统一成日志字段。
-- **验收**：同一压测脚本在单机产出稳定 P99（**部分达成**：命令与基线档案已就绪，2026-10-22
-  未在 S7 内重跑）；“慢在检索、重排还是生成”目前只能看到检索/准备分段，重排与生成待钩子。
+- **[x] rerank/generation 独立分段（本轮分支）**：在准备与查询执行模块包围真实调用，
+  经原 trace JSON 落盘并由 `/metrics` 展示。双重排累计，流式排除消费暂停，arena 计合并流等待。
+  保留 `preparation`/`jev_*` 旧分段；preparation 含 rerank，不相加，不用差值冒充 generation。
+- **[x] 结构化日志补 `request_id`、`kb_id`、`route`（本轮分支）**：JSON/文本统一三个字段，
+  route 为有界逻辑路由；请求、流式逐次推进、线程与 shadow worker 作用域隔离，结束后恢复。
+  shadow 只传日志标识，保留业务 ContextVar 隔离；不增加 Prometheus 高基数标签。
+- **验收**：同一压测脚本在单机产出稳定 P99（**部分达成**：命令与历史档案已就绪，本轮未重跑压测）；
+  检索、准备、重排与最终 RAG 生成可分别观测，新计时代码用离线确定性回归验证。
 - **回滚**：只增观测，无行为变化（`/health` 不变，新增端点只读）。
 
 ### Phase 1：Qdrant server（2–3 天）
@@ -181,7 +183,7 @@ Client ──TLS──> LB / Reverse Proxy
 
 | 阶段 | 硬指标 | 测试 | 回滚 |
 | --- | --- | --- | --- |
-| 0 观测 | P99 可复现；分段耗时可见（**部分**：rerank/generation 待钩子） | 压测档案（已建）+ `/ready` `/metrics` | 无 |
+| 0 观测 | 直接分段已落地；新负载 P99 与部署采样待验收 | 历史压测档案 + `/ready` `/metrics` + 离线计时回归 | 无 |
 | 1 Qdrant | 双进程并发；top-5 一致（**配置面已就绪，运行时未验证：Docker 阻塞**） | 检索回归 + 基准 | 清空 URL |
 | 2 Postgres | 2313 用例通过；并发无锁；恢复演练 | 全量 + 迁移比对 | 切回 SQLite |
 | 3 Redis | 跨副本改写一致；故障降级 | 多副本集成 + 断网 | backend=memory |
@@ -218,8 +220,8 @@ Client ──TLS──> LB / Reverse Proxy
 
 ## 8. 下一步
 
-1. Phase 0 观测面已落地（`/ready`、`/metrics`、压测档案）；剩余：rerank/generation 独立分段
-   （跨工作流钩子）与 `kb_id` 统一进日志字段。
+1. Phase 0 直接 rerank/generation 分段已补齐；日志上下文与最终集成结果见本轮
+   `docs/superpowers/plans/2026-10-23-pipeline-observability.md`，仍需部署采样及新的 P99 验收。
 2. **在有 Docker daemon 的环境**按 `docs/phase0-observability-and-baseline.md` 4.3 完成 Qdrant
    迁移与双进程验收；验收不过不进 Phase 2。
 3. 单机修复（统一修复计划）全部验收通过后，再开 Phase 2；每个阶段单独分支/提交，
