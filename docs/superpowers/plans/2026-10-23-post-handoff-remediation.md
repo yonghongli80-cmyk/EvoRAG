@@ -13,7 +13,7 @@
 - 保持外部 API 响应键不变；仅收紧全局摘要授权。
 - 不抬高 tests/test_architecture_budget.py 的预算。
 - 实现先有失败回归测试；任务独立提交，统筹方统一跑一次后端全量、前端测试/构建及 Ruff。
-- 代码在 codex/post-handoff-remediation 隔离分支完成；不自动推送或合并共享主分支。
+- 实施阶段代码在 codex/post-handoff-remediation 隔离分支完成，未自动推送或合并；随后经用户明确授权，整改交付提交26e4035已快进合并main并同步Gitee/GitHub的main和标签。
 
 ## Review Focus
 - 完全重复文本对应不同索引/元数据时仍保留首个 Chunk；近似重复及空输入维持既有清洗语义（Task 1）。
@@ -75,4 +75,4 @@
 **Files:** tests/test_batch_import_versioning.py；不改生产导入或检索代码。
 全量重跑发现该文件四项用例直接请求嵌入服务并因假凭据401失败。复用已观察RED，以文件级外部嵌入替身输出有效确定向量；保留真实SQLite/Qdrant、版本可见域与回滚断言，恢复嵌入单例/缓存并禁止真实客户端回落。相关回归GREEN、独立提交与审查后执行最终完整套件。
 
-实施状态：Tasks 1–4 已独立审查通过；Task 6 提交414264c/518fd44、Task 7 提交eb14c85，均已独立审查通过。Task 5 稳定代码962c510后端全量2807 passed / 3 skipped / 1既有警告，退出码0；前端39文件299项及临时构建、全树Ruff、pip check通过。Luna整分支代码审查Approved，无问题。测试与审查证据归档本机artifacts/post-handoff-remediation-2026-10-23/；分支保留待集成，Docker运行验收延期。
+实施状态：Tasks 1–4 已独立审查通过；Task 6 提交414264c/518fd44、Task 7 提交eb14c85，均已独立审查通过。Task 5 稳定代码962c510后端全量2807 passed / 3 skipped / 1既有警告，退出码0；前端39文件299项及临时构建、全树Ruff、pip check通过。Luna整分支代码审查Approved，无问题。测试与审查证据归档本机artifacts/post-handoff-remediation-2026-10-23/。用户随后明确授权集成：整改交付26e4035已快进合并main，两端main/标签查询一致；后续集成文档提交按同一流程同步，最终HEAD以远端查询为准。Docker运行验收延期。

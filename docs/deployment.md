@@ -114,13 +114,14 @@ docker compose up -d
 
 - **本仓库采用双远端**：`origin` 是 Gitee（`git@gitee.com:li-yonghong111/ragv3.git`），
   `github` 是 GitHub 镜像（`git@github.com:yonghongli80-cmyk/EvoRAG.git`）。
-  2026-10-23 只读核对时，两边 `main` 均为 `55862fb`；后续以真实远端查询为准。
+  2026-10-23 整改前只读核对时，两边 `main` 均为 `55862fb`；本轮集成状态见最新交接，后续以真实远端查询为准。
 - **仅推送到 Gitee 不会触发 GitHub Actions**。同步推送到 GitHub 后，
   `.github/workflows/ci.yml` 按 GitHub 的 push/pull_request 事件触发；
   `deploy.yml` 监听 `main` 上 CI 完成的 workflow_run 事件，
   部署 job 再通过 `conclusion == 'success'` 条件决定是否执行。
   仓库已同步不等于 CI 或部署已验收：Actions 权限、部署 secrets 和实际运行结果仍需查看 GitHub 的配置及日志。
-- 后续按交接文档分别推送两个远端的 `main`，新增标签也同步两边。
+- 本轮整改交付 `26e4035` 已合并 `main` 并推送两个远端，`main` 与现有标签经真实查询确认一致；新增集成文档提交沿用同一双推流程。
+  后续继续按交接文档分别推送两个远端的 `main`，新增标签也同步两边。
   Gitee 侧若需要独立自动门禁，可接入 Gitee Go 或自建 runner，命令与下面"本地等价命令"一致。
   服务器手动部署入口仍为 `bash deploy.sh`，包含同一套备份门禁与健康门禁。
 

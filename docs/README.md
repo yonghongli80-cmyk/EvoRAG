@@ -7,7 +7,7 @@
 ## 当前有效入口
 
 - `handoff-2026-10-23.md`：最新交接，包含双远端、验证基线、关键行为及剩余升级条件。
-- `superpowers/plans/2026-10-23-post-handoff-remediation.md`：交接后定向整改与集成验证计划。
+- `superpowers/plans/2026-10-23-post-handoff-remediation.md`：交接后定向整改与集成验证完成记录，已并入 `main`。
 - `superpowers/plans/2026-10-21-unified-remediation.md`：上一轮统一修复计划（交接遗留 + 全库审查）。
 - `PROJECT_INTRODUCTION.md`：架构白皮书（描述当前 `main`；历史对照数字以文中标注的提交为准）。
 - `development-log.md`：按“问题→证据→决策→结果”记录的开发日志。
