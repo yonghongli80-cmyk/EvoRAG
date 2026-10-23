@@ -44,15 +44,15 @@
 - [x] 门禁补齐单独跑test_code_patches.py、test_patch_generator.py、test_permissions.py、test_api_security.py及新增改动Ruff；查询源码未再改动时复用已完成112项证据，不重复全量或同一查询套件。
 
 ### Task 3: 直接阶段计时、失败轨迹与指标闭环
-**Files:** Create rag/stage_timing.py、tests/test_pipeline_stage_timing.py；Modify rag/pipeline.py、rag/pipeline_prepare.py、rag/pipeline_jev.py、rag/pipeline_query.py、rag/pipeline_diagnostics.py、rag/tracker.py、rag/routers/system.py、tests/test_tracker.py、tests/test_system_ready_metrics.py、tests/test_architecture_budget.py。
+**Files:** Create rag/stage_timing.py、tests/test_pipeline_stage_timing.py；Modify rag/pipeline_prepare.py、rag/pipeline_query.py、rag/pipeline_diagnostics.py、rag/tracker.py、rag/routers/system.py、tests/test_pipeline_dual_rerank.py、tests/test_tracker.py、tests/test_system_ready_metrics.py、tests/test_architecture_budget.py。rag/pipeline.py 与 rag/pipeline_jev.py 沿用现有委托接入；普通/Jev 准备回归验证该边界，不为文件清单触碰生产代码。
 **Interfaces:** stage_timing.StageTimings 的 start(stage)->opaque token、finish(token)->None、snapshot()->dict[str,float]、seal()->dict[str,float]；snapshot 返回已完成区间，seal 立即把当前活动区间截至封存点计入并冻结，后续更新忽略。use_stage_timings(timings) / current_stage_timings() / ensure_stage_timings() 用 ContextVar 绑定/恢复；measure_call(stage, callable, *args, **kwargs) 与 measure_stream(stage, AsyncIterator) 执行真实调用并保证 finally 收尾。同步全段和异步每次推进/关闭作用域绑定，不能把请求 collector 泄给消费方。
 **Contract:** 保存 rerank_ms / generation_ms；新执行结果字段 execution_outcome 仅success/failed/degraded/cancelled。保留 preparation_ms 旧含重排口径，不相加。最终答案 generation 不覆盖 Agent/路由/改写/Jev 内部调用；arena 计合并事件流等待，不求并行模型之和。
-- [ ] 写 RED 行为回归：单/双 rerank 精确累计、无候选不造样本；普通与Jev prepared 都带真实重排时长；同步生成和 fixed/structured/blocked/cache 的有/无样本；可控 perf_counter 和离线 provider，不 sleep 拼墙钟。
-- [ ] 写 RED 流式回归：默认/balanced/arena 的逐次 anext 时间累计；模拟消费暂停不计 generation；异常/熔断/部分 token 后失败保留实测，未成功不得写答案记忆或伪 done。
-- [ ] 先完成计时器自身的start/finish/snapshot/seal和每次iterator推进/关闭作用域；正常失败记录真实耗时，取消照旧传播并恢复collector。取消轨迹的持久化和终态防重由Task4独立交付，本任务不提前实现该状态机。
-- [ ] 在 tracker 允许新 stage 和有界 outcome；非法键、bool、负值、NaN/inf/非数值不入计时；SQLite表结构与旧列/JSON键不变。/metrics 输出两个新增 stage、沿用旧 series 与标签，不新增 request_id/kb_id 标签。端到端读真实临时SQLite，核对旧preparation/Jev与新stage样本。
-- [ ] 实现请求计时/实际调用钩子与封存，保持同一失败只经既有适当路径记录；直接 private prepare 也有collector；不以差值/整段Agent充当生成耗时。stage_timing上限220。
-- [ ] 跑新 timing、tracker、system metrics、兼容/架构、pipeline/stream/dual_rerank/Jev/arena、breaker、eventloop、done reliability 与 structured observability；改动文件 Ruff。GREEN 后独立提交与报告。
+- [x] 写 RED 行为回归：单/双 rerank 精确累计、无候选不造样本；普通与Jev prepared 都带真实重排时长；同步生成和 fixed/structured/blocked/cache 的有/无样本；可控 perf_counter 和离线 provider，不 sleep 拼墙钟。
+- [x] 写 RED 流式回归：默认/balanced/arena 的逐次 anext 时间累计；模拟消费暂停不计 generation；异常/熔断/部分 token 后失败保留实测，未成功不得写答案记忆或伪 done。
+- [x] 先完成计时器自身的start/finish/snapshot/seal和每次iterator推进/关闭作用域；正常失败记录真实耗时，取消照旧传播并恢复collector。取消轨迹的持久化和终态防重由Task4独立交付，本任务不提前实现该状态机。
+- [x] 在 tracker 允许新 stage 和有界 outcome；非法键、bool、负值、NaN/inf/非数值不入计时；SQLite表结构与旧列/JSON键不变。/metrics 输出两个新增 stage、沿用旧 series 与标签，不新增 request_id/kb_id 标签。端到端读真实临时SQLite，核对旧preparation/Jev与新stage样本。
+- [x] 实现请求计时/实际调用钩子与封存，保持同一失败只经既有适当路径记录；直接 private prepare 也有collector；不以差值/整段Agent充当生成耗时。stage_timing上限220。
+- [x] 跑新 timing、tracker、system metrics、兼容/架构、pipeline/stream/dual_rerank/Jev/arena、breaker、eventloop、done reliability 与 structured observability；改动文件 Ruff。GREEN 后独立提交与报告。
 
 ### Task 4: 取消部分轨迹、后台准备与终态防重
 **Files:** Modify rag/pipeline_query.py、rag/pipeline_diagnostics.py，必要时rag/pipeline.py、rag/stage_timing.py；Create tests/test_pipeline_cancellation_observability.py。
