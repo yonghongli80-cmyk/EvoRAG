@@ -34,8 +34,9 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # Bound credential fields before hashing/throttling.
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):
@@ -138,12 +139,14 @@ async def login(req: LoginRequest, request: Request, response: Response):
             "success",
             "authenticated",
         )
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    secure_cookie = request.url.scheme == "https" or forwarded_proto == "https"
     response.set_cookie(
         _SESSION_COOKIE,
         token,
         httponly=True,
         samesite="strict",
-        secure=request.url.scheme == "https",
+        secure=secure_cookie,
         max_age=86400,
         path="/",
     )
