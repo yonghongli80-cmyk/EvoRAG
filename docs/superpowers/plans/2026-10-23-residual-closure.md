@@ -27,7 +27,7 @@
 
 | 项 | 结果 |
 | --- | --- |
-| 全量 pytest | **2800 passed / 1 skipped（29:46）** |
+| 全量 pytest | **2801 passed / 1 skipped（31:30）** |
 | 前端 Vitest | **299 passed / 39 files** |
 | 前端 build | 成功，`static/` 已重建 |
 | ruff（全树） | All checks passed |
@@ -35,13 +35,20 @@
 | 权限 | 4 个 KB 均为 `ORG-81018c / organization`；admin 200；匿名 `/data/charts/*` 401 |
 | 备份 | 前一轮 `status=verified`；D-01 路径已由启动迁移覆盖 |
 
-## 3. 明确不在本轮“代码缺陷”范围
+## 3. 架构债与 Phase 1 环境（第 2 轮进展）
 
-1. **架构债**：`api.py`/`pipeline.py` 体量、延迟导入、PostgreSQL/多副本属于 `UPGRADE.md` Phase 2/3，
-   不是可一次性安全落地的缺陷；本轮只保证不新增同类债。
-2. **Phase 1 Qdrant server 运行时迁移**：Docker daemon 不可用（`npipe` 连接失败），未 pull 镜像、
-   未启动 qdrant 容器、未做 snapshot/双进程验收。配置面、Compose、单测已完成；
-   启动 Docker Desktop 或提供 Docker 主机后即可执行。
+1. **架构债**：`api.py`/`pipeline.py` 体量、延迟导入、PostgreSQL/多副本属于 `UPGRADE.md`
+   Phase 2/3，不是可一次性安全落地的缺陷。本轮已做两步可验证收敛：
+   - 抽出 `rag/materials/supervisor.py`，`api.py` 去掉 material worker 线程/全局状态
+     （875 → 823 行）；
+   - 新增 `tests/test_architecture_budget.py` 冻结预算（api ≤ 830、pipeline ≤ 1760、
+     延迟导入 ≤ 155），后续改动不能继续膨胀；当前实测 823 / 1758 / 150。
+   剩余目标是 Phase 2/3 的 pipeline 拆分与导入上移，需要独立重构周期。
+2. **Phase 1 Qdrant server 运行时迁移**：本轮复核仍阻塞——Docker Desktop 无进程、
+   `docker version` 报 `npipe:////./pipe/dockerDesktopLinuxEngine` 不存在、
+   `wsl -l -v` 无发行版、6333/6334 未监听。未 pull 镜像、未启动 qdrant 容器、
+   未做 snapshot/双进程验收；配置面、Compose、单测已完成。启动 Docker Desktop 或提供
+   Docker 主机后即可执行。
 3. **产品取舍**：canary 现在要求层 2 `benchmark=passed` + 层 3 shadow 至少 1 样本；
    `run_candidate_shadow.py` 是显式管理员动作，不是自动线上 5% 采样。
 
