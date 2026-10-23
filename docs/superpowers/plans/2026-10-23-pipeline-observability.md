@@ -54,13 +54,15 @@
 - [x] 实现请求计时/实际调用钩子与封存，保持同一失败只经既有适当路径记录；直接 private prepare 也有collector；不以差值/整段Agent充当生成耗时。stage_timing上限220。
 - [x] 跑新 timing、tracker、system metrics、兼容/架构、pipeline/stream/dual_rerank/Jev/arena、breaker、eventloop、done reliability 与 structured observability；改动文件 Ruff。GREEN 后独立提交与报告。
 
+**Task 3 验证来源说明：** 上述勾选表示当前回归、实现和审查已完成，不表示原定 TDD 顺序全部执行。tracker/metrics 有实现前断言 RED；rerank/generation 钩子与公开流关闭回归为实现后补测，没有实现前 RED 记录。报告明确保留这项过程缺口，不能补写成已执行；后续 Task 4/5 必须先观察行为断言失败。
+
 ### Task 4: 取消部分轨迹、后台准备与终态防重
-**Files:** Modify rag/pipeline_query.py、rag/pipeline_diagnostics.py，必要时rag/pipeline.py、rag/stage_timing.py；Create tests/test_pipeline_cancellation_observability.py。
+**Files:** Modify rag/pipeline_query.py；Create tests/test_pipeline_cancellation_observability.py。复用既有诊断/计时和 facade 接缝，未改其文件；取消轨迹直接内部持久化，不进入 FailureObserver。
 **Interfaces:** 消费Task3的StageTimings及每次iterator推进/关闭作用域。沿用原public签名、SSE、异常传播；新增取消轨迹是内部观测，不是成功回答。终态拥有权只用于最终trace，既有Agent子路径的非终态观测保持。
-- [ ] 写实际RED：首次yield后aclose、provider await中取消、准备线程被事件阻塞时取消、done后关闭、终态to_thread保存被事件阻塞时取消。用事件/barrier而非sleep，同一请求最终记录不能重复。
-- [ ] 取消继续传播并关闭上游；未终态保存一条route=error、execution_outcome=cancelled的部分trace，不进入FailureObserver、不写答案记忆、不发伪done。
-- [ ] 立即seal计入活动区间截至取消点，不等待准备线程；释放后台线程后轨迹不变、无二次落盘且另一请求独立。终态持久化已经发起则在先终态拥有记录权，取消不追加第二终态；非取消保存错误仍传播，不伪造成功。
-- [ ] 运行新取消回归、Task3 timing、pipeline_stream/arena、breaker、eventloop、结构化观测和架构预算，加改动Ruff；不重跑全量。独立提交、报告与审查通过后再接日志作用域。
+- [x] 写实际RED：首次yield后aclose、provider await中取消、准备线程被事件阻塞时取消、done后关闭、终态to_thread保存被事件阻塞时取消。用事件/barrier而非sleep，同一请求最终记录不能重复。
+- [x] 取消继续传播并关闭上游；未终态保存一条route=error、execution_outcome=cancelled的部分trace，不进入FailureObserver、不写答案记忆、不发伪done。
+- [x] 立即seal计入活动区间截至取消点，不等待准备线程；释放后台线程后轨迹不变、无二次落盘且另一请求独立。终态持久化已经发起则在先终态拥有记录权，取消不追加第二终态；非取消保存错误仍传播，不伪造成功。
+- [x] 运行新取消回归、Task3 timing、pipeline_stream/arena、breaker、eventloop、结构化观测和架构预算，加改动Ruff；不重跑全量。独立提交、报告与审查通过后再接日志作用域。
 
 ### Task 5: 请求日志字段与并发/流式上下文隔离
 **Files:** Modify rag/logging_config.py、rag/api.py、rag/pipeline.py、rag/pipeline_prepare.py、rag/pipeline_jev.py、rag/pipeline_query.py、rag/jev/shadow.py；Create tests/test_logging_context.py；必要时扩 tests/test_pipeline_stage_timing.py、tests/test_jev_shadow.py。
