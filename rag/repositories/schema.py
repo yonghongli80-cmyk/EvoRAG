@@ -805,6 +805,10 @@ def create_material_schema(conn: sqlite3.Connection) -> None:
             after_logical_path TEXT NOT NULL DEFAULT '',
             before_metadata_version INTEGER NOT NULL DEFAULT 0,
             after_metadata_version INTEGER NOT NULL DEFAULT 0,
+            before_tags_json TEXT,
+            after_tags_json TEXT,
+            before_document_type TEXT,
+            after_document_type TEXT,
             status TEXT NOT NULL DEFAULT 'applied',
             reason_code TEXT NOT NULL DEFAULT '',
             FOREIGN KEY(batch_id) REFERENCES material_organization_batches(id) ON DELETE CASCADE
