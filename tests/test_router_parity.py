@@ -17,6 +17,7 @@ GOLDEN_BASELINE: set[tuple[str, tuple[str, ...]]] = {
     ("/analysis/cards/{card_id}/questions", ("POST",)),
     ("/analysis/cards/{card_id}/questions/{qid}", ("DELETE",)),
     ("/analysis/cards/{card_id}/summary", ("GET",)),
+    ("/data/charts/{filename}", ("GET",)),
     ("/analysis/cards/{card_id}/summary", ("PUT",)),
     ("/analysis/cards/{card_id}/summary/generate", ("POST",)),
     ("/analysis/suggest-card", ("POST",)),
