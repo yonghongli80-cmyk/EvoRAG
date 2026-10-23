@@ -287,6 +287,13 @@ RAG_QDRANT_URL 为空 → QdrantClient(path=RAG_QDRANT_PATH)
 
 ## 6. 后续待办
 
+2026-10-23 环境复核：Docker 29.8.0、Compose v5.5.1 客户端可用，但
+`desktop-linux` 的 `//./pipe/dockerDesktopLinuxEngine` 不存在。
+已有 Docker Desktop 仅做一次隐藏启动，约 40 秒后进程退出，仍未建立引擎；启动失败根因未定位。
+WSL 2.7.14/WSLService 已安装运行，WSL 未列出 Linux 发行版；Hypervisor 与固件虚拟化显示开启。
+在临时示例副本上用占位变量执行 `docker compose config --quiet` 通过，未读取生产环境变量，
+也未拉取/运行容器。8080 既有服务仍可连接。用户选择先完成代码整改，以下运行验收保持待执行。
+
 1. 在 Docker 可用环境完成 4.3 的迁移与双进程验收，并把结果补进 `UPGRADE.md` Phase 1 与第 3.5 节。
 2. 给 `pipeline.py` / `reranker.py` / `generator.py` 加分段计时（由检索/降级工作流评审），
    再在 `/metrics` 增加 `rerank`、`generation` stage；不要用差值冒充。

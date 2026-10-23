@@ -53,11 +53,11 @@
 - [ ] 独立提交自己的代码与测试，写任务报告；全量集成测试由统筹方执行一次。
 
 ### Task 4: 更新交接并核实 Phase 1 运行前置
-**Files:** Modify docs/handoff-2026-10-23.md、docs/README.md、docs/deployment.md；必要时追加 docs/phase0-observability-and-baseline.md；保持历史计划原记录。
+**Files:** Modify docs/handoff-2026-10-23.md、docs/README.md、docs/deployment.md；同步 .github/workflows/deploy.yml 的说明注释；必要时追加 docs/phase0-observability-and-baseline.md；保持历史计划原记录。
 **Interfaces:** 消费 Tasks 1–3 的已审查提交和真实环境检查证据，不把计划或 mock 结果当运行时验收。
 - [ ] 核对双远端快照、最新交接入口、GitHub Actions 的触发条件，去掉当前无 GitHub remote 的陈旧断言。
 - [ ] 把本轮问题与修复提交/测试纳入交接，历史 2801 测试标为当时基线，当前结果单列。
-- [ ] 检查现有 Docker Desktop/WSL/daemon；可启动已有应用并创建隔离测试容器，但不安装系统组件、不改生产配置或迁移用户数据。若引擎可用，用已锁定 Qdrant 镜像完成隔离连通/双进程基础验证；若不可用，记录原始错误与未执行步骤。
+- [ ] 记录现有 Docker Desktop/WSL/daemon 预检证据及唯一启动尝试结果。用户已选择“先完成代码整改，保留运行验收步骤”；本轮不再尝试容器运行验收、不安装系统组件、不改生产配置或迁移用户数据。
 - [ ] 文档按事实更新，不为人类说明文字编写文本匹配测试；独立提交。
 
 ### Task 5: 集成验证与整分支审查

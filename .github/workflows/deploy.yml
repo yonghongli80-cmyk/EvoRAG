@@ -1,8 +1,8 @@
 name: Deploy to Server
 
-# F-08/F-09：本仓库 origin 在 Gitee，GitHub Actions 默认不会运行（见
-# docs/deployment.md「CI 与代码托管事实」）。保留此文件是为了 GitHub 镜像部署，
-# 真实部署路径是服务器上执行 `bash deploy.sh`（同样的备份门禁 + 健康门禁）。
+# F-08/F-09：仅推送 origin（Gitee）不会触发 GitHub Actions；同步推送 github
+# 后，main 的 CI 成功才触发本流程，还需配置部署 secrets 并核对实际运行结果。
+# 手动部署入口为服务器上的 `bash deploy.sh`（同样的备份门禁 + 健康门禁）。
 on:
   workflow_run:
     workflows: [CI]

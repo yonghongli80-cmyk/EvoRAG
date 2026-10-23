@@ -112,13 +112,16 @@ docker compose up -d
 
 ## CI 与代码托管事实（F-08）
 
-- **本仓库的 `origin` 在 Gitee**：`git@gitee.com:li-yonghong111/ragv3.git`（2026-10-22 用
-  `git remote -v` 核对，只有一个 origin，没有 GitHub remote）。
-- 因此 `.github/workflows/ci.yml` 与 `deploy.yml` **不会因为推送到 Gitee 而运行**：GitHub Actions
-  只跟随 GitHub 仓库的 push/pull_request 事件。这两个文件是给 GitHub 镜像/迁移后的仓库准备的；
-  Gitee 侧若需要门禁，应使用 Gitee Go 或自建 runner，命令与
-  下面"本地等价命令"一致。真实部署路径是服务器上执行 `bash deploy.sh`（同一套备份门禁与健康门禁）。
-- 什么时候会真正生效：仓库同步到 GitHub（含 Actions 权限）后，或把 workflow 迁移到 Gitee Go。
+- **本仓库采用双远端**：`origin` 是 Gitee（`git@gitee.com:li-yonghong111/ragv3.git`），
+  `github` 是 GitHub 镜像（`git@github.com:yonghongli80-cmyk/EvoRAG.git`）。
+  2026-10-23 只读核对时，两边 `main` 均为 `55862fb`；后续以真实远端查询为准。
+- **仅推送到 Gitee 不会触发 GitHub Actions**。同步推送到 GitHub 后，
+  `.github/workflows/ci.yml` 按 GitHub 的 push/pull_request 事件触发；
+  `deploy.yml` 监听 `main` 上 CI 成功完成的 workflow_run 事件。
+  仓库已同步不等于 CI 或部署已验收：Actions 权限、部署 secrets 和实际运行结果仍需查看 GitHub 的配置及日志。
+- 后续按交接文档分别推送两个远端的 `main`，新增标签也同步两边。
+  Gitee 侧若需要独立自动门禁，可接入 Gitee Go 或自建 runner，命令与下面"本地等价命令"一致。
+  服务器手动部署入口仍为 `bash deploy.sh`，包含同一套备份门禁与健康门禁。
 
 本地等价命令（与 CI 各 job 一一对应）：
 
