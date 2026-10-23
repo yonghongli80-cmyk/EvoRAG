@@ -139,10 +139,11 @@ async def query_stream(
         owner._submit_failure_observation(trace, None, error)
         return
 
+    stream_iterator = owner._stream_prepared(
+        question, prepared, sid, start_time, model=model, models=models
+    )
     try:
-        async for event in owner._stream_prepared(
-            question, prepared, sid, start_time, model=model, models=models
-        ):
+        async for event in stream_iterator:
             yield event
     except Exception as exc:
         # 流式中途失败：同样先留痕再分类。已准备好的判定统计量与问题集版本照旧写进
@@ -151,6 +152,10 @@ async def query_stream(
             owner._record_stream_failure, question, start_time, prepared, exc
         )
         raise
+    finally:
+        close_iterator = getattr(stream_iterator, "aclose", None)
+        if close_iterator is not None:
+            await close_iterator()
 
 
 async def stream_prepared(

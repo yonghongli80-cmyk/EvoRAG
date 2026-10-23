@@ -171,3 +171,29 @@ def test_stream_failure_frame_points_to_query_module_without_exception_text():
         assert "'route'" not in detail.exception_frame
     finally:
         pipeline.close()
+
+
+def test_closing_public_query_stream_closes_the_prepared_stream_iterator():
+    pipeline = _constructed_pipeline()
+    pipeline._prepare_context = lambda *args, **kwargs: ({"route": "rag"}, None)
+    closed = []
+
+    async def prepared_stream(*args, **kwargs):
+        try:
+            yield "first event"
+            yield "second event"
+        finally:
+            closed.append(True)
+
+    pipeline._stream_prepared = prepared_stream
+
+    async def stop_after_first_event():
+        stream = pipeline.query_stream("question")
+        assert await anext(stream) == "first event"
+        await stream.aclose()
+        assert closed == [True]
+
+    try:
+        asyncio.run(stop_after_first_event())
+    finally:
+        pipeline.close()
