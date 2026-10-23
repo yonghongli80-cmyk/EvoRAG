@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 import sys
-import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -58,6 +57,7 @@ from rag.loader import load as load_document
 from rag.logging_config import set_request_id, setup_logging
 from rag.login_throttle import LoginThrottle
 from rag.materials.api import router as materials_router
+from rag.materials.supervisor import MaterialWorkerSupervisor
 from rag.operations_api import router as operations_router
 from rag.org_auth.api import router as organization_router
 from rag.reliability.api import answers_router
@@ -100,9 +100,6 @@ _login_throttle = LoginThrottle(
     settings.login_failure_limit,
     settings.login_failure_window_seconds,
 )
-_material_worker_stop = threading.Event()
-_material_worker_thread: threading.Thread | None = None
-_material_worker = None
 
 
 def restore_question_set_rollout():
@@ -167,6 +164,19 @@ def _versions_root() -> Path:
     return Path(getattr(app.state, "document_versions_root", settings.document_versions_root))
 
 
+_material_worker_supervisor = MaterialWorkerSupervisor(user_db, _versions_root)
+
+
+def _start_material_worker() -> None:
+    """Compatibility alias; ownership lives in ``MaterialWorkerSupervisor``."""
+    _material_worker_supervisor.start()
+
+
+def _stop_material_worker() -> bool:
+    """Compatibility alias; ownership lives in ``MaterialWorkerSupervisor``."""
+    return _material_worker_supervisor.stop()
+
+
 def _run_document_version_migration() -> None:
     """Create version-1 rows for documents created before versioning."""
     from rag.document_versions import migrate_existing_document_versions
@@ -214,66 +224,6 @@ def _run_spreadsheet_migration() -> None:
             logger.info("spreadsheet migration: migrated=%s failed=%s", report.migrated, report.failed)
     except Exception:
         logger.exception("spreadsheet migration failed")
-
-
-def _start_material_worker() -> None:
-    """Start the single API-owned consumer for persistent material jobs."""
-    global _material_worker, _material_worker_thread
-    if not settings.material_worker_enabled:
-        return
-    if _material_worker_thread is not None and _material_worker_thread.is_alive():
-        return
-
-    from rag.embedder import embed
-    from rag.materials.formats import build_default_format_registry
-    from rag.materials.worker import MaterialWorker, WorkerServices
-
-    worker = MaterialWorker(
-        WorkerServices(
-            db=user_db,
-            versions_root=_versions_root(),
-            registry=build_default_format_registry(),
-            embedder=embed,
-            max_embedding_concurrency=settings.material_embedding_slots,
-        ),
-        worker_id=f"api-material-{uuid.uuid4().hex[:8]}",
-        lease_seconds=settings.material_worker_lease_seconds,
-        max_attempts=settings.material_job_max_attempts,
-    )
-    _material_worker_stop.clear()
-
-    def _consume() -> None:
-        while not _material_worker_stop.is_set():
-            try:
-                worker.run(batch=settings.material_worker_count)
-            except Exception:
-                logger.exception("material index worker polling iteration failed")
-            _material_worker_stop.wait(1.0)
-
-    _material_worker = worker
-    _material_worker_thread = threading.Thread(
-        target=_consume, name="material-index-worker", daemon=True
-    )
-    _material_worker_thread.start()
-    logger.info("material index worker started")
-
-
-def _stop_material_worker() -> bool:
-    """Stop the API-owned worker before closing shared vector resources."""
-    global _material_worker, _material_worker_thread
-    worker = _material_worker
-    thread = _material_worker_thread
-    _material_worker_stop.set()
-    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=5.0)
-    if thread is not None and thread.is_alive():
-        logger.error("material index worker did not stop before shutdown; preserving shared resources")
-        return False
-    if worker is not None:
-        worker.shutdown()
-    _material_worker = None
-    _material_worker_thread = None
-    return True
 
 
 def _register_repo_document_version(doc_name: str, source_path: Path) -> bool:
