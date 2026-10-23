@@ -130,6 +130,63 @@ def test_sync_query_scope_uses_prepare_default_when_owner_has_no_kb_id(monkeypat
         assert owner.query("question") == ("sync-request", "rag_docs", "-")
 
 
+def test_private_prepare_scopes_route_and_restores_parent_after_real_preparation(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock, patch
+
+    from config import settings
+
+    candidate = Chunk(text="policy fact", doc_name="policy.md", chunk_index=0)
+    owner = object.__new__(RAGPipeline)
+    owner._cache = MagicMock()
+    owner._cache.get.return_value = None
+    owner._kb_id = "rag_docs"
+    owner._user_db = None
+    owner.session_id = "session"
+    owner.memory = MagicMock()
+    owner.memory.build_messages.return_value = []
+    owner._feedback_processor = MagicMock()
+    owner._feedback_processor.get_weight.return_value = 1.0
+    owner._feedback_processor.get_weights.return_value = {}
+    owner.reranker = MagicMock()
+    rerank_routes = []
+    owner.reranker.rerank.side_effect = lambda _query, chunks: (
+        rerank_routes.append(logging_config.get_route()) or chunks
+    )
+    owner.retriever = MagicMock()
+    owner.retriever.retrieve.return_value = [candidate]
+    allowed = SimpleNamespace(blocked=False, reason="")
+    monkeypatch.setattr(settings, "jev_mode", "off")
+
+    with (
+        patch("rag.agent.route_question", return_value="rag"),
+        patch("rag.pipeline.rewrite_query", return_value="question"),
+        patch("rag.pipeline.check_injection", return_value=allowed),
+        _logging_context(request_id="private-request", kb_id="parent-kb", route="agent"),
+    ):
+        prepared, error = owner._prepare_context("question", "session", None, top_k=1)
+        assert error is None
+        assert prepared["route"] == "rag"
+        assert rerank_routes == ["rag"]
+        assert _read_fields() == ("private-request", "parent-kb", "agent")
+
+
+def test_private_prepare_restores_parent_route_after_exception(monkeypatch):
+    import rag.pipeline as pipeline
+
+    owner = object.__new__(RAGPipeline)
+
+    def fail_during_preparation(*_args, **_kwargs):
+        logging_config.set_route("error")
+        raise RuntimeError("prepare failed")
+
+    monkeypatch.setattr(pipeline._pipeline_prepare, "_prepare_context", fail_during_preparation)
+    with _logging_context(request_id="private-request", kb_id="parent-kb", route="agent"):
+        with pytest.raises(RuntimeError, match="prepare failed"):
+            owner._prepare_context("question", "session", None)
+        assert _read_fields() == ("private-request", "parent-kb", "agent")
+
+
 def test_public_query_stream_remains_an_async_generator():
     assert inspect.isasyncgenfunction(RAGPipeline.query_stream)
 

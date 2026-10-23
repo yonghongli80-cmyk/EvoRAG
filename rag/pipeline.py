@@ -42,7 +42,7 @@ from rag.jev.service import JevDecisionService
 from rag.jev.shadow import ShadowCase, ShadowComparison, ShadowEvaluator  # noqa: F401 - public facade patch surface
 from rag.llm_pool import get_llm_pool_router  # noqa: F401 - public facade patch surface
 from rag.loader import load
-from rag.logging_config import request_logging_context_scope
+from rag.logging_config import get_request_id, get_route, logging_context, request_logging_context_scope
 from rag.models import Chunk
 from rag.pipeline_bindings import PipelineBindings
 from rag.pipeline_diagnostics import _exception_frame  # noqa: F401 - public facade patch surface
@@ -463,7 +463,9 @@ class RAGPipeline:
         return _pipeline_prepare._rerank_for_evidence(_binding_for(self), self, original_question, retrieval_query, candidates, record)
 
     def _prepare_context(self, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
-        return _pipeline_prepare._prepare_context(_binding_for(self), self, question, session_id, doc_name, top_k, tags, user, kb_id)
+        effective_kb_id = kb_id or getattr(self, "_kb_id", "rag_docs") or "rag_docs"
+        with logging_context(request_id=get_request_id(), kb_id=effective_kb_id, route=get_route()):
+            return _pipeline_prepare._prepare_context(_binding_for(self), self, question, session_id, doc_name, top_k, tags, user, kb_id)
 
     def _prepare_context_standard(
     self, question, session_id, doc_name, top_k, tags, user, kb_id,
