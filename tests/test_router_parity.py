@@ -63,6 +63,7 @@ GOLDEN_BASELINE: set[tuple[str, tuple[str, ...]]] = {
     ("/knowledge-bases/{kb_id}", ("DELETE",)),
     ("/knowledge-bases/{kb_id}", ("GET",)),
     ("/knowledge-bases/{kb_id}/documents", ("POST",)),
+    ("/knowledge-bases/{kb_id}/documents/link", ("POST",)),
     ("/knowledge-bases/{kb_id}/documents/{doc_name}", ("DELETE",)),
     ("/knowledge-bases/{kb_id}/documents/{doc_name}/summary", ("PUT",)),
     ("/knowledge-bases/{kb_id}/documents/{doc_name}/toc", ("PUT",)),

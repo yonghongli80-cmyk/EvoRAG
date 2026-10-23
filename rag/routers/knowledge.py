@@ -16,6 +16,7 @@ from rag.api_security import (
     get_user_db,
     is_org_policy,
     require_doc_edit,
+    require_doc_view,
     require_kb_administer,
     require_kb_edit,
     require_kb_view,
@@ -56,6 +57,13 @@ class CreateKBRequest(BaseModel):
     name: str = Field(..., description="知识库名称")
     scope: str = Field(default="private", pattern="^(private|public)$", description="可见范围：private 或 public")
     org_unit_code: str | None = Field(default=None, description="所属组织编号")
+
+
+class LinkDocumentRequest(BaseModel):
+    """Reference an existing document into another KB without a browser download."""
+
+    document_id: int = Field(..., ge=1)
+    duplicate_action: str = Field(default="reject", pattern="^(reject|overwrite|keep)$")
 
 
 class KBResponse(BaseModel):
@@ -378,6 +386,145 @@ async def add_document_to_kb(
     return {
         "status": "added",
         "kb_id": kb_id,
+        "chunks": result.chunks,
+        "document_id": result.document_id,
+        "version_id": result.version_id,
+        "version_no": result.version_no,
+    }
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents/link",
+    summary="引用已有文档到知识库",
+    description="从已有 document_id 读取源文件并在目标知识库重新索引，不经过浏览器下载再上传",
+)
+async def link_document_to_kb(
+    kb_id: str,
+    body: LinkDocumentRequest,
+    request: Request,
+    user: dict = Depends(require_user),
+):
+    user_db = get_user_db(request)
+    require_kb_edit(user_db, kb_id, user)
+
+    source_doc = user_db.get_document_permission_by_id(body.document_id)
+    if source_doc is None:
+        raise HTTPException(status_code=404, detail="资源不存在")
+    require_doc_view(user_db, source_doc["doc_name"], source_doc["kb_id"], user)
+    current_version_id = source_doc.get("current_version_id")
+    version = (
+        user_db.get_document_version_by_id(current_version_id)
+        if current_version_id
+        else None
+    )
+    if version is None:
+        raise HTTPException(status_code=409, detail="源文档没有可用版本")
+    source_path = Path(version["file_path"])
+    if not source_path.is_file():
+        raise HTTPException(status_code=409, detail="源文档文件不可用")
+    content = source_path.read_bytes()
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+    filename = Path(source_doc["doc_name"]).name
+    if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="不支持的文件格式")
+
+    source = UploadDocumentSource.from_bytes(filename, content)
+    if body.duplicate_action == "overwrite" and user_db.get_document_permission(
+        source.display_name, kb_id
+    ):
+        require_doc_edit(user_db, source.display_name, kb_id, user)
+    manager = KnowledgeBaseManager()
+    kb_document_id = None
+    try:
+        final_name = choose_document_name(
+            user_db, kb_id, source.display_name, body.duplicate_action
+        )
+        existing_kb_doc = await asyncio.to_thread(
+            user_db.get_kb_document, kb_id, final_name
+        )
+        if existing_kb_doc is None:
+            kb_document_id = await asyncio.to_thread(
+                user_db.create_kb_document_pending, kb_id, final_name
+            )
+        else:
+            kb_document_id = existing_kb_doc["id"]
+        result = await asyncio.to_thread(
+            ingest_document_version,
+            user_db,
+            manager,
+            source,
+            kb_id,
+            user,
+            body.duplicate_action,
+            _versions_root(request),
+        )
+        target_version = await asyncio.to_thread(
+            user_db.get_document_version_by_id, result.version_id
+        )
+        parsed = await asyncio.to_thread(load_document, target_version["file_path"])
+        toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
+        summary = generate_summary(parsed)
+        await asyncio.to_thread(
+            user_db.finish_kb_document,
+            kb_document_id,
+            target_version["file_path"],
+            toc,
+            summary,
+            result.chunks,
+        )
+        if Path(result.filename).suffix.lower() in {".xlsx", ".csv"}:
+            spreadsheet_format = Path(result.filename).suffix.lower().removeprefix(".")
+            try:
+                datasets_root = Path(
+                    getattr(
+                        request.app.state,
+                        "structured_datasets_root",
+                        settings.structured_datasets_root,
+                    )
+                )
+                await asyncio.to_thread(
+                    ensure_structured_dataset,
+                    user_db,
+                    datasets_root,
+                    document_id=result.document_id,
+                    version_id=result.version_id,
+                    source_path=Path(target_version["file_path"]),
+                    fmt=spreadsheet_format,
+                )
+            except Exception:
+                logger.exception(
+                    "KB linked spreadsheet dataset extraction failed",
+                    extra={"kb_id": kb_id, "document_id": result.document_id},
+                )
+    except DuplicateDocument as exc:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "document_id": exc.document_id,
+                "current_version": exc.current_version,
+            },
+        ) from exc
+    except HTTPException:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        raise
+    except Exception as exc:
+        if kb_document_id is not None:
+            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
+        logger.exception("KB document link failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=400, detail="文件处理失败") from exc
+
+    await asyncio.to_thread(
+        _audit_org_event, user, "document_linked", kb_id, "authorized", user_db
+    )
+    return {
+        "status": "linked",
+        "kb_id": kb_id,
+        "source_document_id": body.document_id,
         "chunks": result.chunks,
         "document_id": result.document_id,
         "version_id": result.version_id,

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../utils/api'
 import { downloadLibraryFile } from '../api/files'
+import { linkDocumentToKb } from '../api/documents'
 import { useChatStore } from '../stores/chat'
 import { useAnalysis } from '../composables/useAnalysis'
 import ConversationSidebar from '../components/ConversationSidebar.vue'
@@ -246,14 +247,16 @@ async function addFileToKB(file: any) {
   if (!file) return
   addingFile.value = true
   try {
-    // The backend currently only exposes "upload bytes into a KB", so the
-    // library version is fetched through the shared API client (API base,
-    // cookie auth and the dev-proxy HTML guard) and re-uploaded (E-09).
-    const blob = await downloadLibraryFile(file.name, file.version_id)
-    const formData = new FormData()
-    formData.append('file', blob, file.name)
-
-    await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
+    if (file.document_id) {
+      // Server-side reference: no browser download/re-upload, no HTML-as-file.
+      await linkDocumentToKb(Number(file.document_id), getKbId())
+    } else {
+      // Upload-directory-only entries have no permission row yet; fall back to bytes.
+      const blob = await downloadLibraryFile(file.name, file.version_id)
+      const formData = new FormData()
+      formData.append('file', blob, file.name)
+      await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
+    }
     ElMessage.success('文件已添加到知识库')
     showAddDialog.value = false
     await loadDetail()

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { uploadWithDuplicateAction, fetchDocumentVersions } from '../documents'
+import { uploadWithDuplicateAction, fetchDocumentVersions, linkDocumentToKb } from '../documents'
 
 vi.mock('../../utils/api', () => ({ default: { post: vi.fn(), get: vi.fn() } }))
 vi.mock('../../stores/auth', () => ({
@@ -35,5 +35,19 @@ describe('fetchDocumentVersions', () => {
 
     expect(api.get).toHaveBeenCalledWith('/documents/7/versions', expect.anything())
     expect(versions).toHaveLength(1)
+  })
+})
+
+describe('linkDocumentToKb', () => {
+  it('posts the document id instead of a browser upload', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { status: 'linked' } } as any)
+
+    const result = await linkDocumentToKb(7, 'kb_accessories')
+
+    expect(api.post).toHaveBeenCalledWith('/knowledge-bases/kb_accessories/documents/link', {
+      document_id: 7,
+      duplicate_action: 'reject'
+    })
+    expect(result).toEqual({ status: 'linked' })
   })
 })

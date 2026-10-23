@@ -44,6 +44,19 @@ export async function uploadWithDuplicateAction(
   return res.data
 }
 
+/** Link an existing document into another KB without a browser download. */
+export async function linkDocumentToKb(
+  documentId: number,
+  kbId: string,
+  action: DuplicateAction = 'reject'
+): Promise<any> {
+  const res = await api.post(`/knowledge-bases/${kbId}/documents/link`, {
+    document_id: documentId,
+    duplicate_action: action
+  })
+  return res.data
+}
+
 /** List immutable versions for one logical document. */
 export async function fetchDocumentVersions(documentId: number): Promise<DocumentVersion[]> {
   const auth = useAuthStore()
