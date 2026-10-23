@@ -1,6 +1,8 @@
 """Tests for BatchImporter document versioning alignment (ALIGN-01)."""
 
 import csv
+from collections import OrderedDict
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +12,37 @@ from rag.retriever import Retriever
 from rag.user_db import UserDB
 from rag.vector_store import _get_client
 from rag.versioned_retrieval import retrieve_current_then_history
+
+
+@pytest.fixture(autouse=True)
+def offline_embeddings(monkeypatch):
+    """Keep versioned import and retrieval on the real embed path without network IO."""
+    import rag.embedder
+    from config import settings
+
+    class OfflineEmbeddings:
+        def create(self, *, model, input):
+            if model != settings.bailian_embed_model:
+                raise AssertionError(f"unexpected embedding model: {model}")
+            vector = [0.1] + [0.0] * (settings.embed_dimension - 1)
+            return SimpleNamespace(
+                data=[SimpleNamespace(embedding=vector.copy()) for _ in input]
+            )
+
+    with rag.embedder._cache_lock:
+        previous_cache = OrderedDict(rag.embedder._cache)
+    rag.embedder.clear_cache()
+    monkeypatch.setattr(rag.embedder, "client", SimpleNamespace(embeddings=OfflineEmbeddings()))
+
+    def reject_client_construction(**kwargs):
+        raise AssertionError("versioning tests must not construct a real embedding client")
+
+    monkeypatch.setattr(rag.embedder, "OpenAI", reject_client_construction)
+    yield
+
+    with rag.embedder._cache_lock:
+        rag.embedder._cache.clear()
+        rag.embedder._cache.update(previous_cache)
 
 
 def test_process_csv_creates_initial_version_and_payload(tmp_path, sandbox_api_storage):
