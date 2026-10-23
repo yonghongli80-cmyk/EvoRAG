@@ -315,8 +315,8 @@ class RAGPipeline:
             chunk_texts = [c.text for c in self.chunks]
             unique_texts = deduplicate_chunks(chunk_texts)
             if len(unique_texts) < len(chunk_texts):
-                unique_set = set(unique_texts)
-                self.chunks = [c for c in self.chunks if c.text in unique_set]
+                chunks_by_text = {c.text: c for c in reversed(self.chunks)}
+                self.chunks = [chunks_by_text[text] for text in unique_texts]
             embeddings = embed([c.text for c in self.chunks])
             delete_doc("rag_docs", doc_name)
             add(self.chunks, embeddings)
