@@ -110,7 +110,7 @@ def test_api_starts_and_stops_material_worker(monkeypatch):
 
         def run(self, batch):
             calls.append(("run", batch))
-            api._material_worker_stop.set()
+            api._material_worker_supervisor._stop.set()
             return []
 
         def shutdown(self):
@@ -118,11 +118,12 @@ def test_api_starts_and_stops_material_worker(monkeypatch):
 
     monkeypatch.setattr(settings, "material_worker_enabled", True, raising=False)
     monkeypatch.setattr("rag.materials.worker.MaterialWorker", FakeWorker)
-    monkeypatch.setattr(api, "_material_worker_thread", None, raising=False)
-    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+    supervisor = api._material_worker_supervisor
+    monkeypatch.setattr(supervisor, "_thread", None)
+    monkeypatch.setattr(supervisor, "_stop", __import__("threading").Event())
 
     api._start_material_worker()
-    api._material_worker_thread.join(timeout=1)
+    supervisor._thread.join(timeout=1)
     api.close_pipeline_processors()
 
     assert calls == [("run", settings.material_worker_count), ("shutdown", None)]
@@ -160,7 +161,7 @@ def test_material_worker_loop_survives_a_transient_run_error(monkeypatch):
             attempts.append(batch)
             if len(attempts) == 1:
                 raise RuntimeError("temporary database lock")
-            api._material_worker_stop.set()
+            api._material_worker_supervisor._stop.set()
             return []
 
         def shutdown(self):
@@ -168,11 +169,12 @@ def test_material_worker_loop_survives_a_transient_run_error(monkeypatch):
 
     monkeypatch.setattr(settings, "material_worker_enabled", True)
     monkeypatch.setattr("rag.materials.worker.MaterialWorker", FakeWorker)
-    monkeypatch.setattr(api, "_material_worker_thread", None, raising=False)
-    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+    supervisor = api._material_worker_supervisor
+    monkeypatch.setattr(supervisor, "_thread", None)
+    monkeypatch.setattr(supervisor, "_stop", __import__("threading").Event())
 
     api._start_material_worker()
-    api._material_worker_thread.join(timeout=2)
+    supervisor._thread.join(timeout=2)
     api.close_pipeline_processors()
 
     assert attempts == [settings.material_worker_count, settings.material_worker_count]
@@ -192,16 +194,17 @@ def test_api_shutdown_keeps_qdrant_open_until_material_worker_exits(monkeypatch)
 
     worker = MagicMock()
     qdrant_client = MagicMock()
-    monkeypatch.setattr(api, "_material_worker", worker, raising=False)
-    monkeypatch.setattr(api, "_material_worker_thread", StillRunningThread(), raising=False)
-    monkeypatch.setattr(api, "_material_worker_stop", __import__("threading").Event(), raising=False)
+    supervisor = api._material_worker_supervisor
+    monkeypatch.setattr(supervisor, "_worker", worker)
+    monkeypatch.setattr(supervisor, "_thread", StillRunningThread())
+    monkeypatch.setattr(supervisor, "_stop", __import__("threading").Event())
     monkeypatch.setattr(vector_store, "_client", qdrant_client)
 
     api.close_pipeline_processors()
 
     worker.shutdown.assert_not_called()
     qdrant_client.close.assert_not_called()
-    assert api._material_worker is worker
+    assert supervisor._worker is worker
 
 
 def test_pipeline_close_does_not_close_an_injected_failure_recorder():
