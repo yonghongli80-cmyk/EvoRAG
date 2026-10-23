@@ -2,6 +2,7 @@
 
 import logging
 import math
+import threading
 from dataclasses import replace
 
 import requests
@@ -31,6 +32,7 @@ class Reranker:
         self._explicit_url = base_url
         self._explicit_api_key = api_key
         self._client = None
+        self._client_lock = threading.Lock()
 
     @property
     def provider(self) -> str:
@@ -80,13 +82,22 @@ class Reranker:
 
     def _get_client(self):
         if self._client is None:
-            self._client = requests.Session()
-            headers = {"Content-Type": "application/json"}
-            key = self.api_key
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-            self._client.headers.update(headers)
+            with self._client_lock:
+                if self._client is None:
+                    self._client = requests.Session()
+                    headers = {"Content-Type": "application/json"}
+                    key = self.api_key
+                    if key:
+                        headers["Authorization"] = f"Bearer {key}"
+                    self._client.headers.update(headers)
         return self._client
+
+    def close(self) -> None:
+        """Release the process-local requests session (idempotent)."""
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     @retry(
         max_attempts=3,

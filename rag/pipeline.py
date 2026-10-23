@@ -398,6 +398,9 @@ class RAGPipeline:
         self._closed = True
         self.memory.close()
         self.tracker.close()
+        reranker = getattr(self, "reranker", None)
+        if reranker is not None and hasattr(reranker, "close"):
+            reranker.close()
         if self._owns_feedback_processor:
             self._feedback_processor.close()
         if self._owns_gap_analyzer:

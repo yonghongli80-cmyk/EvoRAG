@@ -27,6 +27,7 @@ _SCROLL_PAGE = 256
 _SEARCH_SAMPLE_LIMIT = 512
 
 _client = None
+_client_lock = threading.Lock()
 _write_lock = ReadWriteLock()
 
 _search_lock = threading.Lock()
@@ -73,14 +74,16 @@ def _invalidate_bm25(collection_name: str) -> None:
 def _get_client():
     global _client
     if _client is None:
-        url = (settings.qdrant_url or "").strip()
-        if url:
-            # Phase 1：连 Qdrant server，所有副本共享同一份向量数据。
-            api_key = (settings.qdrant_api_key or "").strip() or None
-            _client = QdrantClient(url=url, api_key=api_key)
-        else:
-            # 默认（向后兼容）：本地嵌入式目录，进程级独占锁。
-            _client = QdrantClient(path=settings.qdrant_path)
+        with _client_lock:
+            if _client is None:
+                url = (settings.qdrant_url or "").strip()
+                if url:
+                    # Phase 1：连 Qdrant server，所有副本共享同一份向量数据。
+                    api_key = (settings.qdrant_api_key or "").strip() or None
+                    _client = QdrantClient(url=url, api_key=api_key)
+                else:
+                    # 默认（向后兼容）：本地嵌入式目录，进程级独占锁。
+                    _client = QdrantClient(path=settings.qdrant_path)
     return _client
 
 
