@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -104,53 +106,88 @@ def test_suite_uses_a_fixed_jwt_secret_instead_of_the_repository_secret_file():
     assert os.environ["RAG_JWT_SECRET"] == rag.auth._JWT_SECRET
 
 
-def test_model_clients_use_isolated_credentials_and_provider_configuration(monkeypatch):
-    """Real client constructors must use test credentials, even when host env is poisoned."""
-    from langchain_openai import ChatOpenAI
+def test_model_clients_use_isolated_credentials_and_provider_configuration():
+    """A poisoned clean subprocess must still construct test clients and use test endpoints."""
+    child_env = {
+        key: os.environ[key]
+        for key in ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP")
+        if key in os.environ
+    }
+    child_env.update({
+        "RAG_DEEPSEEK_API_KEY": "host-simulated-generation-sentinel",
+        "RAG_DEEPSEEK_BASE_URL": "https://host.invalid/generation",
+        "RAG_DEEPSEEK_AUTH_HEADER": "x-host-auth",
+        "RAG_LLM_PROVIDERS_JSON": (
+            '[{"provider_id":"host-poison","name":"Host Poison",'
+            '"model":"poison-model","base_url":"https://host.invalid/v1",'
+            '"api_key":"host-simulated-provider-sentinel"}]'
+        ),
+        "RAG_LLM_DEFAULT_MODEL": "host-poison",
+        "RAG_BAILIAN_API_KEY": "host-simulated-embedding-sentinel",
+        "RAG_BAILIAN_BASE_URL": "https://host.invalid/embedding",
+        "RAG_RERANK_PROVIDER": "host-poison",
+        "RAG_RERANK_BASE_URL": "https://host.invalid/rerank",
+        "RAG_RERANK_API_KEY": "host-simulated-rerank-sentinel",
+        "RAG_SILICONFLOW_RERANK_URL": "https://host.invalid/provider-rerank",
+        "RAG_TYPESAFE_API_KEY": "host-simulated-typesafe-sentinel",
+    })
+    script = r'''
+import runpy
 
-    from config import settings
-    from rag.llm_pool.models import load_provider_configs_from_settings
+runpy.run_path("tests/conftest.py")
 
-    generation_key = "ragv3-tests-only-generation-key"
-    embedding_key = "ragv3-tests-only-embedding-key"
+from config import settings
+from langchain_openai import ChatOpenAI
+from rag.llm_pool.models import load_provider_configs_from_settings
+from rag.reranker import Reranker
 
-    assert settings.deepseek_api_key == generation_key
-    assert settings.deepseek_base_url == "https://api.deepseek.com"
-    assert settings.deepseek_auth_header == ""
-    assert settings.bailian_api_key == embedding_key
-    assert settings.bailian_base_url == "https://api.siliconflow.cn/v1"
-    assert settings.llm_providers_json == "[]"
-    assert settings.llm_default_model == "deepseek"
-    assert settings.rerank_provider == "siliconflow"
-    assert settings.rerank_base_url == ""
-    assert settings.rerank_api_key == ""
-    assert settings.typesafe_api_key == ""
+generation_key = "ragv3-tests-only-generation-key"
+embedding_key = "ragv3-tests-only-embedding-key"
+assert settings.deepseek_api_key == generation_key
+assert settings.deepseek_base_url == "https://api.deepseek.com"
+assert settings.deepseek_auth_header == ""
+assert settings.bailian_api_key == embedding_key
+assert settings.bailian_base_url == "https://api.siliconflow.cn/v1"
+assert settings.llm_providers_json == "[]"
+assert settings.llm_default_model == "deepseek"
+assert settings.rerank_provider == "siliconflow"
+assert settings.rerank_base_url == ""
+assert settings.rerank_api_key == ""
+assert settings.typesafe_api_key == ""
 
-    generation_client = ChatOpenAI(
-        model=settings.deepseek_model,
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
+generation_client = ChatOpenAI(
+    model=settings.deepseek_model,
+    api_key=settings.deepseek_api_key,
+    base_url=settings.deepseek_base_url,
+)
+assert generation_client.root_client.api_key == generation_key
+assert str(generation_client.root_client.base_url).startswith("https://api.deepseek.com")
+
+import rag.embedder as embedder
+assert embedder.embed([]) == []
+assert embedder.client.api_key == embedding_key
+assert str(embedder.client.base_url).startswith("https://api.siliconflow.cn/v1")
+
+providers = load_provider_configs_from_settings(settings)
+assert [(provider.provider_id, provider.api_key) for provider in providers] == [
+    ("deepseek", generation_key)
+]
+
+reranker = Reranker()
+assert reranker.provider == "siliconflow"
+assert reranker.api_key == embedding_key
+assert reranker.url == "https://api.siliconflow.cn/v1/rerank"
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
     )
-    assert generation_client.root_client.api_key == generation_key
-    assert str(generation_client.root_client.base_url).startswith("https://api.deepseek.com")
-
-    import rag.embedder as embedder
-
-    monkeypatch.setattr(embedder, "client", None)
-    assert embedder.embed([]) == []
-    assert embedder.client.api_key == embedding_key
-    assert str(embedder.client.base_url).startswith("https://api.siliconflow.cn/v1")
-
-    providers = load_provider_configs_from_settings(settings)
-    assert [(provider.provider_id, provider.api_key) for provider in providers] == [
-        ("deepseek", generation_key)
-    ]
-
-    from rag.reranker import Reranker
-
-    reranker = Reranker()
-    assert reranker.provider == "siliconflow"
-    assert reranker.api_key == embedding_key
+    assert result.returncode == 0, f"isolated client probe failed:\n{result.stdout}\n{result.stderr}"
 
 
 def test_tests_do_not_mutate_global_settings_directly():

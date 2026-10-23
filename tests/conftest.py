@@ -51,6 +51,7 @@ PRESEEDED_ENVIRONMENT = {
     "RAG_RERANK_MODEL": "",
     "RAG_RERANK_BASE_URL": "",
     "RAG_RERANK_API_KEY": "",
+    "RAG_SILICONFLOW_RERANK_URL": "https://api.siliconflow.cn/v1/rerank",
     "RAG_TYPESAFE_API_KEY": "",
     # Auth: most tests call endpoints anonymously; the auth-enabled subset opts back in.
     # tests/test_auth_enabled_smoke.py is the counterweight for this default.
