@@ -27,12 +27,12 @@
 
 | 项 | 结果 |
 | --- | --- |
-| 全量 pytest | **2799 passed / 1 skipped**；唯一失败为 `test_router_parity` 漏列新图表路由，已修（`0f90c86`），定向 22 passed |
+| 全量 pytest | **2800 passed / 1 skipped（29:46）** |
 | 前端 Vitest | **299 passed / 39 files** |
 | 前端 build | 成功，`static/` 已重建 |
 | ruff（全树） | All checks passed |
-| 服务 | `/health` 200、`/ready` 200（Redis degraded 不阻塞） |
-| 权限 | 4 个 KB 均为 `ORG-81018c / organization`；admin 200 |
+| 服务 | `/health` 200、`/ready` 200（Redis degraded 不阻塞）、`/metrics` 管理员 200 |
+| 权限 | 4 个 KB 均为 `ORG-81018c / organization`；admin 200；匿名 `/data/charts/*` 401 |
 | 备份 | 前一轮 `status=verified`；D-01 路径已由启动迁移覆盖 |
 
 ## 3. 明确不在本轮“代码缺陷”范围
