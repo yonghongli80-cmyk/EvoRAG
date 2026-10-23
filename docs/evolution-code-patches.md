@@ -533,10 +533,12 @@ gate_log `scope(passed) → sandbox(passed) → review(passed)`；被拒候选�
 
 ### 9.2 未闭环（如实记录）
 
-- **层 3 影子采样的写入者仍未接线**：`CandidateShadowEvaluator` 会把样本数与一致率算出来，但当前
-  没有生产代码把 `shadow` gate 条目写进 `gate_log`（与本轮之前相同）。因此 C-05 的进入条件在真实
-  部署里会**先要求补这一层**——这是有意的 fail-closed：在写入者出现之前，灰度端点不会仅凭状态放行。
-  接线方式应当是 `record_gate_entry(gate="shadow", result=..., gate_metrics={"samples": n})`。
+- **层 3 影子采样已有可执行写入者（2026-10-23）**：`scripts/run_candidate_shadow.py` 用现有
+  `CandidateShadowEvaluator` 对 `benchmarks/jev_retrieval_cases.json` 跑真实比较，并通过
+  `record_gate_entry(gate="shadow", gate_metrics={"samples": n, ...})` 写入 gate_log。
+  灰度前先运行：
+  `python scripts/run_candidate_shadow.py --candidate-id <id> --dry-run`，确认后去掉 `--dry-run`。
+  自动的线上 5% 抽样仍未接入主链路（可选 Phase 2 工作）；但 C-05 的层 3 证据不再只能手写。
 - **容器隔离仍未实现**（C-01 的结论不变）：`SANDBOX_ISOLATION_ENV` 只是与启动器的契约。
 - **helper 的租约等待窗口是常量**（60s）：请求侧若因大补丁/慢盘超过 60s 未释放，助手会放弃重启并留痕。
   需要时可调 `spawn_restart_helper(lock_wait_s=...)`。
