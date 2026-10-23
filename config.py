@@ -1,8 +1,14 @@
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+# pydantic-settings reads .env into Settings, but a handful of legacy consumers
+# (logging, JWT secret, INIT_ADMIN_USERNAME) still read os.environ directly.
+# Load once before those modules import so `cp .env.example .env` is effective.
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -65,7 +71,6 @@ class Settings(BaseSettings):
     jev_kb_allowlist: str = ""
 
     # Agent
-    agent_max_iterations: int = 5
     memory_db_path: str = str(Path(__file__).resolve().parent / "data" / "memory.db")
     analysis_db_path: str = str(Path(__file__).resolve().parent / "data" / "analysis.db")
     users_db_path: str = str(Path(__file__).resolve().parent / "data" / "users.db")
@@ -107,7 +112,6 @@ class Settings(BaseSettings):
     spreadsheet_max_rows: int = 200_000
     spreadsheet_max_columns: int = 500
     spreadsheet_max_cell_chars: int = 32_000
-    sensitive_structured_query_enabled: bool = False
     feedback_cluster_days: int = 30
     feedback_cluster_users: int = 3
     knowledge_task_due_days: int = 7
@@ -119,21 +123,12 @@ class Settings(BaseSettings):
     comparison_max_documents: int = 5
 
     # 增量资料生命周期
-    material_file_max_bytes: int = 50 * 1024 * 1024
-    material_archive_max_bytes: int = 200 * 1024 * 1024
-    material_debounce_seconds: int = 300
+    # 材料/worker（只保留真正被消费的开关）
     material_worker_lease_seconds: int = 120
     material_job_max_attempts: int = 5
-    material_job_queue_limit: int = 10_000
-    material_embedding_cache_path: str = str(Path(__file__).resolve().parent / "data" / "embedding_cache.sqlite3")
-    material_embedding_cache_bytes: int = 10 * 1024 * 1024 * 1024
     material_worker_enabled: bool = True
     material_worker_count: int = 2
     material_embedding_slots: int = 4
-    legacy_office_enabled: bool = False
-    legacy_office_launcher: str = ""
-    legacy_office_timeout_seconds: int = 60
-    legacy_office_max_memory_mb: int = 512
 
     # 权威数据备份
     backup_enabled: bool = True
@@ -247,8 +242,6 @@ class Settings(BaseSettings):
     # 灰度百分比配置上限：请求的百分比超过它即 400（在线路径默认 0%，不配置即不允许放量）。
     # 层 4 未批准时在线请求 100% 走当前问题集；回滚 = 秒级置 0 + 审计。
     evolution_candidate_canary_percent: int = Field(default=0, ge=0, le=100)
-    # 第 4 阶段层 3 影子对比的默认采样率（每请求的确定性抽样比例）。
-    evolution_candidate_shadow_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
     evolution_candidate_timeout_seconds: float = Field(default=120.0, ge=1.0)
     evolution_candidate_max_tokens: int = Field(default=16000, ge=1)
 
