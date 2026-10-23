@@ -35,3 +35,4 @@ def test_pipeline_split_modules_stay_within_their_frozen_budgets():
     assert _lines(ROOT / "rag" / "pipeline_jev.py") <= 550
     assert _lines(ROOT / "rag" / "pipeline_query.py") <= 650
     assert _lines(ROOT / "rag" / "pipeline_diagnostics.py") <= 350
+    assert _lines(ROOT / "rag" / "stage_timing.py") <= 220

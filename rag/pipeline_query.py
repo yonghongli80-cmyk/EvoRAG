@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+from contextlib import aclosing
 
+from rag.stage_timing import current_stage_timings, measure_call, measure_stream, request_stage_timing_scope
+
+
+def _trace_stage_timings(prepared):
+    timings = dict(prepared.get("stage_timings") or {})
+    collector = current_stage_timings()
+    if collector is not None:
+        timings.update(collector.snapshot())
+    return timings
+
+
+def _trace_decision_metadata(prepared, outcome):
+    metadata = dict(prepared.get("decision_metadata") or {})
+    metadata["execution_outcome"] = outcome
+    return metadata
+
+
+@request_stage_timing_scope
 def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None, doc_name: str = None, tags: list[str] = None, user: dict = None, kb_id: str = None):
     CircuitOpenError = bindings['CircuitOpenError']
     ExecutionTrace = bindings['ExecutionTrace']
@@ -16,9 +35,17 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
     sid = owner._memory_session_id(session_id, user)
     start_time = time.time()
 
-    prepared, error = owner._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
+    try:
+        prepared, error = owner._prepare_context(question, sid, doc_name, top_k, tags=tags, user=user, kb_id=kb_id)
+    except Exception as error:
+        owner._record_stream_failure(question, start_time, None, error)
+        raise
     if error:
-        trace = ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
+        trace = ExecutionTrace(
+            question=question, route="blocked", answer=error, total_ms=0,
+            stage_timings=_trace_stage_timings({}),
+            decision_metadata={"execution_outcome": "success"},
+        )
         owner.tracker.save(trace)
         owner._submit_failure_observation(trace, None, error)
         return QueryResult(answer=error, context=[], sources=[])
@@ -47,11 +74,11 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
         tool_calls = [ToolCall(**c) for c in captured_calls]
     else:
         try:
-            answer = generate(prepared["messages"])
-        except CircuitOpenError as error:
-            # 熔断不是答案：留失败轨迹/观测后把可识别失败交给端点，绝不入 memory、
-            # 也绝不附带 reliability（P1-02）。
-            logger.warning("sync generation degraded because the circuit breaker is open")
+            answer = measure_call("generation_ms", generate, prepared["messages"])
+        except Exception as error:
+            if isinstance(error, CircuitOpenError):
+                # 熔断不是答案：留失败轨迹/观测后把可识别失败交给端点，绝不入 memory。
+                logger.warning("sync generation degraded because the circuit breaker is open")
             owner._record_stream_failure(question, start_time, prepared, error)
             raise
         decision = prepared.get("decision")
@@ -73,8 +100,8 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
     trace = ExecutionTrace(
         question=question, route=prepared["route"], answer=answer,
         total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
-        stage_timings=prepared.get("stage_timings") or {},
-        decision_metadata=prepared.get("decision_metadata") or {},
+        stage_timings=_trace_stage_timings(prepared),
+        decision_metadata=_trace_decision_metadata(prepared, "success"),
     )
     owner.tracker.save(trace)
     owner._submit_failure_observation(trace, prepared)
@@ -102,6 +129,7 @@ def query(bindings, owner, question: str, top_k: int = 8, session_id: str = None
     )
 
 
+@request_stage_timing_scope
 async def query_stream(
     bindings, owner,
     question: str,
@@ -134,7 +162,11 @@ async def query_stream(
         raise
     if error:
         yield f'data: {_json.dumps({"type": "error", "reason": error}, ensure_ascii=False)}\n\n'
-        trace = ExecutionTrace(question=question, route="blocked", answer=error, total_ms=0)
+        trace = ExecutionTrace(
+            question=question, route="blocked", answer=error, total_ms=0,
+            stage_timings=_trace_stage_timings({}),
+            decision_metadata={"execution_outcome": "success"},
+        )
         await asyncio.to_thread(owner.tracker.save, trace)
         owner._submit_failure_observation(trace, None, error)
         return
@@ -236,12 +268,17 @@ async def stream_prepared(
             yield _degraded_sse_event()
             return
         model_answers: dict[str, str] = {}
-        async for event in router.generate_stream_parallel(prepared["messages"], provider_ids=models):
-            if event.get("type") == "token":
-                m_id = event.get("model", "")
-                model_answers[m_id] = model_answers.get(m_id, "") + event.get("content", "")
-            if event.get("type") != "done":
-                yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+        measured_stream = measure_stream(
+            "generation_ms",
+            router.generate_stream_parallel(prepared["messages"], provider_ids=models),
+        )
+        async with aclosing(measured_stream):
+            async for event in measured_stream:
+                if event.get("type") == "token":
+                    m_id = event.get("model", "")
+                    model_answers[m_id] = model_answers.get(m_id, "") + event.get("content", "")
+                if event.get("type") != "done":
+                    yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
 
         # 汇总各模型回答写入对话记忆与执行跟踪，保证多轮对话与审计观测完整。
         # 合并回答不再在这里自行落库后提前 return，而是与单模型分支共用下面的统一后处理：
@@ -261,10 +298,15 @@ async def stream_prepared(
         router = get_llm_pool_router()
         if len(router.providers) > 1 or model:
             try:
-                async for event in router.generate_stream_balanced(prepared["messages"], preferred_provider_id=model):
-                    token = event.get("content", "")
-                    answer += token
-                    yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
+                measured_stream = measure_stream(
+                    "generation_ms",
+                    router.generate_stream_balanced(prepared["messages"], preferred_provider_id=model),
+                )
+                async with aclosing(measured_stream):
+                    async for event in measured_stream:
+                        token = event.get("content", "")
+                        answer += token
+                        yield f'data: {_json.dumps(event, ensure_ascii=False)}\n\n'
             except Exception as error:
                 cause = circuit_open_cause(error)
                 if cause is None:
@@ -277,9 +319,13 @@ async def stream_prepared(
                 return
         else:
             try:
-                async for token in generate_stream(prepared["messages"]):
-                    answer += token
-                    yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
+                measured_stream = measure_stream(
+                    "generation_ms", generate_stream(prepared["messages"])
+                )
+                async with aclosing(measured_stream):
+                    async for token in measured_stream:
+                        answer += token
+                        yield f'data: {_json.dumps({"type": "token", "content": token}, ensure_ascii=False)}\n\n'
             except CircuitOpenError as error:
                 logger.warning("stream generation degraded because the generator breaker is open")
                 await asyncio.to_thread(
@@ -315,8 +361,8 @@ async def stream_prepared(
     trace = ExecutionTrace(
         question=question, route=trace_route, answer=answer,
         total_ms=total_ms, tool_calls=tool_calls, chunk_hashes=chunk_hashes,
-        stage_timings=prepared.get("stage_timings") or {},
-        decision_metadata=prepared.get("decision_metadata") or {},
+        stage_timings=_trace_stage_timings(prepared),
+        decision_metadata=_trace_decision_metadata(prepared, "success"),
     )
     await asyncio.to_thread(owner.tracker.save, trace)
     owner._submit_failure_observation(trace, prepared)

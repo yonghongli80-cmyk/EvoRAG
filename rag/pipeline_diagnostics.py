@@ -3,6 +3,8 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
+from rag.stage_timing import current_stage_timings
+
 
 def _exception_frame(error: BaseException) -> str:
     """异常栈的最后一帧，形如 ``rag/pipeline_query.py:700:stream_prepared``。
@@ -115,14 +117,28 @@ def record_stream_failure(
     _TRANSIENT_ERROR_NAMES = bindings['_TRANSIENT_ERROR_NAMES']
     _exception_frame = bindings['_exception_frame']
     time = bindings['time']
+    CircuitOpenError = bindings['CircuitOpenError']
+    circuit_open_cause = bindings['circuit_open_cause']
+    collector = current_stage_timings()
+    stage_timings = dict((prepared or {}).get("stage_timings") or {})
+    if collector is not None:
+        snapshot = collector.snapshot() if (prepared or {}).get("route") == "agent" else collector.seal()
+        stage_timings.update(snapshot)
+    outcome = (
+        "degraded"
+        if isinstance(error, CircuitOpenError) or circuit_open_cause(error) is not None
+        else "failed"
+    )
+    decision_metadata = dict((prepared or {}).get("decision_metadata") or {})
+    decision_metadata["execution_outcome"] = outcome
     trace = ExecutionTrace(
         question=question,
         route="error",
         answer="",
         total_ms=(time.time() - start_time) * 1000,
         chunk_hashes=(prepared or {}).get("chunk_hashes") or [],
-        stage_timings=(prepared or {}).get("stage_timings") or {},
-        decision_metadata=(prepared or {}).get("decision_metadata") or {},
+        stage_timings=stage_timings,
+        decision_metadata=decision_metadata,
     )
     owner.tracker.save(trace)
     recorder = getattr(owner, "_failure_recorder", None)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rag.models import Chunk
+from rag.stage_timing import measure_call, preparation_stage_timing_scope
 
 
 def _route_with_history_correction(bindings, owner, question: str, session_id: str, capabilities):
@@ -144,7 +145,7 @@ def _rerank_for_evidence(bindings, owner, original_question, retrieval_query, ca
     settings = bindings['settings']
     if not candidates:
         return []
-    primary = owner.reranker.rerank(retrieval_query, candidates)
+    primary = measure_call("rerank_ms", owner.reranker.rerank, retrieval_query, candidates)
     if record is not None:
         record["rewrite_dual_rerank"] = False
     if retrieval_query.strip() == original_question.strip():
@@ -159,11 +160,12 @@ def _rerank_for_evidence(bindings, owner, original_question, retrieval_query, ca
         best = max(chunk.rerank_score for chunk in primary if chunk.rerank_score is not None)
         if best >= settings.rewrite_dual_rerank_threshold:
             return primary
-    secondary = owner.reranker.rerank(original_question, candidates)
+    secondary = measure_call("rerank_ms", owner.reranker.rerank, original_question, candidates)
     if record is not None:
         record["rewrite_dual_rerank"] = True
     return merge_ranked_chunks(primary, secondary) or primary
 
+@preparation_stage_timing_scope
 def _prepare_context(bindings, owner, question: str, session_id: str, doc_name: str, top_k: int = 8, tags: list[str] = None, user: dict = None, kb_id: str = None):
     """公共逻辑：guard -> route -> retrieve -> judge -> build_messages。"""
     assess_confidence = bindings['assess_confidence']

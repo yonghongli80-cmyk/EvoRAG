@@ -1,6 +1,7 @@
 """执行追踪日志 — 记录 Agent 调用链用于排查。"""
 
 import json
+import math
 import sqlite3
 import threading
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ _DECISION_METADATA_KEYS = frozenset(
         "structured_query_kind",
         # 这条请求是否用了"原问题 + 改写句"双路重排。布尔值，用于判断改写抖动修复是否生效。
         "rewrite_dual_rerank",
+        "execution_outcome",
     }
 )
 
@@ -65,13 +67,22 @@ class ExecutionTrace:
     decision_metadata: dict[str, object] = field(default_factory=dict)
 
 
+_EXECUTION_OUTCOMES = frozenset({"success", "failed", "degraded", "cancelled"})
+_STAGE_TIMING_KEYS = frozenset(
+    {"preparation_ms", "jev_preflight_ms", "jev_passages_ms", "rerank_ms", "generation_ms"}
+)
+
+
 def _sanitize_decision_metadata(metadata: dict) -> dict:
     """Keep allowlisted scalar keys only; anything else is dropped before persistence."""
     sanitized = {}
     for key, value in metadata.items():
         if key not in _DECISION_METADATA_KEYS:
             continue
-        if isinstance(value, bool | int | float | str):
+        if key == "execution_outcome":
+            if isinstance(value, str) and value in _EXECUTION_OUTCOMES:
+                sanitized[key] = value
+        elif isinstance(value, bool | int | float | str):
             sanitized[key] = value
     return sanitized
 
@@ -79,8 +90,14 @@ def _sanitize_decision_metadata(metadata: dict) -> dict:
 def _sanitize_stage_timings(stage_timings: dict) -> dict[str, float]:
     sanitized = {}
     for key, value in stage_timings.items():
-        if key in _DECISION_METADATA_KEYS and isinstance(value, bool | int | float):
-            sanitized[key] = float(value)
+        if key not in _STAGE_TIMING_KEYS or not isinstance(value, int | float) or isinstance(value, bool):
+            continue
+        try:
+            numeric = float(value)
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if math.isfinite(numeric) and numeric >= 0.0:
+            sanitized[key] = numeric
     return sanitized
 
 

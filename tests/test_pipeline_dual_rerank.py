@@ -154,3 +154,29 @@ def test_no_candidates_short_circuits():
 
     assert pipeline._rerank_for_evidence("原问题", "改写问题", []) == []
     assert reranker.calls == []
+
+def test_rerank_ms_sums_the_real_single_and_dual_calls(monkeypatch):
+    import rag.stage_timing as stage_timing
+
+    candidate = _chunk(0, 0.05)
+    ranked = _chunk(0, 0.80)
+    reranker = FakeReranker({"改写问题": [candidate], "原问题": [ranked]})
+    pipeline = _pipeline(reranker)
+    ticks = iter([1.0, 1.125, 2.0, 2.25])
+    monkeypatch.setattr(stage_timing.time, "perf_counter", lambda: next(ticks))
+    timings = stage_timing.StageTimings()
+
+    with stage_timing.use_stage_timings(timings):
+        pipeline._rerank_for_evidence("原问题", "改写问题", [candidate])
+
+    assert timings.snapshot() == {"rerank_ms": 375.0}
+
+
+def test_no_candidate_rerank_produces_no_timing_sample(monkeypatch):
+    import rag.stage_timing as stage_timing
+
+    pipeline = _pipeline(FakeReranker({}))
+    timings = stage_timing.StageTimings()
+    with stage_timing.use_stage_timings(timings):
+        assert pipeline._rerank_for_evidence("原问题", "改写问题", []) == []
+    assert timings.snapshot() == {}

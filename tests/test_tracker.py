@@ -117,3 +117,58 @@ def test_tool_calls_serialized_as_json(tmp_path):
     assert tool_calls[0]["output"] == "12.36"
     assert tool_calls[0]["ms"] == 50.0
     assert tool_calls[1]["tool"] == "sql_query"
+
+def test_tracker_persists_only_finite_known_stage_timings_and_bounded_outcome(tmp_path):
+    db_path = str(tmp_path / "timings.db")
+    tracker = ExecutionTracker(db_path=db_path)
+    tracker.save(
+        ExecutionTrace(
+            question="q",
+            route="rag",
+            stage_timings={
+                "preparation_ms": 12,
+                "jev_preflight_ms": 1,
+                "jev_passages_ms": 2,
+                "rerank_ms": 3.5,
+                "generation_ms": 4,
+                "unknown_ms": 99,
+                "negative_ms": -1,
+                "infinite_ms": float("inf"),
+                "nan_ms": float("nan"),
+                "boolean_ms": True,
+                "text_ms": "7",
+            },
+            decision_metadata={"execution_outcome": "degraded", "unknown": "drop"},
+        )
+    )
+    tracker.save(
+        ExecutionTrace(
+            question="q2",
+            route="rag",
+            stage_timings={"generation_ms": 5},
+            decision_metadata={"execution_outcome": "arbitrary"},
+        )
+    )
+
+    rows = tracker.get_recent()
+    first = json.loads(rows[1]["details"])
+    second = json.loads(rows[0]["details"])
+    assert first["stage_timings"] == {
+        "preparation_ms": 12.0,
+        "jev_preflight_ms": 1.0,
+        "jev_passages_ms": 2.0,
+        "rerank_ms": 3.5,
+        "generation_ms": 4.0,
+    }
+    assert first["decision_metadata"]["execution_outcome"] == "degraded"
+    assert "execution_outcome" not in second["decision_metadata"]
+    tracker.close()
+
+
+def test_tracker_sqlite_schema_stays_unchanged_with_observation_fields(tmp_path):
+    db_path = str(tmp_path / "schema.db")
+    tracker = ExecutionTracker(db_path=db_path)
+    tracker.save(ExecutionTrace(question="q", route="rag", stage_timings={"generation_ms": 1}))
+    columns = [row[1] for row in sqlite3.connect(db_path).execute("PRAGMA table_info(execution_logs)")]
+    assert columns == ["id", "timestamp", "question", "route", "answer", "total_ms", "details"]
+    tracker.close()

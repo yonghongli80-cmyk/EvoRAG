@@ -464,3 +464,67 @@ def test_chart_download_is_not_anonymous_static_content(client):
     # Auth-disabled test client is a development principal; the point is that a
     # missing/foreign chart is never served by an anonymous StaticFiles mount.
     assert response.status_code in {401, 404}
+
+def test_metrics_reports_direct_rerank_and_generation_stages_from_sqlite(
+    client, monkeypatch, tmp_path
+):
+    _sqlite_ready(monkeypatch, tmp_path)
+    _qdrant_ready(monkeypatch)
+    _no_redis(monkeypatch)
+    db = tmp_path / "direct-stages.db"
+    tracker = ExecutionTracker(str(db))
+    try:
+        tracker.save(
+            ExecutionTrace(
+                question="private question",
+                route="rag",
+                stage_timings={"rerank_ms": 12.0, "generation_ms": 45.0},
+            )
+        )
+    finally:
+        tracker.close()
+    monkeypatch.setattr(settings, "memory_db_path", str(db))
+
+    response = client.get("/metrics")
+    samples = _parse_samples(response.text)
+    assert _value(samples, "rag_query_stage_samples", stage="rerank", route="rag") == 1
+    assert _value(samples, "rag_query_stage_samples", stage="generation", route="rag") == 1
+    assert _value(
+        samples, "rag_query_stage_duration_seconds", stage="rerank", route="rag", quantile="0.5"
+    ) == pytest.approx(0.012)
+    assert _value(
+        samples, "rag_query_stage_duration_seconds", stage="generation", route="rag", quantile="0.5"
+    ) == pytest.approx(0.045)
+    assert "private question" not in response.text
+    assert "request_id" not in response.text
+    assert "kb_id" not in response.text
+
+def test_metrics_ignores_malformed_and_invalid_historical_stage_values(
+    client, monkeypatch, tmp_path
+):
+    _sqlite_ready(monkeypatch, tmp_path)
+    _qdrant_ready(monkeypatch)
+    _no_redis(monkeypatch)
+    db = tmp_path / "historical-stages.db"
+    tracker = ExecutionTracker(str(db))
+    tracker.close()
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO execution_logs (timestamp, question, route, answer, total_ms, details) VALUES (?, ?, ?, ?, ?, ?)",
+        ("t", "q", "rag", "", 1.0, '{"stage_timings":{"preparation_ms":2,"jev_preflight_ms":true,"rerank_ms":-1,"generation_ms":1e999,"unknown_ms":8}}'),
+    )
+    conn.execute(
+        "INSERT INTO execution_logs (timestamp, question, route, answer, total_ms, details) VALUES (?, ?, ?, ?, ?, ?)",
+        ("t", "q", "rag", "", 1.0, "not json"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(settings, "memory_db_path", str(db))
+
+    samples = _parse_samples(client.get("/metrics").text)
+
+    assert _value(samples, "rag_query_stage_samples", stage="preparation", route="rag") == 1
+    assert not any(
+        name == "rag_query_stage_samples" and labels.get("stage") in {"rerank", "generation"}
+        for name, labels, _value_ in samples
+    )

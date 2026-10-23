@@ -53,6 +53,8 @@ _STAGE_LABELS = (
     ("preparation_ms", "preparation"),
     ("jev_preflight_ms", "jev_preflight"),
     ("jev_passages_ms", "jev_passages"),
+    ("rerank_ms", "rerank"),
+    ("generation_ms", "generation"),
 )
 _STAGE_KEYS = tuple(key for key, _ in _STAGE_LABELS)
 #: 执行轨迹里已知的 route 取值；未知值归入 "other"，避免标签基数无限增长。
@@ -250,11 +252,15 @@ def _read_query_traces(
                 payload = {}
             raw = payload.get("stage_timings") if isinstance(payload, dict) else None
             if isinstance(raw, dict):
-                stages = {
-                    key: float(value)
-                    for key, value in raw.items()
-                    if key in _STAGE_KEYS and isinstance(value, int | float)
-                }
+                for key, value in raw.items():
+                    if key not in _STAGE_KEYS or not isinstance(value, int | float) or isinstance(value, bool):
+                        continue
+                    try:
+                        numeric = float(value)
+                    except (OverflowError, TypeError, ValueError):
+                        continue
+                    if math.isfinite(numeric) and numeric >= 0.0:
+                        stages[key] = numeric
         total = float(total_ms) if total_ms is not None else None
         route_label = route if route in _TRACE_ROUTES else "other"
         traces.append((route_label, total, stages))
