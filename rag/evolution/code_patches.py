@@ -87,8 +87,17 @@ FORBIDDEN_GLOBS: tuple[str, ...] = (
 #: 因此对每个被改动的调用点文件，**从它派生**出必须点名的权限用例：补丁的 ``test_paths`` 里
 #: 至少出现其中一条，否则层 1 直接拒绝（fail-closed）。这不是"要求它一定通过"——沙箱会真的
 #: 跑这些用例——而是"不许在没有权限证据的情况下改这条路径"。
+# These two tests are the facade's established proof; every pipeline component shares the same
+# tuple so moving an ACL-bearing call site between pipeline modules cannot drop that proof.
+_PIPELINE_ACL_TESTS = ("tests/test_permissions.py", "tests/test_api_security.py")
+
 ACL_CALL_SITE_TESTS: dict[str, tuple[str, ...]] = {
-    "rag/pipeline.py": ("tests/test_permissions.py", "tests/test_api_security.py"),
+    "rag/pipeline.py": _PIPELINE_ACL_TESTS,
+    "rag/pipeline_bindings.py": _PIPELINE_ACL_TESTS,
+    "rag/pipeline_prepare.py": _PIPELINE_ACL_TESTS,
+    "rag/pipeline_jev.py": _PIPELINE_ACL_TESTS,
+    "rag/pipeline_query.py": _PIPELINE_ACL_TESTS,
+    "rag/pipeline_diagnostics.py": _PIPELINE_ACL_TESTS,
     "rag/guard.py": ("tests/test_permissions.py",),
     "rag/retriever.py": ("tests/test_permissions.py",),
 }
@@ -454,7 +463,7 @@ def _validate_acl_regression_tests(
     """A patch that touches an ACL/audit call site must name a permission test (C-10).
 
     The blacklist protects the permission *modules*; it cannot protect the *call sites* inside
-    ``pipeline.py`` / ``guard.py`` / ``retriever.py``, which legitimate patches must be able to
+    ``pipeline*.py`` / ``guard.py`` / ``retriever.py``, which legitimate patches must be able to
     edit. This closes that blind side without forbidding the files: the diff is refused unless the
     candidate's verification targets include a permission test derived from the file it touches.
     The sandbox runs the same tests (they are also in the fixed net), so the requirement is
@@ -522,7 +531,7 @@ def validate_patch(candidate: CodePatchCandidate, *, repo_root: str | Path) -> N
        ``test_*.py``, present under ``repo_root``, and not a blacklist exception
        (``tests/**`` itself is what a test path points at).
     3b. **ACL/audit red line (C-10)**: a diff that touches an ACL call site
-       (``rag/pipeline.py`` / ``rag/guard.py`` / ``rag/retriever.py``) must name at least one
+       (``rag/pipeline*.py`` / ``rag/guard.py`` / ``rag/retriever.py``) must name at least one
        permission test derived from that file (:data:`ACL_CALL_SITE_TESTS`). The blacklist
        protects the permission modules; this protects the call sites a legitimate patch can
        reach.

@@ -666,3 +666,45 @@ def test_the_acl_check_runs_after_the_layer_boundary():
 
     assert "outside the reranking layer" in reason
     assert "forbidden" not in reason
+
+
+def test_pipeline_prepare_patch_without_permission_evidence_is_rejected():
+    """A moved ACL call site keeps the facade's proof requirement."""
+    path = "rag/pipeline_prepare.py"
+    reason = reject_reason(
+        patch_candidate(
+            layer="code",
+            paths=(path,),
+            diff=edit_file_diff(path),
+            test_paths=("tests/test_pipeline.py",),
+        )
+    )
+
+    assert "ACL" in reason
+    assert path in reason
+    assert "tests/test_permissions.py" in reason
+    assert "tests/test_api_security.py" in reason
+
+
+def test_pipeline_prepare_patch_with_permission_evidence_passes_real_git_check():
+    path = "rag/pipeline_prepare.py"
+    candidate = patch_candidate(
+        layer="code",
+        paths=(path,),
+        diff=edit_file_diff(path),
+        test_paths=("tests/test_pipeline.py", "tests/test_api_security.py"),
+    )
+
+    assert validate_patch(candidate, repo_root=REPO_ROOT) is None
+
+
+def test_every_pipeline_module_is_covered_by_the_acl_regression_mapping():
+    from rag.evolution.code_patches import PERMISSION_REGRESSION_TESTS, required_acl_test_paths
+
+    pipeline_files = sorted((REPO_ROOT / "rag").glob("pipeline*.py"))
+    assert pipeline_files
+    assert all(
+        required_acl_test_paths((path.relative_to(REPO_ROOT).as_posix(),))
+        == PERMISSION_REGRESSION_TESTS
+        for path in pipeline_files
+    )

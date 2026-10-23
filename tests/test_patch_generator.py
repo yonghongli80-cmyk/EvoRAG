@@ -1059,6 +1059,29 @@ def test_the_available_tests_lead_with_the_permission_test_for_an_acl_call_site(
     # 不碰 ACL 调用点的补丁不显示这条红线（噪音最小化，也避免把规则说成"所有补丁都要"）。
     assert _render_acl_note(("rag/reranker.py", "rag/chunker.py")) == ""
 
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "rag/pipeline_bindings.py",
+        "rag/pipeline_prepare.py",
+        "rag/pipeline_jev.py",
+        "rag/pipeline_query.py",
+        "rag/pipeline_diagnostics.py",
+    ),
+)
+def test_extracted_pipeline_paths_keep_permission_tests_in_the_generator_prompt(path):
+    from rag.evolution.patch_generator import _available_tests, _render_acl_note
+
+    tests = _available_tests(Path(REPO_ROOT), (path,))
+    assert tests[:2] == ("tests/test_permissions.py", "tests/test_api_security.py")
+
+    note = _render_acl_note((path,))
+    assert note.startswith("# 权限红线")
+    assert path in note
+    assert "tests/test_permissions.py" in note
+    assert "tests/test_api_security.py" in note
+
 # ------------------------------------------------------------------
 # 带失败类别的一次重试（含真实调用计数）。
 # ------------------------------------------------------------------
