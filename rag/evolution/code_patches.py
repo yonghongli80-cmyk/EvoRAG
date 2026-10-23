@@ -280,11 +280,34 @@ def _diff_files(diff: str) -> list[tuple[str | None, str | None]]:
     return pairs
 
 
+def _git_diff_paths(diff: str) -> list[str]:
+    """Paths named by ``diff --git`` headers, including mode-only entries.
+
+    A mode-only change has no ``---``/``+++`` pair, so without this it would be
+    invisible to the "diff must touch only the named paths" check (C-09).
+    """
+    paths: list[str] = []
+    for line in diff.splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        parts = line[len("diff --git ") :].split()
+        for part in parts[:2]:
+            path = part.strip().strip('"')
+            if path.startswith(("a/", "b/")):
+                path = path[2:]
+            if path and path not in paths:
+                paths.append(path)
+    return paths
+
+
 def _diff_header_paths(diff: str) -> list[str]:
     """Every file a diff touches, in diff order; ``/dev/null`` is not a file."""
     paths: list[str] = []
     for source, target in _diff_files(diff):
         paths.extend(path for path in (source, target) if path is not None)
+    for path in _git_diff_paths(diff):
+        if path not in paths:
+            paths.append(path)
     return paths
 
 

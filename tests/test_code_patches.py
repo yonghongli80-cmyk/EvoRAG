@@ -504,6 +504,19 @@ def test_a_rename_naming_a_path_outside_paths_is_refused():
     assert "rag/reranker_alt.py" in reason
 
 
+def test_a_mode_only_diff_naming_a_foreign_path_is_refused():
+    candidate = patch_candidate(
+        paths=("rag/reranker.py",),
+        diff=(
+            "diff --git a/rag/permissions.py b/rag/permissions.py\n"
+            "old mode 100644\n"
+            "new mode 100755\n"
+        ),
+    )
+    reason = reject_reason(candidate)
+    assert "rag/permissions.py" in reason
+
+
 # ------------------------------------------------------------------
 # git apply --check, both directions, on the real repository.
 # ------------------------------------------------------------------
