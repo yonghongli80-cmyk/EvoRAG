@@ -1,8 +1,10 @@
 """Compatibility checks for the pipeline facade while preparation is extracted."""
 
+import asyncio
 import hashlib
 import inspect
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import rag.pipeline as pipeline_module
@@ -80,5 +82,92 @@ def test_query_dispatches_through_an_instance_prepare_override():
 
         assert result.answer == "blocked by instance override"
         assert calls == [("question", "u7:original", None, 8, ["tag"], {"id": 7}, "kb")]
+    finally:
+        pipeline.close()
+
+
+def test_query_uses_generate_patched_after_construction():
+    pipeline = _constructed_pipeline()
+    pipeline._prepare_context = lambda *args, **kwargs: (
+        {
+            "route": "rag",
+            "messages": [{"role": "user", "content": "question"}],
+            "context": [],
+            "sources": [],
+            "chunk_hashes": [],
+        },
+        None,
+    )
+
+    try:
+        with patch.object(pipeline_module, "generate", return_value="patched answer") as generate:
+            result = pipeline.query("question")
+
+        assert result.answer == "patched answer"
+        generate.assert_called_once_with([{"role": "user", "content": "question"}])
+    finally:
+        pipeline.close()
+
+
+def test_query_stream_uses_generate_stream_patched_after_construction():
+    pipeline = _constructed_pipeline()
+    pipeline._prepare_context = lambda *args, **kwargs: (
+        {
+            "route": "rag",
+            "messages": [{"role": "user", "content": "question"}],
+            "sources": [],
+            "chunk_hashes": [],
+        },
+        None,
+    )
+
+    generator_calls = []
+
+    async def replacement(messages):
+        generator_calls.append(messages)
+        yield "patched token"
+
+    async def collect():
+        return [event async for event in pipeline.query_stream("question")]
+
+    try:
+        with (
+            patch.object(pipeline_module, "generate_stream", replacement),
+            patch.object(pipeline_module, "get_llm_pool_router", return_value=SimpleNamespace(providers={})),
+        ):
+            events = asyncio.run(collect())
+
+        assert events == [
+            'data: {"type": "token", "content": "patched token"}\n\n',
+            'data: {"type": "sources", "sources": []}\n\n',
+            'data: {"type": "done"}\n\n',
+        ]
+        assert generator_calls == [[{"role": "user", "content": "question"}]]
+    finally:
+        pipeline.close()
+
+
+def test_stream_failure_frame_points_to_query_module_without_exception_text():
+    pipeline = _constructed_pipeline()
+    recorder = MagicMock()
+    pipeline._failure_recorder = recorder
+    pipeline._prepare_context = lambda *args, **kwargs: ({}, None)
+
+    async def collect():
+        return [event async for event in pipeline.query_stream("private question")]
+
+    try:
+        try:
+            asyncio.run(collect())
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("malformed prepared data should propagate")
+
+        _trace, detail = recorder.submit.call_args.args
+        assert detail.exception_class == "KeyError"
+        assert detail.exception_frame.startswith("rag/pipeline_query.py:")
+        assert "private question" not in detail.exception_frame
+        assert "'route'" not in detail.exception_frame
     finally:
         pipeline.close()
