@@ -117,7 +117,8 @@ docker compose up -d
   2026-10-23 只读核对时，两边 `main` 均为 `55862fb`；后续以真实远端查询为准。
 - **仅推送到 Gitee 不会触发 GitHub Actions**。同步推送到 GitHub 后，
   `.github/workflows/ci.yml` 按 GitHub 的 push/pull_request 事件触发；
-  `deploy.yml` 监听 `main` 上 CI 成功完成的 workflow_run 事件。
+  `deploy.yml` 监听 `main` 上 CI 完成的 workflow_run 事件，
+  部署 job 再通过 `conclusion == 'success'` 条件决定是否执行。
   仓库已同步不等于 CI 或部署已验收：Actions 权限、部署 secrets 和实际运行结果仍需查看 GitHub 的配置及日志。
 - 后续按交接文档分别推送两个远端的 `main`，新增标签也同步两边。
   Gitee 侧若需要独立自动门禁，可接入 Gitee Go 或自建 runner，命令与下面"本地等价命令"一致。

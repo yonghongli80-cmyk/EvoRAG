@@ -1,7 +1,8 @@
 name: Deploy to Server
 
 # F-08/F-09：仅推送 origin（Gitee）不会触发 GitHub Actions；同步推送 github
-# 后，main 的 CI 成功才触发本流程，还需配置部署 secrets 并核对实际运行结果。
+# 后，main 的 CI 完成会触发本流程；deploy job 仅在 CI 结论为 success 时执行，
+# 还需配置部署 secrets 并核对实际运行结果。
 # 手动部署入口为服务器上的 `bash deploy.sh`（同样的备份门禁 + 健康门禁）。
 on:
   workflow_run:
