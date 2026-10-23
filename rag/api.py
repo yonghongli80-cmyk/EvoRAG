@@ -653,8 +653,6 @@ def serve_spa():
 
 DATA_CHARTS_DIR = DATA_DIR_PATH / "charts"
 DATA_CHARTS_DIR.mkdir(exist_ok=True)
-if DATA_CHARTS_DIR.is_dir():
-    app.mount("/data/charts", StaticFiles(directory=str(DATA_CHARTS_DIR)), name="data-charts")
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

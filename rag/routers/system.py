@@ -13,17 +13,30 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import rag.vector_store as vector_store
 from config import settings
-from rag.api_security import require_admin
+from rag.api_security import require_admin, require_user
 from rag.context import get_gap_analyzer
 from rag.llm_pool import get_llm_pool_router
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_CHARTS_DIR = Path(__file__).resolve().parents[2] / "data" / "charts"
+
+
+@router.get("/data/charts/{filename}", include_in_schema=False)
+def download_chart(filename: str, user: dict = Depends(require_user)):
+    """Serve a generated chart only to an authenticated session."""
+    if Path(filename).name != filename or not filename.endswith(".png"):
+        return JSONResponse(status_code=404, content={"detail": "资源不存在"})
+    path = _CHARTS_DIR / filename
+    if not path.is_file():
+        return JSONResponse(status_code=404, content={"detail": "资源不存在"})
+    return FileResponse(path, media_type="image/png")
 
 # ── Phase 0 观测面 ──────────────────────────────────────────────────
 # `/health` 保持既有契约（容器 healthcheck 使用）；`/ready` 是依赖就绪门禁：

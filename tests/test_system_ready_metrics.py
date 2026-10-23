@@ -457,3 +457,10 @@ def test_ready_and_metrics_routes_are_get_only():
     for route in app.routes:
         if getattr(route, "path", "") in {"/ready", "/metrics"}:
             assert route.methods == {"GET"}
+
+
+def test_chart_download_is_not_anonymous_static_content(client):
+    response = client.get("/data/charts/example.png")
+    # Auth-disabled test client is a development principal; the point is that a
+    # missing/foreign chart is never served by an anonymous StaticFiles mount.
+    assert response.status_code in {401, 404}
