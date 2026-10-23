@@ -84,7 +84,7 @@
 
 ### 2.1 分段口径与限制
 
-2026-10-23 补齐于 `codex/pipeline-observability` 隔离分支；本轮是否集成及最终测试结果见
+2026-10-23 在 `codex/pipeline-observability` 隔离分支补齐，交付 `6dcca5c` 已并入 main；集成及最终测试结果见
 [`handoff-2026-10-23.md`](handoff-2026-10-23.md)。原服务没有因本轮离线验证而重启。
 
 * `rerank_ms` 由 `rag/pipeline_prepare.py` 包围每次真实 reranker 调用，以
@@ -319,7 +319,7 @@ WSL 2.7.14/WSLService 已安装运行，WSL 未列出 Linux 发行版；Hypervis
 也未拉取/运行容器。8080 既有服务仍可连接。用户选择先完成代码整改，以下运行验收保持待执行。
 
 1. 在 Docker 可用环境完成 4.3 的迁移与双进程验收，并把结果补进 `UPGRADE.md` Phase 1 与第 3.5 节。
-2. 本轮分支已补直接 `rerank` / `generation` 分段与 `/metrics` 展示；集成后采集真实负载，
+2. main 已补直接 `rerank` / `generation` 分段与 `/metrics` 展示；部署后采集真实负载，
    核对样本覆盖及 P99。离线回归不能代替部署验收或压测，不从旧分位数补造新结果。
 3. 若需要准备的 P99，给 `scripts/benchmark_jev_retrieval.py` 增加原始样本输出（或分位数参数）。
 4. 生产抓取：给 Prometheus 配管理员 Bearer token；`/ready` 用于摘流，`/health` 继续做容器健康检查。
@@ -333,4 +333,8 @@ WSL 2.7.14/WSLService 已安装运行，WSL 未列出 Linux 发行版；Hypervis
 首次全量中的4项日志断言失败指向独立准备入口的真实route残留，修复后保留断言重新完整执行，
 不将分项结果拼成全量。首次失败和最终通过日志均保留在
 `artifacts/pipeline-observability-2026-10-23/`；整分支审查和两项收尾修复复审通过。
-本轮没有新增P99压测结果或运行迁移结果；现有8080服务仍运行原main，最终部署与运行验收另行执行。
+交付 `6dcca5c` 已由 `8294753` 快进合并到 main 并推送两个远端；合并后 104 项定向回归
+及全树 Ruff 通过，源码与完整验收时一致。152 份原始证据已复制到原目录并校验 SHA256，
+集成记录见 `artifacts/pipeline-merge-dual-push-2026-10-23/`。
+本轮没有新增 P99 压测结果或运行迁移结果；main 文件已更新，现有 8080 服务进程未重启，
+只读 `/ready` 为 200，最终部署与运行验收另行执行。

@@ -1,6 +1,6 @@
 # RAGv3 生产化升级方案（多实例）
 
-> **状态：Phase 0 分段计时与日志上下文代码补齐（本轮分支待集成），新负载验收待执行；Phase 1 配置面落地，运行时迁移未执行。** 日期：2026-10-23。
+> **状态：Phase 0 分段计时与日志上下文代码补齐（已并入 main），新负载验收待执行；Phase 1 配置面落地，运行时迁移未执行。** 日期：2026-10-23。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
 > 单机缺陷的修复见 [`docs/superpowers/plans/2026-10-21-unified-remediation.md`](docs/superpowers/plans/2026-10-21-unified-remediation.md)。
 > 原则：**不 big-bang**，每个阶段独立可回滚，上一阶段验收不过不进下一阶段。
@@ -84,10 +84,10 @@ Client ──TLS──> LB / Reverse Proxy
 - **[x] `/metrics`**（只读，管理员鉴权）：Prometheus 文本格式，输出请求量/延迟（P50/P95/P99）、
   检索阶段耗时、执行轨迹分段、依赖健康、LLM 池并发；不含问题文本/文档名/原始路径/凭据。
   HTTP 计数由 `rag/api.py` 中间件按路由模板采集，检索耗时在 `rag/vector_store.py` 采集。
-- **[x] rerank/generation 独立分段（本轮分支）**：在准备与查询执行模块包围真实调用，
+- **[x] rerank/generation 独立分段（已并入 main）**：在准备与查询执行模块包围真实调用，
   经原 trace JSON 落盘并由 `/metrics` 展示。双重排累计，流式排除消费暂停，arena 计合并流等待。
   保留 `preparation`/`jev_*` 旧分段；preparation 含 rerank，不相加，不用差值冒充 generation。
-- **[x] 结构化日志补 `request_id`、`kb_id`、`route`（本轮分支）**：JSON/文本统一三个字段，
+- **[x] 结构化日志补 `request_id`、`kb_id`、`route`（已并入 main）**：JSON/文本统一三个字段，
   route 为有界逻辑路由；请求、流式逐次推进、线程与 shadow worker 作用域隔离，结束后恢复。
   shadow 只传日志标识，保留业务 ContextVar 隔离；不增加 Prometheus 高基数标签。
 - **验收**：同一压测脚本在单机产出稳定 P99（**部分达成**：命令与历史档案已就绪，本轮未重跑压测）；
@@ -243,7 +243,7 @@ Client ──TLS──> LB / Reverse Proxy
 | 未做/阻塞 | **Docker daemon 不可用**：未 pull 镜像、未启动容器、未验证健康检查/API key/持久卷、未做 snapshot 迁移、未做双进程验收；Compose 仅静态校验。rerank/generation 独立分段需 `pipeline.py`/`reranker.py`/`generator.py` 钩子（超出 S7 边界）。未提交 Git |
 
 
-## 10. 2026-10-23：pipeline 与观测代码补齐（隔离分支）
+## 10. 2026-10-23：pipeline 与观测代码补齐（已集成 main）
 
 `codex/pipeline-observability` 将入口按准备/Jev/查询/诊断拆分，保留签名、QueryResult、
 实时 facade 替换接缝和 ACL 证据门禁；入口 615 行（上限1000）、api 822 行、局部导入150。
@@ -251,6 +251,8 @@ Client ──TLS──> LB / Reverse Proxy
 首次全量暴露独立准备日志 route 残留，已定位生产边界并修复，保留原失败断言与失败证据。
 修复后源码 `af32f43` 全后端 **2879 passed / 3 skipped / 1 既有警告**，退出码0；
 JUnit 2882项、0失败/0错误，全树Ruff通过，分项与整分支代码审查通过。
-本轮未合并或推送 main，原服务未重启。Docker/Qdrant 运行、迁移与双进程、新负载/P99、
+交付提交 `6dcca5c` 已由 `8294753` 快进合并到 main，并按交接四条命令推送 Gitee 和 GitHub。
+合并后 104 项定向回归及全树 Ruff 通过；相对全量验收源码仅有文档变更。原服务未重启。
+Docker/Qdrant 运行、迁移与双进程、新负载/P99、
 PostgreSQL/共享Redis/对象存储/多副本和自动 shadow 采样仍按既有计划待办。
 完整口径、结果与本机证据路径见最新交接和 `docs/phase0-observability-and-baseline.md`。
