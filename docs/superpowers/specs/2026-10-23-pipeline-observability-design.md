@@ -2,6 +2,8 @@
 
 用户明确要求继续实施交接中的 pipeline 拆分和观测待办，由 Luna 子代理工作、主代理统筹；Docker 运行验收继续保留。本设计沿用 UPGRADE.md Phase 0 的行为目标，内部模块与计时口径由统筹选择。
 
+用户后续明确调整：pipeline 主文件 1000 行以内可接受，稳定性优先。700 行不再作为硬目标，不为压数字追加迁移、脆弱兼容层或改变业务行为；按自然职责拆分即可。
+
 ## 目标与范围
 - 将当前 1758 行的 rag/pipeline.py 分为有界职责模块，保留 RAGPipeline / QueryResult 及已使用的模块导出、方法签名和替换接缝。
 - 完成最终答案 generation、实际 rerank 的直接计时，从请求到 ExecutionTrace、SQLite details 再到 /metrics 可核对。
@@ -15,8 +17,10 @@
 
 模块允许继续通过 owner._prepare_context 等原有实例方法协作，保持实例 monkeypatch 和继承覆盖。依赖视图仅作为旧 facade 的兼容桥，不成为任意服务注册表。保留 QueryResult 的原定义路径和 NamedTuple 字段顺序；纯辅助函数可以在 facade 兼容导出。
 
+拆分迁移必须同时继承自动补丁的 ACL 证据门禁：rag/evolution/code_patches.py 的 ACL_CALL_SITE_TESTS 原只列 rag/pipeline.py，新增的 pipeline_bindings/prepare/jev/query/diagnostics.py 也归同一逻辑组件，沿用该文件的权限测试要求。候选路径白名单、禁止路径、配额及沙箱固定权限回归网不放宽。架构性回归确保未来新增 pipeline*.py 不会静默漏出门禁，并验证新模块候选不带权限用例被拒、带用例可正常验证，生成提示/测试选择也继承权限证据。
+
 ## 文件与依赖方向
-- rag/pipeline.py：公开入口、装配、资源所有权/关闭、CLI、兼容导出和薄委托。最终 <=700 行。
+- rag/pipeline.py：公开入口、装配、资源所有权/关闭、CLI、兼容导出和必要薄委托。最终 <=1000 行，稳定性优先，不追求最低行数。
 - rag/pipeline_bindings.py：只读、按名称实时读取的依赖视图；显式传入 globals() 的只读视图，不经 sys.modules 或反向 import 查 facade。<=80 行。
 - rag/pipeline_prepare.py：输入保护、历史/改写缓存、传统准备、检索/ACL、安全、可靠性、结构化协作。<=750 行。
 - rag/pipeline_jev.py：Jev 路由/证据/阶段、shadow 与字段提示。<=550 行。
@@ -48,6 +52,7 @@
 - KB 仅来自本次 pipeline 的有效 kb_id（含实例默认库），不从问题/文件/日志正文推断。有效值仅作为日志字段，不进入 Prometheus 标签。
 - HTTP 中间件为请求建立/恢复上下文，合法已有 X-Request-ID 保留；空值、控制字符或超长值用新随机 ID，响应继续返回 X-Request-ID。
 - 同步查询覆盖整个执行；异步流仅在每次推进/关闭内部 iterator 的上下文中绑定，yield 给消费方前已恢复，不能污染消费方或同任务后续日志。线程池内上下文可用，结束/异常/取消均恢复。
+- Jev shadow 自有线程池也应保留本次三个日志字段；只捕获/恢复日志标识，不把整个 Context 一并复制，以免改变业务 rollout/question-set 选择语义。submit/排队/丢弃/关闭和比较结果不变，回调结束后 worker 上下文恢复。
 - 日志统一字段只放有界标识与路由，不新增问题、文档名、用户信息、提示词、token、凭据或 provider URL。文本输出对标识中的控制字符安全处理，JSON 正常转义。
 
 ## 全局约束
@@ -55,7 +60,7 @@
 - 生产配置/数据/服务生命周期不变；不读取真实密钥或客户资料。
 - RAGPipeline 构造/query/query_stream、QueryResult、现有 SSE 和授权/降级/记忆契约不变。
 - facade 模块替换和实例方法替换继续作用于真实执行；不得批量改 patch 路径或删弱原业务断言来让重构过关。
-- 不抬高架构预算：api.py<=830；第一阶段 pipeline.py<=1150，最终<=700；局部 imports<=155，最终 ratchet<=150；新模块按上述上限冻结。
+- 不抬高既有主干架构预算：api.py<=830；已完成第一阶段 pipeline.py<=1150，后续<=1000（用户明确接受）；局部 imports<=155，最终 ratchet<=150；新模块按上述上限冻结，职责与行为稳定优先于追求更低行数。
 - 在 codex/pipeline-observability 隔离分支完成，独立提交与审查；不自动合并/推送共享 main。
 - 仅用合成夹具和离线模型替身；由统筹统一跑一次最终后端全量及全树 Ruff，未改依赖/前端时不重复安装或重建产物。
 - Docker/Qdrant 运行、认证、持久化、迁移和双进程验收保留待办，不据本轮测试标记已验收。
