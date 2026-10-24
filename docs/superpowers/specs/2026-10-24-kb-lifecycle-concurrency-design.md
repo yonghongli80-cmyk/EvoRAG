@@ -30,7 +30,7 @@
 
 1. 快速授权，进入删除门禁后再复核现有owner/admin或组织ADMINISTER权限；`rag_docs`保持禁止删除。未知KB不创建墓碑假报成功；orphan edit仍遵循现有409，不能借此扩权。
 2. 读取全部目标KB文档身份，而不只kb_documents；枚举immutable版本、可证明归属的staging、legacy KB文件、结构化数据集、Wiki页面/修订、后台任务。先校验所有路径的根和owner归属，再进行任何删除。
-3. 短事务写入deleting和删除token/generation。取消可归属该KB的队列/在途任务，再执行外部清理；Wiki任务必须在Wiki身份清除前识别并取消，避免崩溃后丢失关联。保留足够身份供重试。
+3. 短事务写入deleting和删除token/generation。按全部document permission IDs取消job_scope=material的active index/purge任务，按Wiki page IDs取消job_scope=wiki的active retry；不能误取消别的KB或同数值ID的另一scope。任务完成/取消状态均在共享KB gate内更新。
 4. 在事务外幂等移除该collection和所有已验证归属的文件/数据集/Wiki内容；仅在已有删除意图的恢复路径中把资源已不存在当成已清理。任何失败不得返回deleted，保持可恢复deleting。
 5. 全部外部清理成功后，同一短事务删除剩余目标关系数据并把墓碑置deleted。提交失败整体回滚关系数据/状态。以后读写均拒绝墓碑KB；不让缓存pipeline或Wiki重试重建它。
 
@@ -42,7 +42,7 @@
 
 - knowledge upload/link/remove：整个实际写入在一个同步worker的门禁内，上传/link复用同一导入编排；链接先保护源KB读取快照，释放源准入后再进入目标，避免跨KB嵌套死锁。保留路由patch surface与现有响应字段。
 - common version ingest、BatchImporter、spreadsheet编辑/恢复及启动期legacy/staged version与spreadsheet迁移：同KB准入覆盖文件到发布，版本预留/激活、目录完成另有事务内墓碑检查，零行UPDATE不能返回成功；迁移按KB逐条持锁，不改现有lifespan顺序。
-- materials上传/归档确认、索引/修复/purge worker及启动期material metadata迁移：所有自定义KB使用现有KB编辑授权。busy要保留/安全重排任务，deleting/deleted任务取消，不重新建collection；任务结束状态在持有准入期间处理，FTS backfill在逐document gate后短事务内执行。
+- materials上传/归档确认、索引/修复/purge worker及启动期material metadata迁移：所有自定义KB使用现有KB编辑授权。KB删除按document IDs仅取消job_scope=material任务、Wiki按page IDs仅取消job_scope=wiki任务，清除lease且不触碰别的scope。busy要保留/安全重排任务，deleting/deleted任务取消，不重新建collection；任务结束状态在持有准入期间处理，FTS backfill在逐document gate后短事务内执行。
 - Wiki create/update/rollback/delete与reindex：用户DB准入必须覆盖Wiki DB修改及向量写；Indexer显式注入用户DB或接受当前合法准入，不能为自定义KB静默绕过。保持精确Wiki点删除边界。删除先按KB枚举Wiki page ids，取消UserDB中job_scope=wiki且document_id属于这些page ids的活动重试；再清理全部Wiki向量，全部成功后才在一个Wiki事务中删除页面/修订/链接身份。此接口由WikiIndexer.remove_kb_content(kb_id, *, db)提供，调用方需已持有delete permit；UserDB.cancel_wiki_reindex_jobs(page_ids)负责重试任务取消。
 - KB详情/查询等授权入口追加生命周期可用性检查；启动期legacy org-policy migration和离线seed的KB SQL写入，在同一事务内检查墓碑；删除重试只能显式允许deleting，同时继续做原删除权限检查。KB metadata/目录更新有事务内检查；新KB创建在物理创建前拒绝墓碑ID。
 

@@ -56,11 +56,11 @@
 
 **Files:** Modify `rag/routers/knowledge.py`, `rag/api_security.py`, `rag/knowledge_base.py`, `rag/kb_document_cleanup.py`; Create `rag/kb_lifecycle_cleanup.py`, `tests/test_kb_lifecycle_api.py`；必要既有测试仅 `tests/test_kb_failed_mutations.py`, `tests/test_kb_file_lifecycle.py`, `tests/test_kb_permissions.py`。
 
-**Interfaces consumed:** Task1准入、permit、可用性与HTTP映射；Task4的UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int；Task5的get_wiki_indexer(user_db=db).remove_kb_content(kb_id, db=db) -> None。**Produced:** knowledge upload/link复用同步导入编排 _ingest_kb_document_sync(source, db, manager, actor, roots)；删除由一个实际同步worker持有delete permit完成，先调用Wiki清理接口，再执行其余外部清理。
+**Interfaces consumed:** Task1准入、permit、可用性与HTTP映射；Task4的UserDB.cancel_material_jobs_for_documents(document_ids: Sequence[int]) -> int与cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int；Task5的get_wiki_indexer(user_db=db).remove_kb_content(kb_id, db=db) -> None。**Produced:** knowledge upload/link复用同步导入编排 _ingest_kb_document_sync(source, db, manager, actor, roots)；删除由一个实际同步worker持有delete permit完成，先按permission document IDs取消material/purge任务、按Wiki page IDs取消Wiki retries，再调用Wiki清理接口并清理其余外部资源。
 
 - [ ] Step 1: 将audit的真实ASGI/SQLite/临时Qdrant交错改成正式安全断言并观察RED；覆盖上传先入门禁、删除先入门禁、finish UPDATE丢行、链接跨库源快照。禁止两个成功响应却资源缺失。
 - [ ] Step 2: 整段pending→ingest→文件/数据集→目录→audit/rollback纳入同一worker准入，保留现有路由可patch的loader/toc/summary/ingest函数和响应字段。源链接先在源准入中读取快照，释放后才进入目标，避免双KB锁环。
-- [ ] Step 3: 删除枚举目标KB全部document_permissions、版本、目录、dataset和Wiki page ids，不只kb_documents；借现有storage primitives校验根和owner，先取消这些page ids对应的Wiki retry，再清理Wiki向量与页面，随后处理其余资源。预验证在任何删除前，I/O在用户DB事务外，最后通过permit.finish_delete原子清关系与墓碑。失败503且可重试；已有意图时资源缺失幂等，未知ID不假成功；真实legacy文件与其他KB保持。
+- [ ] Step 3: 删除枚举目标KB全部document_permissions、版本、目录、dataset和Wiki page ids，不只kb_documents；借现有storage primitives校验根和owner；先按全部permission document IDs取消job_scope=material的active index/purge任务，再按page IDs取消job_scope=wiki的active retry，不能误取消其它KB或跨scope的同数值ID。随后清理Wiki向量/页面及其余资源。预验证在任何删除前，I/O在用户DB事务外，最后通过permit.finish_delete原子清关系与墓碑。失败503且可重试；已有意图时资源缺失幂等，未知ID不假成功；真实legacy文件与其他KB保持。
 - [ ] Step 4: central require_kb_view/edit/administer追加生命周期检查，删除重试显式allow_deleting但原删除授权仍必需；旧orphan edit409和org隐藏语义保留。metadata/目录写入事务内复核状态；新create在物理collection创建前检查墓碑（Manager可新增可选before_create回调，不破坏旧默认调用）。避免缓存绕过墓碑，不强关在途query对象。
 - [ ] Step 5: API权限矩阵/故障重试/其他KB与既有KB、版本回归GREEN，根提交并fresh规格/质量复审。
 
@@ -80,11 +80,11 @@
 
 **Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/materials/migration.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive测试可调整。
 
-**Interfaces consumed:** Task1 gate/fence/errors；Task3既有promote函数签名保持；Task5 WikiIndexer生产实例显式 user_db=db（同接口契约并行开发，组合测试待Task5实现落盘后运行）。**Produced:** UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int，只将匹配page IDs且job_scope=wiki的active任务置cancelled并清lease。
+**Interfaces consumed:** Task1 gate/fence/errors；Task3既有promote函数签名保持；Task5 WikiIndexer生产实例显式 user_db=db（同接口契约并行开发，组合测试待Task5实现落盘后运行）。**Produced:** UserDB.cancel_material_jobs_for_documents(document_ids: Sequence[int]) -> int只取消job_scope=material的active任务并清lease；UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int只取消job_scope=wiki的active任务并清lease。
 
 - [ ] Step 1: RED覆盖材料custom KB无policy跳过编辑授权、deleting/deleted上传/归档确认、在途index/repair/purge与删除交错、busy后job不丢失或反复复活。
 - [ ] Step 2: 自定义KB全部走现有require_kb_edit，rag_docs保留特例。保持分块/大小限制；不在async coroutine中持生命周期permit。所有KB外部写由实际同步worker在同一准入内完成，不能为了锁无界buffer文件。migrate_material_metadata也按document permission的kb_id逐条取得准入，在短事务内fence后再补FTS/逻辑metadata。自定义KB未取得doc id的材料staging放在 versions_root/staging/kb/<sha256(kb_id)>/，保护尚未建身份时的崩溃文件归属；原staging函数新增可选kb_id参数，默认系统路径不变。
-- [ ] Step 3: Archive upload/confirm、worker完整执行/补偿/状态完成覆盖scope。busy任务以CAS安全重排，不能把已取消job改回queued；deleting/deleted任务取消且不触向量/激活。permit在真正worker退出前一直有效，保留最新版本/权限/session CAS。Wiki retry worker由UserDB读取page所属KB，在一个同步worker准入下重新读取page并索引；墓碑后不得写向量或settle成重试。
+- [ ] Step 3: Archive upload/confirm、worker完整执行/补偿/状态完成覆盖scope。busy任务以CAS安全重排，不能把已取消job改回queued；deleting/deleted任务取消且不触向量/激活。permit在真正worker退出前一直有效，保留最新版本/权限/session CAS。Wiki retry worker由UserDB读取page所属KB，在一个同步worker准入下重新读取page并索引；墓碑后不得写向量或settle成重试。KB删除器通过material/wiki两个按scope、按ID取消方法先清队列，但不因同数值ID跨scope误取消。
 - [ ] Step 4: 生产Wiki retry实例传user_db并与Task5接口协作；取消Wiki job在清Wiki身份前可完成且不误取消别库任务。
 - [ ] Step 5: 材料/归档/worker与启动迁移定向GREEN；两份真实脱敏缺失fixture保持原跳过原因，根提交并fresh审查。
 
