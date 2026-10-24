@@ -46,3 +46,5 @@ tmp_test_dir/
 real-case-handoff/
 artifacts/
 scratch/
+.codex-recorder-data/
+AGENTS.md
