@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import multiprocessing
 import sqlite3
 import threading
@@ -14,6 +15,7 @@ from rag.kb_lifecycle import (
     KBDeleted,
     KBDeleteIncomplete,
     KBDeleting,
+    KBLifecycleError,
     KBUnknown,
     assert_kb_available,
     assert_kb_available_in_tx,
@@ -132,6 +134,67 @@ def test_delete_completion_rejects_a_replaced_token(tmp_path):
             with pytest.raises(KBDeleteIncomplete):
                 permit.finish_delete(lambda conn: conn.execute("DELETE FROM kb_metadata WHERE kb_id='docs'"))
         assert db.get_kb_metadata("docs")["name"] == "Docs"
+    finally:
+        db.close()
+
+
+def test_delete_permit_cannot_finish_after_its_admission_exits(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs", mode="delete") as permit:
+            permit.begin_delete()
+        with pytest.raises(KBLifecycleError):
+            permit.finish_delete(lambda conn: conn.execute("DELETE FROM kb_metadata WHERE kb_id='docs'"))
+        assert db.get_kb_lifecycle("docs")["state"] == "deleting"
+        assert db.get_kb_metadata("docs")["name"] == "Docs"
+    finally:
+        db.close()
+
+
+def test_copied_context_cannot_reuse_a_permit_after_admission_exits(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs", mode="delete") as permit:
+            permit.begin_delete()
+            copied_context = contextvars.copy_context()
+        with pytest.raises(KBLifecycleError):
+            copied_context.run(
+                permit.finish_delete,
+                lambda conn: conn.execute("DELETE FROM kb_metadata WHERE kb_id='docs'"),
+            )
+        assert db.get_kb_lifecycle("docs")["state"] == "deleting"
+        assert db.get_kb_metadata("docs")["name"] == "Docs"
+    finally:
+        db.close()
+
+
+def test_delete_permit_cannot_be_used_from_another_thread(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs", mode="delete") as permit:
+            permit.begin_delete()
+            outcome = []
+
+            def finish_from_another_thread():
+                try:
+                    permit.finish_delete(
+                        lambda conn: conn.execute("DELETE FROM kb_metadata WHERE kb_id='docs'")
+                    )
+                except BaseException as error:
+                    outcome.append(error)
+                else:
+                    outcome.append("finished")
+
+            worker = threading.Thread(target=finish_from_another_thread)
+            worker.start()
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+            assert isinstance(outcome[0], KBLifecycleError)
+            assert db.get_kb_lifecycle("docs")["state"] == "deleting"
+            assert db.get_kb_metadata("docs")["name"] == "Docs"
     finally:
         db.close()
 

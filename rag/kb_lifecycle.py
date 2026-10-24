@@ -59,6 +59,7 @@ class _Owner:
     thread_id: int
     task: asyncio.Task | None
     depth: int = 1
+    active: bool = True
 
 
 _local_locks: dict[tuple[object, str], threading.Lock] = {}
@@ -134,7 +135,20 @@ class KBMutationPermit:
         self.mode = mode
         self._delete_token: str | None = None
 
+    def _assert_active_owner(self) -> None:
+        """Reject stale permits and use outside their acquiring execution context."""
+        owner = (_owners.get() or {}).get(_lock_key(self.db, self.kb_id))
+        if owner is None or owner.permit is not self or not owner.active:
+            raise KBLifecycleError("kb_mutation_permit_inactive")
+        if (
+            owner.pid != os.getpid()
+            or owner.thread_id != threading.get_ident()
+            or owner.task is not _async_task()
+        ):
+            raise KBLifecycleError("kb_mutation_permit_owner_mismatch")
+
     def begin_delete(self) -> str:
+        self._assert_active_owner()
         if self.mode != "delete":
             raise KBLifecycleError("delete_permit_required")
         if self.kb_id == "rag_docs" or self.db.get_kb_metadata(self.kb_id) is None:
@@ -172,6 +186,7 @@ class KBMutationPermit:
             return token
 
     def fail_delete(self, code: str) -> None:
+        self._assert_active_owner()
         if self.mode != "delete" or self._delete_token is None:
             raise KBDeleteIncomplete()
         with self.db.locked_transaction(immediate=True) as conn:
@@ -184,6 +199,7 @@ class KBMutationPermit:
                 raise KBDeleteIncomplete("delete_token_mismatch")
 
     def finish_delete(self, cleanup_sql: Callable[[sqlite3.Connection], None]) -> None:
+        self._assert_active_owner()
         if self.mode != "delete" or self._delete_token is None:
             raise KBDeleteIncomplete()
         with self.db.locked_transaction(immediate=True) as conn:
@@ -259,6 +275,7 @@ def kb_mutation(db: Any, kb_id: str, *, mode: str = "write") -> Iterator[KBMutat
         try:
             yield permit
         finally:
+            owner.active = False
             _owners.reset(context_token)
     finally:
         if file_locked and lock_stream is not None:
