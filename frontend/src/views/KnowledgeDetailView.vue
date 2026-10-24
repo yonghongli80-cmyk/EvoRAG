@@ -43,6 +43,9 @@ const currentDialogAnswer = computed(() => {
 })
 
 const getKbId = () => route.params.id as string
+let knowledgeBaseGeneration = 0
+const isCurrentKnowledgeBase = (kbId: string, generation: number) =>
+  getKbId() === kbId && knowledgeBaseGeneration === generation
 const loading = ref(true)
 const convSidebarCollapsed = ref(false)
 const kbInfoCollapsed = ref(false)
@@ -80,14 +83,36 @@ const generatingOverview = ref(false)
  * the previous knowledge base's conversations, streamed answer and selected
  * file stayed on screen and leaked into the next KB (E-08).
  */
-async function enterKnowledgeBase() {
+function clearKnowledgeBaseDetail() {
+  kbName.value = ''
+  kbDescription.value = ''
+  kbOverview.value = ''
+  documents.value = []
+  effectiveRole.value = 'read'
+  availableFiles.value = []
+}
+
+async function enterKnowledgeBase(kbId = getKbId()) {
+  const generation = ++knowledgeBaseGeneration
+  clearKnowledgeBaseDetail()
+  showRenameDialog.value = false
+  showAddDialog.value = false
+  renaming.value = false
+  savingOverview.value = false
+  loadingFiles.value = false
+  addingFile.value = false
+  generatingToc.value = false
+  generatingOverview.value = false
+  loading.value = true
   chatStore.reset()
   await chatStore.loadConversations('kb')
+  if (!isCurrentKnowledgeBase(kbId, generation)) return
   // Auto-select the most recent conversation if exists
   if (chatStore.conversations.length > 0) {
     await chatStore.selectConversation(chatStore.conversations[0].id)
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
   }
-  await loadDetail()
+  await loadDetail(kbId, generation)
 }
 
 watch(() => route.params.id, (nextId, previousId) => {
@@ -97,10 +122,11 @@ watch(() => route.params.id, (nextId, previousId) => {
 
 onMounted(enterKnowledgeBase)
 
-async function loadDetail() {
+async function loadDetail(kbId = getKbId(), generation = knowledgeBaseGeneration) {
   loading.value = true
   try {
-    const res = await api.get(`/knowledge-bases/${getKbId()}`)
+    const res = await api.get(`/knowledge-bases/${kbId}`)
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     const data = res.data
     kbName.value = data.name || ''
     kbDescription.value = data.description || ''
@@ -108,6 +134,7 @@ async function loadDetail() {
     documents.value = data.documents || []
     effectiveRole.value = data.effective_role || 'read'
   } catch (err: any) {
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     if (err.response?.status === 404) {
       ElMessage.error('知识库不存在')
       router.push('/kb')
@@ -115,7 +142,7 @@ async function loadDetail() {
     }
     ElMessage.error('加载知识库详情失败')
   } finally {
-    loading.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) loading.value = false
   }
 }
 
@@ -129,23 +156,29 @@ function openRenameDialog() {
 }
 
 async function renameKB(name: string) {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   renaming.value = true
   try {
-    await api.put(`/knowledge-bases/${getKbId()}/name`, { name })
+    await api.put(`/knowledge-bases/${kbId}/name`, { name })
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     kbName.value = name
     showRenameDialog.value = false
     ElMessage.success('已重命名')
   } catch {
-    ElMessage.error('重命名失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error('重命名失败')
   } finally {
-    renaming.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) renaming.value = false
   }
 }
 
 async function generateTOC() {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   generatingToc.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${getKbId()}/toc/generate`, {})
+    const res = await api.post(`/knowledge-bases/${kbId}/toc/generate`, {})
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     // Update local document state with generated TOC
     const tocData = res.data.toc || {}
     for (const doc of documents.value) {
@@ -155,37 +188,44 @@ async function generateTOC() {
     }
     ElMessage.success('目录生成完成')
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.detail || '目录生成失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error(err.response?.data?.detail || '目录生成失败')
   } finally {
-    generatingToc.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) generatingToc.value = false
   }
 }
 
 async function generateOverview() {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   generatingOverview.value = true
   try {
-    const res = await api.post(`/knowledge-bases/${getKbId()}/overview/generate`, {})
+    const res = await api.post(`/knowledge-bases/${kbId}/overview/generate`, {})
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     kbOverview.value = res.data.overview || ''
     ElMessage.success('概述生成完成')
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.detail || '概述生成失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error(err.response?.data?.detail || '概述生成失败')
   } finally {
-    generatingOverview.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) generatingOverview.value = false
   }
 }
 
 async function deleteKB() {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
+  const name = kbName.value
   try {
     await ElMessageBox.confirm(
-      `确定删除知识库「${kbName.value}」吗？此操作不可恢复。`,
+      `确定删除知识库「${name}」吗？此操作不可恢复。`,
       '删除知识库',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'error' }
     )
-    await api.delete(`/knowledge-bases/${getKbId()}`)
+    await api.delete(`/knowledge-bases/${kbId}`)
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     ElMessage.success('知识库已删除')
     router.push('/kb')
   } catch (err: any) {
-    if (err !== 'cancel' && err?.message !== 'cancel') {
+    if (isCurrentKnowledgeBase(kbId, generation) && err !== 'cancel' && err?.message !== 'cancel') {
       ElMessage.error('删除失败')
     }
   }
@@ -193,31 +233,37 @@ async function deleteKB() {
 
 // ── Overview editing ──
 async function saveOverview(newOverview: string) {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   savingOverview.value = true
   try {
-    await api.put(`/knowledge-bases/${getKbId()}/overview`, { overview: newOverview })
+    await api.put(`/knowledge-bases/${kbId}/overview`, { overview: newOverview })
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     kbOverview.value = newOverview
     ElMessage.success('概述已更新')
   } catch {
-    ElMessage.error('保存概述失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error('保存概述失败')
   } finally {
-    savingOverview.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) savingOverview.value = false
   }
 }
 
 // ── Document management ──
 async function removeFromKB(doc: KBDocument) {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   try {
     await ElMessageBox.confirm(
       `确定将「${doc.filename}」从知识库移除？`,
       '从知识库移除',
       { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
     )
-    await api.delete(`/knowledge-bases/${getKbId()}/documents/${encodeURIComponent(doc.filename)}`)
+    await api.delete(`/knowledge-bases/${kbId}/documents/${encodeURIComponent(doc.filename)}`)
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     ElMessage.success('已从知识库移除')
-    await loadDetail()
+    await loadDetail(kbId, generation)
   } catch (err: any) {
-    if (err !== 'cancel' && err?.message !== 'cancel') {
+    if (isCurrentKnowledgeBase(kbId, generation) && err !== 'cancel' && err?.message !== 'cancel') {
       ElMessage.error('移除失败')
     }
   }
@@ -229,41 +275,45 @@ function openAddDialog() {
 }
 
 async function loadAvailableFiles() {
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
+  const kbFileNames = new Set(documents.value.map(d => d.filename))
   loadingFiles.value = true
   try {
     const res = await api.get('/files')
-    const kbFileNames = new Set(documents.value.map(d => d.filename))
-    availableFiles.value = (res.data.files || []).filter(
-      (f: any) => !f.in_kb && !kbFileNames.has(f.name)
-    )
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
+    availableFiles.value = (res.data.files || []).filter((f: any) => !kbFileNames.has(f.name))
   } catch {
-    ElMessage.error('加载文件列表失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error('加载文件列表失败')
   } finally {
-    loadingFiles.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) loadingFiles.value = false
   }
 }
 
 async function addFileToKB(file: any) {
   if (!file) return
+  const kbId = getKbId()
+  const generation = knowledgeBaseGeneration
   addingFile.value = true
   try {
     if (file.document_id) {
       // Server-side reference: no browser download/re-upload, no HTML-as-file.
-      await linkDocumentToKb(Number(file.document_id), getKbId())
+      await linkDocumentToKb(Number(file.document_id), kbId)
     } else {
       // Upload-directory-only entries have no permission row yet; fall back to bytes.
       const blob = await downloadLibraryFile(file.name, file.version_id)
       const formData = new FormData()
       formData.append('file', blob, file.name)
-      await api.post(`/knowledge-bases/${getKbId()}/documents`, formData)
+      await api.post(`/knowledge-bases/${kbId}/documents`, formData)
     }
+    if (!isCurrentKnowledgeBase(kbId, generation)) return
     ElMessage.success('文件已添加到知识库')
     showAddDialog.value = false
-    await loadDetail()
+    await loadDetail(kbId, generation)
   } catch {
-    ElMessage.error('添加文件失败')
+    if (isCurrentKnowledgeBase(kbId, generation)) ElMessage.error('添加文件失败')
   } finally {
-    addingFile.value = false
+    if (isCurrentKnowledgeBase(kbId, generation)) addingFile.value = false
   }
 }
 
