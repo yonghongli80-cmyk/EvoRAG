@@ -119,9 +119,9 @@
 
 **Files:** Modify `rag/backups/service.py`; Test `tests/test_backup_schedule.py`，必要时 `tests/test_backup_service.py`。
 
-**Interfaces:** 保持 `create_backup(context, trigger, now=None)->BackupRecord` 与 `create_if_due(context, trigger, now=None)->BackupRecord|None`。抽取已有持锁创建体为内部helper，due检查和创建使用同一跨进程文件锁；不得重复获取不可重入锁。手工并发create仍报告backup_in_progress，due调用对锁占用可有界安全跳过并记录原因，不删除他人锁/未完成目录。
+**Interfaces:** 保持 `create_backup(context, trigger, now=None)->BackupRecord` 与 `create_if_due(context, trigger, now=None)->BackupRecord|None`。抽取已有持锁创建体为内部helper，due检查和创建使用同一跨进程文件锁；不得重复获取不可重入锁。并发create/due遇锁占用继续报告backup_in_progress，保留部署前备份门禁的fail-closed，不将“已有创建者正在运行”冒充“已有验证成功的备份”，不删除他人锁/未完成目录。
 
-- [ ] Step 1: 临时目录/合成SQLite、两个due调用barrier交错，验证一个完成后另一个重查返回None且只有一份formal backup；覆盖持锁中的due不使deploy式调用失败，显式manual create锁仍fail-closed；先保存 RED。
+- [ ] Step 1: 临时目录/合成SQLite、两个due调用在创建准入前交错，验证一个完成后另一个在锁内重查返回None且只有一份formal backup；锁仍占用时create/due保持backup_in_progress且CLI非零，绝不能绕过部署备份门禁；先保存重复决策的 RED。
 - [ ] Step 2: 实现受锁due检查，保持格式/验证/保留策略/时钟回退行为。
 - [ ] Step 3: 运行backup_schedule/service/CLI/deployment相关回归 GREEN，保留所有失败和成功输出。
 - [ ] Step 4: 主代理审核任务 diff 后仅提交白名单文件。
