@@ -105,11 +105,11 @@
 
 **Interfaces consumed:** Task1-5最终公开契约。可以在前序任务施工期间先设计/准备自己的测试文件，依赖未就绪不伪报GREEN。
 
-- [ ] Step 1: 两个独立Python进程同一合成DB/锁目录：同KB互斥，不同KB并行；可重入/async同线程不同task/fork继承凭据均不能绕过。
-- [ ] Step 2: 实际异步请求取消时同步索引/文件线程仍阻塞，竞争删除仍409且无副作用；放行真实工作后重试删除成功且无迟到发布。
-- [ ] Step 3: owned child在deleting提交后、向量删后、部分文件删后、最终关系事务前退出；OS锁释放，重启retry收敛。只控制自己spawn且核实身份的进程，不杀已知或未知现存PID。
-- [ ] Step 4: 覆盖unlink/向量失败、最终SQL触发器失败的503与保留身份；所有目标资源清完才deleted、墓碑不级联、新旧调用不能复活、其他KB不损坏。真实临时Qdrant，只stub embedding。
-- [ ] Step 5: 独立集成矩阵GREEN，所有未适用平台条件单独说明，根fresh审查；发现源码问题只报告根，不越权改其他任务文件。
+- [x] Step 1: 两个独立Python进程同一合成DB/锁目录：同KB互斥，不同KB并行；可重入/async同线程不同task/fork继承凭据均不能绕过。
+- [x] Step 2: 实际异步请求取消时同步索引/文件线程仍阻塞，竞争删除仍409且无副作用；放行真实工作后重试删除成功且无迟到发布。
+- [x] Step 3: owned child在deleting提交后、向量删后、部分文件删后、最终关系事务前退出；OS锁释放，重启retry收敛。只控制自己spawn且核实身份的进程，不杀已知或未知现存PID。
+- [x] Step 4: 覆盖unlink/向量失败、最终SQL触发器失败的503与保留身份；所有目标资源清完才deleted、墓碑不级联、新旧调用不能复活、其他KB不损坏。真实临时Qdrant，只stub embedding。
+- [x] Step 5: 独立集成矩阵GREEN，所有未适用平台条件单独说明，根fresh审查；发现源码问题只报告根，不越权改其他任务文件。
 
 ### Task 7: Unified verification, handoff and source delivery
 
