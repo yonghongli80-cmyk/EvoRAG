@@ -280,12 +280,21 @@ class WikiIndexer:
 
     def remove_kb_content(self, kb_id: str, *, db: UserDB) -> None:
         """Remove Wiki data while the caller owns the KB delete permit."""
-        with kb_mutation(db, kb_id, mode="delete"):
+        with kb_mutation(db, kb_id, mode="delete") as permit:
+            permit.assert_delete_started()
+            with self._store._lock:
+                page_ids = [
+                    int(row[0])
+                    for row in self._store._conn.execute(
+                        "SELECT id FROM wiki_pages WHERE kb_id = ?", (kb_id,)
+                    ).fetchall()
+                ]
+            db.cancel_wiki_reindex_jobs(page_ids)
+
             with self._store.transaction() as conn:
                 pages = conn.execute(
                     "SELECT id, title FROM wiki_pages WHERE kb_id = ?", (kb_id,)
                 ).fetchall()
-                page_ids = [int(row["id"]) for row in pages]
                 point_ids = set(self._collect_kb_wiki_point_ids(kb_id))
                 for row in pages:
                     titles = [str(row["title"])]
@@ -298,7 +307,6 @@ class WikiIndexer:
                     point_ids.update(
                         self._collect_point_ids(kb_id, int(row["id"]), titles, conn)
                     )
-            db.cancel_wiki_reindex_jobs(page_ids)
             self._delete_point_ids(kb_id, sorted(point_ids))
 
             with self._store.transaction(immediate=True) as conn:

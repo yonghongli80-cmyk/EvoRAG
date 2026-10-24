@@ -181,7 +181,8 @@ def test_remove_kb_content_cancels_retries_and_preserves_other_kb_and_regular_po
     )
     db.enqueue_latest_index_job(doomed.id, 1, "material-hash", 0)
 
-    with kb_mutation(db, "kb_wiki_delete", mode="delete"):
+    with kb_mutation(db, "kb_wiki_delete", mode="delete") as permit:
+        permit.begin_delete()
         indexer.remove_kb_content("kb_wiki_delete", db=db)
 
     assert store.list_pages(kb_id="kb_wiki_delete") == []
@@ -227,9 +228,10 @@ def test_remove_kb_content_keeps_wiki_identity_when_vector_cleanup_fails(
         raise RuntimeError("temporary qdrant failure")
 
     monkeypatch.setattr(client, "delete", fail_delete)
-    with kb_mutation(db, "kb_wiki_delete", mode="delete"), pytest.raises(
+    with kb_mutation(db, "kb_wiki_delete", mode="delete") as permit, pytest.raises(
         RuntimeError, match="temporary qdrant failure"
     ):
+        permit.begin_delete()
         indexer.remove_kb_content("kb_wiki_delete", db=db)
 
     assert store.get_page(page.id) is not None
@@ -252,6 +254,48 @@ def test_retry_enqueue_refuses_a_kb_tombstone(wiki_lifecycle_env):
         (page.id,),
     ).fetchone()[0]
     assert count == 0
+
+
+def test_remove_kb_content_cancels_retry_before_vector_enumeration(
+    wiki_lifecycle_env, monkeypatch
+):
+    db, store, indexer = wiki_lifecycle_env
+    page = store.create_page("kb_wiki_delete", "Enumeration failure", "# Keep\nRetry is cancelled first.")
+    indexer.sync_page(page.id)
+    assert enqueue_wiki_reindex_job(
+        db, page.id, page.current_revision_id, kb_id="kb_wiki_delete"
+    )
+
+    def fail_enumeration(_kb_id: str) -> list[str]:
+        raise RuntimeError("temporary qdrant scroll failure")
+
+    monkeypatch.setattr(indexer, "_collect_kb_wiki_point_ids", fail_enumeration)
+    with kb_mutation(db, "kb_wiki_delete", mode="delete") as permit:
+        permit.begin_delete()
+        with pytest.raises(RuntimeError, match="temporary qdrant scroll failure"):
+            indexer.remove_kb_content("kb_wiki_delete", db=db)
+
+    job = db._conn.execute(
+        "SELECT status FROM document_index_jobs WHERE job_scope = 'wiki' AND document_id = ?",
+        (page.id,),
+    ).fetchone()
+    assert job["status"] == "cancelled"
+    assert store.get_page(page.id) is not None
+    assert len(_points("kb_wiki_delete")) == 1
+
+
+def test_remove_kb_content_rejects_call_without_begun_delete_permit(wiki_lifecycle_env):
+    db, store, indexer = wiki_lifecycle_env
+    page = store.create_page("kb_wiki_delete", "Active KB", "# Keep\nNo deletion intent.")
+    indexer.sync_page(page.id)
+
+    with pytest.raises(KBLifecycleError) as error:
+        indexer.remove_kb_content("kb_wiki_delete", db=db)
+
+    assert error.value.code == "delete_not_started"
+    assert store.get_page(page.id) is not None
+    assert len(store.get_revisions(page.id)) == 1
+    assert len(_points("kb_wiki_delete")) == 1
 
 
 def test_kb_wiki_cleanup_only_targets_wiki_chunk_kind(wiki_lifecycle_env):
@@ -277,7 +321,8 @@ def test_kb_wiki_cleanup_only_targets_wiki_chunk_kind(wiki_lifecycle_env):
         ],
     )
 
-    with kb_mutation(db, "kb_wiki_delete", mode="delete"):
+    with kb_mutation(db, "kb_wiki_delete", mode="delete") as permit:
+        permit.begin_delete()
         indexer.remove_kb_content("kb_wiki_delete", db=db)
 
     assert [point.id for point in _points("kb_wiki_delete")] == [regular_id]
