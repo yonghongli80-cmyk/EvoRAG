@@ -70,11 +70,11 @@
 
 **Interfaces consumed:** Task1 kb_mutation、事务内可用性检查、HTTP映射；Task2不依赖本任务新签名。既有ingest/promote/batch返回契约保持。
 
-- [ ] Step 1: RED证明common ingest、custom BatchImporter、表格编辑/restore及启动中的旧版本/表格迁移遇删除意图仍不能创建或激活；另证明组织seed/legacy-policy迁移遇墓碑ID时不会重新插入metadata/policy；用两连接真实SQLite与合成文件，不以mock存在性作为断言。
-- [ ] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。migrate_existing_document_versions与migrate_staged_document_versions按每个权限记录的kb_id取得准入后再读写行/文件，保留api.py现有启动调用顺序；新增doc owner staging目录支持（stage_version(...,document_id=None)可选参数，原默认兼容），新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
-- [ ] Step 3: document permission/version预留、激活、create_kb_metadata、finish_kb_document在短事务内加墓碑fence；finish匹配零行抛冲突不假成功。低层repo只SQL检查，不在持DB事务时反向拿文件锁。组织seed保持离线维护入口；seed和migrate_legacy_knowledge_bases在插入KB metadata/policy的事务中调用assert_kb_available_in_tx(conn,kb_id)，遇墓碑整笔事务回滚或安全跳过。
-- [ ] Step 4: 表格service入口和migrate_existing_spreadsheets逐KB覆盖全部实际文件/registry/mirror写入，保留edit session/base-version CAS、rollback和rag_docs/文档ACL；API映射错误正确。
-- [ ] Step 5: 新用例及version/batch/spreadsheet既有定向GREEN，根提交并fresh审查。
+- [x] Step 1: RED证明common ingest、custom BatchImporter、表格编辑/restore及启动中的旧版本/表格迁移遇删除意图仍不能创建或激活；另证明组织seed/legacy-policy迁移遇墓碑ID时不会重新插入metadata/policy；用两连接真实SQLite与合成文件，不以mock存在性作为断言。
+- [x] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。migrate_existing_document_versions与migrate_staged_document_versions按每个权限记录的kb_id取得准入后再读写行/文件，保留api.py现有启动调用顺序；新增doc owner staging目录支持（stage_version(...,document_id=None)可选参数，原默认兼容），新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
+- [x] Step 3: document permission/version预留、激活、create_kb_metadata、finish_kb_document在短事务内加墓碑fence；finish匹配零行抛冲突不假成功。低层repo只SQL检查，不在持DB事务时反向拿文件锁。组织seed保持离线维护入口；seed和migrate_legacy_knowledge_bases在插入KB metadata/policy的事务中调用assert_kb_available_in_tx(conn,kb_id)，遇墓碑整笔事务回滚或安全跳过。
+- [x] Step 4: 表格service入口和migrate_existing_spreadsheets逐KB覆盖全部实际文件/registry/mirror写入，保留edit session/base-version CAS、rollback和rag_docs/文档ACL；API映射错误正确。
+- [x] Step 5: 新用例及version/batch/spreadsheet既有定向GREEN，根提交并fresh审查。
 
 ### Task 4: Materials, archives and background jobs
 
