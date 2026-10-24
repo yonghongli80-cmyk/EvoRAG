@@ -58,11 +58,11 @@
 
 **Interfaces consumed:** Task1准入、permit与assert_delete_started()；Task3的document_id owner staging layout
 
-- [ ] Step 1: 将audit的真实ASGI/SQLite/临时Qdrant交错改成正式安全断言并观察RED；覆盖上传先入门禁、删除先入门禁、finish UPDATE丢行、链接跨库源快照；另验证已注册staging被目标KB删除回收且其他KB/unowned staging保留。禁止两个成功响应却资源缺失。
-- [ ] Step 2: 整段pending→ingest→文件/数据集→目录→audit/rollback纳入同一worker准入，保留现有路由可patch的loader/toc/summary/ingest函数和响应字段。源链接先在源准入中读取快照，释放后才进入目标，避免双KB锁环。
-- [ ] Step 3: 删除枚举目标KB全部document_permissions、版本、目录、structured datasets、Wiki page IDs和pending archive manifests，不只kb_documents；借现有storage primitives预验证所有归属路径。先按permission document IDs取消job_scope=material的active index/purge任务，再按page IDs取消job_scope=wiki的active retry，不能误取消其它KB或跨scope的同数值ID。事务外清理collection/BM25、版本/legacy/dataset、按document ID归属的staging目录、按KB哈希归属的materials staging目录、archive quarantine和Wiki向量/页面；只删有确定owner/root的路径，归属不明的旧全局staging保留。任一步失败503且保留所有身份供重试。最终finish_delete事务清理对应material_search_fts/material_unit_fingerprints、archive manifests/entries/idempotency结果、shares与KB policy/metadata，保留answer_citations/聊天比较/审计历史并保持现有聊天历史策略。最后原子完成墓碑；未知ID不假成功、其他KB不受影响。
-- [ ] Step 4: central require_kb_view/edit/administer追加生命周期可用性检查；DELETE入口快速授权后，删除worker在持有gate内再次require_kb_administer(...,allow_deleting=True)，授权成功后才begin_delete，避免排队期间撤权仍开始清理；重试原权限必需。旧orphan edit409和org隐藏语义保留。metadata/目录写入事务内复核状态；新create在物理collection创建前检查墓碑（Manager可新增可选before_create回调，不破坏旧默认调用）。避免缓存绕过墓碑，不强关在途query对象。
-- [ ] Step 5: API权限矩阵/故障重试/其他KB与既有KB、版本回归GREEN，根提交并fresh规格/质量复审。
+- [x] Step 1: 将audit的真实ASGI/SQLite/临时Qdrant交错改成正式安全断言并观察RED；覆盖上传先入门禁、删除先入门禁、finish UPDATE丢行、链接跨库源快照；另验证已注册staging被目标KB删除回收且其他KB/unowned staging保留。禁止两个成功响应却资源缺失。
+- [x] Step 2: 整段pending→ingest→文件/数据集→目录→audit/rollback纳入同一worker准入，保留现有路由可patch的loader/toc/summary/ingest函数和响应字段。源链接先在源准入中读取快照，释放后才进入目标，避免双KB锁环。
+- [x] Step 3: 删除枚举目标KB全部document_permissions、版本、目录、structured datasets、Wiki page IDs和pending archive manifests，不只kb_documents；借现有storage primitives预验证所有归属路径。先按permission document IDs取消job_scope=material的active index/purge任务，再按page IDs取消job_scope=wiki的active retry，不能误取消其它KB或跨scope的同数值ID。事务外清理collection/BM25、版本/legacy/dataset、按document ID归属的staging目录、按KB哈希归属的materials staging目录、archive quarantine和Wiki向量/页面；只删有确定owner/root的路径，归属不明的旧全局staging保留。任一步失败503且保留所有身份供重试。最终finish_delete事务清理对应material_search_fts/material_unit_fingerprints、archive manifests/entries/idempotency结果、shares与KB policy/metadata，保留answer_citations/聊天比较/审计历史并保持现有聊天历史策略。最后原子完成墓碑；未知ID不假成功、其他KB不受影响。
+- [x] Step 4: central require_kb_view/edit/administer追加生命周期可用性检查；DELETE入口快速授权后，删除worker在持有gate内再次require_kb_administer(...,allow_deleting=True)，授权成功后才begin_delete，避免排队期间撤权仍开始清理；重试原权限必需。旧orphan edit409和org隐藏语义保留。metadata/目录写入事务内复核状态；新create在物理collection创建前检查墓碑（Manager可新增可选before_create回调，不破坏旧默认调用）。避免缓存绕过墓碑，不强关在途query对象。
+- [x] Step 5: API权限矩阵/故障重试/其他KB与既有KB、版本回归GREEN，根提交并fresh规格/质量复审。
 
 ### Task 3: Shared version, batch and spreadsheet writers
 
