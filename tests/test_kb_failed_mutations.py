@@ -410,3 +410,49 @@ def test_failed_or_unsafe_cleanup_preserves_retry_identity(
     assert db.get_kb_document(kb_id, "report.txt")["id"] == kb_document_id
     assert db.get_document_permission("report.txt", kb_id) is not None
     assert len(db.list_document_versions(db.get_document_permission("report.txt", kb_id)["id"])) == 2
+
+
+def test_kb_delete_preserves_manifest_and_reports_unowned_archive_source(
+    kb_client, tmp_path, monkeypatch
+):
+    client, db = kb_client
+    owner, headers = _owner(db, "archive-source-owner")
+    kb_id = "kb_unowned_archive_source"
+    api.app.state.user_db.create_kb_metadata(kb_id, "Archive source", owner["id"], "private")
+    _kb_document_id, _version_paths, _legacy = _existing_document(
+        db,
+        owner,
+        kb_id,
+        "bundle.zip",
+        Path(api.app.state.document_versions_root),
+        Path(api.app.state.kb_files_root),
+    )
+    permission = db.get_document_permission("bundle.zip", kb_id)
+    version = db.get_current_document_version(permission["id"])
+    source = tmp_path / "unowned-source.zip"
+    source.write_bytes(b"preserve for manual resolution")
+    manifest_id = db.create_material_archive_manifest(
+        permission["id"], version["id"], str(source), owner["id"], 4_102_444_800
+    )
+
+    manager_calls = []
+
+    class Manager:
+        def remove_document(self, *_args):
+            manager_calls.append("remove_document")
+
+        def delete_kb(self, _kb_id):
+            manager_calls.append("delete_kb")
+
+    monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", Manager)
+    response = client.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+    assert response.status_code == 503
+    assert response.headers["X-KB-Lifecycle-Error"] == "archive_source_unowned"
+    assert manager_calls == []
+    assert source.read_bytes() == b"preserve for manual resolution"
+    assert db.get_material_archive_manifest(manifest_id)["source_path"] == str(source)
+    assert db.get_kb_metadata(kb_id) is not None
+    lifecycle = db.get_kb_lifecycle(kb_id)
+    assert lifecycle["state"] == "deleting"
+    assert lifecycle["last_error_code"] == "archive_source_unowned"

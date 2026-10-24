@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from rag.api_security import require_kb_edit, require_kb_view
+from rag.api_security import require_kb_administer, require_kb_edit, require_kb_view
 from rag.document_version_store import final_version_path
 
 
@@ -58,6 +58,121 @@ def test_failed_kb_delete_keeps_tombstone_and_retry_identity(
     second = isolated_api.delete("/knowledge-bases/kb_delete_retry_api", headers=headers)
     assert second.status_code == 200
     assert db.get_kb_lifecycle("kb_delete_retry_api")["state"] == "deleted"
+
+
+def test_deleted_kb_authorization_and_delete_retry_return_tombstone_contract(
+    isolated_api, make_user, monkeypatch
+):
+    import rag.routers.knowledge as knowledge
+
+    owner, headers = make_user("deleted-kb-contract-owner")
+    db = isolated_api.app.state.user_db
+    kb_id = "kb_deleted_contract"
+    db.create_kb_metadata(kb_id, "Deleted", owner["id"], "private")
+
+    class Manager:
+        def delete_kb(self, _kb_id):
+            return None
+
+    monkeypatch.setattr(knowledge, "KnowledgeBaseManager", Manager)
+    deleted = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+    assert deleted.status_code == 200, deleted.text
+    assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+    assert db.get_kb_metadata(kb_id) is None
+
+    for authorize in (require_kb_edit, require_kb_administer):
+        with pytest.raises(HTTPException) as denied:
+            authorize(db, kb_id, owner)
+        assert denied.value.status_code == 404
+        assert denied.value.headers == {"X-KB-Lifecycle-Error": "knowledge_base_deleted"}
+
+    retried = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+    assert retried.status_code == 404
+    assert retried.headers["X-KB-Lifecycle-Error"] == "knowledge_base_deleted"
+    assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+
+
+@pytest.mark.parametrize(
+    ("error_type", "status_code", "code"),
+    [
+        ("busy", 409, "knowledge_base_busy"),
+        ("deleted", 404, "knowledge_base_deleted"),
+    ],
+)
+def test_wiki_route_uses_shared_lifecycle_http_contract(
+    isolated_api, make_user, monkeypatch, error_type, status_code, code
+):
+    import rag.wiki.api as wiki_api
+    from rag.kb_lifecycle import KBBusy, KBDeleted
+
+    owner, headers = make_user(f"wiki-lifecycle-{error_type}")
+    db = isolated_api.app.state.user_db
+    kb_id = f"kb_wiki_lifecycle_{error_type}"
+    db.create_kb_metadata(kb_id, "Wiki lifecycle", owner["id"], "private")
+    error = KBBusy() if error_type == "busy" else KBDeleted()
+
+    def reject_mutation(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(wiki_api, "kb_mutation", reject_mutation)
+    response = isolated_api.post(
+        "/wiki/pages",
+        headers=headers,
+        json={"kb_id": kb_id, "title": "Lifecycle", "content": "No write."},
+    )
+
+    assert response.status_code == status_code
+    assert response.headers["X-KB-Lifecycle-Error"] == code
+    assert response.json()["detail"] == str(error)
+
+
+def test_kb_scope_rechecks_shares_inside_gate_after_concurrent_share(
+    isolated_api, make_user, monkeypatch
+):
+    import rag.routers.knowledge as knowledge
+
+    owner, owner_headers = make_user("scope-race-owner")
+    shared, _shared_headers = make_user("scope-race-shared")
+    db = isolated_api.app.state.user_db
+    kb_id = "kb_scope_share_race"
+    db.create_kb_metadata(kb_id, "Scope race", owner["id"], "public")
+
+    scope_write_waiting = threading.Event()
+    release_scope_write = threading.Event()
+    real_write = knowledge._kb_write_sync
+
+    def pause_scope_before_gate(db_arg, target_kb, actor, callback):
+        if callback.__name__ == "_update_scope":
+            scope_write_waiting.set()
+            assert release_scope_write.wait(10), "test did not release the scope update"
+        return real_write(db_arg, target_kb, actor, callback)
+
+    monkeypatch.setattr(knowledge, "_kb_write_sync", pause_scope_before_gate)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            scope_update = pool.submit(
+                isolated_api.put,
+                f"/knowledge-bases/{kb_id}/scope",
+                headers=owner_headers,
+                json={"scope": "private"},
+            )
+            assert scope_write_waiting.wait(10), "scope update did not reach the gate boundary"
+
+            shared_response = isolated_api.post(
+                f"/knowledge-bases/{kb_id}/share",
+                headers=owner_headers,
+                json={"user_id": shared["id"], "permission": "view"},
+            )
+            assert shared_response.status_code == 200, shared_response.text
+            release_scope_write.set()
+            rejected = scope_update.result(timeout=20)
+
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"] == "请先取消所有共享后再设为私有"
+        assert db.is_kb_shared(kb_id, shared["id"])
+        assert db.get_kb_metadata(kb_id)["scope"] == "shared"
+    finally:
+        release_scope_write.set()
 
 
 def test_delete_rechecks_management_authorization_inside_worker_before_tombstone(

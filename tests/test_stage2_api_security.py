@@ -365,13 +365,13 @@ def test_kb_share_does_not_echo_the_database_error(isolated_api, make_user, monk
     target, _ = make_user("s1-share-target")
     db = isolated_api.app.state.user_db
     _create_kb_metadata(db, "kb_s1_share", owner["id"])
-    monkeypatch.setattr(
-        db,
-        "share_kb",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            RuntimeError("sqlite internal s1-sql-secret")
-        ),
-    )
+    def fail_share_transaction(immediate=False):
+        if immediate:
+            raise RuntimeError("sqlite internal s1-sql-secret")
+        return original_locked_transaction(immediate=immediate)
+
+    original_locked_transaction = db.locked_transaction
+    monkeypatch.setattr(db, "locked_transaction", fail_share_transaction)
 
     response = isolated_api.post(
         "/knowledge-bases/kb_s1_share/share",

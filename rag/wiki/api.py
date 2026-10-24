@@ -3,21 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.api_security import get_user_db, require_kb_edit, require_kb_view, require_user
 from rag.kb_lifecycle import KBLifecycleError, kb_mutation
+from rag.kb_lifecycle_http import lifecycle_http_error
+from rag.user_db import UserDB
 from rag.wiki.indexer import WikiIndexer, enqueue_wiki_reindex_job
 from rag.wiki.models import WikiPage
 from rag.wiki.store import WikiStore
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from rag.user_db import UserDB
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
 
@@ -46,10 +45,6 @@ def get_wiki_indexer(user_db: UserDB | None = None) -> WikiIndexer:
     ):
         _wiki_indexer = WikiIndexer(wiki_store=current_store, user_db=user_db)
     return _wiki_indexer
-
-
-def _lifecycle_http_error(exc: KBLifecycleError) -> HTTPException:
-    return HTTPException(status_code=409, detail=exc.code)
 
 
 class CreateWikiPageRequest(BaseModel):
@@ -164,7 +159,7 @@ def create_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KBLifecycleError as exc:
-        raise _lifecycle_http_error(exc) from exc
+        raise lifecycle_http_error(exc) from exc
 
     return {"page": page.model_dump(), **sync_result}
 
@@ -230,7 +225,7 @@ def update_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KBLifecycleError as exc:
-        raise _lifecycle_http_error(exc) from exc
+        raise lifecycle_http_error(exc) from exc
 
     return {"page": updated.model_dump(), **sync_result}
 
@@ -255,7 +250,7 @@ def delete_page(
         with kb_mutation(db, page.kb_id):
             deleted = indexer.delete_page_and_index(page_id)
     except KBLifecycleError as exc:
-        raise _lifecycle_http_error(exc) from exc
+        raise lifecycle_http_error(exc) from exc
     return {"deleted": deleted, "id": page_id}
 
 
@@ -309,7 +304,7 @@ def rollback_page(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KBLifecycleError as exc:
-        raise _lifecycle_http_error(exc) from exc
+        raise lifecycle_http_error(exc) from exc
 
     return {"page": updated.model_dump(), **sync_result}
 

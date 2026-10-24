@@ -346,7 +346,11 @@ def _helper_fixture(tmp_path, diff: str):
 def _run_helper_source(monkeypatch, command: dict, **overrides):
     namespace = {"__name__": "evolution_helper_test"}
     monkeypatch.setattr(sys, "argv", ["helper", json.dumps(command)])
-    exec(compile(service_control.HELPER_SOURCE, "helper-under-test", "exec"), namespace)
+    original_sys_path = sys.path[:]
+    try:
+        exec(compile(service_control.HELPER_SOURCE, "helper-under-test", "exec"), namespace)
+    finally:
+        sys.path[:] = original_sys_path
     namespace.update(overrides)
     return namespace
 

@@ -234,8 +234,6 @@ async def update_kb_scope(
     if is_org_policy(OrgRepository(user_db).get_kb_policy(kb_id)):
         raise HTTPException(status_code=404, detail="资源不存在")
     require_kb_edit(user_db, kb_id, user)
-    if req.scope == "private" and await asyncio.to_thread(user_db.list_kb_shared_users, kb_id):
-        raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
 
     try:
         def _update_scope():
@@ -245,6 +243,10 @@ async def update_kb_scope(
                 from rag.kb_lifecycle import assert_kb_available_in_tx
 
                 assert_kb_available_in_tx(conn, kb_id)
+                if req.scope == "private" and conn.execute(
+                    "SELECT 1 FROM kb_shares WHERE kb_id = ? LIMIT 1", (kb_id,)
+                ).fetchone():
+                    raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
                 conn.execute("UPDATE kb_metadata SET scope = ? WHERE kb_id = ?", (req.scope, kb_id))
                 conn.execute("DELETE FROM kb_shares WHERE kb_id = ?", (kb_id,))
 
@@ -272,8 +274,6 @@ def _ingest_kb_document_sync(
     source, db, manager, actor, roots, kb_id, duplicate_action, audit_action="document_uploaded"
 ):
     """Run every durable upload/link mutation under one synchronous KB permit."""
-    from rag.kb_lifecycle import kb_mutation
-
     kb_document_id = None
     created = False
     with kb_mutation(db, kb_id):
@@ -328,6 +328,61 @@ def _kb_write_sync(db, kb_id: str, actor: dict, callback):
         return callback()
 
 
+def coordinate_kb_deletion(
+    user_db,
+    kb_id: str,
+    actor: dict,
+    versions_root: Path,
+    kb_files_root: Path,
+    datasets_root: Path,
+) -> None:
+    """Run the retryable synchronous teardown shared by the route and integration tests."""
+    with kb_mutation(user_db, kb_id, mode="delete") as permit:
+        require_kb_administer(user_db, kb_id, actor, allow_deleting=True)
+        permit.begin_delete()
+        try:
+            permit.assert_delete_started()
+            plan = collect_kb_cleanup(
+                user_db, kb_id, versions_root, kb_files_root, datasets_root
+            )
+            permission_ids = [int(row["id"]) for row in plan["permissions"]]
+            user_db.cancel_material_jobs_for_documents(permission_ids)
+
+            from rag.wiki.api import get_wiki_indexer, get_wiki_store
+
+            wiki_store = get_wiki_store()
+            with wiki_store._lock:
+                page_ids = [
+                    int(row[0])
+                    for row in wiki_store._conn.execute(
+                        "SELECT id FROM wiki_pages WHERE kb_id = ?", (kb_id,)
+                    ).fetchall()
+                ]
+            user_db.cancel_wiki_reindex_jobs(page_ids)
+
+            manager = KnowledgeBaseManager()
+            for record in plan["documents"]:
+                manager.remove_document(kb_id, record["filename"])
+            from rag.bm25_store import BM25Store
+
+            bm25 = BM25Store()
+            try:
+                bm25.invalidate(kb_id)
+            finally:
+                bm25.close()
+            get_wiki_indexer(user_db).remove_kb_content(kb_id, db=user_db)
+            manager.delete_kb(kb_id)
+            cleanup_kb_files(plan)
+            _audit_org_event(actor, "kb_deleted", kb_id, "authorized", user_db)
+            permit.finish_delete(lambda conn: finish_kb_cleanup_sql(conn, kb_id, plan))
+        except Exception as exc:
+            try:
+                permit.fail_delete(getattr(exc, "code", "cleanup_failed"))
+            except Exception:
+                logger.exception("Failed to record KB deletion failure", extra={"kb_id": kb_id})
+            raise
+
+
 @router.delete("/knowledge-bases/{kb_id}", summary="删除知识库", description="删除指定知识库及其所有文档")
 async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depends(require_user)):
     if kb_id == "rag_docs":
@@ -339,54 +394,16 @@ async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depen
     kb_files_root = _resolve_kb_files_root(request)
     datasets_root = Path(getattr(getattr(request, "app", None).state, "structured_datasets_root", settings.structured_datasets_root)) if getattr(request, "app", None) is not None else Path(settings.structured_datasets_root)
 
-    def _delete_worker():
-        with kb_mutation(user_db, kb_id, mode="delete") as permit:
-            require_kb_administer(user_db, kb_id, user, allow_deleting=True)
-            permit.begin_delete()
-            try:
-                permit.assert_delete_started()
-                plan = collect_kb_cleanup(
-                    user_db, kb_id, versions_root, kb_files_root, datasets_root
-                )
-                permission_ids = [int(row["id"]) for row in plan["permissions"]]
-                user_db.cancel_material_jobs_for_documents(permission_ids)
-
-                from rag.wiki.api import get_wiki_indexer, get_wiki_store
-
-                wiki_store = get_wiki_store()
-                with wiki_store._lock:
-                    page_ids = [
-                        int(row[0])
-                        for row in wiki_store._conn.execute(
-                            "SELECT id FROM wiki_pages WHERE kb_id = ?", (kb_id,)
-                        ).fetchall()
-                    ]
-                user_db.cancel_wiki_reindex_jobs(page_ids)
-
-                manager = KnowledgeBaseManager()
-                for record in plan["documents"]:
-                    manager.remove_document(kb_id, record["filename"])
-                from rag.bm25_store import BM25Store
-
-                bm25 = BM25Store()
-                try:
-                    bm25.invalidate(kb_id)
-                finally:
-                    bm25.close()
-                get_wiki_indexer(user_db).remove_kb_content(kb_id, db=user_db)
-                manager.delete_kb(kb_id)
-                cleanup_kb_files(plan)
-                _audit_org_event(user, "kb_deleted", kb_id, "authorized", user_db)
-                permit.finish_delete(lambda conn: finish_kb_cleanup_sql(conn, kb_id, plan))
-            except Exception as exc:
-                try:
-                    permit.fail_delete(getattr(exc, "code", "cleanup_failed"))
-                except Exception:
-                    logger.exception("Failed to record KB deletion failure", extra={"kb_id": kb_id})
-                raise
-
     try:
-        await asyncio.to_thread(_delete_worker)
+        await asyncio.to_thread(
+            coordinate_kb_deletion,
+            user_db,
+            kb_id,
+            user,
+            versions_root,
+            kb_files_root,
+            datasets_root,
+        )
     except KBLifecycleError as exc:
         raise lifecycle_http_error(exc) from exc
     except HTTPException:

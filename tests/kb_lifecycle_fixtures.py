@@ -10,7 +10,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def child_env(db_path: Path, qdrant_path: Path, versions_root: Path) -> dict[str, str]:
+def child_env(
+    db_path: Path,
+    qdrant_path: Path,
+    versions_root: Path,
+    *,
+    wiki_db_path: Path | None = None,
+    bm25_db_path: Path | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -21,6 +28,10 @@ def child_env(db_path: Path, qdrant_path: Path, versions_root: Path) -> dict[str
             "RAG_STRUCTURED_DATASETS_ROOT": str(versions_root.parent / "datasets"),
         }
     )
+    if wiki_db_path is not None:
+        env["RAG_WIKI_DB_PATH"] = str(wiki_db_path)
+    if bm25_db_path is not None:
+        env["RAG_BM25_DB_PATH"] = str(bm25_db_path)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(REPO_ROOT) + (os.pathsep + existing if existing else "")
     return env
@@ -111,6 +122,79 @@ with kb_mutation(db, kb_id, mode="delete") as permit:
         ],
         cwd=REPO_ROOT,
         env=child_env(db_path, qdrant_path, versions_root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def crash_coordinator_after_cleanup(
+    db_path: Path,
+    qdrant_path: Path,
+    versions_root: Path,
+    kb_files_root: Path,
+    datasets_root: Path,
+    wiki_db_path: Path,
+    bm25_db_path: Path,
+    kb_id: str,
+    actor_id: int,
+    exit_code: int,
+) -> subprocess.Popen[str]:
+    """Crash an owned child after the real KB deletion coordinator removes files."""
+    script = r'''
+import offline_network_guard
+import os, sys
+from pathlib import Path
+from rag.user_db import UserDB
+import rag.routers.knowledge as knowledge
+
+db_path, kb_id, actor_id, versions_root, kb_files_root, datasets_root, exit_code = sys.argv[1:]
+db = UserDB(db_path)
+real_cleanup = knowledge.cleanup_kb_files
+
+def crash_after_cleanup(plan):
+    real_cleanup(plan)
+    print("actual_coordinator_cleanup_complete", flush=True)
+    os._exit(int(exit_code))
+
+knowledge.cleanup_kb_files = crash_after_cleanup
+actor = {"id": int(actor_id), "username": "coordinator-test-owner", "is_admin": False}
+try:
+    knowledge.coordinate_kb_deletion(
+        db,
+        kb_id,
+        actor,
+        Path(versions_root),
+        Path(kb_files_root),
+        Path(datasets_root),
+    )
+finally:
+    db.close()
+'''
+    env = child_env(
+        db_path,
+        qdrant_path,
+        versions_root,
+        wiki_db_path=wiki_db_path,
+        bm25_db_path=bm25_db_path,
+    )
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(db_path),
+            kb_id,
+            str(actor_id),
+            str(versions_root),
+            str(kb_files_root),
+            str(datasets_root),
+            str(exit_code),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

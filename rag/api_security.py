@@ -242,6 +242,10 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict, *, allow_deleting: bool 
             raise lifecycle_http_error(exc) from exc
         return result
     if meta is None:
+        try:
+            assert_kb_available(db, kb_id)
+        except KBLifecycleError as exc:
+            raise lifecycle_http_error(exc) from exc
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
     if not _legacy_kb_owner_or_admin(meta, user):
         _deny_unmigrated_legacy_kb(kb_id)

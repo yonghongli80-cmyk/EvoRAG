@@ -18,7 +18,11 @@ from rag.kb_lifecycle import KBBusy, KBDeleted, KBLifecycleError, kb_mutation
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.user_db import UserDB
 from rag.vector_store import close_client
-from tests.kb_lifecycle_fixtures import crash_during_delete, start_gate_child
+from tests.kb_lifecycle_fixtures import (
+    crash_coordinator_after_cleanup,
+    crash_during_delete,
+    start_gate_child,
+)
 
 
 def _fork_inherited_gate_attempt(db_path: str, kb_id: str, result) -> None:
@@ -263,6 +267,188 @@ def test_crashed_delete_releases_process_lock_and_retry_converges(
             pytest.fail("deleted KB accepted a new mutation")
     finally:
         db.close()
+        close_client()
+
+
+def test_coordinator_crash_retries_scoped_cleanup_without_touching_other_kb(
+    isolated_api, make_user
+):
+    from config import settings
+    from rag.wiki.indexer import enqueue_wiki_reindex_job
+    from rag.wiki.store import WikiStore
+
+    owner, headers = make_user("coordinator-crash-owner")
+    db = isolated_api.app.state.user_db
+    kb_id, other_kb = "kb_coordinator_target", "kb_coordinator_other"
+    db.create_kb_metadata(kb_id, "Coordinator target", owner["id"], "private")
+    db.create_kb_metadata(other_kb, "Coordinator other", owner["id"], "private")
+
+    versions_root = Path(isolated_api.app.state.document_versions_root)
+    kb_files_root = Path(isolated_api.app.state.kb_files_root)
+    datasets_root = Path(isolated_api.app.state.structured_datasets_root)
+    wiki_db_path = Path(settings.wiki_db_path)
+    bm25_db_path = Path(settings.bm25_db_path)
+
+    def seed_document(target_kb, filename, body):
+        permission_id = db.create_document_permission(filename, target_kb, owner["id"])
+        version_path = versions_root / str(permission_id) / "1" / filename
+        version_path.parent.mkdir(parents=True, exist_ok=True)
+        version_path.write_text(body, encoding="utf-8")
+        version_id = db.create_document_version(
+            permission_id, filename, str(version_path), f"hash-{filename}", owner["id"]
+        )
+        db.activate_document_version(permission_id, version_id, target_kb, filename)
+        kb_document_id = db.create_kb_document_pending(target_kb, filename)
+        kb_file = kb_files_root / target_kb / str(kb_document_id) / filename
+        kb_file.parent.mkdir(parents=True, exist_ok=True)
+        kb_file.write_text(f"legacy {body}", encoding="utf-8")
+        db.finish_kb_document(kb_document_id, str(kb_file), "[]", "synthetic", 1)
+        return permission_id, version_id, [version_path, kb_file]
+
+    target_doc_id, target_version_id, target_files = seed_document(
+        kb_id, "target.txt", "target body"
+    )
+    other_doc_id, other_version_id, other_files = seed_document(
+        other_kb, "other.txt", "other body"
+    )
+    target_material_job = db.enqueue_material_job(target_doc_id, target_version_id)
+    other_material_job = db.enqueue_material_job(other_doc_id, other_version_id)
+    db.insert_material_search_fts(
+        target_doc_id, target_version_id, "target.txt", "", "", "[]", "target body"
+    )
+    db.insert_material_search_fts(
+        other_doc_id, other_version_id, "other.txt", "", "", "[]", "other body"
+    )
+    with db.locked_transaction() as conn:
+        conn.executemany(
+            "INSERT INTO material_unit_fingerprints(document_id,version_id,unit_key,digest) "
+            "VALUES(?,?, 'unit','digest')",
+            [(target_doc_id, target_version_id), (other_doc_id, other_version_id)],
+        )
+
+    wiki_store = WikiStore(db_path=wiki_db_path)
+    target_page = wiki_store.create_page(kb_id, "Target page", "Target wiki body.")
+    other_page = wiki_store.create_page(other_kb, "Other page", "Other wiki body.")
+    wiki_store.close()
+    assert enqueue_wiki_reindex_job(
+        db, target_page.id, target_page.current_revision_id, kb_id=kb_id
+    )
+    assert enqueue_wiki_reindex_job(
+        db, other_page.id, other_page.current_revision_id, kb_id=other_kb
+    )
+
+    manager = KnowledgeBaseManager()
+    for target, point_id, value in ((kb_id, 101, 0.1), (other_kb, 202, 0.2)):
+        manager._client.create_collection(
+            collection_name=target,
+            vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+        )
+        manager._client.upsert(
+            collection_name=target,
+            points=[PointStruct(id=point_id, vector=[value] * 1024, payload={"doc_name": "body.txt"})],
+        )
+
+    qdrant_path = Path(settings.qdrant_path)
+    db_path = Path(db.db_path)
+    close_client()
+    child = None
+    try:
+        child = crash_coordinator_after_cleanup(
+            db_path,
+            qdrant_path,
+            versions_root,
+            kb_files_root,
+            datasets_root,
+            wiki_db_path,
+            bm25_db_path,
+            kb_id,
+            owner["id"],
+            74,
+        )
+        try:
+            stdout, stderr = child.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            stdout, stderr = child.communicate(timeout=15)
+            pytest.fail(f"owned coordinator child timed out; stdout={stdout!r}, stderr={stderr!r}")
+
+        assert child.returncode == 74, stderr
+        assert "actual_coordinator_cleanup_complete" in stdout
+        lifecycle = db.get_kb_lifecycle(kb_id)
+        assert lifecycle["state"] == "deleting"
+        retained_token = lifecycle["delete_token"]
+        assert retained_token
+        assert db.get_kb_metadata(kb_id) is not None
+        assert db.get_kb_metadata(other_kb) is not None
+        assert all(not path.exists() for path in target_files)
+        assert all(path.exists() for path in other_files)
+        assert db.get_index_job(target_material_job)["status"] == "cancelled"
+        assert db.get_index_job(other_material_job)["status"] == "queued"
+
+        with db.cm.read_connection() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_search_fts WHERE document_id = ?", (target_doc_id,)
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_search_fts WHERE document_id = ?", (other_doc_id,)
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_unit_fingerprints WHERE document_id = ?", (target_doc_id,)
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_unit_fingerprints WHERE document_id = ?", (other_doc_id,)
+            ).fetchone()[0] == 1
+
+        manager = KnowledgeBaseManager()
+        assert not manager._client.collection_exists(kb_id)
+        assert manager._client.collection_exists(other_kb)
+        assert manager._client.count(collection_name=other_kb).count == 1
+
+        from rag.wiki.api import get_wiki_store
+
+        store = get_wiki_store()
+        assert store.list_pages(kb_id=kb_id) == []
+        assert [page.id for page in store.list_pages(kb_id=other_kb)] == [other_page.id]
+        wiki_jobs = {
+            int(row["document_id"]): row["status"]
+            for row in db._conn.execute(
+                "SELECT document_id,status FROM document_index_jobs WHERE job_scope='wiki'"
+            ).fetchall()
+        }
+        assert wiki_jobs[target_page.id] == "cancelled"
+        assert wiki_jobs[other_page.id] == "queued"
+
+        retried = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+        assert retried.status_code == 200, retried.text
+        assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+        assert db.get_kb_lifecycle(kb_id)["delete_token"] == retained_token
+        assert db.get_kb_metadata(kb_id) is None
+        assert db.get_kb_metadata(other_kb) is not None
+        assert db.get_document_permission("target.txt", kb_id) is None
+        assert db.get_document_permission("other.txt", other_kb) is not None
+        with db.cm.read_connection() as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_search_fts WHERE document_id = ?", (target_doc_id,)
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_search_fts WHERE document_id = ?", (other_doc_id,)
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_unit_fingerprints WHERE document_id = ?", (target_doc_id,)
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM material_unit_fingerprints WHERE document_id = ?", (other_doc_id,)
+            ).fetchone()[0] == 1
+        assert all(not path.exists() for path in target_files)
+        assert all(path.exists() for path in other_files)
+        assert not manager._client.collection_exists(kb_id)
+        assert manager._client.collection_exists(other_kb)
+        assert manager._client.count(collection_name=other_kb).count == 1
+        assert [page.id for page in store.list_pages(kb_id=other_kb)] == [other_page.id]
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.wait(timeout=15)
         close_client()
 
 

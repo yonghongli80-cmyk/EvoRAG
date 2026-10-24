@@ -297,13 +297,19 @@ async def upload_material(
             )
             return document_id, promoted
 
+    preserve_staged_upload = False
     try:
         document_id, promoted = await asyncio.to_thread(_promote_and_enqueue)
     except KBLifecycleError as exc:
         staged.path.unlink(missing_ok=True)
         raise lifecycle_http_error(exc) from exc
+    except HTTPException as exc:
+        if exc.status_code == 500 and exc.detail == "material_promotion_failed":
+            preserve_staged_upload = True
+        raise
     finally:
-        staged.path.unlink(missing_ok=True)
+        if not preserve_staged_upload:
+            staged.path.unlink(missing_ok=True)
     _audit_org_material(db, user, "document_uploaded", kb_id)
     return {
         "status": "queued",

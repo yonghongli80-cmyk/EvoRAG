@@ -12,6 +12,7 @@ from rag.kb_document_cleanup import (
     resolve_document_staging_directory,
     resolve_kb_document_paths,
 )
+from rag.kb_lifecycle import KBDeleteIncomplete
 from rag.spreadsheets.store import resolve_dataset_path
 
 
@@ -92,11 +93,17 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
         for document_id in permission_by_id
     ]
     # Archive manifests may point to legacy global staging. Only hashed KB-owned roots
-    # are safe to delete; a manifest referencing elsewhere remains an error.
+    # have a proven KB owner; retain the manifest and fail before teardown otherwise.
     for manifest in archive_manifests:
-        source = Path(manifest["source_path"]).absolute()
-        if source.exists() and source.is_relative_to(material_staging.absolute()):
-            paths.add(_validate_tree(source, Path(versions_root)))
+        source_path = str(manifest["source_path"] or "").strip()
+        if not source_path:
+            continue
+        source = Path(source_path).absolute()
+        if not source.exists():
+            continue
+        if not source.is_relative_to(material_staging.absolute()):
+            raise KBDeleteIncomplete("archive_source_unowned")
+        paths.add(_validate_tree(source, Path(versions_root)))
 
     cleanup_dirs = [
         _validate_tree(path, Path(versions_root))
