@@ -1,6 +1,7 @@
 # RAGv3 生产化升级方案（多实例）
 
-> **状态：Phase 0 分段计时与日志上下文代码补齐（已并入 main），新负载验收待执行；Phase 1 配置面落地，运行时迁移未执行。** 日期：2026-10-23。
+> **状态：Phase 0 分段计时与日志上下文已落地，真实模型/业务负载验收待执行；Phase 1 配置与独立合成运行验收已完成，用户业务存量迁移未执行。** 日期：2026-10-24。
+> 2026-10-24 复查待办、独立锁环境、宿主Docker当前修复与新验收口径见 [`docs/handoff-2026-10-24.md`](docs/handoff-2026-10-24.md)；下文带日期的探测/基线为历史事实。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
 > 单机缺陷的修复见 [`docs/superpowers/plans/2026-10-21-unified-remediation.md`](docs/superpowers/plans/2026-10-21-unified-remediation.md)。
 > 原则：**不 big-bang**，每个阶段独立可回滚，上一阶段验收不过不进下一阶段。
@@ -106,11 +107,11 @@ Client ──TLS──> LB / Reverse Proxy
   启用方式与"空字符串不要注入"的注意事项写在 `.env.example`/Compose 注释里）；
   应用通过 `RAG_QDRANT_URL` 切换，默认空仍连本地目录；旧 `qdrant_data` 卷保留用于回滚。
 - **[ ] 迁移**：对每个集合做 snapshot/restore（或 scroll + upsert），迁移后比对点数与抽样召回。
-  **未执行——Docker daemon 当前不可用**（无法拉镜像/起容器）。
+  **用户业务存量迁移未执行**；Docker当前探测、宿主修复及隔离合成验收见10月24日交接，不能用早期daemon失败代表当前条件。
 - **验收**（全部待 Docker 可用后验证）：两个 API 进程可同时检索/写入，不再有目录锁；
   同一问题 top-5 与迁移前一致；`scripts/verify_structured_schema_mirror.py` 与基准可不停服务运行。
 - **回滚**：清空 `RAG_QDRANT_URL` 回到本地目录（迁移期间保留旧目录只读副本）。
-- **阻塞事实（2026-10-22）**：`docker` daemon 不可用；`docker-compose.yml` 通过了 YAML 解析、
+- **历史阻塞事实（2026-10-22）**：当时`docker` daemon 不可用；`docker-compose.yml` 通过了 YAML 解析、
   静态断言与 `docker compose config`（用占位 `REDIS_PASSWORD`/`QDRANT_API_KEY` 做插值校验，
   `config` 不接触 daemon），但镜像 tag 未 pull、容器未启动、健康检查与 API key 未实测、
   迁移与双进程验收均未做。详见 `docs/phase0-observability-and-baseline.md` 第 5 节。
@@ -184,7 +185,7 @@ Client ──TLS──> LB / Reverse Proxy
 | 阶段 | 硬指标 | 测试 | 回滚 |
 | --- | --- | --- | --- |
 | 0 观测 | 直接分段已落地；新负载 P99 与部署采样待验收 | 历史压测档案 + `/ready` `/metrics` + 离线计时回归 | 无 |
-| 1 Qdrant | 双进程并发；top-5 一致（**配置面已就绪，运行时未验证：Docker 阻塞**） | 检索回归 + 基准 | 清空 URL |
+| 1 Qdrant | 双进程并发；top-5 一致（配置面已就绪，实际运行验收以10月24日当前交接为准） | 检索回归 + 基准 | 清空 URL |
 | 2 Postgres | 2313 用例通过；并发无锁；恢复演练 | 全量 + 迁移比对 | 切回 SQLite |
 | 3 Redis | 跨副本改写一致；故障降级 | 多副本集成 + 断网 | backend=memory |
 | 4 对象存储 | 大文件/断点/删除 | 集成 + 恢复 | 本地适配器 |

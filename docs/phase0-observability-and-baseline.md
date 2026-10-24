@@ -1,12 +1,13 @@
 # Phase 0 观测面与压测基线档案（2026-10-22）
 
+> 当前宿主条件、10月24日复查待办与隔离验收见 [`handoff-2026-10-24.md`](handoff-2026-10-24.md)。本文旧环境探测和压测数字保留其日期与范围。
+
 本文件是 `UPGRADE.md` Phase 0/1 的实施说明与可复现压测档案。范围：
 
 * Phase 0：只读 `/ready`、只读 `/metrics`、直接重排/生成分段、可复现的 P50/P95/P99 采集命令与基线记录。
 * Phase 1（配置面）：`RAG_QDRANT_URL` / `RAG_QDRANT_API_KEY`、`_get_client()` 的本地/远程分支、
   Compose 的 `qdrant` 服务、`.env.example` 说明。
-* **Docker daemon 当前不可用**：Phase 1 只完成代码/配置/静态测试，未拉镜像、未启动容器、
-  未做数据迁移，也未验证双进程并发。详见第 5 节。
+* **早期Docker探测不可用**：当时Phase 1只完成代码/配置/静态测试；当前修复与运行结果以10月24日交接为准，用户业务数据迁移未据此完成。历史证据见第5节。
 
 原则：指标与基线只写**观测到的事实**；没有样本的指标宁可不出现，也不补数字。
 
@@ -280,7 +281,10 @@ RAG_QDRANT_URL 为空 → QdrantClient(path=RAG_QDRANT_PATH)
   `RAG_QDRANT_API_KEY=${QDRANT_API_KEY:-}`；`depends_on.qdrant.condition=service_healthy`。
 * 旧的 `qdrant_data:/app/qdrant_data` 卷保留，用于回滚。
 
-### 4.3 切换与迁移步骤（待 Docker 可用后执行）
+### 4.3 用户业务存量的切换与迁移步骤
+
+10月24日已在独立合成环境验证server认证、持久化、点数/top-5及双应用就绪，见当前交接。
+以下仍是用户实际业务数据的切换流程，需要备份与停写安排，不能据合成验收自动勾成业务迁移完成。
 
 1. 在 `.env` 设置强随机 `QDRANT_API_KEY`（URL-safe，非空），并取消 Compose 中
    `QDRANT__SERVICE__API_KEY` 注释；`RAG_QDRANT_URL` 暂留空。
@@ -311,14 +315,17 @@ RAG_QDRANT_URL 为空 → QdrantClient(path=RAG_QDRANT_PATH)
 
 ## 6. 后续待办
 
+当前状态（2026-10-24）：Docker engine已恢复，独立合成集合迁移/持久化、双应用默认启动与remote就绪已通过。
+下段10月23日的探测保留为历史，当前结果、软件备份和验收证据以 `handoff-2026-10-24.md` 为准。
+
 2026-10-23 环境复核：Docker 29.8.0、Compose v5.5.1 客户端可用，但
 `desktop-linux` 的 `//./pipe/dockerDesktopLinuxEngine` 不存在。
 已有 Docker Desktop 仅做一次隐藏启动，约 40 秒后进程退出，仍未建立引擎；启动失败根因未定位。
 WSL 2.7.14/WSLService 已安装运行，WSL 未列出 Linux 发行版；Hypervisor 与固件虚拟化显示开启。
 在临时示例副本上用占位变量执行 `docker compose config --quiet` 通过，未读取生产环境变量，
-也未拉取/运行容器。8080 既有服务仍可连接。用户选择先完成代码整改，以下运行验收保持待执行。
+当时也未拉取/运行容器，用户选择先完成代码整改；10月24日的隔离运行验收已另行完成，原8080业务服务未被用于演练。
 
-1. 在 Docker 可用环境完成 4.3 的迁移与双进程验收，并把结果补进 `UPGRADE.md` Phase 1 与第 3.5 节。
+1. 合成运行验收已完成；实际业务迁移与上线前仍按4.3执行备份、停写、逐集合校验与回滚准备。
 2. main 已补直接 `rerank` / `generation` 分段与 `/metrics` 展示；部署后采集真实负载，
    核对样本覆盖及 P99。离线回归不能代替部署验收或压测，不从旧分位数补造新结果。
 3. 若需要准备的 P99，给 `scripts/benchmark_jev_retrieval.py` 增加原始样本输出（或分位数参数）。

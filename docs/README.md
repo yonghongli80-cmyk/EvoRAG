@@ -1,12 +1,15 @@
 # 文档状态索引
 
-> 更新日期：2026-10-23
+> 更新日期：2026-10-24
 
 项目功能、依赖和启动方式以根目录 `README.md`、当前代码、自动化测试和 Git 提交为准。历史设计文档保留决策背景，不等同于尚未完成的待办。
 
 ## 当前有效入口
 
-- `handoff-2026-10-23.md`：最新交接，包含双远端、验证基线、关键行为及剩余升级条件。
+- `handoff-2026-10-24.md`：当前交接，包含复查待办闭环、锁环境、候选竞态修复、宿主Docker修复与实际验收状态。
+- `reviews/2026-10-24-handoff.md`：凌晨Gitee交付的原始交接及两轮修复证据口径。
+- `handoff-2026-10-23.md`：前次交接，保留SSH/双远端、关键行为和pipeline整改历史。
+- `superpowers/plans/2026-10-24-review-backlog.md`：本轮逐项执行计划，当前状态以新交接和实际验证为准。
 - `superpowers/plans/2026-10-23-post-handoff-remediation.md`：交接后定向整改与集成验证完成记录，已并入 `main`。
 - `superpowers/plans/2026-10-23-pipeline-observability.md`：本轮 pipeline 职责拆分、直接计时与日志上下文实施记录，已并入 `main`；集成和验证状态以最新交接为准。
 - `superpowers/plans/2026-10-21-unified-remediation.md`：上一轮统一修复计划（交接遗留 + 全库审查）。
