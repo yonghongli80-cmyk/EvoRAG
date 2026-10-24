@@ -197,21 +197,21 @@ backup_before_up() {
 
 start_stack() {
     log "启动服务"
-    docker compose up -d
-    docker compose ps
+    docker compose up -d || return $?
+    docker compose ps || return $?
 }
 
 main() {
     cd "$project_dir"
 
-    require_docker
-    ensure_env_file
-    harden_env_permissions
-    check_port_binding
-    maybe_pull
-    build_image
-    backup_before_up
-    start_stack
+    require_docker || return $?
+    ensure_env_file || return $?
+    harden_env_permissions || return $?
+    maybe_pull || return $?
+    check_port_binding || return $?
+    build_image || return $?
+    backup_before_up || return $?
+    start_stack || return $?
 
     local health_path
     health_path="$(detect_health_path)"
