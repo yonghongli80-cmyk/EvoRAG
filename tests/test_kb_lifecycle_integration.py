@@ -1,0 +1,393 @@
+"""Cross-process, cancellation, and crash integration for KB lifecycle teardown."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import multiprocessing
+import subprocess
+import threading
+from pathlib import Path
+
+import httpx
+import pytest
+from qdrant_client.models import Distance, PointStruct, VectorParams
+
+from rag.kb_lifecycle import KBBusy, KBDeleted, kb_mutation
+from rag.knowledge_base import KnowledgeBaseManager
+from rag.user_db import UserDB
+from rag.vector_store import close_client
+from tests.kb_lifecycle_fixtures import crash_during_delete, start_gate_child
+
+
+def _fork_inherited_gate_attempt(db_path: str, kb_id: str, result) -> None:
+    db = UserDB(db_path)
+    try:
+        try:
+            with kb_mutation(db, kb_id):
+                result.put("acquired")
+        except KBBusy:
+            result.put("busy")
+    finally:
+        db.close()
+
+
+def _read_child_line(child: subprocess.Popen[str]) -> dict:
+    assert child.stdout is not None
+    line = child.stdout.readline()
+    assert line, child.stderr.read() if child.stderr is not None else "child exited without output"
+    return json.loads(line)
+
+
+def _release_gate_child(child: subprocess.Popen[str]) -> None:
+    assert child.stdin is not None
+    child.stdin.write("release\n")
+    child.stdin.flush()
+    assert child.wait(timeout=15) == 0
+
+
+def test_portalocker_gate_is_shared_across_processes_and_per_kb(tmp_path):
+    db_path = tmp_path / "synthetic-users.db"
+    qdrant_path = tmp_path / "synthetic-qdrant"
+    versions_root = tmp_path / "versions"
+    db = UserDB(db_path)
+    db.create_kb_metadata("kb_process_one", "one", 1, "private")
+    db.create_kb_metadata("kb_process_two", "two", 1, "private")
+    try:
+        holder = start_gate_child(
+            db_path, qdrant_path, versions_root, "kb_process_one", hold=True
+        )
+        assert _read_child_line(holder)["state"] == "acquired"
+
+        same = start_gate_child(
+            db_path, qdrant_path, versions_root, "kb_process_one", hold=False
+        )
+        assert _read_child_line(same)["state"] == "busy"
+        assert same.wait(timeout=15) == 0
+
+        other = start_gate_child(
+            db_path, qdrant_path, versions_root, "kb_process_two", hold=True
+        )
+        assert _read_child_line(other)["state"] == "acquired"
+        _release_gate_child(other)
+        _release_gate_child(holder)
+
+        # Same-thread nesting returns one permit; a copied context cannot authorize
+        # a different asyncio task to use it.
+        with kb_mutation(db, "kb_process_one") as permit:
+            with kb_mutation(db, "kb_process_one") as nested:
+                assert nested is permit
+
+            async def copied_context_attempt():
+                try:
+                    permit._assert_active_owner()
+                except Exception as error:
+                    return getattr(error, "code", None)
+                return "accepted"
+
+            async def child_task_attempt():
+                return await asyncio.create_task(copied_context_attempt())
+
+            assert asyncio.run(child_task_attempt()) == "kb_mutation_permit_owner_mismatch"
+    finally:
+        db.close()
+
+
+def test_forked_process_cannot_reuse_inherited_permit(tmp_path):
+    if "fork" not in multiprocessing.get_all_start_methods():
+        pytest.skip("fork start method is unavailable on this platform")
+
+    db = UserDB(tmp_path / "synthetic-users.db")
+    db.create_kb_metadata("kb_forked", "forked", 1, "private")
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+    child = None
+    try:
+        with kb_mutation(db, "kb_forked"):
+            child = context.Process(
+                target=_fork_inherited_gate_attempt,
+                args=(str(db.db_path), "kb_forked", results),
+            )
+            child.start()
+            assert results.get(timeout=15) == "busy"
+            child.join(timeout=15)
+            assert child.exitcode == 0
+    finally:
+        if child is not None and child.is_alive():
+            child.join(timeout=15)
+        results.close()
+        results.join_thread()
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "exit_code"),
+    [
+        ("deleting_committed", 70),
+        ("vectors_removed", 71),
+        ("part_files_removed", 72),
+        ("before_final_sql", 73),
+    ],
+)
+def test_crashed_delete_releases_process_lock_and_retry_converges(
+    tmp_path, checkpoint, exit_code, monkeypatch
+):
+    from config import settings
+
+    db_path = tmp_path / "synthetic-users.db"
+    qdrant_path = tmp_path / "synthetic-qdrant"
+    monkeypatch.setattr(settings, "qdrant_path", str(qdrant_path))
+    versions_root = tmp_path / "versions"
+    kb_id, other_kb = "kb_crash_target", "kb_crash_other"
+    db = UserDB(db_path)
+    db.create_kb_metadata(kb_id, "target", 1, "private")
+    db.create_kb_metadata(other_kb, "other", 1, "private")
+    manager = KnowledgeBaseManager()
+    manager._client.create_collection(
+        collection_name=kb_id,
+        vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+    )
+    manager._client.create_collection(
+        collection_name=other_kb,
+        vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+    )
+    manager._client.upsert(
+        collection_name=kb_id,
+        points=[PointStruct(id=1, vector=[0.1] * 1024, payload={"doc_name": "target.txt"})],
+    )
+    manager._client.upsert(
+        collection_name=other_kb,
+        points=[PointStruct(id=2, vector=[0.2] * 1024, payload={"doc_name": "other.txt"})],
+    )
+    files = [tmp_path / "files" / "target-a.txt", tmp_path / "files" / "target-b.txt"]
+    for index, path in enumerate(files):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"synthetic file {index}", encoding="utf-8")
+
+    # The crash child must exclusively own the local Qdrant directory.
+    close_client()
+    try:
+        child = crash_during_delete(
+            db_path, qdrant_path, versions_root, kb_id, files, checkpoint
+        )
+        stdout, stderr = child.communicate(timeout=45)
+        assert child.returncode == exit_code, stderr
+        assert "deleting:" in stdout
+
+        row = db.get_kb_lifecycle(kb_id)
+        assert row["state"] == "deleting"
+        token = row["delete_token"]
+        assert token
+        if checkpoint == "part_files_removed":
+            assert not files[0].exists() and files[1].exists()
+        if checkpoint == "before_final_sql":
+            assert not any(path.exists() for path in files)
+
+        # Reopen local Qdrant after child exit. The same lock identity and token
+        # are retried; only KB-owned rows, vectors and files are removed.
+        manager = KnowledgeBaseManager()
+        with kb_mutation(db, kb_id, mode="delete") as permit:
+            assert permit.begin_delete() == token
+            assert permit.assert_delete_started() is None
+            manager.delete_kb(kb_id)
+            for path in files:
+                path.unlink(missing_ok=True)
+            permit.finish_delete(
+                lambda conn: conn.execute("DELETE FROM kb_metadata WHERE kb_id = ?", (kb_id,))
+            )
+
+        assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+        assert db.get_kb_metadata(kb_id) is None
+        assert not any(path.exists() for path in files)
+        assert not manager._client.collection_exists(kb_id)
+        assert manager._client.collection_exists(other_kb)
+        assert manager._client.count(collection_name=other_kb).count == 1
+        with pytest.raises(KBDeleted), kb_mutation(db, kb_id):
+            pytest.fail("deleted KB accepted a new mutation")
+    finally:
+        db.close()
+        close_client()
+
+
+def test_cancelled_upload_keeps_gate_until_worker_finishes_then_delete_converges(
+    isolated_api, make_user, monkeypatch
+):
+    import rag.embedder
+    import rag.routers.knowledge as knowledge
+
+    owner, headers = make_user("cancel-index-owner")
+    db = isolated_api.app.state.user_db
+    manager = KnowledgeBaseManager()
+    kb_id = manager.create_kb("cancel-index")
+    db.create_kb_metadata(kb_id, "cancel-index", owner["id"], "private")
+    monkeypatch.setattr(rag.embedder, "embed", lambda texts: [[0.1] * 1024 for _ in texts])
+    entered = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+
+    class BlockingManager:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+        def add_document(self, *args, **kwargs):
+            entered.set()
+            if not release.wait(timeout=20):
+                raise TimeoutError("test did not release synthetic index worker")
+            return self.wrapped.add_document(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge, "KnowledgeBaseManager", lambda: BlockingManager(manager))
+    original_ingest = knowledge._ingest_kb_document_sync
+
+    def track_ingest(*args, **kwargs):
+        try:
+            return original_ingest(*args, **kwargs)
+        finally:
+            worker_finished.set()
+
+    monkeypatch.setattr(knowledge, "_ingest_kb_document_sync", track_ingest)
+
+    async def exercise_cancel_and_delete():
+        transport = httpx.ASGITransport(app=isolated_api.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            upload = asyncio.create_task(
+                client.post(
+                    f"/knowledge-bases/{kb_id}/documents",
+                    headers=headers,
+                    files={"file": ("cancelled.txt", b"synthetic document body", "text/plain")},
+                )
+            )
+            assert await asyncio.to_thread(entered.wait, 10)
+            upload.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await upload
+
+            competing_delete = await client.delete(
+                f"/knowledge-bases/{kb_id}", headers=headers
+            )
+            assert competing_delete.status_code == 409
+            assert db.get_kb_lifecycle(kb_id) is None
+            # The worker may have reserved its document identity before cancellation;
+            # the competing delete must not have changed it or tombstoned the KB.
+            in_flight = db.get_document_permission("cancelled.txt", kb_id)
+            assert in_flight is not None
+            assert manager._client.collection_exists(kb_id)
+
+            release.set()
+            assert await asyncio.to_thread(worker_finished.wait, 15)
+            # The completed worker has published a real local vector and version;
+            # a later delete must remove both and leave the permanent tombstone.
+            response = await client.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+            assert response.status_code == 200, response.text
+            assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+            assert db.get_document_permission("cancelled.txt", kb_id) is None
+            assert not manager._client.collection_exists(kb_id)
+
+    try:
+        asyncio.run(exercise_cancel_and_delete())
+    finally:
+        release.set()
+        close_client()
+
+
+def _seed_file_document(db, kb_id: str, owner_id: int, root: Path, name: str) -> Path:
+    document_id = db.create_kb_document_pending(kb_id, name)
+    path = root / kb_id / str(document_id) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"synthetic {name}", encoding="utf-8")
+    db.finish_kb_document(document_id, str(path), "[]", "synthetic", 0)
+    return path
+
+
+@pytest.mark.parametrize("failure", ["vector", "unlink", "final_sql"])
+def test_delete_failures_return_503_keep_identity_and_retry_safely(
+    isolated_api, make_user, monkeypatch, failure
+):
+    import rag.kb_lifecycle_cleanup as cleanup
+    import rag.routers.knowledge as knowledge
+
+    owner, headers = make_user(f"failure-owner-{failure}")
+    db = isolated_api.app.state.user_db
+    real_manager = KnowledgeBaseManager()
+    kb_id = real_manager.create_kb(f"failure-{failure}")
+    other_kb = real_manager.create_kb(f"other-{failure}")
+    db.create_kb_metadata(kb_id, "target", owner["id"], "private")
+    db.create_kb_metadata(other_kb, "other", owner["id"], "private")
+    file_root = Path(isolated_api.app.state.kb_files_root)
+    first = _seed_file_document(db, kb_id, owner["id"], file_root, "first.txt")
+    second = _seed_file_document(db, kb_id, owner["id"], file_root, "second.txt")
+    other_file = _seed_file_document(db, other_kb, owner["id"], file_root, "keep.txt")
+    token_before_retry = None
+
+    if failure == "vector":
+        class FailingVectorManager:
+            def __init__(self):
+                self.wrapped = real_manager
+
+            def __getattr__(self, name):
+                return getattr(self.wrapped, name)
+
+            def delete_kb(self, _kb_id):
+                raise RuntimeError("synthetic vector delete failure")
+
+        monkeypatch.setattr(knowledge, "KnowledgeBaseManager", FailingVectorManager)
+    elif failure == "unlink":
+        real_delete_files = cleanup.delete_kb_document_files
+
+        def fail_after_one(paths):
+            real_delete_files(paths[:1])
+            raise OSError("synthetic unlink failure")
+
+        monkeypatch.setattr(cleanup, "delete_kb_document_files", fail_after_one)
+    else:
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "CREATE TRIGGER fail_target_metadata_delete BEFORE DELETE ON kb_metadata "
+                f"WHEN OLD.kb_id = '{kb_id}' "
+                "BEGIN SELECT RAISE(ABORT, 'synthetic final SQL failure'); END"
+            )
+
+    try:
+        failed = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+        assert failed.status_code == 503
+        row = db.get_kb_lifecycle(kb_id)
+        assert row["state"] == "deleting"
+        assert row["delete_token"]
+        token_before_retry = row["delete_token"]
+        assert row["last_error_code"]
+        assert db.get_kb_metadata(kb_id) is not None
+        assert db.get_kb_metadata(other_kb) is not None
+        assert other_file.read_text(encoding="utf-8") == "synthetic keep.txt"
+
+        if failure == "vector":
+            assert real_manager._client.collection_exists(kb_id)
+            assert first.exists() and second.exists()
+        elif failure == "unlink":
+            assert not first.exists() and second.exists()
+        else:
+            assert not real_manager._client.collection_exists(kb_id)
+            assert not first.exists() and not second.exists()
+
+        if failure == "vector":
+            monkeypatch.setattr(knowledge, "KnowledgeBaseManager", KnowledgeBaseManager)
+        elif failure == "unlink":
+            monkeypatch.setattr(cleanup, "delete_kb_document_files", real_delete_files)
+        if failure == "final_sql":
+            with db.locked_transaction() as conn:
+                conn.execute("DROP TRIGGER fail_target_metadata_delete")
+
+        retried = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+        assert retried.status_code == 200, retried.text
+        row = db.get_kb_lifecycle(kb_id)
+        assert row["state"] == "deleted"
+        assert row["delete_token"] == token_before_retry
+        assert db.get_kb_metadata(kb_id) is None
+        assert not first.exists() and not second.exists()
+        assert real_manager._client.collection_exists(other_kb)
+        assert other_file.exists()
+        with pytest.raises(KBDeleted), kb_mutation(db, kb_id):
+            pytest.fail("deleted KB accepted a new mutation")
+    finally:
+        real_manager._client.close()
