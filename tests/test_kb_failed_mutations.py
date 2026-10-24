@@ -24,7 +24,8 @@ def _owner(db, username="kb-owner"):
 
 
 def _existing_document(db, owner, kb_id, name, versions_root, kb_root):
-    db.create_kb_metadata(kb_id, kb_id, owner["id"], "private")
+    if db.get_kb_metadata(kb_id) is None:
+        db.create_kb_metadata(kb_id, kb_id, owner["id"], "private")
     document_id = db.create_document_permission(name, kb_id, owner["id"])
     paths = []
     for version_no in (1, 2):
@@ -42,6 +43,207 @@ def _existing_document(db, owner, kb_id, name, versions_root, kb_root):
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text("legacy", encoding="utf-8")
     return kb_document_id, paths, legacy
+
+
+def test_document_delete_rejects_version_path_owned_by_another_document(
+    kb_client, monkeypatch
+):
+    client, db = kb_client
+    owner, headers = _owner(db)
+    versions_root = api.app.state.document_versions_root
+    kb_root = api.app.state.kb_files_root
+    kb_id = "kb_version_owner_boundary"
+    first_id, first_paths, _first_legacy = _existing_document(
+        db, owner, kb_id, "first.txt", versions_root, kb_root
+    )
+    second_id, second_paths, _second_legacy = _existing_document(
+        db, owner, kb_id, "second.txt", versions_root, kb_root
+    )
+    first_permission = db.get_document_permission("first.txt", kb_id)
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE document_versions SET file_path = ? WHERE id = ("
+            "SELECT MIN(id) FROM document_versions WHERE document_id = ?)",
+            (str(second_paths[0]), first_permission["id"]),
+        )
+    manager_calls = []
+    monkeypatch.setattr(
+        "rag.routers.knowledge.KnowledgeBaseManager.remove_document",
+        lambda *_args: manager_calls.append("removed"),
+    )
+
+    response = client.delete(
+        f"/knowledge-bases/{kb_id}/documents/first.txt", headers=headers
+    )
+
+    assert response.status_code == 400
+    assert manager_calls == []
+    assert all(path.exists() for path in first_paths + second_paths)
+    assert db.get_kb_document(kb_id, "first.txt")["id"] == first_id
+    assert db.get_kb_document(kb_id, "second.txt")["id"] == second_id
+    assert db.get_document_permission("first.txt", kb_id) is not None
+
+
+def test_document_delete_rejects_version_symlink_into_another_document(
+    kb_client, monkeypatch
+):
+    client, db = kb_client
+    owner, headers = _owner(db)
+    versions_root = api.app.state.document_versions_root
+    kb_id = "kb_version_symlink_boundary"
+    first_id, first_paths, _first_legacy = _existing_document(
+        db, owner, kb_id, "first.txt", versions_root, api.app.state.kb_files_root
+    )
+    _second_id, second_paths, _second_legacy = _existing_document(
+        db, owner, kb_id, "second.txt", versions_root, api.app.state.kb_files_root
+    )
+    symlink = versions_root / str(db.get_document_permission("first.txt", kb_id)["id"]) / "3" / "link.txt"
+    symlink.parent.mkdir(parents=True)
+    try:
+        symlink.symlink_to(second_paths[0])
+    except OSError as exc:
+        pytest.skip(f"host cannot create a temporary symlink: {exc}")
+    first_permission = db.get_document_permission("first.txt", kb_id)
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE document_versions SET file_path = ? WHERE id = ("
+            "SELECT MIN(id) FROM document_versions WHERE document_id = ?)",
+            (str(symlink), first_permission["id"]),
+        )
+    monkeypatch.setattr(
+        "rag.routers.knowledge.KnowledgeBaseManager.remove_document",
+        lambda *_args: None,
+    )
+
+    response = client.delete(
+        f"/knowledge-bases/{kb_id}/documents/first.txt", headers=headers
+    )
+
+    assert response.status_code == 400
+    assert all(path.exists() for path in first_paths + second_paths)
+    assert db.get_kb_document(kb_id, "first.txt")["id"] == first_id
+
+
+@pytest.mark.parametrize("target", ["other_kb", "sibling_document"])
+def test_document_delete_rejects_legacy_path_owned_by_another_record(
+    kb_client, monkeypatch, target
+):
+    client, db = kb_client
+    owner, headers = _owner(db)
+    versions_root = api.app.state.document_versions_root
+    kb_root = api.app.state.kb_files_root
+    kb_id = "kb_legacy_owner_boundary"
+    first_id, first_paths, _first_legacy = _existing_document(
+        db, owner, kb_id, "first.txt", versions_root, kb_root
+    )
+    victim_kb = "kb_victim" if target == "other_kb" else kb_id
+    victim_name = "victim.txt" if target == "other_kb" else "sibling.txt"
+    victim_id, _victim_versions, victim_legacy = _existing_document(
+        db, owner, victim_kb, victim_name, versions_root, kb_root
+    )
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE kb_documents SET file_path = ? WHERE id = ?",
+            (str(victim_legacy), first_id),
+        )
+    manager_calls = []
+    monkeypatch.setattr(
+        "rag.routers.knowledge.KnowledgeBaseManager.remove_document",
+        lambda *_args: manager_calls.append("removed"),
+    )
+
+    response = client.delete(
+        f"/knowledge-bases/{kb_id}/documents/first.txt", headers=headers
+    )
+
+    assert response.status_code == 400
+    assert manager_calls == []
+    assert all(path.exists() for path in first_paths)
+    assert victim_legacy.exists()
+    assert db.get_kb_document(kb_id, "first.txt") is not None
+    assert db.get_kb_document(victim_kb, victim_name)["id"] == victim_id
+
+
+def test_delete_kb_prevalidates_every_document_owner_before_side_effects(
+    kb_client, monkeypatch
+):
+    client, db = kb_client
+    owner, headers = _owner(db)
+    versions_root = api.app.state.document_versions_root
+    kb_root = api.app.state.kb_files_root
+    kb_id = "kb_bulk_owner_boundary"
+    first_id, first_paths, _first_legacy = _existing_document(
+        db, owner, kb_id, "first.txt", versions_root, kb_root
+    )
+    second_id, second_paths, _second_legacy = _existing_document(
+        db, owner, kb_id, "second.txt", versions_root, kb_root
+    )
+    first_permission = db.get_document_permission("first.txt", kb_id)
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE document_versions SET file_path = ? WHERE id = ("
+            "SELECT MIN(id) FROM document_versions WHERE document_id = ?)",
+            (str(second_paths[0]), first_permission["id"]),
+        )
+    manager_calls = []
+
+    class Manager:
+        def remove_document(self, *_args):
+            manager_calls.append("document")
+
+        def delete_kb(self, _kb_id):
+            manager_calls.append("collection")
+
+    monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", Manager)
+    response = client.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+    assert response.status_code == 400
+    assert manager_calls == []
+    assert all(path.exists() for path in first_paths + second_paths)
+    assert db.get_document_permission("first.txt", kb_id) is not None
+    assert db.get_document_permission("second.txt", kb_id) is not None
+    assert db.get_kb_document(kb_id, "first.txt")["id"] == first_id
+    assert db.get_kb_document(kb_id, "second.txt")["id"] == second_id
+
+
+def test_document_delete_removes_real_legacy_path_and_keeps_siblings(
+    kb_client, monkeypatch
+):
+    client, db = kb_client
+    owner, headers = _owner(db)
+    versions_root = api.app.state.document_versions_root
+    kb_root = api.app.state.kb_files_root
+    kb_id = "kb_legacy_delete"
+    document_id, version_paths, legacy_path = _existing_document(
+        db, owner, kb_id, "legacy.txt", versions_root, kb_root
+    )
+    sibling_id, _sibling_versions, sibling_legacy = _existing_document(
+        db, owner, kb_id, "sibling.txt", versions_root, kb_root
+    )
+    _other_document_id, _other_versions, other_legacy = _existing_document(
+        db, owner, "kb_legacy_other", "other.txt", versions_root, kb_root
+    )
+    with db.locked_transaction() as conn:
+        conn.execute(
+            "UPDATE kb_documents SET file_path = ? WHERE id = ?",
+            (str(legacy_path), document_id),
+        )
+    monkeypatch.setattr(
+        "rag.routers.knowledge.KnowledgeBaseManager.remove_document",
+        lambda *_args: None,
+    )
+
+    response = client.delete(
+        f"/knowledge-bases/{kb_id}/documents/legacy.txt", headers=headers
+    )
+
+    assert response.status_code == 200
+    assert not legacy_path.exists()
+    assert all(not path.exists() for path in version_paths)
+    assert sibling_legacy.exists()
+    assert other_legacy.exists()
+    assert db.get_kb_document(kb_id, "sibling.txt")["id"] == sibling_id
+    assert db.get_kb_document("kb_legacy_other", "other.txt") is not None
 
 
 @pytest.mark.parametrize("entry", ["upload", "link"])
