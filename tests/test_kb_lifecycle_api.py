@@ -60,7 +60,54 @@ def test_failed_kb_delete_keeps_tombstone_and_retry_identity(
     assert db.get_kb_lifecycle("kb_delete_retry_api")["state"] == "deleted"
 
 
-def test_kb_delete_removes_only_owned_material_staging_and_preserves_history(
+def test_delete_rechecks_management_authorization_inside_worker_before_tombstone(
+    isolated_api, make_user, monkeypatch
+):
+    owner, headers = make_user("revoked-manager")
+    db = isolated_api.app.state.user_db
+    kb_id = "kb_revoke_before_worker"
+    db.create_kb_metadata(kb_id, "Revoked", owner["id"], "private")
+    kb_document_id = db.create_kb_document_pending(kb_id, "preserve.txt")
+    kb_root = Path(isolated_api.app.state.kb_files_root)
+    stored_file = kb_root / kb_id / str(kb_document_id) / "preserve.txt"
+    stored_file.parent.mkdir(parents=True, exist_ok=True)
+    stored_file.write_text("keep during revoked request", encoding="utf-8")
+    db.finish_kb_document(kb_document_id, str(stored_file), "[]", "keep", 0)
+
+    authorization_calls = []
+    import rag.routers.knowledge as knowledge
+
+    def revoke_after_route_check(_db, _kb_id, _actor, *, allow_deleting=False):
+        authorization_calls.append(allow_deleting)
+        if len(authorization_calls) == 1:
+            return {"kb_id": kb_id, "owner_id": owner["id"]}
+        raise HTTPException(status_code=403, detail="管理权限已撤销")
+
+    manager_calls = []
+
+    class Manager:
+        def remove_document(self, *_args):
+            manager_calls.append("document")
+
+        def delete_kb(self, _kb_id):
+            manager_calls.append("collection")
+
+    monkeypatch.setattr(knowledge, "require_kb_administer", revoke_after_route_check)
+    monkeypatch.setattr(knowledge, "KnowledgeBaseManager", Manager)
+
+    response = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "管理权限已撤销"
+    assert authorization_calls == [True, True]
+    assert db.get_kb_lifecycle(kb_id) is None
+    assert db.get_kb_metadata(kb_id) is not None
+    assert db.get_kb_document(kb_id, "preserve.txt") is not None
+    assert stored_file.read_text(encoding="utf-8") == "keep during revoked request"
+    assert manager_calls == []
+
+
+def test_kb_delete_removes_only_owned_material_staging(
     isolated_api, make_user, monkeypatch, tmp_path
 ):
     owner, headers = make_user("staging-owner")
@@ -292,6 +339,16 @@ def test_upload_holds_admission_until_directory_and_version_are_committed(
     db = isolated_api.app.state.user_db
     kb_id = "kb_upload_admission"
     db.create_kb_metadata(kb_id, "Admission", owner["id"], "private")
+    from qdrant_client.models import Distance, VectorParams
+
+    from config import settings
+    from rag.vector_store import _get_client
+
+    vector_client = _get_client()
+    vector_client.create_collection(
+        collection_name=kb_id,
+        vectors_config=VectorParams(size=settings.embed_dimension, distance=Distance.COSINE),
+    )
     entered = threading.Event()
     release = threading.Event()
     import rag.routers.knowledge as knowledge
@@ -311,7 +368,7 @@ def test_upload_holds_admission_until_directory_and_version_are_committed(
             return None
 
         def delete_kb(self, _kb_id):
-            return None
+            vector_client.delete_collection(_kb_id)
 
     monkeypatch.setattr(knowledge, "ingest_document_version", blocked_ingest)
     monkeypatch.setattr(knowledge, "KnowledgeBaseManager", Manager)
@@ -334,3 +391,4 @@ def test_upload_holds_admission_until_directory_and_version_are_committed(
     assert db.get_kb_document(kb_id, "report.txt")["status"] == "indexed"
     assert isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers).status_code == 200
     assert db.get_document_permission("report.txt", kb_id) is None
+    assert not vector_client.collection_exists(kb_id)

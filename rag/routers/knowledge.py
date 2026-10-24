@@ -341,6 +341,7 @@ async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depen
 
     def _delete_worker():
         with kb_mutation(user_db, kb_id, mode="delete") as permit:
+            require_kb_administer(user_db, kb_id, user, allow_deleting=True)
             permit.begin_delete()
             try:
                 permit.assert_delete_started()
@@ -388,6 +389,8 @@ async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depen
         await asyncio.to_thread(_delete_worker)
     except KBLifecycleError as exc:
         raise lifecycle_http_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("KB deletion cleanup failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=503, detail="知识库删除未完成，请重试。", headers={"X-KB-Lifecycle-Error": "knowledge_base_delete_incomplete"}) from exc
