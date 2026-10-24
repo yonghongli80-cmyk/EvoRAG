@@ -484,8 +484,9 @@ class DocRepository(BaseRepository):
                 "SELECT kb_id FROM document_permissions WHERE id = ?",
                 (document_id,),
             ).fetchone()
-            if permission is not None:
-                assert_kb_available_in_tx(conn, permission["kb_id"])
+            if permission is None:
+                raise VersionConflict("document permission no longer exists")
+            assert_kb_available_in_tx(conn, permission["kb_id"])
             row = conn.execute(
                 "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no "
                 "FROM document_versions WHERE document_id = ?",
@@ -514,10 +515,11 @@ class DocRepository(BaseRepository):
             "SELECT kb_id FROM document_permissions WHERE id = ?",
             (document_id,),
         ).fetchone()
-        if permission is not None:
-            assert_kb_available_in_tx(conn, permission["kb_id"])
-            if permission["kb_id"] != kb_id:
-                raise VersionConflict("document knowledge base changed")
+        if permission is None:
+            raise VersionConflict("document permission no longer exists")
+        assert_kb_available_in_tx(conn, permission["kb_id"])
+        if permission["kb_id"] != kb_id:
+            raise VersionConflict("document knowledge base changed")
         conn.execute(
             "UPDATE document_versions SET status='historical', superseded_at=? "
             "WHERE document_id=? AND status='current'",

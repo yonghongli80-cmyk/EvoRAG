@@ -187,6 +187,48 @@ def test_repository_document_writers_reject_a_tombstoned_kb(tmp_path):
         db.close()
 
 
+def test_version_reservation_rejects_missing_document_permission(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    owner_id = db.create_user("owner", "Password-123!")
+
+    try:
+        with pytest.raises(VersionConflict, match="document permission no longer exists"):
+            db.create_document_version(
+                99999, "missing.pdf", "missing.pdf", "hash", owner_id
+            )
+
+        assert db.list_document_versions(99999) == []
+    finally:
+        db.close()
+
+
+def test_version_activation_rejects_missing_document_permission_without_mutating(
+    tmp_path,
+):
+    db = UserDB(tmp_path / "users.db")
+    owner_id = db.create_user("owner", "Password-123!")
+    with db.cm.write_connection() as conn:
+        conn.execute("PRAGMA foreign_keys=OFF")
+        version_id = conn.execute(
+            "INSERT INTO document_versions "
+            "(document_id, version_no, original_filename, file_path, content_hash, uploaded_by, status) "
+            "VALUES (99999, 1, 'orphan.pdf', 'orphan.pdf', 'hash', ?, 'staging')",
+            (owner_id,),
+        ).lastrowid
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=ON")
+
+    try:
+        with pytest.raises(VersionConflict, match="document permission no longer exists"):
+            db.activate_document_version(
+                99999, version_id, "kb_missing", "orphan.pdf"
+            )
+
+        assert db.get_document_version_by_id(version_id)["status"] == "staging"
+    finally:
+        db.close()
+
+
 def test_document_version_startup_migration_skips_tombstoned_kb(tmp_path):
     db = UserDB(tmp_path / "users.db")
     second = UserDB(tmp_path / "users.db")
