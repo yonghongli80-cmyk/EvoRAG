@@ -56,6 +56,16 @@ def create_tables(conn: sqlite3.Connection) -> None:
             created_at TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS kb_lifecycle (
+            kb_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('deleting', 'deleted')),
+            delete_token TEXT,
+            generation INTEGER NOT NULL,
+            requested_at REAL NOT NULL,
+            deleted_at REAL,
+            last_error_code TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS kb_documents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             kb_id TEXT NOT NULL,

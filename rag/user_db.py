@@ -30,6 +30,7 @@ from rag.repositories.analysis_repo import (
     _SENSITIVE_CONFIG_HINTS,
     _mask_url_credentials,
 )
+from rag.repositories.kb_lifecycle_repo import KBLifecycleRepository
 
 __all__ = [
     "UserDB",
@@ -81,6 +82,7 @@ class UserDB:
         self.spreadsheet_repo = SpreadsheetRepository(self.cm, db=self)
         self.material_repo = MaterialRepository(self.cm, db=self)
         self.analysis_repo = AnalysisRepository(self.cm, db=self)
+        self.kb_lifecycle_repo = KBLifecycleRepository(self.cm, db=self)
 
     # ------------------------------------------------------------------
     # Transaction helpers & Lifecycle
@@ -156,6 +158,9 @@ class UserDB:
     def get_kb_metadata(self, kb_id: str) -> dict[str, Any] | None:
         """获取 KB 元数据。不存在返回 None。"""
         return self.doc_repo.get_kb_metadata(kb_id)
+
+    def get_kb_lifecycle(self, kb_id: str) -> dict[str, Any] | None:
+        return self.kb_lifecycle_repo.get(kb_id)
 
     def create_kb_document_pending(self, kb_id: str, filename: str) -> int:
         return self.doc_repo.create_kb_document_pending(kb_id, filename)
