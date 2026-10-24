@@ -104,14 +104,14 @@
 - [ ] Step 3: 运行缓存/就绪/日志相关定向回归，保留 GREEN；不连接真实Redis。
 - [ ] Step 4: 主代理审核任务 diff 后仅提交白名单文件。
 
-### Task 7: Check deployment binding after successful update
+### Task 7: Check updated deployment binding and propagate failures
 
 **Files:** Modify `deploy.sh`; Test `tests/test_deploy_script_health.py`。
 
-**Interfaces:** 保持main的require/env/harden/build/backup/up/health语义，只在maybe_pull成功后执行check_port_binding。
+**Interfaces:** 保持main成功部署的require/env/harden/build/backup/up/health顺序与告警策略，在maybe_pull成功后执行check_port_binding。各前置阶段须显式传播非零结果，不能依赖在`if ! main`调用上下文中被抑制的set -e；start_stack内up失败也必须在ps之前返回。
 
-- [ ] Step 1: 在临时目录source脚本并stub部署外部命令；maybe_pull将合成Compose从loopback更新为全网卡，断言实际本轮告警反映更新后内容；pull失败不得进入build/up。先保存 RED。
-- [ ] Step 2: 移动检查顺序，保留告警而非擅自阻断的契约。
+- [ ] Step 1: 在临时目录source脚本并stub部署外部命令；maybe_pull将合成Compose从loopback更新为全网卡，断言实际本轮告警反映更新后内容。以真实入口`if ! main`语境覆盖require、pull、build、backup、up失败，验证失败返回非零且后续部署/成功提示不发生；up失败后ps不能掩盖错误。先保存 RED。主代理离线probe已证明pull/backup失败仍up且exit0（audit/deploy-*-failure-probe.log）。
+- [ ] Step 2: 移动检查顺序并增加阶段失败显式传播，保留端口告警而非擅自阻断的契约。
 - [ ] Step 3: `PY -m pytest tests/test_deploy_script_health.py -q` GREEN；脚本静态语法检查通过，不真实运行deploy/git pull/Docker。
 - [ ] Step 4: 主代理审核任务 diff 后仅提交白名单文件。
 
