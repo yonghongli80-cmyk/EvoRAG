@@ -66,27 +66,27 @@
 
 ### Task 3: Shared version, batch and spreadsheet writers
 
-**Files:** Modify rag/document_versions.py, rag/document_version_store.py, rag/batch_importer.py, rag/repositories/doc_repo.py, rag/spreadsheets/edit_service.py, rag/spreadsheets/api.py, rag/org_auth/seed.py; Create tests/test_kb_lifecycle_writers.py；相关既有version/batch/spreadsheet测试按实际调用面补充，不能改公共conftest。
+**Files:** Modify rag/document_versions.py, rag/document_version_store.py, rag/batch_importer.py, rag/repositories/doc_repo.py, rag/spreadsheets/edit_service.py, rag/spreadsheets/api.py, rag/spreadsheets/migration.py, rag/org_auth/seed.py, rag/org_auth/migration.py; Create tests/test_kb_lifecycle_writers.py；相关既有version/batch/spreadsheet测试按实际调用面补充，不能改公共conftest。
 
 **Interfaces consumed:** Task1 kb_mutation、事务内可用性检查、HTTP映射；Task2不依赖本任务新签名。既有ingest/promote/batch返回契约保持。
 
-- [ ] Step 1: RED证明common ingest、custom BatchImporter、表格编辑/restore遇删除意图仍能创建/激活；另证明组织seed遇墓碑ID时不会重新插入metadata/policy；用两连接真实SQLite与合成文件，不以mock存在性作为断言。
-- [ ] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。新增doc owner staging目录支持（`stage_version(...,document_id=None)`可选参数，原默认兼容）；新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
-- [ ] Step 3: document permission/version预留、激活、create_kb_metadata、finish_kb_document在短事务内加墓碑fence；finish匹配零行抛冲突不假成功。低层repo只SQL检查，不在持DB事务时反向拿文件锁。组织seed保持离线维护入口，在插入KB metadata/policy的事务中调用assert_kb_available_in_tx(conn,kb_id)，遇墓碑整体回滚。
-- [ ] Step 4: 表格service入口覆盖全部实际写入，保留edit session/base-version CAS、rollback和rag_docs/文档ACL；API映射错误正确。
+- [ ] Step 1: RED证明common ingest、custom BatchImporter、表格编辑/restore及启动中的旧版本/表格迁移遇删除意图仍不能创建或激活；另证明组织seed/legacy-policy迁移遇墓碑ID时不会重新插入metadata/policy；用两连接真实SQLite与合成文件，不以mock存在性作为断言。
+- [ ] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。migrate_existing_document_versions与migrate_staged_document_versions按每个权限记录的kb_id取得准入后再读写行/文件，保留api.py现有启动调用顺序；新增doc owner staging目录支持（stage_version(...,document_id=None)可选参数，原默认兼容），新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
+- [ ] Step 3: document permission/version预留、激活、create_kb_metadata、finish_kb_document在短事务内加墓碑fence；finish匹配零行抛冲突不假成功。低层repo只SQL检查，不在持DB事务时反向拿文件锁。组织seed保持离线维护入口；seed和migrate_legacy_knowledge_bases在插入KB metadata/policy的事务中调用assert_kb_available_in_tx(conn,kb_id)，遇墓碑整笔事务回滚或安全跳过。
+- [ ] Step 4: 表格service入口和migrate_existing_spreadsheets逐KB覆盖全部实际文件/registry/mirror写入，保留edit session/base-version CAS、rollback和rag_docs/文档ACL；API映射错误正确。
 - [ ] Step 5: 新用例及version/batch/spreadsheet既有定向GREEN，根提交并fresh审查。
 
 ### Task 4: Materials, archives and background jobs
 
-**Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive测试可调整。
+**Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/materials/migration.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive测试可调整。
 
 **Interfaces consumed:** Task1 gate/fence/errors；Task3既有promote函数签名保持；Task5 WikiIndexer生产实例显式 user_db=db（同接口契约并行开发，组合测试待Task5实现落盘后运行）。**Produced:** UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int，只将匹配page IDs且job_scope=wiki的active任务置cancelled并清lease。
 
 - [ ] Step 1: RED覆盖材料custom KB无policy跳过编辑授权、deleting/deleted上传/归档确认、在途index/repair/purge与删除交错、busy后job不丢失或反复复活。
-- [ ] Step 2: 自定义KB全部走现有require_kb_edit，rag_docs保留特例。保持分块/大小限制；不在async coroutine中持生命周期permit。所有KB外部写由实际同步worker在同一准入内完成，不能为了锁无界buffer文件。自定义KB未取得doc id的材料staging放在 versions_root/staging/kb/<sha256(kb_id)>/，保护尚未建身份时的崩溃文件归属；原staging函数新增可选kb_id参数，默认系统路径不变。
+- [ ] Step 2: 自定义KB全部走现有require_kb_edit，rag_docs保留特例。保持分块/大小限制；不在async coroutine中持生命周期permit。所有KB外部写由实际同步worker在同一准入内完成，不能为了锁无界buffer文件。migrate_material_metadata也按document permission的kb_id逐条取得准入，在短事务内fence后再补FTS/逻辑metadata。自定义KB未取得doc id的材料staging放在 versions_root/staging/kb/<sha256(kb_id)>/，保护尚未建身份时的崩溃文件归属；原staging函数新增可选kb_id参数，默认系统路径不变。
 - [ ] Step 3: Archive upload/confirm、worker完整执行/补偿/状态完成覆盖scope。busy任务以CAS安全重排，不能把已取消job改回queued；deleting/deleted任务取消且不触向量/激活。permit在真正worker退出前一直有效，保留最新版本/权限/session CAS。Wiki retry worker由UserDB读取page所属KB，在一个同步worker准入下重新读取page并索引；墓碑后不得写向量或settle成重试。
 - [ ] Step 4: 生产Wiki retry实例传user_db并与Task5接口协作；取消Wiki job在清Wiki身份前可完成且不误取消别库任务。
-- [ ] Step 5: 材料/归档/worker及两份真实脱敏缺失fixture保持原跳过原因，定向GREEN，根提交并fresh审查。
+- [ ] Step 5: 材料/归档/worker与启动迁移定向GREEN；两份真实脱敏缺失fixture保持原跳过原因，根提交并fresh审查。
 
 ### Task 5: Wiki mutation and retry admission
 
