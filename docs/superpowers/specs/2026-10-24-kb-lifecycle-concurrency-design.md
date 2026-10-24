@@ -32,7 +32,7 @@
 2. 读取全部目标KB文档身份，而不只kb_documents；枚举immutable版本、可证明归属的staging、legacy KB文件、结构化数据集、Wiki页面/修订、后台任务。先校验所有路径的根和owner归属，再进行任何删除。
 3. 短事务写入deleting和删除token/generation。按全部document permission IDs取消job_scope=material的active index/purge任务，按Wiki page IDs取消job_scope=wiki的active retry；不能误取消别的KB或同数值ID的另一scope。任务完成/取消状态均在共享KB gate内更新。
 4. 在事务外幂等移除该collection和所有已验证归属的文件/数据集/Wiki内容；仅在已有删除意图的恢复路径中把资源已不存在当成已清理。任何失败不得返回deleted，保持可恢复deleting。
-5. 全部外部清理成功后，同一短事务删除剩余目标关系数据并把墓碑置deleted。提交失败整体回滚关系数据/状态。以后读写均拒绝墓碑KB；不让缓存pipeline或Wiki重试重建它。
+5. 全部外部清理成功后，同一短事务删除目标关系行与派生索引/指纹/归档工作流记录、KB shares/org policy/metadata，并把墓碑置deleted。保留answer_citations、比较快照、material/org审计与知识反馈历史，保持现有聊天历史语义。提交失败整体回滚关系数据/状态。以后读写均拒绝墓碑KB；不让缓存pipeline或Wiki重试重建它。
 
 不自动扫除归属不明的历史staging或业务孤儿文件，不改变聊天历史保留策略，不用删除其他KB的数据换取通过。已注册的新staging应带document owner目录，崩溃后能被该文档/KB的删除恢复处理。
 
