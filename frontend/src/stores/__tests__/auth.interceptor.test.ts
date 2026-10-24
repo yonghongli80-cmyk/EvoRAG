@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AxiosAdapter, InternalAxiosRequestConfig } from 'axios'
 
+vi.mock('element-plus', () => ({
+  ElMessage: { error: vi.fn() },
+}))
+
 let api: typeof import('../../utils/api').default
 let useAuthStore: typeof import('../auth').useAuthStore
 let AxiosError: typeof import('axios').AxiosError
