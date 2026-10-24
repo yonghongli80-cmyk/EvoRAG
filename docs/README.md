@@ -7,6 +7,8 @@
 ## 当前有效入口
 
 - `handoff-2026-10-24.md`：当前交接，包含复查待办闭环、锁环境、候选竞态修复、宿主Docker修复与实际验收状态。
+- `reviews/2026-10-24-real-model-p99.md`：真实模型200条合成资料基线、阶段/外呼与metrics对齐、少量参数/连接对照及适用边界。
+- `superpowers/plans/2026-10-24-real-model-p99.md`：本次隔离运行验收计划与执行状态。
 - `reviews/2026-10-24-handoff.md`：凌晨Gitee交付的原始交接及两轮修复证据口径。
 - `handoff-2026-10-23.md`：前次交接，保留SSH/双远端、关键行为和pipeline整改历史。
 - `superpowers/plans/2026-10-24-review-backlog.md`：本轮逐项执行计划，当前状态以新交接和实际验证为准。

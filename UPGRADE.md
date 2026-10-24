@@ -1,6 +1,6 @@
 # RAGv3 生产化升级方案（多实例）
 
-> **状态：Phase 0 分段计时与日志上下文已落地，真实模型/业务负载验收待执行；Phase 1 配置与独立合成运行验收已完成，用户业务存量迁移未执行。** 日期：2026-10-24。
+> **状态：Phase 0 观测与真实模型合成资料基线已完成，真实业务分布/容量/稳定SLO仍待验收；Phase 1 配置与独立合成运行验收已完成，用户业务存量迁移未执行。** 日期：2026-10-24。
 > 2026-10-24 复查待办、独立锁环境、宿主Docker当前修复与新验收口径见 [`docs/handoff-2026-10-24.md`](docs/handoff-2026-10-24.md)；下文带日期的探测/基线为历史事实。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
 > 单机缺陷的修复见 [`docs/superpowers/plans/2026-10-21-unified-remediation.md`](docs/superpowers/plans/2026-10-21-unified-remediation.md)。
@@ -79,7 +79,7 @@ Client ──TLS──> LB / Reverse Proxy
   P95 13s、P99 19s、QPS 1.7。混合负载受 LLM 生成主导。
 - **[x] 压测档案**：`docs/phase0-observability-and-baseline.md` 第 3 节给出 locust/benchmark
   的固定命令、CSV 百分位列、记录模板与上面两条已记录基线，并明确 benchmark 只输出
-  P50/P95、不反推 P99。本次未重跑压测，不补数字。
+  P50/P95、不反推 P99。历史基线保留原口径；10月24日新完成的真实模型200条基线见专项报告。
 - **[x] `/ready`**（只读依赖就绪）：SQLite `SELECT 1`、Qdrant 集合可列举、Redis 已配置时 ping；
   未就绪 503 + 组件状态，不泄露异常文本；`/health` 契约保持不变（容器 healthcheck 继续用它）。
 - **[x] `/metrics`**（只读，管理员鉴权）：Prometheus 文本格式，输出请求量/延迟（P50/P95/P99）、
@@ -91,8 +91,9 @@ Client ──TLS──> LB / Reverse Proxy
 - **[x] 结构化日志补 `request_id`、`kb_id`、`route`（已并入 main）**：JSON/文本统一三个字段，
   route 为有界逻辑路由；请求、流式逐次推进、线程与 shadow worker 作用域隔离，结束后恢复。
   shadow 只传日志标识，保留业务 ContextVar 隔离；不增加 Prometheus 高基数标签。
-- **验收**：同一压测脚本在单机产出稳定 P99（**部分达成**：命令与历史档案已就绪，本轮未重跑压测）；
+- **验收状态**：真实模型、合成资料、串行200条基线已采集：P50 3.109s、P95 4.422s、P99 5.016s、最大22.609s，HTTP/事实/来源检查均0失败；稳定业务SLO仍待独立验收。
   检索、准备、重排与最终 RAG 生成可分别观测，新计时代码用离线确定性回归验证。
+  实际运行的准备/生成分段与模型外呼已对齐；传统rerank本轮未触发，详见 [`docs/reviews/2026-10-24-real-model-p99.md`](docs/reviews/2026-10-24-real-model-p99.md)。
 - **回滚**：只增观测，无行为变化（`/health` 不变，新增端点只读）。
 
 ### Phase 1：Qdrant server（2–3 天）
@@ -108,8 +109,9 @@ Client ──TLS──> LB / Reverse Proxy
   应用通过 `RAG_QDRANT_URL` 切换，默认空仍连本地目录；旧 `qdrant_data` 卷保留用于回滚。
 - **[ ] 迁移**：对每个集合做 snapshot/restore（或 scroll + upsert），迁移后比对点数与抽样召回。
   **用户业务存量迁移未执行**；Docker当前探测、宿主修复及隔离合成验收见10月24日交接，不能用早期daemon失败代表当前条件。
-- **验收**（全部待 Docker 可用后验证）：两个 API 进程可同时检索/写入，不再有目录锁；
-  同一问题 top-5 与迁移前一致；`scripts/verify_structured_schema_mirror.py` 与基准可不停服务运行。
+- **验收状态（2026-10-24）**：此前独立合成环境已验证认证、持久化、迁移点数/固定向量 top-5、
+  双应用 remote 就绪及容器辅助进程共享写读，详见当天交接。业务存量切换后的召回、
+  脚本与完整多副本业务一致性仍需实际环境验证，不能据合成结果标为已上线。
 - **回滚**：清空 `RAG_QDRANT_URL` 回到本地目录（迁移期间保留旧目录只读副本）。
 - **历史阻塞事实（2026-10-22）**：当时`docker` daemon 不可用；`docker-compose.yml` 通过了 YAML 解析、
   静态断言与 `docker compose config`（用占位 `REDIS_PASSWORD`/`QDRANT_API_KEY` 做插值校验，
@@ -126,7 +128,7 @@ Client ──TLS──> LB / Reverse Proxy
   中文分词需要 `zhparser`/`pg_jieba` 或应用层分词（先用应用层，降低运维依赖）。
 - 连接层：`ConnectionManager` 抽成协议，新增 Postgres 实现（连接池、事务、只读副本）。
 - 迁移路径：双写 → 回填 → 影子读比对 → 切读 → 切写 → 保留 SQLite 只读回滚窗口。
-- **验收**：全量 2313 用例在 Postgres 下通过；并发压测无锁等待；备份/恢复演练通过；
+- **验收**：迁移时的完整后端用例在 Postgres 下通过；并发压测无锁等待；备份/恢复演练通过；
   `kb/documents/versions/structured/wiki/evolution` 计数与 SQLite 一致。
 - **回滚**：保留 SQLite 快照；切写开关可回退；不接受“迁移脚本单向不可逆”。
 
@@ -184,9 +186,9 @@ Client ──TLS──> LB / Reverse Proxy
 
 | 阶段 | 硬指标 | 测试 | 回滚 |
 | --- | --- | --- | --- |
-| 0 观测 | 直接分段已落地；新负载 P99 与部署采样待验收 | 历史压测档案 + `/ready` `/metrics` + 离线计时回归 | 无 |
+| 0 观测 | 真实模型/合成资料200条基线P99 5.016s；业务分布与SLO待验 | 原始请求/模型/trace对齐 + 管理员metrics实测 + 历史档案 | 无 |
 | 1 Qdrant | 双进程并发；top-5 一致（配置面已就绪，实际运行验收以10月24日当前交接为准） | 检索回归 + 基准 | 清空 URL |
-| 2 Postgres | 2313 用例通过；并发无锁；恢复演练 | 全量 + 迁移比对 | 切回 SQLite |
+| 2 Postgres | 迁移时完整后端用例通过；并发无锁；恢复演练 | 全量 + 迁移比对 | 切回 SQLite |
 | 3 Redis | 跨副本改写一致；故障降级 | 多副本集成 + 断网 | backend=memory |
 | 4 对象存储 | 大文件/断点/删除 | 集成 + 恢复 | 本地适配器 |
 | 5 多副本 | 滚动发布零 5xx；worker 不重复 | 发布演练 | 副本数回 1 |
@@ -222,9 +224,9 @@ Client ──TLS──> LB / Reverse Proxy
 ## 8. 下一步
 
 1. Phase 0 直接 rerank/generation 分段已补齐；日志上下文与最终集成结果见本轮
-   `docs/superpowers/plans/2026-10-23-pipeline-observability.md`，仍需部署采样及新的 P99 验收。
-2. **在有 Docker daemon 的环境**按 `docs/phase0-observability-and-baseline.md` 4.3 完成 Qdrant
-   迁移与双进程验收；验收不过不进 Phase 2。
+   `docs/superpowers/plans/2026-10-23-pipeline-observability.md`；真实模型合成基线与受控诊断见10月24日专项报告，真实业务分布/容量与SLO仍待部署验收。
+2. Qdrant独立合成运行验收已通过；业务存量按 `docs/phase0-observability-and-baseline.md` 4.3
+   备份、安排停写、逐集合比对及准备回滚，不能把合成通过视为业务切换完成。
 3. 单机修复（统一修复计划）全部验收通过后，再开 Phase 2；每个阶段单独分支/提交，
    验收记录写入 `docs/development-log.md`。
 
