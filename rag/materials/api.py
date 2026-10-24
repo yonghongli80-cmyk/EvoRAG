@@ -8,6 +8,7 @@ Exception strings and physical paths never leak into responses.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -25,6 +26,8 @@ from rag.api_security import (
 )
 from rag.document_versions import VersionPromotionError, promote_staged_version
 from rag.generator import StructuredOutputError
+from rag.kb_lifecycle import KBLifecycleError, assert_kb_available, kb_mutation
+from rag.kb_lifecycle_http import lifecycle_http_error
 from rag.materials.archives import (
     ArchiveConfirmationError,
     ArchiveLimits,
@@ -215,9 +218,13 @@ async def upload_material(
     user: dict = Depends(require_user),
 ):
     db = get_user_db(request)
-    policy = OrgRepository(db).get_kb_policy(_kb_id(request))
-    if is_org_policy(policy):
-        require_kb_edit(db, _kb_id(request), user)
+    kb_id = _kb_id(request)
+    if kb_id != "rag_docs":
+        require_kb_edit(db, kb_id, user)
+    try:
+        assert_kb_available(db, kb_id)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     registry = build_default_format_registry()
     limits = _limits()
     try:
@@ -228,6 +235,7 @@ async def upload_material(
             _versions_root(request),
             registry,
             limits,
+            kb_id=kb_id if kb_id != "rag_docs" else None,
         )
     except MaterialTooLarge as exc:
         raise HTTPException(status_code=413, detail="material_too_large") from exc
@@ -235,45 +243,68 @@ async def upload_material(
     resolution = registry.resolve(staged.filename, staged.detected_mime, _read_signature(staged.path))
     if resolution.capability is not None and resolution.capability.archive_container:
         service = ArchiveService(db, _versions_root(request), registry, _archive_limits())
-        preview = service.upload_zip(staged.filename, _kb_id(request), user, staged.path)
-        _audit_org_material(db, user, "archive_uploaded", _kb_id(request))
+        try:
+            preview = await asyncio.to_thread(
+                service.upload_zip,
+                staged.filename,
+                kb_id,
+                user,
+                staged.path,
+            )
+        except KBLifecycleError as exc:
+            staged.path.unlink(missing_ok=True)
+            raise lifecycle_http_error(exc) from exc
+        finally:
+            staged.path.unlink(missing_ok=True)
+        _audit_org_material(db, user, "archive_uploaded", kb_id)
         return {
             "status": "awaiting_archive_confirmation",
             "manifest_id": preview.manifest_id,
             "filename": staged.filename,
         }
 
-    existing = db.get_document_permission(staged.filename, _kb_id(request))
-    created_document = existing is None
-    if existing is None:
-        document_id = db.create_document_permission(
-            staged.filename, _kb_id(request), user["id"], 1, False
-        )
-    else:
-        document_id = existing["id"]
-    # Promote before enqueueing: staging is transient and excluded from
-    # backups, so the committed version row must point at the final path.
-    try:
-        promoted = promote_staged_version(
-            db,
-            _versions_root(request),
-            document_id=document_id,
-            filename=staged.filename,
-            staged_path=staged.path,
-            content_hash=staged.sha256,
-            uploaded_by=user["id"],
-        )
-    except VersionPromotionError as exc:
-        if created_document:
+    def _promote_and_enqueue():
+        with kb_mutation(db, kb_id):
+            if kb_id != "rag_docs":
+                require_kb_edit(db, kb_id, user)
+            existing = db.get_document_permission(staged.filename, kb_id)
+            created_document = existing is None
+            if existing is None:
+                document_id = db.create_document_permission(
+                    staged.filename, kb_id, user["id"], 1, False
+                )
+            else:
+                document_id = existing["id"]
             try:
-                db.delete_document_permission(document_id)
-            except Exception:
-                logger.exception("material promotion rollback failed")
-        raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
-    enqueue_latest_index_job(
-        db, document_id, promoted.version_id, staged.sha256, time.time()
-    )
-    _audit_org_material(db, user, "document_uploaded", _kb_id(request))
+                promoted = promote_staged_version(
+                    db,
+                    _versions_root(request),
+                    document_id=document_id,
+                    filename=staged.filename,
+                    staged_path=staged.path,
+                    content_hash=staged.sha256,
+                    uploaded_by=user["id"],
+                )
+            except VersionPromotionError as exc:
+                if created_document:
+                    try:
+                        db.delete_document_permission(document_id)
+                    except Exception:
+                        logger.exception("material promotion rollback failed")
+                raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
+            enqueue_latest_index_job(
+                db, document_id, promoted.version_id, staged.sha256, time.time()
+            )
+            return document_id, promoted
+
+    try:
+        document_id, promoted = await asyncio.to_thread(_promote_and_enqueue)
+    except KBLifecycleError as exc:
+        staged.path.unlink(missing_ok=True)
+        raise lifecycle_http_error(exc) from exc
+    finally:
+        staged.path.unlink(missing_ok=True)
+    _audit_org_material(db, user, "document_uploaded", kb_id)
     return {
         "status": "queued",
         "document_id": document_id,
@@ -315,7 +346,10 @@ async def get_archive_manifest(request: Request, manifest_id: int, user: dict = 
         # to a shared-document viewer or disclose whether the container exists.
         raise HTTPException(status_code=404, detail="manifest_not_found")
     try:
-        require_doc_edit(db, container["doc_name"], container["kb_id"], user)
+        if container["kb_id"] != "rag_docs":
+            require_kb_edit(db, container["kb_id"], user)
+        else:
+            require_doc_edit(db, container["doc_name"], container["kb_id"], user)
     except HTTPException as exc:
         raise HTTPException(status_code=404, detail="manifest_not_found") from exc
     entries = db.list_material_archive_entries(manifest_id)
@@ -363,9 +397,13 @@ async def confirm_archive(
     container = db.get_document_permission_by_id(manifest["container_document_id"]) if manifest else None
     if container is None:
         raise HTTPException(status_code=404, detail="manifest_not_found")
-    require_doc_edit(db, container["doc_name"], container["kb_id"], user)
+    if container["kb_id"] != "rag_docs":
+        require_kb_edit(db, container["kb_id"], user)
+    else:
+        require_doc_edit(db, container["doc_name"], container["kb_id"], user)
     try:
-        result = confirm_archive_import(
+        result = await asyncio.to_thread(
+            confirm_archive_import,
             db,
             manifest_id,
             user,
@@ -378,6 +416,8 @@ async def confirm_archive(
         )
     except ArchiveConfirmationError as exc:
         _raise_archive_error(exc)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     _audit_org_material(db, user, "archive_confirmed", container["kb_id"])
     return {
         "status": result.status,
@@ -397,8 +437,9 @@ async def delete_material(request: Request, document_id: int, user: dict = Depen
         raise HTTPException(status_code=404, detail="document_missing")
     policy = OrgRepository(db).get_kb_policy(document["kb_id"])
     organization_authorized = is_org_policy(policy)
-    if organization_authorized:
+    if document["kb_id"] != "rag_docs":
         require_kb_edit(db, document["kb_id"], user)
+        organization_authorized = True
     elif not (
         user.get("is_admin")
         or user["id"] in {document["owner_id"], document.get("deleted_by")}
@@ -431,8 +472,9 @@ async def restore_material(
         raise HTTPException(status_code=404, detail="document_missing")
     policy = OrgRepository(db).get_kb_policy(document["kb_id"])
     organization_authorized = is_org_policy(policy)
-    if organization_authorized:
+    if document["kb_id"] != "rag_docs":
         require_kb_edit(db, document["kb_id"], user)
+        organization_authorized = True
     elif not (
         user.get("is_admin")
         or user["id"] in {document["owner_id"], document.get("deleted_by")}

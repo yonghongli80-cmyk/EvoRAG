@@ -21,8 +21,9 @@ from typing import Annotated
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from rag.api_security import require_doc_edit
+from rag.api_security import require_doc_edit, require_kb_edit
 from rag.generator import generate_structured
+from rag.kb_lifecycle import assert_kb_available_in_tx
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
@@ -257,6 +258,8 @@ class OrganizationService:
         if item.confidence < MIN_CONFIDENCE:
             return "low_confidence"
         try:
+            if doc["kb_id"] != "rag_docs":
+                require_kb_edit(self.db, doc["kb_id"], actor)
             require_doc_edit(self.db, doc["doc_name"], doc["kb_id"], actor)
         except HTTPException:
             return "permission_conflict"
@@ -294,6 +297,8 @@ class OrganizationService:
             if document is None:
                 continue
             try:
+                if document["kb_id"] != "rag_docs":
+                    require_kb_edit(self.db, document["kb_id"], actor)
                 require_doc_edit(
                     self.db, document["doc_name"], document["kb_id"], actor
                 )
@@ -349,6 +354,7 @@ class OrganizationService:
         ).fetchone()
         if doc is None:
             return self._conflict("document_missing", None, None)
+        assert_kb_available_in_tx(self.db._conn, str(doc["kb_id"]))
         if doc["deleted_at"] is not None:
             return self._conflict("deleted", doc["logical_path"], doc["tags_json"], doc["document_type"])
         if int(doc["id"]) not in authorized_ids:
@@ -461,9 +467,11 @@ class OrganizationService:
                     items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status=row["status"], reason_code=row["reason_code"]))
                     continue
                 current = self.db._conn.execute(
-                    "SELECT metadata_version, logical_path FROM document_permissions WHERE id=?",
+                    "SELECT metadata_version, logical_path, kb_id FROM document_permissions WHERE id=?",
                     (row["document_id"],),
                 ).fetchone()
+                if current is not None:
+                    assert_kb_available_in_tx(self.db._conn, str(current["kb_id"]))
                 if current is None or current["metadata_version"] != row["after_metadata_version"]:
                     items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="metadata_conflict", reason_code="changed_since"))
                     continue

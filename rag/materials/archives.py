@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rag.document_version_store import final_version_path
+from rag.kb_lifecycle import kb_mutation
 from rag.materials.formats import FormatCapabilityRegistry
 from rag.materials.jobs import enqueue_latest_index_job
 from rag.materials.models import FormatCapability
@@ -517,6 +518,53 @@ def confirm_archive_import(
     now: float | None = None,
     should_fail: Callable[[], bool] | None = None,
 ) -> ArchiveImportResult:
+    """Run confirmation under the owning KB's synchronous lifecycle permit."""
+    manifest = db.get_material_archive_manifest(manifest_id)
+    if manifest is None:
+        return _confirm_archive_import_under_gate(
+            db, manifest_id, actor, selected_entry_ids, expected_version,
+            idempotency_key, versions_root, registry, limits, now=now,
+            should_fail=should_fail,
+        )
+    container = db.get_document_permission_by_id(int(manifest["container_document_id"]))
+    if container is None:
+        return _confirm_archive_import_under_gate(
+            db, manifest_id, actor, selected_entry_ids, expected_version,
+            idempotency_key, versions_root, registry, limits, now=now,
+            should_fail=should_fail,
+        )
+    kb_id = str(container["kb_id"])
+    with kb_mutation(db, kb_id):
+        if kb_id != "rag_docs":
+            from fastapi import HTTPException
+
+            from rag.api_security import require_kb_edit
+
+            try:
+                require_kb_edit(db, kb_id, actor)
+            except HTTPException as exc:
+                raise ArchiveConfirmationError("no_edit_permission") from exc
+        return _confirm_archive_import_under_gate(
+            db, manifest_id, actor, selected_entry_ids, expected_version,
+            idempotency_key, versions_root, registry, limits, now=now,
+            should_fail=should_fail,
+        )
+
+
+def _confirm_archive_import_under_gate(
+    db: UserDB,
+    manifest_id: int,
+    actor: dict,
+    selected_entry_ids: tuple[int, ...],
+    expected_version: int,
+    idempotency_key: str,
+    versions_root: Path,
+    registry: FormatCapabilityRegistry,
+    limits: ArchiveLimits,
+    *,
+    now: float | None = None,
+    should_fail: Callable[[], bool] | None = None,
+) -> ArchiveImportResult:
     """Atomically activate the container and every changed child version.
 
     Idempotency is checked first so a replay never duplicates children.
@@ -545,9 +593,12 @@ def confirm_archive_import(
         raise ArchiveConfirmationError("container_missing")
     from fastapi import HTTPException
 
-    from rag.api_security import require_doc_edit
+    from rag.api_security import require_doc_edit, require_kb_edit
     try:
-        require_doc_edit(db, container["doc_name"], container["kb_id"], actor)
+        if container["kb_id"] != "rag_docs":
+            require_kb_edit(db, container["kb_id"], actor)
+        else:
+            require_doc_edit(db, container["doc_name"], container["kb_id"], actor)
     except HTTPException as exc:
         raise ArchiveConfirmationError("no_edit_permission") from exc
 
@@ -776,7 +827,19 @@ class ArchiveService:
         return False
 
     def upload_zip(self, filename: str, kb_id: str, actor: dict, source: Path) -> ArchiveManifestPreview:
+        with kb_mutation(self.db, kb_id):
+            if kb_id != "rag_docs":
+                from rag.api_security import require_kb_edit
+
+                require_kb_edit(self.db, kb_id, actor)
+            return self._upload_zip_under_gate(filename, kb_id, actor, source)
+
+    def _upload_zip_under_gate(
+        self, filename: str, kb_id: str, actor: dict, source: Path
+    ) -> ArchiveManifestPreview:
         quarantine_dir = self.versions_root / "staging"
+        if kb_id != "rag_docs":
+            quarantine_dir = quarantine_dir / "kb" / hashlib.sha256(kb_id.encode("utf-8")).hexdigest()
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         quarantine = quarantine_dir / f"{uuid.uuid4().hex}-{Path(filename).name}"
         shutil.copyfile(source, quarantine)

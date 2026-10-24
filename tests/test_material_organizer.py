@@ -22,6 +22,7 @@ class OrganizationFixture:
         self.db = db
         self.alice_id = db.create_user("alice", "Password-123!")
         self.hr_id = db.create_user("hr", "Password-123!")
+        db.create_kb_metadata("kb-1", "Organizer test KB", owner_id=self.alice_id)
         self.model = mock.MagicMock()
         self.service = OrganizationService(db, generate=self._generate)
         self.contract_id = self.seed("合同.pdf", owner="alice", logical_path="未整理")

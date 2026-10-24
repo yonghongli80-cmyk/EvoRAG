@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -627,6 +628,14 @@ class UserDB:
     def claim_material_jobs(self, worker_id: str, now: float, limit: int, lease_seconds: int) -> list[dict[str, Any]]:
         """Claim due, unlocked jobs with one compare-and-set update each."""
         return self.material_repo.claim_material_jobs(worker_id, now, limit, lease_seconds)
+
+    def cancel_material_jobs_for_documents(self, document_ids: Sequence[int]) -> int:
+        """Cancel active material jobs for these documents and clear their leases."""
+        return self.material_repo.cancel_material_jobs_for_documents(document_ids)
+
+    def cancel_wiki_reindex_jobs(self, page_ids: Sequence[int]) -> int:
+        """Cancel active Wiki retry jobs for these page IDs and clear their leases."""
+        return self.material_repo.cancel_wiki_reindex_jobs(page_ids)
 
     def create_material_archive_manifest(self, container_document_id: int, container_version_id: int, source_path: str, created_by: int, expires_at: float) -> int:
         return self.material_repo.create_material_archive_manifest(container_document_id, container_version_id, source_path, created_by, expires_at)

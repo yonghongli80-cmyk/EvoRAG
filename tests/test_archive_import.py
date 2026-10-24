@@ -71,6 +71,7 @@ def archive_service(tmp_path):
         limits=LIMITS,
     )
     user_id = db.create_user("alice", "Password-123!")
+    db.create_kb_metadata("kb-1", "Archive test KB", owner_id=user_id)
     service.actor = {"id": user_id, "username": "alice", "is_admin": False}
     return service
 

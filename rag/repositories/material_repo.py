@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from rag.repositories.base import BaseRepository
@@ -86,6 +87,37 @@ def ensure_organization_batch_item_columns(conn: sqlite3.Connection) -> None:
 
 class MaterialRepository(BaseRepository):
     """Handles index jobs, archive manifests, search FTS, and organization batches."""
+
+    def _cancel_active_jobs(self, job_scope: str, document_ids: Sequence[int]) -> int:
+        ids = sorted({int(document_id) for document_id in document_ids})
+        if not ids:
+            return 0
+
+        cancelled = 0
+        now = time.time()
+        with self.cm.transaction(immediate=True) as conn:
+            # Stay below SQLite's parameter limit while preserving one atomic
+            # cancellation boundary for this scope and ID set.
+            for start in range(0, len(ids), 500):
+                batch = ids[start : start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                cur = conn.execute(
+                    "UPDATE document_index_jobs "
+                    "SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL, updated_at=? "
+                    f"WHERE job_scope=? AND document_id IN ({placeholders}) "
+                    "AND status IN ('queued','retry','running')",
+                    (now, job_scope, *batch),
+                )
+                cancelled += cur.rowcount
+        return cancelled
+
+    def cancel_material_jobs_for_documents(self, document_ids: Sequence[int]) -> int:
+        """Cancel active material jobs for these document IDs, clearing leases."""
+        return self._cancel_active_jobs("material", document_ids)
+
+    def cancel_wiki_reindex_jobs(self, page_ids: Sequence[int]) -> int:
+        """Cancel active Wiki jobs for these page IDs, clearing leases."""
+        return self._cancel_active_jobs("wiki", page_ids)
 
     def enqueue_latest_index_job(
         self, document_id: int, version_id: int, content_hash: str, not_before: float

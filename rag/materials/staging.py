@@ -44,6 +44,8 @@ async def stream_upload_to_stage(
     root: Path,
     registry: FormatCapabilityRegistry,
     limits: MaterialLimits,
+    *,
+    kb_id: str | None = None,
 ) -> StagedMaterial:
     """Quarantine an upload stream under ``root/staging`` and hash it on the fly.
 
@@ -52,6 +54,8 @@ async def stream_upload_to_stage(
     """
     safe_name = Path(filename).name
     stage_dir = root / "staging"
+    if kb_id is not None:
+        stage_dir = stage_dir / "kb" / hashlib.sha256(kb_id.encode("utf-8")).hexdigest()
     stage_dir.mkdir(parents=True, exist_ok=True)
     stage = stage_dir / f"{uuid.uuid4().hex}-{safe_name}"
 

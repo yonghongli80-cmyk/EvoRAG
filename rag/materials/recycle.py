@@ -23,6 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from rag.kb_lifecycle import KBLifecycleError, assert_kb_available_in_tx
 from rag.user_db import UserDB
 
 RESTORE_WINDOW_SECONDS = 30 * 86400
@@ -98,6 +99,7 @@ def delete_to_recycle(
             doc = dict(row)
         else:
             doc = _require_edit(db, document_id, actor)
+        assert_kb_available_in_tx(db._conn, str(doc["kb_id"]))
         if doc["deleted_at"] is not None:
             raise RecycleError("already_deleted")
         expected = doc["metadata_version"]
@@ -141,6 +143,7 @@ def restore_from_recycle(
         ).fetchone()
         if doc is None:
             raise RecycleError("document_missing")
+        assert_kb_available_in_tx(db._conn, str(doc["kb_id"]))
         if doc["deleted_at"] is None:
             raise RecycleError("not_deleted")
         if now > (doc["restore_until"] or 0):
@@ -169,7 +172,7 @@ def restore_from_recycle(
             db._conn.execute(
                 "UPDATE document_index_jobs SET status='cancelled', lease_owner=NULL, "
                 "lease_expires_at=NULL, updated_at=? "
-                "WHERE document_id=? AND job_type=? "
+                "WHERE document_id=? AND job_type=? AND job_scope='material' "
                 "AND status IN ('queued','retry','running')",
                 (now, document_id, PURGE_JOB_TYPE),
             )
@@ -344,10 +347,14 @@ def enqueue_purge_job(
         if _has_active_purge_job(db, document_id, now, retry_cooldown):
             return None
         version = db._conn.execute(
-            "SELECT current_version_id FROM document_permissions WHERE id = ?",
+            "SELECT current_version_id, kb_id FROM document_permissions WHERE id = ?",
             (document_id,),
         ).fetchone()
         if version is None:
+            return None
+        try:
+            assert_kb_available_in_tx(db._conn, str(version["kb_id"]))
+        except KBLifecycleError:
             return None
         cursor = db._conn.execute(
             "INSERT INTO document_index_jobs "

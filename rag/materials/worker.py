@@ -29,6 +29,7 @@ from pathlib import Path
 
 from config import settings
 from rag.document_version_store import resolve_version_path
+from rag.kb_lifecycle import KBBusy, KBDeleted, KBDeleting, KBLifecycleError, kb_mutation
 from rag.materials.embedding_cache import EmbeddingCache
 from rag.materials.formats import FormatCapabilityRegistry
 from rag.materials.incremental import fingerprint_material
@@ -365,38 +366,120 @@ class MaterialWorker:
             renewal_thread = threading.Thread(target=_renew_lease, daemon=True)
             renewal_thread.start()
             try:
-                result = self._process(job, current)
-            except Exception:
-                logger.exception("material job %s failed", job["id"])
-                attempts_exhausted = job["attempt"] >= self.max_attempts
-                result = JobResult(
-                    job["id"],
-                    "failed" if attempts_exhausted else "retry",
-                    job["version_id"],
-                    0,
-                    0,
-                    "processing_failed",
-                )
-                if attempts_exhausted and (
-                    job.get("job_type") or MATERIAL_INDEX_JOB_TYPE
-                ) == MATERIAL_INDEX_JOB_TYPE:
-                    _exhaust_spreadsheet_job(job, self.services)
-                retry_at = None
-                if result.status == "retry":
-                    retry_at = time.time() + min(60, 2 ** job["attempt"])
-                self.services.db.settle_material_job(
-                    job["id"], self.worker_id, result.status, result.error_code, retry_at
-                )
-            else:
-                self.services.db.settle_material_job(
-                    job["id"], self.worker_id, result.status, result.error_code
-                )
+                result = self._run_claimed_job(job, current)
             finally:
                 renewal_stop.set()
                 renewal_thread.join(timeout=1.0)
                 self._in_flight.remove(job["id"])
             results.append(result)
         return results
+
+    def _run_claimed_job(self, job: dict, now: float) -> JobResult:
+        """Run and settle a job while its target KB admission is still owned."""
+        db = self.services.db
+        job_type = job.get("job_type") or MATERIAL_INDEX_JOB_TYPE
+        is_wiki = job.get("job_scope") == "wiki" or job_type == "wiki_reindex"
+        indexer = None
+        kb_id = None
+
+        try:
+            if is_wiki:
+                indexer = self.services.wiki_indexer or _default_wiki_indexer(db)
+                page = indexer.store.get_page(int(job["document_id"]))
+                if page is None:
+                    result = JobResult(job["id"], "cancelled", 0, 0, 0, "page_missing")
+                    db.settle_material_job(job["id"], self.worker_id, result.status, result.error_code)
+                    return result
+                kb_id = str(page.kb_id)
+            else:
+                document = db.get_document_permission_by_id(int(job["document_id"]))
+                if document is not None:
+                    kb_id = str(document["kb_id"])
+        except Exception:
+            logger.exception("material job %s target lookup failed", job["id"])
+            retry_at = time.time() + min(60, 2 ** int(job.get("attempt", 1)))
+            result = JobResult(
+                job["id"], "retry", job["version_id"], 0, 0, "processing_failed"
+            )
+            db.settle_material_job(
+                job["id"], self.worker_id, result.status, result.error_code, retry_at
+            )
+            return result
+
+        try:
+            if kb_id is None:
+                try:
+                    result = self._process(job, now)
+                except Exception:
+                    logger.exception("material job %s failed", job["id"])
+                    attempts_exhausted = job["attempt"] >= self.max_attempts
+                    result = JobResult(
+                        job["id"],
+                        "failed" if attempts_exhausted else "retry",
+                        job["version_id"],
+                        0,
+                        0,
+                        "processing_failed",
+                    )
+                retry_at = (
+                    time.time() + min(60, 2 ** job["attempt"])
+                    if result.status == "retry"
+                    else None
+                )
+                db.settle_material_job(
+                    job["id"], self.worker_id, result.status, result.error_code, retry_at
+                )
+                return result
+
+            with kb_mutation(db, kb_id):
+                try:
+                    if is_wiki:
+                        result = process_wiki_reindex_job(
+                            job, self.services, indexer=indexer, expected_kb_id=kb_id
+                        )
+                    else:
+                        result = self._process(job, now)
+                except KBLifecycleError:
+                    raise
+                except Exception:
+                    logger.exception("material job %s failed", job["id"])
+                    attempts_exhausted = job["attempt"] >= self.max_attempts
+                    result = JobResult(
+                        job["id"],
+                        "failed" if attempts_exhausted else "retry",
+                        job["version_id"],
+                        0,
+                        0,
+                        "processing_failed",
+                    )
+                    if attempts_exhausted and job_type == MATERIAL_INDEX_JOB_TYPE:
+                        _exhaust_spreadsheet_job(job, self.services)
+                    retry_at = (
+                        time.time() + min(60, 2 ** job["attempt"])
+                        if result.status == "retry"
+                        else None
+                    )
+                    db.settle_material_job(
+                        job["id"], self.worker_id, result.status, result.error_code, retry_at
+                    )
+                    return result
+                db.settle_material_job(job["id"], self.worker_id, result.status, result.error_code)
+                return result
+        except KBBusy:
+            retry_at = time.time() + min(60, 2 ** int(job.get("attempt", 1)))
+            result = JobResult(job["id"], "retry", job["version_id"], 0, 0, "knowledge_base_busy")
+            db.settle_material_job(
+                job["id"], self.worker_id, result.status, result.error_code, retry_at
+            )
+            return result
+        except (KBDeleting, KBDeleted) as exc:
+            result = JobResult(job["id"], "cancelled", job["version_id"], 0, 0, exc.code)
+            db.settle_material_job(job["id"], self.worker_id, result.status, result.error_code)
+            return result
+        except KBLifecycleError as exc:
+            result = JobResult(job["id"], "cancelled", job["version_id"], 0, 0, exc.code)
+            db.settle_material_job(job["id"], self.worker_id, result.status, result.error_code)
+            return result
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """Stop claims and atomically return in-flight jobs to the queue."""
@@ -522,24 +605,32 @@ def process_purge_job(
     return JobResult(job["id"], "done", 0, 0, 0)
 
 
-def _default_wiki_indexer() -> object:
+def _default_wiki_indexer(user_db: UserDB) -> object:
     from rag.wiki.indexer import WikiIndexer
     from rag.wiki.store import get_wiki_store
 
-    return WikiIndexer(wiki_store=get_wiki_store())
+    return WikiIndexer(wiki_store=get_wiki_store(), user_db=user_db)
 
 
-def process_wiki_reindex_job(job: dict, services: WorkerServices) -> JobResult:
+def process_wiki_reindex_job(
+    job: dict,
+    services: WorkerServices,
+    *,
+    indexer: object | None = None,
+    expected_kb_id: str | None = None,
+) -> JobResult:
     """Reindex one Wiki page whose API-time index write failed.
 
     Wiki pages are not material documents, so the job carries ``version_id=0``
     and the page id in ``document_id``. A deleted page cancels the retry.
     """
-    indexer = services.wiki_indexer or _default_wiki_indexer()
+    indexer = indexer or services.wiki_indexer or _default_wiki_indexer(services.db)
     page_id = int(job["document_id"])
     page = indexer.store.get_page(page_id)
     if page is None:
         return JobResult(job["id"], "cancelled", 0, 0, 0, "page_missing")
+    if expected_kb_id is not None and page.kb_id != expected_kb_id:
+        return JobResult(job["id"], "cancelled", 0, 0, 0, "page_scope_changed")
     indexed = indexer.sync_page(page_id)
     return JobResult(job["id"], "done", 0, indexed, 0)
 
