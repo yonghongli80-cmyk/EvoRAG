@@ -1,3 +1,4 @@
+import contextlib
 import random
 import threading
 
@@ -129,6 +130,7 @@ async def generate_stream(messages: list[dict], temperature: float | None = None
     last_exc = None
     has_yielded = False
     for attempt in range(max_attempts):
+        stream = None
         try:
             stream = await _async_client.chat.completions.create(
                 model=settings.deepseek_model,
@@ -157,6 +159,12 @@ async def generate_stream(messages: list[dict], temperature: float | None = None
         except Exception:
             _breaker.record_failure()
             raise
+        finally:
+            if stream is not None:
+                close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
 
     # 所有重试都失败
     raise last_exc

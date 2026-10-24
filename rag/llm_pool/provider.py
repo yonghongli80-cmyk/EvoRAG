@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from collections.abc import AsyncGenerator
@@ -87,6 +88,7 @@ class LLMProvider:
             create_kwargs["extra_body"] = extra_body
 
         has_yielded = False
+        stream = None
         try:
             stream = await client.chat.completions.create(**create_kwargs)
             async for chunk in stream:
@@ -100,6 +102,12 @@ class LLMProvider:
                 # 已经推流部分内容，禁止重试避免内容重复
                 raise
             raise
+        finally:
+            if stream is not None:
+                close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+                if close is not None:
+                    with contextlib.suppress(Exception):
+                        await close()
 
     def generate(self, messages: list[dict], temperature: float = 0.3) -> str:
         """Synchronously generate response."""

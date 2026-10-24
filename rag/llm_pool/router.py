@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from typing import Any
 
 from rag.llm_pool.concurrency import DistributedConcurrencyGate
@@ -109,8 +110,11 @@ class LLMPoolRouter:
         for provider in ordered_candidates:
             has_yielded = False
             try:
-                async with self.gate.slot(provider.config.provider_id, max_concurrency=provider.config.max_concurrency, timeout=5.0):
-                    async for token in provider.generate_stream(messages, temperature=temperature):
+                async with (
+                    self.gate.slot(provider.config.provider_id, max_concurrency=provider.config.max_concurrency, timeout=5.0),
+                    aclosing(provider.generate_stream(messages, temperature=temperature)) as stream,
+                ):
+                    async for token in stream:
                         has_yielded = True
                         yield {"type": "token", "model": provider.config.provider_id, "content": token}
                 return  # 成功完成整个流式生成
@@ -142,8 +146,11 @@ class LLMPoolRouter:
 
         async def worker(provider: LLMProvider):
             try:
-                async with self.gate.slot(provider.config.provider_id, max_concurrency=provider.config.max_concurrency, timeout=5.0):
-                    async for token in provider.generate_stream(messages, temperature=temperature):
+                async with (
+                    self.gate.slot(provider.config.provider_id, max_concurrency=provider.config.max_concurrency, timeout=5.0),
+                    aclosing(provider.generate_stream(messages, temperature=temperature)) as stream,
+                ):
+                    async for token in stream:
                         await queue.put({
                             "type": "token",
                             "model": provider.config.provider_id,
