@@ -130,6 +130,7 @@ Client ──TLS──> LB / Reverse Proxy
 - 迁移路径：双写 → 回填 → 影子读比对 → 切读 → 切写 → 保留 SQLite 只读回滚窗口。
 - **验收**：迁移时的完整后端用例在 Postgres 下通过；并发压测无锁等待；备份/恢复演练通过；
   `kb/documents/versions/structured/wiki/evolution` 计数与 SQLite 一致。
+  旧的 2313 项是历史快照；交接前最近一轮完整后端套件为 3009 passed / 3 skipped（历史交接记录）。迁移实施时仍须运行当时的完整后端套件，不能降低范围，也不要求恰好达到旧计数；本次未重跑全套件。
 - **回滚**：保留 SQLite 快照；切写开关可回退；不接受“迁移脚本单向不可逆”。
 
 ### Phase 3：Redis 共享缓存、限流与锁（3–5 天）
