@@ -6,9 +6,11 @@
 
 ## 当前有效入口
 
-- `reviews/2026-10-24-deep-audit.md`：最新深度审查、增量缺陷修复、实际验证、过程偏差与仍需专项设计/运行条件的事项。
+- `reviews/2026-10-24-kb-lifecycle-concurrency.md`：KB删除/上传生命周期并发协议、崩溃重试、失败归档所有权、最终完整回归与部署边界。
+- `superpowers/plans/2026-10-24-kb-lifecycle-concurrency.md`：KB生命周期并发整改的TDD计划及完成状态。
+- `reviews/2026-10-24-deep-audit.md`：上一轮深度审查、增量缺陷修复、实际验证、过程偏差与剩余专项设计/运行条件。
 - `superpowers/plans/2026-10-24-deep-audit-remediation.md`：本次先计划再并行Luna的逐项实施与验收状态。
-- `handoff-2026-10-24.md`：当前交接，包含复查待办闭环、锁环境、候选竞态修复、宿主Docker修复与实际验收状态。
+- `handoff-2026-10-24.md`：当前交接，包含KB生命周期并发整改、前序复查待办、锁环境、候选竞态修复、Docker运行边界与验收状态。
 - `reviews/2026-10-24-real-model-p99.md`：真实模型200条合成资料基线、阶段/外呼与metrics对齐、少量参数/连接对照及适用边界。
 - `superpowers/plans/2026-10-24-real-model-p99.md`：本次隔离运行验收计划与执行状态。
 - `reviews/2026-10-24-handoff.md`：凌晨Gitee交付的原始交接及两轮修复证据口径。
