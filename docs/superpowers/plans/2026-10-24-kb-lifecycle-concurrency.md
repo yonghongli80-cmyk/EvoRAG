@@ -46,11 +46,11 @@
 - `assert_kb_available(db,kb_id,*,allow_deleting=False)->None` 和 `assert_kb_available_in_tx(conn,kb_id,*,allow_deleting=False)->None`，只检查生命周期，不授予权限。
 - domain errors `KBLifecycleError(code)`, `KBBusy`, `KBDeleting`, `KBDeleted`, `KBUnknown`, `KBDeleteIncomplete`；`lifecycle_http_error(error)->HTTPException`：409 busy/deleting、404 deleted/unknown、503 incomplete，detail可读字符串，机器码头 `X-KB-Lifecycle-Error`。
 
-- [ ] Step 1: 写新接口的状态/迁移/回滚与互斥测试，保留未实现接口RED（如属于缺失新接口要如实标识，不伪称既有产品复现）。临时旧schema实例化后旧数据不变；墓碑不会级联删除。
-- [ ] Step 2: 实现短事务state/token CAS与真实portalocker非阻塞文件锁。锁文件在规范化绝对数据库路径旁的专用目录，以KB id摘要命名；所有进程必须打开相同规范路径并共享该目录。不同挂载别名或硬链接不自动互斥；不unlink锁文件。
-- [ ] Step 3: 进程内使用非重入互斥锁+ContextVar合法重入，校验PID/线程/async任务身份；异步同线程的不同任务和继承context的子任务不能借锁。准入只在同步worker中取得，持有准入时不得再派发会写入KB的asyncio.to_thread；先在请求协程读入有界临时文件可行，但所有pending/版本/向量/发布副作用必须在实际持锁worker内完成。asyncio.CancelledError不得释放仍运行worker的门禁。内存库按ConnectionManager隔离，只用进程内门禁，状态读写使用正确连接。
-- [ ] Step 4: 运行 `PY -m pytest -p offline_network_guard tests/test_kb_lifecycle_core.py -q` GREEN、Ruff与架构门禁，不添加局部导入突破150；报告精确命令/退出。
-- [ ] Step 5: 根审阅并提交/复审本任务，接口稳定后并行派发Task2/3/4/5。
+- [x] Step 1: 写新接口的状态/迁移/回滚与互斥测试，保留未实现接口RED（如属于缺失新接口要如实标识，不伪称既有产品复现）。临时旧schema实例化后旧数据不变；墓碑不会级联删除。
+- [x] Step 2: 实现短事务state/token CAS与真实portalocker非阻塞文件锁。锁文件在规范化绝对数据库路径旁的专用目录，以KB id摘要命名；所有进程必须打开相同规范路径并共享该目录。不同挂载别名或硬链接不自动互斥；不unlink锁文件。
+- [x] Step 3: 进程内使用非重入互斥锁+ContextVar合法重入，校验PID/线程/async任务身份；异步同线程的不同任务和继承context的子任务不能借锁。准入只在同步worker中取得，持有准入时不得再派发会写入KB的asyncio.to_thread；先在请求协程读入有界临时文件可行，但所有pending/版本/向量/发布副作用必须在实际持锁worker内完成。asyncio.CancelledError不得释放仍运行worker的门禁。内存库按ConnectionManager隔离，只用进程内门禁，状态读写使用正确连接。
+- [x] Step 4: 运行 `PY -m pytest -p offline_network_guard tests/test_kb_lifecycle_core.py -q` GREEN、Ruff与架构门禁，不添加局部导入突破150；报告精确命令/退出。
+- [x] Step 5: 根审阅并提交/复审本任务，接口稳定后并行派发Task2/3/4/5。
 
 ### Task 2: KB HTTP operations and resumable complete teardown
 
