@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import multiprocessing
 import subprocess
@@ -13,7 +14,7 @@ import httpx
 import pytest
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from rag.kb_lifecycle import KBBusy, KBDeleted, kb_mutation
+from rag.kb_lifecycle import KBBusy, KBDeleted, KBLifecycleError, kb_mutation
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.user_db import UserDB
 from rag.vector_store import close_client
@@ -72,23 +73,25 @@ def test_portalocker_gate_is_shared_across_processes_and_per_kb(tmp_path):
         _release_gate_child(other)
         _release_gate_child(holder)
 
-        # Same-thread nesting returns one permit; a copied context cannot authorize
-        # a different asyncio task to use it.
-        with kb_mutation(db, "kb_process_one") as permit:
+        # Same-thread nesting is allowed. A ContextVar copied while the gate is
+        # active must not re-enter the public gate API after the owner exits.
+        with kb_mutation(db, "kb_process_one"):
             with kb_mutation(db, "kb_process_one") as nested:
-                assert nested is permit
+                assert nested.kb_id == "kb_process_one"
 
-            async def copied_context_attempt():
+            async def attempt_from_inherited_task():
                 try:
-                    permit._assert_active_owner()
-                except Exception as error:
-                    return getattr(error, "code", None)
+                    await asyncio.to_thread(_run_gate_write, db, "kb_process_one")
+                except KBBusy:
+                    return "busy"
                 return "accepted"
 
-            async def child_task_attempt():
-                return await asyncio.create_task(copied_context_attempt())
+            assert asyncio.run(attempt_from_inherited_task()) == "busy"
+            copied_owner_context = contextvars.copy_context()
 
-            assert asyncio.run(child_task_attempt()) == "kb_mutation_permit_owner_mismatch"
+        with pytest.raises(KBLifecycleError) as inactive:
+            copied_owner_context.run(lambda: _run_gate_write(db, "kb_process_one"))
+        assert inactive.value.code == "kb_mutation_permit_inactive"
     finally:
         db.close()
 
@@ -118,6 +121,48 @@ def test_forked_process_cannot_reuse_inherited_permit(tmp_path):
         results.close()
         results.join_thread()
         db.close()
+
+
+def _run_gate_write(db, kb_id: str) -> None:
+    with kb_mutation(db, kb_id):
+        return
+
+
+def test_retained_stale_operation_cannot_resurrect_deleted_kb(
+    isolated_api, make_user
+):
+    owner, headers = make_user("stale-operation-owner")
+    db = isolated_api.app.state.user_db
+    manager = KnowledgeBaseManager()
+    kb_id = manager.create_kb("stale-operation")
+    db.create_kb_metadata(kb_id, "stale operation", owner["id"], "private")
+    late_file = Path(isolated_api.app.state.kb_files_root) / kb_id / "late.txt"
+    entered_gate = []
+
+    def retained_operation():
+        with kb_mutation(db, kb_id):
+            entered_gate.append(True)
+            manager._client.create_collection(
+                collection_name=kb_id,
+                vectors_config=VectorParams(size=1024, distance=Distance.COSINE),
+            )
+            late_file.parent.mkdir(parents=True, exist_ok=True)
+            late_file.write_text("stale publication", encoding="utf-8")
+
+    try:
+        deleted = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+        assert deleted.status_code == 200, deleted.text
+        assert db.get_kb_lifecycle(kb_id)["state"] == "deleted"
+        assert not manager._client.collection_exists(kb_id)
+
+        with pytest.raises(KBDeleted):
+            retained_operation()
+
+        assert entered_gate == []
+        assert not manager._client.collection_exists(kb_id)
+        assert not late_file.exists()
+    finally:
+        close_client()
 
 
 @pytest.mark.parametrize(
