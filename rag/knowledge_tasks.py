@@ -246,10 +246,6 @@ class TaskService:
         if new_status not in _ALLOWED_TRANSITIONS.get(task["status"], set()):
             raise ValueError(f"invalid transition: {task['status']} -> {new_status}")
         self._assert_task_actor(task, actor)
-        if new_status == "confirmed_expired":
-            version_id = task.get("document_version_id")
-            if version_id is not None:
-                self._db.set_version_validity(version_id, "confirmed_outdated")
         result = self._db.transition_knowledge_task(
             task_id, actor["id"], new_status, note, expected_updated_at
         )

@@ -543,7 +543,8 @@ class ChatRepository(BaseRepository):
         now = time.time()
         with self.cm.transaction(immediate=True) as conn:
             row = conn.execute(
-                "SELECT status, updated_at FROM knowledge_tasks WHERE id = ?", (task_id,)
+                "SELECT status, updated_at, document_version_id FROM knowledge_tasks WHERE id = ?",
+                (task_id,),
             ).fetchone()
             if row is None:
                 return None
@@ -565,6 +566,12 @@ class ChatRepository(BaseRepository):
                 )
             if cur.rowcount == 0:
                 raise VersionConflict("task_state_conflict")
+            if new_status == "confirmed_expired" and row["document_version_id"] is not None:
+                conn.execute(
+                    "UPDATE document_versions SET validity_status = 'confirmed_outdated' "
+                    "WHERE id = ?",
+                    (row["document_version_id"],),
+                )
             conn.execute(
                 "INSERT INTO knowledge_task_events "
                 "(task_id, actor_id, old_status, new_status, note, created_at) "

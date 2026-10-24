@@ -1,5 +1,6 @@
 """Task 7: knowledge correction tasks, ownership, and operations API."""
 
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -188,6 +189,81 @@ def test_owner_transition_resolves_task(isolated_api, seeded_task):
 
     assert response.status_code == 200
     assert response.json()["status"] == "resolved"
+
+
+def _make_outdated_task(task_fixture):
+    feedback_id = task_fixture.submit(kind="outdated", user="alice")
+    task_id = task_fixture.service.record_feedback(feedback_id)
+    task = task_fixture.service._db.get_knowledge_task(task_id)
+    return task_id, task
+
+
+def _task_event_count(db, task_id):
+    with db.cm.read_connection() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM knowledge_task_events WHERE task_id = ?", (task_id,)
+        ).fetchone()[0]
+
+
+def test_stale_expiry_cas_does_not_change_task_version_or_events(task_fixture):
+    task_id, task = _make_outdated_task(task_fixture)
+    db = task_fixture.service._db
+
+    from rag.user_db import VersionConflict
+
+    with pytest.raises(VersionConflict, match="task_state_conflict"):
+        task_fixture.service.transition(
+            task_id,
+            {"id": task_fixture.owner_id, "is_admin": False},
+            "confirmed_expired",
+            "confirmed by owner",
+            task["updated_at"] - 1,
+        )
+
+    assert db.get_knowledge_task(task_id)["status"] == "open"
+    assert db.get_document_version_by_id(task["document_version_id"])["validity_status"] == "valid"
+    assert _task_event_count(db, task_id) == 0
+
+
+def test_confirmed_expiry_updates_task_version_and_event(task_fixture):
+    task_id, task = _make_outdated_task(task_fixture)
+    db = task_fixture.service._db
+
+    result = task_fixture.service.transition(
+        task_id,
+        {"id": task_fixture.owner_id, "is_admin": False},
+        "confirmed_expired",
+        "confirmed by owner",
+        task["updated_at"],
+    )
+
+    assert result["status"] == "confirmed_expired"
+    assert db.get_document_version_by_id(task["document_version_id"])["validity_status"] == "confirmed_outdated"
+    assert _task_event_count(db, task_id) == 1
+
+
+def test_expiry_event_insert_failure_rolls_back_task_and_version(task_fixture):
+    task_id, task = _make_outdated_task(task_fixture)
+    db = task_fixture.service._db
+    with db.cm.write_connection() as conn:
+        conn.execute(
+            "CREATE TRIGGER fail_knowledge_task_event BEFORE INSERT ON knowledge_task_events "
+            "BEGIN SELECT RAISE(ABORT, 'event insert failed'); END"
+        )
+        conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError, match="event insert failed"):
+        task_fixture.service.transition(
+            task_id,
+            {"id": task_fixture.owner_id, "is_admin": False},
+            "confirmed_expired",
+            "confirmed by owner",
+            task["updated_at"],
+        )
+
+    assert db.get_knowledge_task(task_id)["status"] == "open"
+    assert db.get_document_version_by_id(task["document_version_id"])["validity_status"] == "valid"
+    assert _task_event_count(db, task_id) == 0
 
 
 def test_task_summary_counts_stale_knowledge_bases_by_latest_live_current_document(
