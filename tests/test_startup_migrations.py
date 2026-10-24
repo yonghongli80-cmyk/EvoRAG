@@ -44,6 +44,52 @@ def test_lifespan_promotes_staged_versions_before_the_backup_scheduler(monkeypat
     assert order == ["legacy_kb", "index", "staged_versions", "backups"]
 
 
+def test_lifespan_runs_lifecycle_migrations_in_sync_workers_before_backups(
+    monkeypatch,
+):
+    import rag.api as api
+
+    order: list[str] = []
+    in_sync_worker: dict[str, bool] = {}
+
+    def record(name: str) -> None:
+        order.append(name)
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        in_sync_worker[name] = current_task is None
+
+    monkeypatch.setattr(api, "_run_legacy_kb_migration", lambda: record("legacy_kb"))
+    monkeypatch.setattr(api, "auto_index_on_startup", lambda: record("index"))
+    monkeypatch.setattr(
+        api,
+        "_run_staged_version_migration",
+        lambda: record("staged_versions"),
+    )
+    monkeypatch.setattr(api, "start_backup_scheduler", lambda: record("backups"))
+    for name in (
+        "start_evolution_worker",
+        "restore_question_set_rollout",
+        "stop_backup_scheduler",
+        "stop_evolution_worker",
+        "close_pipeline_processors",
+    ):
+        monkeypatch.setattr(api, name, lambda: None)
+
+    async def _enter() -> None:
+        async with api.lifespan(api.app):
+            pass
+
+    asyncio.run(_enter())
+
+    assert order == ["legacy_kb", "index", "staged_versions", "backups"]
+    assert in_sync_worker["legacy_kb"] is False
+    assert in_sync_worker["index"] is True
+    assert in_sync_worker["staged_versions"] is True
+    assert in_sync_worker["backups"] is False
+
+
 def test_startup_repairs_committed_versions_left_in_staging(isolated_api, make_user):
     import rag.api as api
 

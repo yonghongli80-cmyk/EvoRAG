@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sys
@@ -121,8 +122,8 @@ def restore_question_set_rollout():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _run_legacy_kb_migration()
-    auto_index_on_startup()
-    _run_staged_version_migration()
+    await asyncio.to_thread(auto_index_on_startup)
+    await asyncio.to_thread(_run_staged_version_migration)
     start_backup_scheduler()
     start_evolution_worker()
     restore_question_set_rollout()
