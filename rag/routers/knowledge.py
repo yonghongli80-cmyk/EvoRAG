@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
-from contextlib import suppress
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -36,6 +35,10 @@ from rag.document_versions import (
     DuplicateDocument,
     choose_document_name,
     ingest_document_version,
+)
+from rag.kb_document_cleanup import (
+    delete_kb_document_files,
+    resolve_kb_document_paths,
 )
 from rag.kb_file_store import resolve_stored_path
 from rag.kb_metadata import generate_summary, generate_toc
@@ -250,18 +253,21 @@ async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depen
     manager = KnowledgeBaseManager()
     try:
         documents = await asyncio.to_thread(user_db.list_kb_documents, kb_id)
+        versions_root = _versions_root(request)
+        planned_files = {
+            record["id"]: resolve_kb_document_paths(
+                user_db, kb_id, record, versions_root, kb_files_root
+            )
+            for record in documents
+        }
         for record in documents:
             await asyncio.to_thread(manager.remove_document, kb_id, record["filename"])
+            await asyncio.to_thread(delete_kb_document_files, planned_files[record["id"]])
             permission = await asyncio.to_thread(
                 user_db.get_document_permission, record["filename"], kb_id
             )
             if permission:
                 await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
-            if record["file_path"]:
-                stored = resolve_stored_path(kb_files_root, record["file_path"])
-                stored.unlink(missing_ok=True)
-                with suppress(OSError):
-                    stored.parent.rmdir()
             await asyncio.to_thread(user_db.delete_kb_document, record["id"])
         manager.delete_kb(kb_id)
     except ValueError as e:
@@ -304,6 +310,7 @@ async def add_document_to_kb(
         require_doc_edit(user_db, source.display_name, kb_id, user)
     manager = KnowledgeBaseManager()
     kb_document_id = None
+    kb_document_created = False
     try:
         final_name = choose_document_name(user_db, kb_id, source.display_name, duplicate_action)
         existing_kb_doc = await asyncio.to_thread(user_db.get_kb_document, kb_id, final_name)
@@ -311,6 +318,7 @@ async def add_document_to_kb(
             kb_document_id = await asyncio.to_thread(
                 user_db.create_kb_document_pending, kb_id, final_name
             )
+            kb_document_created = True
         else:
             kb_document_id = existing_kb_doc["id"]
         result = await asyncio.to_thread(
@@ -362,7 +370,7 @@ async def add_document_to_kb(
                     extra={"kb_id": kb_id, "document_id": result.document_id},
                 )
     except DuplicateDocument as exc:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise HTTPException(
             status_code=409,
@@ -373,11 +381,11 @@ async def add_document_to_kb(
             },
         ) from exc
     except HTTPException:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise
     except Exception as exc:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         logger.exception("KB document upload failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
@@ -436,6 +444,7 @@ async def link_document_to_kb(
         require_doc_edit(user_db, source.display_name, kb_id, user)
     manager = KnowledgeBaseManager()
     kb_document_id = None
+    kb_document_created = False
     try:
         final_name = choose_document_name(
             user_db, kb_id, source.display_name, body.duplicate_action
@@ -447,6 +456,7 @@ async def link_document_to_kb(
             kb_document_id = await asyncio.to_thread(
                 user_db.create_kb_document_pending, kb_id, final_name
             )
+            kb_document_created = True
         else:
             kb_document_id = existing_kb_doc["id"]
         result = await asyncio.to_thread(
@@ -498,7 +508,7 @@ async def link_document_to_kb(
                     extra={"kb_id": kb_id, "document_id": result.document_id},
                 )
     except DuplicateDocument as exc:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise HTTPException(
             status_code=409,
@@ -509,11 +519,11 @@ async def link_document_to_kb(
             },
         ) from exc
     except HTTPException:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise
     except Exception as exc:
-        if kb_document_id is not None:
+        if kb_document_created:
             await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         logger.exception("KB document link failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
@@ -545,16 +555,19 @@ async def remove_document_from_kb(
 
     manager = KnowledgeBaseManager()
     try:
+        paths = resolve_kb_document_paths(
+            user_db,
+            kb_id,
+            record,
+            _versions_root(request),
+            _resolve_kb_files_root(request),
+        )
         await asyncio.to_thread(user_db.set_kb_document_state, record["id"], "deleting")
         await asyncio.to_thread(manager.remove_document, kb_id, doc_name)
+        await asyncio.to_thread(delete_kb_document_files, paths)
         permission = await asyncio.to_thread(user_db.get_document_permission, doc_name, kb_id)
         if permission:
             await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
-        if record["file_path"]:
-            stored = resolve_stored_path(_resolve_kb_files_root(request), record["file_path"])
-            stored.unlink(missing_ok=True)
-            with suppress(OSError):
-                stored.parent.rmdir()
         await asyncio.to_thread(user_db.delete_kb_document, record["id"])
     except Exception as exc:
         await asyncio.to_thread(
