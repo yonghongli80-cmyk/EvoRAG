@@ -500,6 +500,100 @@ def _remove_staging(staging: Path, backup_root: Path) -> None:
         raise BackupError("staging_cleanup_failed") from error
 
 
+def _create_backup_locked(
+    validated: BackupContext, trigger: str, timestamp: float
+) -> BackupRecord:
+    if trigger not in {"manual", "scheduled", "deploy"}:
+        raise BackupError("invalid_backup_trigger")
+
+    backup_id = datetime.fromtimestamp(timestamp, UTC).strftime(
+        "%Y%m%dT%H%M%SZ"
+    ) + f"-{uuid.uuid4().hex[:12]}"
+    staging = validated.backup_root / f".incomplete-{backup_id}"
+    final_path = validated.backup_root / backup_id
+
+    try:
+        staging.mkdir()
+        database_entries: list[DatabaseEntry] = []
+        for name, source in sorted(validated.databases.items()):
+            if not source.is_file():
+                if name in validated.required_databases:
+                    raise BackupError("required_database_missing")
+                continue
+            target = staging / "sqlite" / f"{name}.db"
+            snapshot = snapshot_sqlite(source, target)
+            database_entries.append(
+                replace(
+                    snapshot,
+                    name=name,
+                    path=f"sqlite/{name}.db",
+                    required=name in validated.required_databases,
+                )
+            )
+
+        file_entries: list[FileEntry] = []
+        for logical_root, source_root in sorted(validated.file_roots.items()):
+            for source in _iter_source_files(source_root):
+                relative = source.relative_to(source_root).as_posix()
+                logical_path = (
+                    PurePosixPath(logical_root) / PurePosixPath(relative)
+                ).as_posix()
+                target = staging / "files" / logical_root / Path(relative)
+                file_entries.append(
+                    copy_file_verified(source, target, logical_path)
+                )
+
+        users_snapshot = staging / "sqlite" / "users.db"
+        required_file_keys = _required_file_keys(users_snapshot, validated)
+        copied_keys = frozenset(entry.path for entry in file_entries)
+        if not set(required_file_keys).issubset(copied_keys):
+            raise BackupError("referenced_file_missing")
+
+        database_entries.sort(key=lambda entry: entry.name)
+        file_entries.sort(key=lambda entry: entry.path)
+        total_bytes = sum(entry.size for entry in database_entries) + sum(
+            entry.size for entry in file_entries
+        )
+        manifest = BackupManifest(
+            schema_version=1,
+            backup_id=backup_id,
+            created_at=timestamp,
+            app_version=_application_version(),
+            python_version=sys.version.split()[0],
+            trigger=trigger,
+            databases=tuple(database_entries),
+            files=tuple(file_entries),
+            required_file_keys=required_file_keys,
+            excluded=_EXCLUDED_PAYLOADS,
+            total_files=len(database_entries) + len(file_entries),
+            total_bytes=total_bytes,
+            qdrant_included=False,
+            vector_rebuild_required=True,
+        )
+        write_manifest(staging, manifest)
+        verification = verify_backup(staging)
+        staging.replace(final_path)
+        try:
+            prune_verified_backups(
+                validated.backup_root, validated.retention_count
+            )
+        except BackupError:
+            logger.warning("backup_retention_failed")
+        return BackupRecord(
+            backup_id=backup_id,
+            created_at=timestamp,
+            status=verification.status,
+            path=final_path,
+            file_count=verification.file_count,
+            database_count=verification.database_count,
+            total_bytes=verification.total_bytes,
+            vector_rebuild_required=verification.vector_rebuild_required,
+        )
+    except Exception:
+        _remove_staging(staging, validated.backup_root)
+        raise
+
+
 def create_backup(
     context: BackupContext, trigger: str, now: float | None = None
 ) -> BackupRecord:
@@ -507,95 +601,9 @@ def create_backup(
     timestamp = time.time() if now is None else now
     if trigger not in {"manual", "scheduled", "deploy"}:
         raise BackupError("invalid_backup_trigger")
-
     validated.backup_root.mkdir(parents=True, exist_ok=True)
-    backup_id = datetime.fromtimestamp(timestamp, UTC).strftime(
-        "%Y%m%dT%H%M%SZ"
-    ) + f"-{uuid.uuid4().hex[:12]}"
-    staging = validated.backup_root / f".incomplete-{backup_id}"
-    final_path = validated.backup_root / backup_id
-
     with _exclusive_backup_lock(validated.backup_root):
-        try:
-            staging.mkdir()
-            database_entries: list[DatabaseEntry] = []
-            for name, source in sorted(validated.databases.items()):
-                if not source.is_file():
-                    if name in validated.required_databases:
-                        raise BackupError("required_database_missing")
-                    continue
-                target = staging / "sqlite" / f"{name}.db"
-                snapshot = snapshot_sqlite(source, target)
-                database_entries.append(
-                    replace(
-                        snapshot,
-                        name=name,
-                        path=f"sqlite/{name}.db",
-                        required=name in validated.required_databases,
-                    )
-                )
-
-            file_entries: list[FileEntry] = []
-            for logical_root, source_root in sorted(validated.file_roots.items()):
-                for source in _iter_source_files(source_root):
-                    relative = source.relative_to(source_root).as_posix()
-                    logical_path = (
-                        PurePosixPath(logical_root) / PurePosixPath(relative)
-                    ).as_posix()
-                    target = staging / "files" / logical_root / Path(relative)
-                    file_entries.append(
-                        copy_file_verified(source, target, logical_path)
-                    )
-
-            users_snapshot = staging / "sqlite" / "users.db"
-            required_file_keys = _required_file_keys(users_snapshot, validated)
-            copied_keys = frozenset(entry.path for entry in file_entries)
-            if not set(required_file_keys).issubset(copied_keys):
-                raise BackupError("referenced_file_missing")
-
-            database_entries.sort(key=lambda entry: entry.name)
-            file_entries.sort(key=lambda entry: entry.path)
-            total_bytes = sum(entry.size for entry in database_entries) + sum(
-                entry.size for entry in file_entries
-            )
-            manifest = BackupManifest(
-                schema_version=1,
-                backup_id=backup_id,
-                created_at=timestamp,
-                app_version=_application_version(),
-                python_version=sys.version.split()[0],
-                trigger=trigger,
-                databases=tuple(database_entries),
-                files=tuple(file_entries),
-                required_file_keys=required_file_keys,
-                excluded=_EXCLUDED_PAYLOADS,
-                total_files=len(database_entries) + len(file_entries),
-                total_bytes=total_bytes,
-                qdrant_included=False,
-                vector_rebuild_required=True,
-            )
-            write_manifest(staging, manifest)
-            verification = verify_backup(staging)
-            staging.replace(final_path)
-            try:
-                prune_verified_backups(
-                    validated.backup_root, validated.retention_count
-                )
-            except BackupError:
-                logger.warning("backup_retention_failed")
-            return BackupRecord(
-                backup_id=backup_id,
-                created_at=timestamp,
-                status=verification.status,
-                path=final_path,
-                file_count=verification.file_count,
-                database_count=verification.database_count,
-                total_bytes=verification.total_bytes,
-                vector_rebuild_required=verification.vector_rebuild_required,
-            )
-        except Exception:
-            _remove_staging(staging, validated.backup_root)
-            raise
+        return _create_backup_locked(validated, trigger, timestamp)
 
 
 def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
@@ -661,16 +669,19 @@ def create_if_due(
     context: BackupContext, trigger: str, now: float | None = None
 ) -> BackupRecord | None:
     timestamp = time.time() if now is None else now
-    records = list_verified_backups(context.backup_root)
-    if records:
-        latest = records[-1]
-        elapsed = timestamp - latest.created_at
-        if elapsed < 0:
-            logger.warning("backup_clock_moved_backwards")
-            return None
-        if elapsed < context.interval_days * 86400:
-            return None
-    return create_backup(context, trigger, now=timestamp)
+    validated = context.validate()
+    validated.backup_root.mkdir(parents=True, exist_ok=True)
+    with _exclusive_backup_lock(validated.backup_root):
+        records = list_verified_backups(validated.backup_root)
+        if records:
+            latest = records[-1]
+            elapsed = timestamp - latest.created_at
+            if elapsed < 0:
+                logger.warning("backup_clock_moved_backwards")
+                return None
+            if elapsed < validated.interval_days * 86400:
+                return None
+        return _create_backup_locked(validated, trigger, timestamp)
 
 
 def _paths_overlap(first: Path, second: Path) -> bool:

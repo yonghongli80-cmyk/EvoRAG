@@ -1,6 +1,8 @@
+import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -14,11 +16,13 @@ from rag.backups.scheduler import (
     stop_backup_scheduler,
 )
 from rag.backups.service import (
+    _exclusive_backup_lock,
     create_backup,
     create_if_due,
     list_verified_backups,
     snapshot_sqlite,
 )
+from scripts.backup import main as backup_cli_main
 from tests.backup_fixtures import (
     create_backup_sources,
     make_backup_context,
@@ -135,6 +139,97 @@ def test_concurrent_creation_is_rejected_by_lock(backup_context):
 
     assert worker.is_alive() is False
     assert worker_errors == []
+
+
+def test_concurrent_due_decisions_recheck_after_the_first_backup(backup_context):
+    """A due decision made before another creator finishes must not publish twice."""
+    first_snapshot_started = threading.Event()
+    release_first_snapshot = threading.Event()
+    second_waiting_for_first = threading.Event()
+    first_backup_finished = threading.Event()
+    results = {}
+    worker_errors = []
+    real_exclusive_lock = _exclusive_backup_lock
+    real_snapshot = snapshot_sqlite
+
+    @contextmanager
+    def delay_second_lock_until_first_finishes(root):
+        if threading.current_thread().name == "second-due-check":
+            second_waiting_for_first.set()
+            assert first_backup_finished.wait(timeout=3.0)
+        with real_exclusive_lock(root):
+            yield
+
+    def hold_first_snapshot(source, target):
+        if threading.current_thread().name == "first-due-check":
+            first_snapshot_started.set()
+            assert release_first_snapshot.wait(timeout=3.0)
+        return real_snapshot(source, target)
+
+    def run_due_check(name):
+        try:
+            results[name] = create_if_due(
+                backup_context, "scheduled", now=1_700_000_000.0
+            )
+            if name == "first-due-check":
+                first_backup_finished.set()
+        except Exception as error:
+            worker_errors.append(error)
+
+    with (
+        patch(
+            "rag.backups.service._exclusive_backup_lock",
+            delay_second_lock_until_first_finishes,
+        ),
+        patch("rag.backups.service.snapshot_sqlite", hold_first_snapshot),
+    ):
+        workers = [
+            threading.Thread(target=run_due_check, args=(name,), name=name)
+            for name in ("first-due-check", "second-due-check")
+        ]
+        workers[0].start()
+        assert first_snapshot_started.wait(timeout=1.0)
+        workers[1].start()
+        assert second_waiting_for_first.wait(timeout=1.0)
+        release_first_snapshot.set()
+        for worker in workers:
+            worker.join(timeout=5.0)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert worker_errors == []
+    assert results["first-due-check"] is not None
+    assert results["second-due-check"] is None
+    assert len(list_verified_backups(backup_context.backup_root)) == 1
+
+
+def test_due_create_and_cli_fail_closed_while_backup_lock_is_held(
+    backup_context, capsys
+):
+    backup_context.backup_root.mkdir(parents=True, exist_ok=True)
+    other_staging = backup_context.backup_root / ".incomplete-other-process"
+    other_staging.mkdir()
+    (other_staging / "partial.payload").write_bytes(b"unfinished")
+
+    with _exclusive_backup_lock(backup_context.backup_root):
+        with pytest.raises(BackupError, match="backup_in_progress"):
+            create_backup(backup_context, "manual", now=1_800_000_000.0)
+        with pytest.raises(BackupError, match="backup_in_progress"):
+            create_if_due(backup_context, "deploy", now=1_800_000_000.0)
+
+        result = backup_cli_main(
+            ["create-if-due", "--trigger", "deploy"],
+            context_factory=lambda: backup_context,
+            now=lambda: 1_800_000_000.0,
+        )
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "code": "backup_in_progress",
+        "status": "error",
+    }
+    assert list_verified_backups(backup_context.backup_root) == ()
+    assert (backup_context.backup_root / ".backup.lock").is_file()
+    assert (other_staging / "partial.payload").read_bytes() == b"unfinished"
 
 
 def test_scheduler_failure_does_not_end_future_checks():
