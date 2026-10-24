@@ -28,7 +28,7 @@
 
 ## 删除协议
 
-1. 快速授权，进入删除门禁后再复核现有owner/admin或组织ADMINISTER权限；`rag_docs`保持禁止删除。未知KB不创建墓碑假报成功；orphan edit仍遵循现有409，不能借此扩权。
+1. 快速授权；进入删除门禁后，删除worker必须再次使用原owner/admin或组织ADMINISTER检查（显式allow_deleting仅放行生命周期态，不放宽权限），成功后才能提交deleting intent。权限已撤销则不写墓碑也不做清理；rag_docs仍禁止删除。未知KB不创建墓碑假报成功。
 2. 读取全部目标KB文档身份，而不只kb_documents；枚举immutable版本、可证明归属的staging、legacy KB文件、结构化数据集、Wiki页面/修订、后台任务。先校验所有路径的根和owner归属，再进行任何删除。
 3. 短事务写入deleting和删除token/generation。按全部document permission IDs取消job_scope=material的active index/purge任务，按Wiki page IDs取消job_scope=wiki的active retry；不能误取消别的KB或同数值ID的另一scope。任务完成/取消状态均在共享KB gate内更新。
 4. 在事务外幂等移除该collection和所有已验证归属的文件/数据集/Wiki内容；仅在已有删除意图的恢复路径中把资源已不存在当成已清理。任何失败不得返回deleted，保持可恢复deleting。
