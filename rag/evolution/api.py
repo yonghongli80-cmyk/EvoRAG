@@ -51,7 +51,7 @@ from pydantic import BaseModel, ConfigDict
 
 from config import settings
 from rag.api_security import redact_source_config, require_admin, require_user
-from rag.evolution.candidate_store import CandidateStore
+from rag.evolution.candidate_store import CandidateStore, OpenCodeCandidateConflict
 from rag.evolution.candidates import PayloadBoundaryError, validate_payload
 
 # ``code_patches`` owns diff parsing and is the authority layer 1 validated a
@@ -2414,13 +2414,16 @@ def regenerate_code_candidate(
         # 生成器的拒绝是**答案**，不是异常：把原因如实交回给管理员，且不写任何行。
         raise HTTPException(status_code=409, detail=f"生成被拒绝：{error}") from error
 
-    new_id = candidates.add_candidate(
-        observation_id,
-        cluster_id,
-        candidate,
-        prompt_version=str(getattr(generator, "prompt_version", "")),
-        model=str(getattr(generator, "model_name", "")),
-    )
+    try:
+        new_id = candidates.add_generated_code_candidate(
+            observation_id,
+            cluster_id,
+            candidate,
+            prompt_version=str(getattr(generator, "prompt_version", "")),
+            model=str(getattr(generator, "model_name", "")),
+        )
+    except OpenCodeCandidateConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     candidates.add_audit(
         str(user["id"]),
         "advance",

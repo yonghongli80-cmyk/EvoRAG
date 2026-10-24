@@ -58,6 +58,10 @@ OPEN_CANDIDATE_STATUSES: tuple[str, ...] = (
 )
 _OPEN_STATUS_PLACEHOLDERS = ", ".join("?" for _ in OPEN_CANDIDATE_STATUSES)
 
+
+class OpenCodeCandidateConflict(Exception):
+    """Raised when another open code patch already occupies the cluster."""
+
 # Design section 8 actions for the candidate lifecycle; anything else is
 # rejected before the INSERT, and the CHECK constraint is the second gate.
 _AUDIT_ACTIONS = ("generate", "advance", "reject", "canary", "rollback", "accept")
@@ -335,6 +339,48 @@ class CandidateStore:
         :func:`~rag.evolution.code_patches.validate_patch` the same way.
         """
         now = time.time()
+        with self._lock, self._write_transaction():
+            return self._insert_candidate_in_transaction(
+                observation_id, cluster_id, candidate,
+                prompt_version=prompt_version, model=model, now=now,
+            )
+
+    def add_generated_code_candidate(
+        self,
+        observation_id: int | None,
+        cluster_id: int,
+        candidate: CodePatchCandidate,
+        *,
+        prompt_version: str = "",
+        model: str = "",
+    ) -> int:
+        """Atomically admit one generated patch per cluster while an attempt is open."""
+        if candidate.artifact_type != CODE_PATCH_ARTIFACT_TYPE:
+            raise ValueError("add_generated_code_candidate accepts only code_patch candidates")
+        now = time.time()
+        with self._lock, self._write_transaction():
+            self._require_cluster(int(cluster_id))
+            if observation_id is not None:
+                self._require_observation(int(observation_id))
+            occupied = self._conn.execute(
+                "SELECT 1 FROM candidates WHERE cluster_id = ? AND artifact_type = ? "
+                f"AND status IN ({_OPEN_STATUS_PLACEHOLDERS}) LIMIT 1",
+                (int(cluster_id), CODE_PATCH_ARTIFACT_TYPE, *OPEN_CANDIDATE_STATUSES),
+            ).fetchone()
+            if occupied is not None:
+                raise OpenCodeCandidateConflict(
+                    f"cluster {int(cluster_id)} already has an open code patch candidate"
+                )
+            return self._insert_candidate_in_transaction(
+                observation_id, cluster_id, candidate,
+                prompt_version=prompt_version, model=model, now=now,
+                references_validated=True,
+            )
+
+    def _insert_candidate_in_transaction(
+        self, observation_id, cluster_id, candidate, *, prompt_version, model, now,
+        references_validated=False,
+    ) -> int:
         is_patch = candidate.artifact_type == "code_patch"
         if is_patch:
             scope_detail = (
@@ -361,42 +407,42 @@ class CandidateStore:
                 "created_at": now,
             }
         ]
-        with self._lock, self._write_transaction():
+        if not references_validated:
             self._require_cluster(int(cluster_id))
             if observation_id is not None:
                 self._require_observation(int(observation_id))
-            cursor = self._conn.execute(
-                "INSERT INTO candidates ("
-                "observation_id, cluster_id, artifact_type, target, payload, status, pool, "
-                "gate_log, prompt_version, model, rollback_ref, rationale, expected_effect, "
-                "confidence, diff, layer, test_paths, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    None if observation_id is None else int(observation_id),
-                    int(cluster_id),
-                    candidate.artifact_type,
-                    None if is_patch else candidate.target,
-                    None if is_patch else json.dumps(candidate.payload, ensure_ascii=False),
-                    EvolutionStatus.CANDIDATE_TESTING.value,
-                    ObservationPool.CANDIDATE_POOL.value,
-                    json.dumps(gate_log, ensure_ascii=False),
-                    str(prompt_version),
-                    str(model),
-                    json.dumps(candidate.rollback_ref, ensure_ascii=False),
-                    candidate.rationale,
-                    candidate.expected_effect,
-                    candidate.confidence,
-                    candidate.diff if is_patch else None,
-                    candidate.layer if is_patch else None,
-                    json.dumps(list(candidate.test_paths), ensure_ascii=False) if is_patch else None,
-                    now,
-                    now,
-                ),
-            )
-            candidate_id = int(cursor.lastrowid)
-            # The audit row needs the new candidate id, so it follows the
-            # INSERT inside the same transaction and precedes any advance.
-            self._insert_audit(str(model) or "generator", "generate", candidate_id, note, now)
+        cursor = self._conn.execute(
+            "INSERT INTO candidates ("
+            "observation_id, cluster_id, artifact_type, target, payload, status, pool, "
+            "gate_log, prompt_version, model, rollback_ref, rationale, expected_effect, "
+            "confidence, diff, layer, test_paths, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                None if observation_id is None else int(observation_id),
+                int(cluster_id),
+                candidate.artifact_type,
+                None if is_patch else candidate.target,
+                None if is_patch else json.dumps(candidate.payload, ensure_ascii=False),
+                EvolutionStatus.CANDIDATE_TESTING.value,
+                ObservationPool.CANDIDATE_POOL.value,
+                json.dumps(gate_log, ensure_ascii=False),
+                str(prompt_version),
+                str(model),
+                json.dumps(candidate.rollback_ref, ensure_ascii=False),
+                candidate.rationale,
+                candidate.expected_effect,
+                candidate.confidence,
+                candidate.diff if is_patch else None,
+                candidate.layer if is_patch else None,
+                json.dumps(list(candidate.test_paths), ensure_ascii=False) if is_patch else None,
+                now,
+                now,
+            ),
+        )
+        candidate_id = int(cursor.lastrowid)
+        # The audit row needs the new candidate id, so it follows the
+        # INSERT inside the transaction and precedes any advance.
+        self._insert_audit(str(model) or "generator", "generate", candidate_id, note, now)
         return candidate_id
 
     def record_inconclusive_gate(
@@ -794,4 +840,4 @@ class CandidateStore:
             self._conn.close()
 
 
-__all__ = ["OPEN_CANDIDATE_STATUSES", "CandidateStore"]
+__all__ = ["OPEN_CANDIDATE_STATUSES", "OpenCodeCandidateConflict", "CandidateStore"]

@@ -1037,7 +1037,7 @@ def make_evolution_patch_step(
     ``evolution_candidate_enabled`` off, the step reports zero work.
     """
 
-    from rag.evolution.candidate_store import CandidateStore
+    from rag.evolution.candidate_store import CandidateStore, OpenCodeCandidateConflict
     from rag.evolution.diagnoser import DiagnosisUnavailable
     from rag.evolution.patch_generator import PatchGenerator, PatchUnavailable
 
@@ -1097,7 +1097,7 @@ def make_evolution_patch_step(
                     cluster_id=cluster_id,
                     trace_store=store,
                 )
-                candidates.add_candidate(
+                candidates.add_generated_code_candidate(
                     observation_id,
                     cluster_id,
                     candidate,
@@ -1113,6 +1113,11 @@ def make_evolution_patch_step(
                     observation_id,
                     item["cluster"]["confirmed_layer"],
                 )
+            except OpenCodeCandidateConflict:
+                # A concurrent API/worker writer won after the round snapshot; this call still
+                # counts against budget, but another cluster in this round may still proceed.
+                open_clusters.add(cluster_id)
+                continue
             except (PatchUnavailable, DiagnosisUnavailable) as error:
                 # 契约/范围拒绝：记原因，不烧整轮；下一次轮次会重新评估（观测仍无候选）。
                 outcome["patch_failed"] += 1

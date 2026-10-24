@@ -1475,6 +1475,33 @@ def test_the_patch_step_generates_for_an_eligible_confirmed_cluster(tmp_path):
     assert [row["artifact_type"] for row in rows] == ["code_patch"]
 
 
+def test_patch_step_skips_losing_api_race_and_continues_to_another_cluster(tmp_path):
+    """A competing API write wins one cluster; the worker still generates for the next."""
+    from rag.evolution.candidate_store import CandidateStore
+
+    store = FailureTraceStore(tmp_path / "evolution.db")
+    first_cluster, first_member = _confirmed_cluster(store, "kb1|unknown|race-a")
+    _confirmed_cluster(store, "kb2|unknown|race-b", kb_id="kb2")
+
+    class RaceGenerator(FakePatchGenerator):
+        def generate(self, cluster, drafts, **kwargs):
+            if cluster["id"] == first_cluster["id"]:
+                CandidateStore(store).add_generated_code_candidate(
+                    first_member["id"], first_cluster["id"], _code_patch_candidate(),
+                    model="concurrent-api",
+                )
+            return super().generate(cluster, drafts, **kwargs)
+
+    generator = RaceGenerator()
+    outcome = _patch_step(store, generator, budget=3)()
+
+    assert outcome["patches_created"] == 1
+    assert outcome["patch_failed"] == 0
+    assert outcome["patch_model_calls"] == 2
+    assert generator.calls == 2
+    assert len(CandidateStore(store).list_candidates(limit=10)) == 2
+
+
 def test_the_patch_step_skips_layer_mismatches_and_existing_candidates(tmp_path):
     """层不一致、或已有补丁候选的观测一律跳过：不浪费调用，也不重复生成。"""
     from rag.evolution.candidate_store import CandidateStore

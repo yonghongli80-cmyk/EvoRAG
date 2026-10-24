@@ -13,6 +13,8 @@ stored signals only, never question text, chunk text, or credentials.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 from fastapi import FastAPI
@@ -1805,6 +1807,48 @@ def test_regenerate_refuses_while_the_cluster_has_an_open_candidate(
     assert second.status_code == 409
     assert "已有未决" in second.json()["detail"]
     assert seen["calls"] == 0, "被守卫拦下时绝不调用模型"
+    store.close()
+
+
+def test_concurrent_regeneration_requests_return_one_success_and_one_conflict(
+    evolution_client, admin_headers, store_with_cluster, monkeypatch
+):
+    """The transaction gate resolves two requests that pass the preliminary snapshot together."""
+    import rag.evolution.api as api_module
+    from rag.evolution.code_patches import CodePatchCandidate
+
+    store = FailureTraceStore(settings_path())
+    candidate_id = _rolled_back_patch(
+        store, store_with_cluster["cluster_id"], store_with_cluster["member_id"]
+    )
+    entered = Barrier(2)
+
+    class ConcurrentGenerator:
+        prompt_version = "patch-v5"
+        model_name = "offline-race"
+
+        def generate(self, cluster, drafts, *, layer, repo_root, observation_id, cluster_id, trace_store):
+            entered.wait(timeout=5)
+            return CodePatchCandidate(
+                artifact_type="code_patch", layer=layer, paths=("rag/pipeline.py",),
+                diff=_seed_diff("race"), test_paths=("tests/test_pipeline.py",),
+                rationale="race", expected_effect="test race",
+                rollback_ref={"base_commit": "0" * 40}, confidence="low",
+            )
+
+    monkeypatch.setattr(api_module, "_patch_generator", ConcurrentGenerator)
+    with ThreadPoolExecutor(2) as pool:
+        responses = list(pool.map(
+            lambda _: _regenerate(evolution_client, admin_headers, candidate_id), range(2)
+        ))
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    candidates = CandidateStore(store).list_candidates(limit=20)
+    generated = [row for row in candidates if row["id"] != candidate_id]
+    assert len(generated) == 1
+    assert [row["action"] for row in CandidateStore(store).list_audit(generated[0]["id"])] == [
+        "generate", "advance"
+    ]
     store.close()
 
 
