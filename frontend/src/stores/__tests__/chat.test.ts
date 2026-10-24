@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
+import type { AxiosAdapter } from 'axios'
 import { useChatStore } from '../chat'
 
 vi.mock('../../utils/api', () => ({
@@ -577,7 +578,8 @@ describe('chat store', () => {
 
     expect(api.post).toHaveBeenCalledWith(
       '/regenerate',
-      { conversation_id: 7, message_id: 20 }
+      { conversation_id: 7, message_id: 20 },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
     )
     expect(store.messages[0].content).toBe('New answer')
     expect(store.messages[0].sources).toEqual([{ doc_name: 'new.pdf', chunk_index: 2 }])
@@ -642,6 +644,124 @@ describe('chat store', () => {
     await store.regenerate(0)
     expect(store.isStreaming).toBe(false)
   })
+
+  it.each(['stop', 'reset', 'switch conversation'] as const)(
+    'regenerate aborts its Axios request and ignores a late response after %s',
+    async (action) => {
+      const { default: realAxios } = await vi.importActual<typeof import('axios')>('axios')
+      const store = useChatStore()
+      store.currentConvId = 1
+      store.messages = [{
+        id: 10,
+        role: 'assistant',
+        content: 'Original answer',
+        sources: [{ doc_name: 'original.pdf', chunk_index: 0 }],
+        confidence_level: 'low',
+        confidence_reasons: ['original'],
+        answerability_kind: 'insufficient_evidence'
+      }]
+
+      let adapterConfig: Parameters<AxiosAdapter>[0] | undefined
+      let resolveDelayedResponse: (() => void) | undefined
+      let transportError: unknown
+      const previousPostImplementation = vi.mocked(api.post).getMockImplementation()
+      vi.mocked(api.post).mockReset()
+      vi.mocked(api.post).mockImplementation(((_url: string, _data: unknown, config?: any) => {
+        const adapter: AxiosAdapter = (axiosConfig) => {
+          adapterConfig = axiosConfig
+          return new Promise((resolve) => {
+            // This delayed adapter intentionally resolves even after abort so
+            // the store must reject a response that no longer owns the UI.
+            resolveDelayedResponse = () => resolve({
+              data: {
+                answer: 'Late answer',
+                sources: [{ doc_name: 'late.pdf', chunk_index: 1 }],
+                reliability: {
+                  confidence_level: 'high',
+                  confidence_reasons: ['late'],
+                  answerability_kind: 'answerable'
+                }
+              },
+              status: 200,
+              statusText: 'OK',
+              headers: {},
+              config: axiosConfig
+            } as any)
+          })
+        }
+        try {
+          return realAxios.post('http://unit.test/regenerate', _data, {
+            ...config,
+            adapter
+          }).catch((error) => {
+            transportError = error
+            throw error
+          })
+        } catch (error) {
+          transportError = error
+          throw error
+        }
+      }) as any)
+
+      const pending = store.regenerate(0)
+      try {
+        await vi.waitFor(() => {
+          if (transportError) throw transportError
+          expect(resolveDelayedResponse).toBeDefined()
+        })
+
+        if (action === 'stop') {
+          store.stopStreaming()
+        } else if (action === 'reset') {
+          store.reset()
+        } else {
+          vi.mocked(api.get).mockResolvedValueOnce({
+            data: [{ id: 20, role: 'assistant', content: 'Current conversation answer' }]
+          } as any)
+          await store.selectConversation(2)
+        }
+
+        expect(adapterConfig?.signal).toBeInstanceOf(AbortSignal)
+        expect(adapterConfig?.signal?.aborted).toBe(true)
+
+        resolveDelayedResponse!()
+        await pending
+
+        if (action === 'switch conversation') {
+          expect(store.currentConvId).toBe(2)
+          expect(store.messages).toEqual([{
+            id: 20,
+            role: 'assistant',
+            content: 'Current conversation answer',
+            sources: [],
+            feedback: undefined,
+            confidence_level: undefined,
+            confidence_reasons: undefined,
+            answerability_kind: undefined
+          }])
+        } else if (action === 'reset') {
+          expect(store.currentConvId).toBeNull()
+          expect(store.messages).toEqual([])
+        } else {
+          expect(store.messages[0]).toMatchObject({
+            content: 'Original answer',
+            sources: [{ doc_name: 'original.pdf', chunk_index: 0 }],
+            confidence_level: 'low',
+            confidence_reasons: ['original'],
+            answerability_kind: 'insufficient_evidence'
+          })
+        }
+      } finally {
+        if (resolveDelayedResponse) {
+          resolveDelayedResponse()
+          await pending
+        }
+        if (previousPostImplementation) {
+          vi.mocked(api.post).mockImplementation(previousPostImplementation)
+        }
+      }
+    }
+  )
 
   // ── selectFile ──────────────────────────────────────────
   it('selectFile sets selectedFile', () => {

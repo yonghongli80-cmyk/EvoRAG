@@ -527,11 +527,13 @@ export const useChatStore = defineStore('chat', () => {
     if (!msg || msg.role !== 'assistant' || !msg.id || !currentConvId.value) return
     if (isStreaming.value) return
 
-    const { requestId } = beginStreamingRequest()
+    const { requestId, controller } = beginStreamingRequest()
     try {
       const res = await api.post('/regenerate', {
         conversation_id: currentConvId.value,
         message_id: msg.id
+      }, {
+        signal: controller.signal
       })
       if (activeRequestId.value !== requestId) return
       msg.content = res.data.answer
