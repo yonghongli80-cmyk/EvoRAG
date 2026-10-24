@@ -197,7 +197,8 @@ def test_delete_kb_prevalidates_every_document_owner_before_side_effects(
     monkeypatch.setattr("rag.routers.knowledge.KnowledgeBaseManager", Manager)
     response = client.delete(f"/knowledge-bases/{kb_id}", headers=headers)
 
-    assert response.status_code == 400
+    assert response.status_code == 503
+    assert db.get_kb_lifecycle(kb_id)["state"] == "deleting"
     assert manager_calls == []
     assert all(path.exists() for path in first_paths + second_paths)
     assert db.get_document_permission("first.txt", kb_id) is not None

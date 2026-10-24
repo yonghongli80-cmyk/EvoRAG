@@ -77,3 +77,20 @@ def delete_kb_document_files(paths: list[Path]) -> None:
     """Remove prevalidated files, leaving database identities for retry on error."""
     for path in paths:
         path.unlink(missing_ok=True)
+
+
+def resolve_document_staging_directory(root: Path, document_id: int) -> Path:
+    """Resolve the explicit document_id-owned staging directory for teardown."""
+    if not isinstance(document_id, int) or document_id <= 0:
+        raise ValueError("invalid document_id")
+    root_path = Path(root).absolute()
+    staging_root = root_path / "staging"
+    candidate = staging_root / str(document_id)
+    current = root_path
+    for part in candidate.relative_to(root_path).parts:
+        current = current / part
+        if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+            raise ValueError("staging directory crosses a link")
+    if not candidate.resolve().is_relative_to(staging_root.resolve()):
+        raise ValueError("staging directory escapes root")
+    return candidate

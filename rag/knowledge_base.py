@@ -28,11 +28,13 @@ class KnowledgeBaseManager:
 
         self._client = _get_client()
 
-    def create_kb(self, name: str) -> str:
+    def create_kb(self, name: str, *, before_create=None) -> str:
         from qdrant_client.models import Distance, VectorParams
 
         slug = _slugify(name)
         kb_id = f"kb_{slug}_{uuid.uuid4().hex[:6]}"
+        if before_create is not None:
+            before_create(kb_id)
         self._client.create_collection(
             collection_name=kb_id,
             vectors_config=VectorParams(
@@ -64,9 +66,8 @@ class KnowledgeBaseManager:
     def delete_kb(self, kb_id: str) -> None:
         if not kb_id.startswith("kb_"):
             raise ValueError(f"不能删除系统集合 {kb_id}，只能删除 kb_ 前缀的知识库")
-        if not self._client.collection_exists(kb_id):
-            raise ValueError(f"知识库 {kb_id} 不存在")
-        self._client.delete_collection(kb_id)
+        if self._client.collection_exists(kb_id):
+            self._client.delete_collection(kb_id)
 
     def add_document(self, kb_id: str, file_path: str, doc_name: str = None, doc_permission_id: int = None, document_id: int = None, document_version_id: int = None, version_no: int = None) -> int:
         import time

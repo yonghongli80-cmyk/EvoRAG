@@ -41,6 +41,13 @@ from rag.kb_document_cleanup import (
     resolve_kb_document_paths,
 )
 from rag.kb_file_store import resolve_stored_path
+from rag.kb_lifecycle import KBLifecycleError, kb_mutation
+from rag.kb_lifecycle_cleanup import (
+    cleanup_kb_files,
+    collect_kb_cleanup,
+    finish_kb_cleanup_sql,
+)
+from rag.kb_lifecycle_http import lifecycle_http_error
 from rag.kb_metadata import generate_summary, generate_toc
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.loader import load as load_document
@@ -200,8 +207,13 @@ async def create_knowledge_base(req: CreateKBRequest, request: Request, user: di
 
     def _create_org_kb():
         manager = KnowledgeBaseManager()
-        kb_id = manager.create_kb(req.name)
+        from rag.kb_lifecycle import assert_kb_available
+
+        kb_id = manager.create_kb(req.name, before_create=lambda candidate: assert_kb_available(user_db, candidate))
         with user_db.locked_transaction() as conn:
+            from rag.kb_lifecycle import assert_kb_available_in_tx
+
+            assert_kb_available_in_tx(conn, kb_id)
             conn.execute("INSERT INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb_id, req.name))
             conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, req.org_unit_code))
         return kb_id
@@ -226,7 +238,22 @@ async def update_kb_scope(
         raise HTTPException(status_code=409, detail="请先取消所有共享后再设为私有")
 
     try:
-        await asyncio.to_thread(user_db.update_kb_scope, kb_id, req.scope)
+        def _update_scope():
+            if req.scope not in {"private", "public"}:
+                raise ValueError(f"无效的 scope: {req.scope}，必须是 'private' 或 'public'")
+            with user_db.locked_transaction(immediate=True) as conn:
+                from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                assert_kb_available_in_tx(conn, kb_id)
+                conn.execute("UPDATE kb_metadata SET scope = ? WHERE kb_id = ?", (req.scope, kb_id))
+                conn.execute("DELETE FROM kb_shares WHERE kb_id = ?", (kb_id,))
+
+        await asyncio.to_thread(
+            _kb_write_sync, user_db, kb_id, user,
+            _update_scope,
+        )
+    except KBLifecycleError as e:
+        raise lifecycle_http_error(e) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -241,47 +268,129 @@ def _resolve_kb_files_root(request: Request | None = None) -> Path:
     return KB_FILES_ROOT
 
 
+def _ingest_kb_document_sync(
+    source, db, manager, actor, roots, kb_id, duplicate_action, audit_action="document_uploaded"
+):
+    """Run every durable upload/link mutation under one synchronous KB permit."""
+    from rag.kb_lifecycle import kb_mutation
+
+    kb_document_id = None
+    created = False
+    with kb_mutation(db, kb_id):
+        try:
+            require_kb_edit(db, kb_id, actor)
+            if duplicate_action == "overwrite" and db.get_document_permission(source.display_name, kb_id):
+                require_doc_edit(db, source.display_name, kb_id, actor)
+            final_name = choose_document_name(db, kb_id, source.display_name, duplicate_action)
+            existing = db.get_kb_document(kb_id, final_name)
+            if existing is None:
+                kb_document_id = db.create_kb_document_pending(kb_id, final_name)
+                created = True
+            else:
+                kb_document_id = existing["id"]
+            result = ingest_document_version(
+                db, manager, source, kb_id, actor, duplicate_action, Path(roots["versions_root"])
+            )
+            version = db.get_document_version_by_id(result.version_id)
+            parsed = load_document(version["file_path"])
+            toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
+            summary = generate_summary(parsed)
+            db.finish_kb_document(
+                kb_document_id, version["file_path"], toc, summary, result.chunks
+            )
+            if Path(result.filename).suffix.lower() in {".xlsx", ".csv"}:
+                try:
+                    ensure_structured_dataset(
+                        db,
+                        Path(roots["datasets_root"]),
+                        document_id=result.document_id,
+                        version_id=result.version_id,
+                        source_path=Path(version["file_path"]),
+                        fmt=Path(result.filename).suffix.lower().removeprefix("."),
+                    )
+                except Exception:
+                    logger.exception(
+                        "KB spreadsheet dataset extraction failed",
+                        extra={"kb_id": kb_id, "document_id": result.document_id},
+                    )
+            _audit_org_event(actor, audit_action, kb_id, "authorized", db)
+            return result
+        except BaseException:
+            if created and kb_document_id is not None:
+                db.delete_kb_document(kb_document_id)
+            raise
+
+
+def _kb_write_sync(db, kb_id: str, actor: dict, callback):
+    """Run a metadata/directory write behind the same synchronous lifecycle gate."""
+    with kb_mutation(db, kb_id):
+        require_kb_edit(db, kb_id, actor)
+        return callback()
+
+
 @router.delete("/knowledge-bases/{kb_id}", summary="删除知识库", description="删除指定知识库及其所有文档")
 async def delete_knowledge_base(kb_id: str, request: Request, user: dict = Depends(require_user)):
     if kb_id == "rag_docs":
         raise HTTPException(status_code=400, detail="不能删除系统集合 rag_docs")
 
     user_db = get_user_db(request)
-    require_kb_administer(user_db, kb_id, user)
+    require_kb_administer(user_db, kb_id, user, allow_deleting=True)
+    versions_root = _versions_root(request)
     kb_files_root = _resolve_kb_files_root(request)
+    datasets_root = Path(getattr(getattr(request, "app", None).state, "structured_datasets_root", settings.structured_datasets_root)) if getattr(request, "app", None) is not None else Path(settings.structured_datasets_root)
 
-    manager = KnowledgeBaseManager()
+    def _delete_worker():
+        with kb_mutation(user_db, kb_id, mode="delete") as permit:
+            permit.begin_delete()
+            try:
+                permit.assert_delete_started()
+                plan = collect_kb_cleanup(
+                    user_db, kb_id, versions_root, kb_files_root, datasets_root
+                )
+                permission_ids = [int(row["id"]) for row in plan["permissions"]]
+                user_db.cancel_material_jobs_for_documents(permission_ids)
+
+                from rag.wiki.api import get_wiki_indexer, get_wiki_store
+
+                wiki_store = get_wiki_store()
+                with wiki_store._lock:
+                    page_ids = [
+                        int(row[0])
+                        for row in wiki_store._conn.execute(
+                            "SELECT id FROM wiki_pages WHERE kb_id = ?", (kb_id,)
+                        ).fetchall()
+                    ]
+                user_db.cancel_wiki_reindex_jobs(page_ids)
+
+                manager = KnowledgeBaseManager()
+                for record in plan["documents"]:
+                    manager.remove_document(kb_id, record["filename"])
+                from rag.bm25_store import BM25Store
+
+                bm25 = BM25Store()
+                try:
+                    bm25.invalidate(kb_id)
+                finally:
+                    bm25.close()
+                get_wiki_indexer(user_db).remove_kb_content(kb_id, db=user_db)
+                manager.delete_kb(kb_id)
+                cleanup_kb_files(plan)
+                _audit_org_event(user, "kb_deleted", kb_id, "authorized", user_db)
+                permit.finish_delete(lambda conn: finish_kb_cleanup_sql(conn, kb_id, plan))
+            except Exception as exc:
+                try:
+                    permit.fail_delete(getattr(exc, "code", "cleanup_failed"))
+                except Exception:
+                    logger.exception("Failed to record KB deletion failure", extra={"kb_id": kb_id})
+                raise
+
     try:
-        documents = await asyncio.to_thread(user_db.list_kb_documents, kb_id)
-        versions_root = _versions_root(request)
-        planned_files = {
-            record["id"]: resolve_kb_document_paths(
-                user_db, kb_id, record, versions_root, kb_files_root
-            )
-            for record in documents
-        }
-        for record in documents:
-            await asyncio.to_thread(manager.remove_document, kb_id, record["filename"])
-            await asyncio.to_thread(delete_kb_document_files, planned_files[record["id"]])
-            permission = await asyncio.to_thread(
-                user_db.get_document_permission, record["filename"], kb_id
-            )
-            if permission:
-                await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
-            await asyncio.to_thread(user_db.delete_kb_document, record["id"])
-        manager.delete_kb(kb_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        await asyncio.to_thread(_delete_worker)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在") from exc
-    await asyncio.to_thread(_audit_org_event, user, "kb_deleted", kb_id, "authorized", user_db)
-
-    def _cleanup():
-        with user_db.locked_transaction() as conn:
-            conn.execute("DELETE FROM kb_documents WHERE kb_id = ?", (kb_id,))
-            conn.execute("DELETE FROM kb_org_policies WHERE kb_id = ?", (kb_id,))
-            conn.execute("DELETE FROM kb_metadata WHERE kb_id = ?", (kb_id,))
-    await asyncio.to_thread(_cleanup)
+        logger.exception("KB deletion cleanup failed", extra={"kb_id": kb_id})
+        raise HTTPException(status_code=503, detail="知识库删除未完成，请重试。", headers={"X-KB-Lifecycle-Error": "knowledge_base_delete_incomplete"}) from exc
     return {"status": "deleted", "kb_id": kb_id}
 
 
@@ -306,72 +415,19 @@ async def add_document_to_kb(
         raise HTTPException(status_code=400, detail="无效的 duplicate_action")
 
     source = UploadDocumentSource.from_bytes(filename, content)
-    if duplicate_action == "overwrite" and user_db.get_document_permission(source.display_name, kb_id):
-        require_doc_edit(user_db, source.display_name, kb_id, user)
-    manager = KnowledgeBaseManager()
-    kb_document_id = None
-    kb_document_created = False
+    roots = {
+        "versions_root": _versions_root(request),
+        "datasets_root": Path(getattr(request.app.state, "structured_datasets_root", settings.structured_datasets_root))
+        if hasattr(getattr(request, "app", None), "state") else Path(settings.structured_datasets_root),
+    }
     try:
-        final_name = choose_document_name(user_db, kb_id, source.display_name, duplicate_action)
-        existing_kb_doc = await asyncio.to_thread(user_db.get_kb_document, kb_id, final_name)
-        if existing_kb_doc is None:
-            kb_document_id = await asyncio.to_thread(
-                user_db.create_kb_document_pending, kb_id, final_name
-            )
-            kb_document_created = True
-        else:
-            kb_document_id = existing_kb_doc["id"]
         result = await asyncio.to_thread(
-            ingest_document_version,
-            user_db,
-            manager,
-            source,
-            kb_id,
-            user,
-            duplicate_action,
-            _versions_root(request),
+            _ingest_kb_document_sync,
+            source, user_db, KnowledgeBaseManager(), user, roots, kb_id, duplicate_action,
         )
-        version = await asyncio.to_thread(
-            user_db.get_document_version_by_id, result.version_id
-        )
-        parsed = await asyncio.to_thread(load_document, version["file_path"])
-        toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
-        summary = generate_summary(parsed)
-        await asyncio.to_thread(
-            user_db.finish_kb_document,
-            kb_document_id,
-            version["file_path"],
-            toc,
-            summary,
-            result.chunks,
-        )
-        if Path(result.filename).suffix.lower() in {".xlsx", ".csv"}:
-            spreadsheet_format = Path(result.filename).suffix.lower().removeprefix(".")
-            try:
-                datasets_root = Path(
-                    getattr(
-                        request.app.state,
-                        "structured_datasets_root",
-                        settings.structured_datasets_root,
-                    )
-                ) if hasattr(getattr(request, "app", None), "state") else Path(settings.structured_datasets_root)
-                await asyncio.to_thread(
-                    ensure_structured_dataset,
-                    user_db,
-                    datasets_root,
-                    document_id=result.document_id,
-                    version_id=result.version_id,
-                    source_path=Path(version["file_path"]),
-                    fmt=spreadsheet_format,
-                )
-            except Exception:
-                logger.exception(
-                    "KB spreadsheet dataset extraction failed",
-                    extra={"kb_id": kb_id, "document_id": result.document_id},
-                )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except DuplicateDocument as exc:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise HTTPException(
             status_code=409,
             detail={
@@ -381,16 +437,10 @@ async def add_document_to_kb(
             },
         ) from exc
     except HTTPException:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise
     except Exception as exc:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         logger.exception("KB document upload failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
-
-    await asyncio.to_thread(_audit_org_event, user, "document_uploaded", kb_id, "authorized", user_db)
     return {
         "status": "added",
         "kb_id": kb_id,
@@ -414,102 +464,49 @@ async def link_document_to_kb(
 ):
     user_db = get_user_db(request)
     require_kb_edit(user_db, kb_id, user)
-
-    source_doc = user_db.get_document_permission_by_id(body.document_id)
-    if source_doc is None:
+    source_identity = user_db.get_document_permission_by_id(body.document_id)
+    if source_identity is None:
         raise HTTPException(status_code=404, detail="资源不存在")
-    require_doc_view(user_db, source_doc["doc_name"], source_doc["kb_id"], user)
-    current_version_id = source_doc.get("current_version_id")
-    version = (
-        user_db.get_document_version_by_id(current_version_id)
-        if current_version_id
-        else None
-    )
-    if version is None:
-        raise HTTPException(status_code=409, detail="源文档没有可用版本")
-    source_path = Path(version["file_path"])
-    if not source_path.is_file():
-        raise HTTPException(status_code=409, detail="源文档文件不可用")
-    content = source_path.read_bytes()
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
-    filename = Path(source_doc["doc_name"]).name
-    if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="不支持的文件格式")
 
-    source = UploadDocumentSource.from_bytes(filename, content)
-    if body.duplicate_action == "overwrite" and user_db.get_document_permission(
-        source.display_name, kb_id
-    ):
-        require_doc_edit(user_db, source.display_name, kb_id, user)
-    manager = KnowledgeBaseManager()
-    kb_document_id = None
-    kb_document_created = False
+    def _source_snapshot():
+        with kb_mutation(user_db, source_identity["kb_id"]):
+            source_doc = user_db.get_document_permission_by_id(body.document_id)
+            if source_doc is None:
+                raise HTTPException(status_code=404, detail="资源不存在")
+            require_doc_view(user_db, source_doc["doc_name"], source_doc["kb_id"], user)
+            version_id = source_doc.get("current_version_id")
+            version = user_db.get_document_version_by_id(version_id) if version_id else None
+            if version is None:
+                raise HTTPException(status_code=409, detail="源文档没有可用版本")
+            source_path = Path(version["file_path"])
+            if not source_path.is_file():
+                raise HTTPException(status_code=409, detail="源文档文件不可用")
+            content = source_path.read_bytes()
+            if len(content) > MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+            filename = Path(source_doc["doc_name"]).name
+            if Path(filename).suffix.lower() not in SUPPORTED_EXTENSIONS:
+                raise HTTPException(status_code=400, detail="不支持的文件格式")
+            return UploadDocumentSource.from_bytes(filename, content)
+
     try:
-        final_name = choose_document_name(
-            user_db, kb_id, source.display_name, body.duplicate_action
-        )
-        existing_kb_doc = await asyncio.to_thread(
-            user_db.get_kb_document, kb_id, final_name
-        )
-        if existing_kb_doc is None:
-            kb_document_id = await asyncio.to_thread(
-                user_db.create_kb_document_pending, kb_id, final_name
-            )
-            kb_document_created = True
-        else:
-            kb_document_id = existing_kb_doc["id"]
+        source = await asyncio.to_thread(_source_snapshot)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
+    roots = {
+        "versions_root": _versions_root(request),
+        "datasets_root": Path(getattr(request.app.state, "structured_datasets_root", settings.structured_datasets_root))
+        if hasattr(getattr(request, "app", None), "state") else Path(settings.structured_datasets_root),
+    }
+    try:
         result = await asyncio.to_thread(
-            ingest_document_version,
-            user_db,
-            manager,
-            source,
-            kb_id,
-            user,
-            body.duplicate_action,
-            _versions_root(request),
+            _ingest_kb_document_sync,
+            source, user_db, KnowledgeBaseManager(), user, roots, kb_id,
+            body.duplicate_action, "document_linked",
         )
-        target_version = await asyncio.to_thread(
-            user_db.get_document_version_by_id, result.version_id
-        )
-        parsed = await asyncio.to_thread(load_document, target_version["file_path"])
-        toc = _json.dumps(generate_toc(parsed), ensure_ascii=False)
-        summary = generate_summary(parsed)
-        await asyncio.to_thread(
-            user_db.finish_kb_document,
-            kb_document_id,
-            target_version["file_path"],
-            toc,
-            summary,
-            result.chunks,
-        )
-        if Path(result.filename).suffix.lower() in {".xlsx", ".csv"}:
-            spreadsheet_format = Path(result.filename).suffix.lower().removeprefix(".")
-            try:
-                datasets_root = Path(
-                    getattr(
-                        request.app.state,
-                        "structured_datasets_root",
-                        settings.structured_datasets_root,
-                    )
-                )
-                await asyncio.to_thread(
-                    ensure_structured_dataset,
-                    user_db,
-                    datasets_root,
-                    document_id=result.document_id,
-                    version_id=result.version_id,
-                    source_path=Path(target_version["file_path"]),
-                    fmt=spreadsheet_format,
-                )
-            except Exception:
-                logger.exception(
-                    "KB linked spreadsheet dataset extraction failed",
-                    extra={"kb_id": kb_id, "document_id": result.document_id},
-                )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except DuplicateDocument as exc:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise HTTPException(
             status_code=409,
             detail={
@@ -519,18 +516,10 @@ async def link_document_to_kb(
             },
         ) from exc
     except HTTPException:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         raise
     except Exception as exc:
-        if kb_document_created:
-            await asyncio.to_thread(user_db.delete_kb_document, kb_document_id)
         logger.exception("KB document link failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文件处理失败") from exc
-
-    await asyncio.to_thread(
-        _audit_org_event, user, "document_linked", kb_id, "authorized", user_db
-    )
     return {
         "status": "linked",
         "kb_id": kb_id,
@@ -548,35 +537,36 @@ async def remove_document_from_kb(
 ):
     user_db = get_user_db(request)
     require_kb_edit(user_db, kb_id, user)
-    record = await asyncio.to_thread(user_db.get_kb_document, kb_id, doc_name)
-    if record is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
-    require_doc_edit(user_db, doc_name, kb_id, user)
+    def _delete_document():
+        with kb_mutation(user_db, kb_id):
+            require_kb_edit(user_db, kb_id, user)
+            record = user_db.get_kb_document(kb_id, doc_name)
+            if record is None:
+                raise HTTPException(status_code=404, detail="文档不存在")
+            require_doc_edit(user_db, doc_name, kb_id, user)
+            paths = resolve_kb_document_paths(
+                user_db, kb_id, record, _versions_root(request), _resolve_kb_files_root(request)
+            )
+            try:
+                user_db.set_kb_document_state(record["id"], "deleting")
+                KnowledgeBaseManager().remove_document(kb_id, doc_name)
+                delete_kb_document_files(paths)
+                permission = user_db.get_document_permission(doc_name, kb_id)
+                if permission:
+                    user_db.delete_document_permission(permission["id"])
+                user_db.delete_kb_document(record["id"])
+                _audit_org_event(user, "document_deleted", kb_id, "authorized", user_db)
+            except Exception as exc:
+                user_db.set_kb_document_state(record["id"], "delete_failed", str(exc))
+                raise
 
-    manager = KnowledgeBaseManager()
     try:
-        paths = resolve_kb_document_paths(
-            user_db,
-            kb_id,
-            record,
-            _versions_root(request),
-            _resolve_kb_files_root(request),
-        )
-        await asyncio.to_thread(user_db.set_kb_document_state, record["id"], "deleting")
-        await asyncio.to_thread(manager.remove_document, kb_id, doc_name)
-        await asyncio.to_thread(delete_kb_document_files, paths)
-        permission = await asyncio.to_thread(user_db.get_document_permission, doc_name, kb_id)
-        if permission:
-            await asyncio.to_thread(user_db.delete_document_permission, permission["id"])
-        await asyncio.to_thread(user_db.delete_kb_document, record["id"])
+        await asyncio.to_thread(_delete_document)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except Exception as exc:
-        await asyncio.to_thread(
-            user_db.set_kb_document_state, record["id"], "delete_failed", str(exc)
-        )
         logger.exception("KB document deletion failed", extra={"kb_id": kb_id})
         raise HTTPException(status_code=400, detail="文档删除失败") from exc
-
-    await asyncio.to_thread(_audit_org_event, user, "document_deleted", kb_id, "authorized", user_db)
     return {"status": "removed", "kb_id": kb_id, "doc_name": doc_name}
 
 
@@ -650,7 +640,13 @@ async def update_kb_overview(
 ):
     user_db = get_user_db(request)
     require_kb_edit(user_db, kb_id, user)
-    updated = await asyncio.to_thread(user_db.update_kb_overview, kb_id, req.overview)
+    try:
+        updated = await asyncio.to_thread(
+            _kb_write_sync, user_db, kb_id, user,
+            lambda: user_db.update_kb_overview(kb_id, req.overview),
+        )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="知识库不存在")
     return {"status": "updated"}
@@ -667,14 +663,25 @@ async def rename_knowledge_base(
     _check_kb_edit_permission(kb_id, user_dict, user_db)
 
     def _update():
+        with kb_mutation(user_db, kb_id):
+            require_kb_edit(user_db, kb_id, user_dict)
+            return _update_in_tx()
+
+    def _update_in_tx():
         with user_db.locked_transaction() as conn:
+            from rag.kb_lifecycle import assert_kb_available_in_tx
+
+            assert_kb_available_in_tx(conn, kb_id)
             conn.execute(
                 "INSERT INTO kb_metadata (kb_id, name) VALUES (?, ?) "
                 "ON CONFLICT(kb_id) DO UPDATE SET name = ?",
                 (kb_id, req.name, req.name),
             )
 
-    await asyncio.to_thread(_update)
+    try:
+        await asyncio.to_thread(_update)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     await asyncio.to_thread(_audit_org_event, user_dict, "kb_renamed", kb_id, "authorized", user_db)
     return {"status": "updated", "name": req.name}
 
@@ -690,10 +697,15 @@ async def update_doc_toc(
     require_doc_edit(user_db, doc_name, kb_id, user)
 
     def _update():
-        toc_str = _json.dumps(req.toc, ensure_ascii=False)
-        return user_db.update_kb_document_toc(kb_id, doc_name, toc_str)
+        with kb_mutation(user_db, kb_id):
+            require_doc_edit(user_db, doc_name, kb_id, user)
+            toc_str = _json.dumps(req.toc, ensure_ascii=False)
+            return user_db.update_kb_document_toc(kb_id, doc_name, toc_str)
 
-    result = await asyncio.to_thread(_update)
+    try:
+        result = await asyncio.to_thread(_update)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     if not result:
         raise HTTPException(status_code=404, detail="文档不存在")
     return {"status": "updated"}
@@ -709,7 +721,25 @@ async def update_doc_summary(
         raise HTTPException(status_code=404, detail="文档不存在")
     require_doc_edit(user_db, doc_name, kb_id, user)
 
-    await asyncio.to_thread(user_db.update_kb_document_summary, kb_id, doc_name, req.summary)
+    try:
+        def _update_summary():
+            with kb_mutation(user_db, kb_id):
+                require_doc_edit(user_db, doc_name, kb_id, user)
+                with user_db.locked_transaction(immediate=True) as conn:
+                    from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                    assert_kb_available_in_tx(conn, kb_id)
+                    cursor = conn.execute(
+                        "UPDATE kb_documents SET summary = ? WHERE kb_id = ? AND filename = ?",
+                        (req.summary, kb_id, doc_name),
+                    )
+                    return cursor.rowcount > 0
+
+        await asyncio.to_thread(
+            _update_summary,
+        )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     return {"status": "updated"}
 
 
@@ -750,17 +780,30 @@ async def generate_kb_toc(
                 toc_results[filename] = toc
                 toc_str = _json.dumps(toc, ensure_ascii=False)
                 with user_db.locked_transaction() as conn:
+                    from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                    assert_kb_available_in_tx(conn, kb_id)
                     conn.execute(
                         "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
                         (toc_str, kb_id, filename),
                     )
             return toc_results, None
+        except KBLifecycleError:
+            raise
         except Exception:
             logger.exception("KB toc generation failed", extra={"kb_id": kb_id})
             # 返回使用固定标记而非异常文本：调用方只把它翻译成不透明错误（B-05）。
             return None, "internal_error"
 
-    result, error = await asyncio.to_thread(_generate)
+    def _generate_under_gate():
+        with kb_mutation(user_db, kb_id):
+            _check_kb_edit_permission(kb_id, user_dict, user_db)
+            return _generate()
+
+    try:
+        result, error = await asyncio.to_thread(_generate_under_gate)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     if error == "no_documents":
         raise HTTPException(status_code=400, detail="知识库中无文档，请先添加文档")
     if error:
@@ -804,18 +847,31 @@ async def generate_kb_overview(
             overview = generate_summary(combined)
 
             with user_db.locked_transaction() as conn:
+                from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                assert_kb_available_in_tx(conn, kb_id)
                 conn.execute(
                     "INSERT INTO kb_metadata (kb_id, name, overview) VALUES (?, '', ?) "
                     "ON CONFLICT(kb_id) DO UPDATE SET overview = ?",
                     (kb_id, overview, overview),
                 )
             return overview, None
+        except KBLifecycleError:
+            raise
         except Exception:
             logger.exception("KB overview generation failed", extra={"kb_id": kb_id})
             # 固定标记，异常文本只进日志（B-05）。
             return None, "internal_error"
 
-    result, error = await asyncio.to_thread(_generate)
+    def _generate_under_gate():
+        with kb_mutation(user_db, kb_id):
+            _check_kb_edit_permission(kb_id, user_dict, user_db)
+            return _generate()
+
+    try:
+        result, error = await asyncio.to_thread(_generate_under_gate)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     if error == "no_documents":
         raise HTTPException(status_code=400, detail="知识库中无文档，请先添加文档")
     if error:
@@ -846,7 +902,29 @@ async def share_knowledge_base(
         raise HTTPException(status_code=404, detail=f"用户 ID {req.user_id} 不存在")
 
     try:
-        await asyncio.to_thread(user_db.share_kb, kb_id, req.user_id, user_dict["id"], req.permission)
+        def _share():
+            with kb_mutation(user_db, kb_id):
+                require_kb_edit(user_db, kb_id, user_dict)
+                with user_db.locked_transaction(immediate=True) as conn:
+                    from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                    assert_kb_available_in_tx(conn, kb_id)
+                    cursor = conn.execute(
+                        "INSERT INTO kb_shares (kb_id, user_id, permission, granted_by) "
+                        "VALUES (?, ?, ?, ?)",
+                        (kb_id, req.user_id, req.permission, user_dict["id"]),
+                    )
+                    conn.execute(
+                        "UPDATE kb_metadata SET scope = 'shared' WHERE kb_id = ? AND scope != 'shared'",
+                        (kb_id,),
+                    )
+                    return int(cursor.lastrowid)
+
+        await asyncio.to_thread(
+            _share,
+        )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except Exception as exc:
         if "UNIQUE" in str(exc):
             raise HTTPException(status_code=409, detail="该用户已被共享") from exc
@@ -874,7 +952,29 @@ async def unshare_knowledge_base(
     if not user_dict.get("is_admin") and meta["owner_id"] != user_dict["id"]:
         raise HTTPException(status_code=404, detail="资源不存在")
 
-    await asyncio.to_thread(user_db.unshare_kb, kb_id, user_id)
+    try:
+        def _unshare():
+            with kb_mutation(user_db, kb_id):
+                require_kb_edit(user_db, kb_id, user_dict)
+                with user_db.locked_transaction(immediate=True) as conn:
+                    from rag.kb_lifecycle import assert_kb_available_in_tx
+
+                    assert_kb_available_in_tx(conn, kb_id)
+                    conn.execute("DELETE FROM kb_shares WHERE kb_id = ? AND user_id = ?", (kb_id, user_id))
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM kb_shares WHERE kb_id = ?", (kb_id,)
+                    ).fetchone()[0]
+                    if remaining == 0:
+                        conn.execute(
+                            "UPDATE kb_metadata SET scope = 'private' WHERE kb_id = ? AND scope = 'shared'",
+                            (kb_id,),
+                        )
+
+        await asyncio.to_thread(
+            _unshare,
+        )
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     return None
 
 

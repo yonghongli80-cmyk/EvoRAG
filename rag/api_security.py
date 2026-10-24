@@ -14,6 +14,8 @@ from fastapi.security import APIKeyHeader
 from config import settings
 from rag.auth import decode_token
 from rag.context import get_user_db as get_user_db
+from rag.kb_lifecycle import KBLifecycleError, assert_kb_available
+from rag.kb_lifecycle_http import lifecycle_http_error
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
@@ -198,17 +200,30 @@ def require_kb_view(db: UserDB, kb_id: str, user: dict) -> dict:
                 "denied", decision.reason,
             )
             raise HTTPException(status_code=404, detail="资源不存在")
-        return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
+        result = {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
+        try:
+            assert_kb_available(db, kb_id)
+        except KBLifecycleError as exc:
+            raise lifecycle_http_error(exc) from exc
+        return result
     if meta is None:
         if user.get("is_admin"):
+            try:
+                assert_kb_available(db, kb_id)
+            except KBLifecycleError as exc:
+                raise lifecycle_http_error(exc) from exc
             return {"kb_id": kb_id, "owner_id": 0, "scope": "orphaned"}
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
     if not _legacy_kb_owner_or_admin(meta, user):
         _deny_unmigrated_legacy_kb(kb_id)
+    try:
+        assert_kb_available(db, kb_id)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     return meta
 
 
-def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
+def require_kb_edit(db: UserDB, kb_id: str, user: dict, *, allow_deleting: bool = False) -> dict:
     """Require an explicit KB edit grant and reject orphaned collections."""
     meta = db.get_kb_metadata(kb_id)
     policy = OrgRepository(db).get_kb_policy(kb_id)
@@ -220,20 +235,29 @@ def require_kb_edit(db: UserDB, kb_id: str, user: dict) -> dict:
                 "denied", decision.reason,
             )
             raise HTTPException(status_code=404, detail="资源不存在")
-        return {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
+        result = {**(meta or {"kb_id": kb_id}), **policy, "effective_role": decision.role.value}
+        try:
+            assert_kb_available(db, kb_id, allow_deleting=allow_deleting)
+        except KBLifecycleError as exc:
+            raise lifecycle_http_error(exc) from exc
+        return result
     if meta is None:
         raise HTTPException(status_code=409, detail="知识库元数据缺失")
     if not _legacy_kb_owner_or_admin(meta, user):
         _deny_unmigrated_legacy_kb(kb_id)
+    try:
+        assert_kb_available(db, kb_id, allow_deleting=allow_deleting)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     return meta
 
 
-def require_kb_administer(db: UserDB, kb_id: str, user: dict) -> dict:
+def require_kb_administer(db: UserDB, kb_id: str, user: dict, *, allow_deleting: bool = False) -> dict:
     """Require company-administrator authority for an organization KB."""
     meta = db.get_kb_metadata(kb_id)
     policy = OrgRepository(db).get_kb_policy(kb_id)
     if not is_org_policy(policy):
-        return require_kb_edit(db, kb_id, user)
+        return require_kb_edit(db, kb_id, user, allow_deleting=allow_deleting)
     decision = OrgAuthorizationService(db).authorize(
         int(user["id"]), kb_id, OrgRole.ADMINISTER
     )
@@ -243,11 +267,16 @@ def require_kb_administer(db: UserDB, kb_id: str, user: dict) -> dict:
             "denied", decision.reason,
         )
         raise HTTPException(status_code=404, detail="资源不存在")
-    return {
+    result = {
         **(meta or {"kb_id": kb_id}),
         **policy,
         "effective_role": decision.role.value,
     }
+    try:
+        assert_kb_available(db, kb_id, allow_deleting=allow_deleting)
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
+    return result
 
 
 def require_doc_view(db: UserDB, doc_name: str, kb_id: str, user: dict) -> dict:
