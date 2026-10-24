@@ -40,9 +40,9 @@ class RedisCache:
                 self._redis.ping()
                 self._connected = True
                 self._redis_retry_after = 0.0
-                logger.info("Redis 连接成功: %s", settings.redis_url)
+                logger.info("Redis 连接成功")
             except Exception as e:
-                logger.warning("Redis 连接失败，降级到内存缓存: %s", e)
+                logger.warning("Redis 连接失败，降级到内存缓存（%s）", type(e).__name__)
                 self._redis = None
                 self._connected = False
                 self._redis_retry_after = time.monotonic() + self._redis_cooldown_seconds
@@ -64,7 +64,7 @@ class RedisCache:
                     return json.loads(data)
                 return self._fallback_get(key)
             except Exception as e:
-                logger.warning("Redis get 失败，降级到内存: %s", e)
+                logger.warning("Redis get 失败，降级到内存（%s）", type(e).__name__)
                 return self._fallback_get(key)
         else:
             return self._fallback_get(key)
@@ -80,7 +80,7 @@ class RedisCache:
                 redis.set(key, data, ex=self.ttl)
                 return
             except Exception as e:
-                logger.warning("Redis set 失败，降级到内存: %s", e)
+                logger.warning("Redis set 失败，降级到内存（%s）", type(e).__name__)
 
         self._fallback_set(key, data)
 
@@ -92,7 +92,7 @@ class RedisCache:
             try:
                 redis.delete(key)
             except Exception as e:
-                logger.warning("Redis delete 失败: %s", e)
+                logger.warning("Redis delete 失败（%s）", type(e).__name__)
         self._fallback_delete(key)
 
     def clear(self) -> None:
@@ -109,7 +109,7 @@ class RedisCache:
                     if cursor == 0:
                         break
             except Exception as e:
-                logger.warning("Redis clear 失败: %s", e)
+                logger.warning("Redis clear 失败（%s）", type(e).__name__)
         with self._lock:
             self._fallback.clear()
 
