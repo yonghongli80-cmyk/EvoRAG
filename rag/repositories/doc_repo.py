@@ -6,6 +6,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
+from rag.kb_lifecycle import assert_kb_available_in_tx
 from rag.repositories.base import BaseRepository, VersionConflict
 
 if TYPE_CHECKING:
@@ -36,13 +37,13 @@ class DocRepository(BaseRepository):
         self, kb_id: str, name: str, owner_id: int = 0, scope: str = "private"
     ) -> None:
         """创建 KB 元数据（仅新 KB 调用，不覆盖已有数据）。"""
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
+            assert_kb_available_in_tx(conn, kb_id)
             conn.execute(
                 "INSERT OR IGNORE INTO kb_metadata "
                 "(kb_id, name, owner_id, scope) VALUES (?, ?, ?, ?)",
                 (kb_id, name, owner_id, scope),
             )
-            conn.commit()
 
     def get_kb_metadata(self, kb_id: str) -> dict[str, Any] | None:
         """获取 KB 元数据。不存在返回 None。"""
@@ -89,7 +90,8 @@ class DocRepository(BaseRepository):
 
     def update_kb_overview(self, kb_id: str, overview: str) -> bool:
         """Update an existing knowledge base overview through the shared connection."""
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
+            assert_kb_available_in_tx(conn, kb_id)
             cur = conn.execute(
                 "UPDATE kb_metadata SET overview = ? WHERE kb_id = ?",
                 (overview, kb_id),
@@ -161,24 +163,31 @@ class DocRepository(BaseRepository):
     # ------------------------------------------------------------------
 
     def create_kb_document_pending(self, kb_id: str, filename: str) -> int:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
+            assert_kb_available_in_tx(conn, kb_id)
             cur = conn.execute(
                 "INSERT INTO kb_documents (kb_id, filename, status) VALUES (?, ?, 'pending')",
                 (kb_id, filename),
             )
-            conn.commit()
             return int(cur.lastrowid)
 
     def finish_kb_document(
         self, document_id: int, file_path: str, toc: str, summary: str, chunk_count: int
     ) -> None:
-        with self.cm.write_connection() as conn:
-            conn.execute(
+        with self.cm.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT kb_id FROM kb_documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if row is None:
+                raise VersionConflict("kb document no longer exists")
+            assert_kb_available_in_tx(conn, row["kb_id"])
+            updated = conn.execute(
                 "UPDATE kb_documents SET file_path = ?, toc = ?, summary = ?, "
                 "chunk_count = ?, status = 'indexed', last_error = '' WHERE id = ?",
                 (file_path, toc, summary, chunk_count, document_id),
             )
-            conn.commit()
+            if updated.rowcount != 1:
+                raise VersionConflict("kb document no longer exists")
 
     def set_kb_document_state(
         self, document_id: int, status: str, last_error: str = ""
@@ -216,7 +225,8 @@ class DocRepository(BaseRepository):
             conn.commit()
 
     def update_kb_document_toc(self, kb_id: str, filename: str, toc: str) -> bool:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
+            assert_kb_available_in_tx(conn, kb_id)
             cur = conn.execute(
                 "UPDATE kb_documents SET toc = ? WHERE kb_id = ? AND filename = ?",
                 (toc, kb_id, filename),
@@ -251,13 +261,13 @@ class DocRepository(BaseRepository):
         if scope is None:
             scope = "public" if is_public else "private"
         is_public = scope == "public"
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
+            assert_kb_available_in_tx(conn, kb_id)
             cur = conn.execute(
                 "INSERT INTO document_permissions (doc_name, kb_id, owner_id, permission_level, is_public, protected, scope) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (doc_name, kb_id, owner_id, permission_level, int(is_public), int(protected), scope),
             )
-            conn.commit()
             return int(cur.lastrowid)
 
     def get_document_permission(self, doc_name: str, kb_id: str) -> dict[str, Any] | None:
@@ -470,6 +480,12 @@ class DocRepository(BaseRepository):
         it. ``version_no`` is derived per document as max+1.
         """
         with self.cm.transaction(immediate=True) as conn:
+            permission = conn.execute(
+                "SELECT kb_id FROM document_permissions WHERE id = ?",
+                (document_id,),
+            ).fetchone()
+            if permission is not None:
+                assert_kb_available_in_tx(conn, permission["kb_id"])
             row = conn.execute(
                 "SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no "
                 "FROM document_versions WHERE document_id = ?",
@@ -494,6 +510,14 @@ class DocRepository(BaseRepository):
         """
         now = time.time()
         conn = self.cm.get_write_connection()
+        permission = conn.execute(
+            "SELECT kb_id FROM document_permissions WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+        if permission is not None:
+            assert_kb_available_in_tx(conn, permission["kb_id"])
+            if permission["kb_id"] != kb_id:
+                raise VersionConflict("document knowledge base changed")
         conn.execute(
             "UPDATE document_versions SET status='historical', superseded_at=? "
             "WHERE document_id=? AND status='current'",

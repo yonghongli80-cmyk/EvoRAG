@@ -8,6 +8,8 @@ from openpyxl.utils import get_column_letter, range_boundaries
 
 from config import settings
 from rag.api_security import require_doc_version_edit, require_doc_view, require_user
+from rag.kb_lifecycle import KBLifecycleError
+from rag.kb_lifecycle_http import lifecycle_http_error
 from rag.spreadsheets.audit import (
     get_spreadsheet_audit_detail,
     list_spreadsheet_audits,
@@ -136,6 +138,8 @@ async def create_spreadsheet_edit(
             status_code=409,
             detail={"code": str(exc)},
         ) from exc
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except SpreadsheetEditServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -175,6 +179,8 @@ async def create_spreadsheet_structure_edit(
             status_code=409,
             detail={"code": str(exc)},
         ) from exc
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except SpreadsheetEditServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -238,6 +244,8 @@ async def restore_spreadsheet_version(
             status_code=409,
             detail={"code": str(exc)},
         ) from exc
+    except KBLifecycleError as exc:
+        raise lifecycle_http_error(exc) from exc
     except SpreadsheetEditServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

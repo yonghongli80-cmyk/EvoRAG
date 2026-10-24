@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from rag.kb_lifecycle import assert_kb_available_in_tx
 from rag.org_auth.repository import OrgRepository
 
 _UNMIGRATED_SQL = """
@@ -35,6 +36,7 @@ def migrate_legacy_knowledge_bases(db) -> MigrationReport:
     with db.locked_transaction(immediate=True) as conn:
         rows = conn.execute(_UNMIGRATED_SQL).fetchall()
         for row in rows:
+            assert_kb_available_in_tx(conn, row["kb_id"])
             conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type,sensitivity) VALUES(?,NULL,'unassigned',NULL)", (row["kb_id"],))
             shares = [dict(r) for r in conn.execute("SELECT user_id,permission,granted_by FROM kb_shares WHERE kb_id=?", (row["kb_id"],))]
             conn.execute("INSERT INTO org_audit_events(actor_id,action,target_type,target_id,result,reason,details_json) VALUES(NULL,'legacy_kb_migrated','knowledge_base',?,'success','unassigned',?)", (row["kb_id"], json.dumps({"owner_id": row["owner_id"], "scope": row["scope"], "shares": shares}, ensure_ascii=False)))

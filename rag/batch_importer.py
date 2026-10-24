@@ -122,6 +122,37 @@ class BatchImporter:
         doc_name: str | None = None,
         duplicate_action: str = "reject",
     ) -> dict:
+        """Run every document, vector and file write under its KB admission."""
+        if not user or user.get("id") is None:
+            raise ValueError("user is required for batch import")
+        if user_db is None:
+            raise ValueError("user_db is required for batch import")
+        from rag.kb_lifecycle import kb_mutation
+
+        with kb_mutation(user_db, kb_id):
+            return self._import_file(
+                file_path,
+                mode,
+                kb_id,
+                user=user,
+                user_db=user_db,
+                config=config,
+                doc_name=doc_name,
+                duplicate_action=duplicate_action,
+            )
+
+    def _import_file(
+        self,
+        file_path: str,
+        mode: str = "qa_pair",
+        kb_id: str = "rag_docs",
+        *,
+        user: dict,
+        user_db,
+        config: dict | None = None,
+        doc_name: str | None = None,
+        duplicate_action: str = "reject",
+    ) -> dict:
         """导入单个文件并对齐文档版本树与向量库。
 
         ``user``/``user_db`` 必填（B-08）：旧实现缺省会伪造一个管理员身份并
@@ -177,7 +208,7 @@ class BatchImporter:
         raw_bytes = Path(file_path).read_bytes()
         source = UploadDocumentSource.from_bytes(final_name, raw_bytes)
         versions_root = Path(settings.document_versions_root)
-        stage = stage_version(versions_root, source)
+        stage = stage_version(versions_root, source, document_id=document_id)
 
         version_id = None
         indexed = False

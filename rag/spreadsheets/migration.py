@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rag.kb_lifecycle import KBLifecycleError, kb_mutation
 from rag.spreadsheets.parser import parse_spreadsheet
 from rag.spreadsheets.store import (
     read_dataset_schema,
@@ -100,6 +101,29 @@ def ensure_structured_dataset(
     source_path: Path,
     fmt: str,
 ) -> bool:
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise ValueError("document permission no longer exists")
+    with kb_mutation(db, document["kb_id"]):
+        return _ensure_structured_dataset(
+            db,
+            root,
+            document_id=document_id,
+            version_id=version_id,
+            source_path=source_path,
+            fmt=fmt,
+        )
+
+
+def _ensure_structured_dataset(
+    db: UserDB,
+    root: Path,
+    *,
+    document_id: int,
+    version_id: int,
+    source_path: Path,
+    fmt: str,
+) -> bool:
     """Create the readable dataset for one spreadsheet version if absent.
 
     Returns ``True`` when a new dataset was created and ``False`` when a ready
@@ -150,14 +174,21 @@ def backfill_structured_dataset_mirrors(
     datasets_root = Path(root).resolve()
     mirrored = 0
     for kb_id in sorted(kb_ids):
-        for item in db.list_current_ready_spreadsheet_datasets(kb_id):
-            try:
-                if _mirror_dataset_schema(db, datasets_root, item):
-                    mirrored += 1
-            except Exception:
-                logger.exception(
-                    "dataset %s schema mirror backfill failed", item.get("id")
-                )
+        try:
+            with kb_mutation(db, kb_id):
+                for item in db.list_current_ready_spreadsheet_datasets(kb_id):
+                    try:
+                        if _mirror_dataset_schema(db, datasets_root, item):
+                            mirrored += 1
+                    except Exception:
+                        logger.exception(
+                            "dataset %s schema mirror backfill failed", item.get("id")
+                        )
+        except KBLifecycleError:
+            logger.info(
+                "spreadsheet schema backfill skipped for unavailable knowledge base",
+                extra={"kb_id": kb_id},
+            )
     return mirrored
 
 
@@ -168,21 +199,24 @@ def migrate_existing_spreadsheets(db: UserDB, root: Path) -> SpreadsheetMigratio
         version_id = document.get("current_version_id")
         if not version_id or Path(document["doc_name"]).suffix.lower() not in {".xlsx", ".csv"}:
             continue
-        if db.get_structured_dataset_for_version(version_id):
-            unchanged += 1
-            continue
-        version = db.get_document_version_by_id(version_id)
-        fmt = Path(document["doc_name"]).suffix.lower().removeprefix(".")
         try:
-            ensure_structured_dataset(
-                db,
-                root,
-                document_id=document["id"],
-                version_id=version_id,
-                source_path=Path(version["file_path"]),
-                fmt=fmt,
-            )
-            migrated += 1
+            with kb_mutation(db, document["kb_id"]):
+                if db.get_structured_dataset_for_version(version_id):
+                    unchanged += 1
+                    continue
+                version = db.get_document_version_by_id(version_id)
+                fmt = Path(document["doc_name"]).suffix.lower().removeprefix(".")
+                ensure_structured_dataset(
+                    db,
+                    root,
+                    document_id=document["id"],
+                    version_id=version_id,
+                    source_path=Path(version["file_path"]),
+                    fmt=fmt,
+                )
+                migrated += 1
+        except KBLifecycleError:
+            failed += 1
         except Exception:
             failed += 1
     mirrored = backfill_structured_dataset_mirrors(

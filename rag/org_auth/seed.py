@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rag.auth import hash_password
+from rag.kb_lifecycle import assert_kb_available_in_tx
 from rag.org_auth.migration import migrate_legacy_knowledge_bases
 from rag.org_auth.repository import OrgRepository
 from rag.org_auth.seed_manifest import build_seed_manifest
@@ -99,6 +100,7 @@ def seed_organization(
         conn.executemany("INSERT OR IGNORE INTO org_manager_scopes(person_code,org_code) VALUES(?,?)", ((m.person_code, m.org_code) for m in manifest.manager_scopes))
         conn.executemany("INSERT OR IGNORE INTO org_sensitive_qualifications(person_code,sensitivity) VALUES(?,?)", manifest.qualifications)
         for kb in manifest.knowledge_bases:
+            assert_kb_available_in_tx(conn, kb.kb_id)
             cur = conn.execute("INSERT OR IGNORE INTO kb_org_policies(kb_id,org_code,kb_type,sensitivity,seed_key) VALUES(?,?,?,?,?)", (kb.kb_id, kb.org_code, kb.kb_type, kb.sensitivity, kb.kb_id))
             created_kbs += cur.rowcount
             conn.execute("INSERT OR IGNORE INTO kb_metadata(kb_id,name,owner_id,scope) VALUES(?,?,0,'private')", (kb.kb_id, kb.name))

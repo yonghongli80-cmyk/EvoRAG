@@ -21,6 +21,7 @@ from rag.document_version_store import (
     resolve_version_path,
     stage_version,
 )
+from rag.kb_lifecycle import KBLifecycleError, kb_mutation
 from rag.knowledge_base import KnowledgeBaseManager
 from rag.loader import load as load_document
 from rag.user_db import UserDB
@@ -79,6 +80,22 @@ def ingest_document_version(
     duplicate_action: DuplicateAction,
     root: Path,
 ) -> IngestResult:
+    """Admit the complete ingest and its compensations for one KB."""
+    with kb_mutation(db, kb_id):
+        return _ingest_document_version(
+            db, manager, source, kb_id, actor, duplicate_action, root
+        )
+
+
+def _ingest_document_version(
+    db: UserDB,
+    manager: KnowledgeBaseManager,
+    source: SourceObject,
+    kb_id: str,
+    actor: dict,
+    duplicate_action: DuplicateAction,
+    root: Path,
+) -> IngestResult:
     """Ingest one source object as an immutable document version.
 
     - Overwriting never changes the document owner.
@@ -113,7 +130,7 @@ def ingest_document_version(
         document_id = existing["id"]
         was_existing = True
 
-    stage = stage_version(root, source)
+    stage = stage_version(root, source, document_id=document_id)
     version_id = None
     version_no = 0
     indexed = False
@@ -182,6 +199,32 @@ class VersionPromotionError(Exception):
 
 
 def promote_staged_version(
+    db: UserDB,
+    root: Path,
+    *,
+    document_id: int,
+    filename: str,
+    staged_path: Path,
+    content_hash: str,
+    uploaded_by: int,
+) -> PromotedVersion:
+    """Admit staged file promotion and database compensation for its KB."""
+    document = db.get_document_permission_by_id(document_id)
+    if document is None:
+        raise VersionPromotionError("document permission is missing")
+    with kb_mutation(db, document["kb_id"]):
+        return _promote_staged_version(
+            db,
+            root,
+            document_id=document_id,
+            filename=filename,
+            staged_path=staged_path,
+            content_hash=content_hash,
+            uploaded_by=uploaded_by,
+        )
+
+
+def _promote_staged_version(
     db: UserDB,
     root: Path,
     *,
@@ -289,49 +332,55 @@ def migrate_staged_document_versions(
     staging_root = (versions_root / "staging").resolve()
     migrated = unchanged = missing = skipped = conflicts = 0
     for document in db.list_document_permissions_all():
-        for version in db.list_document_versions(document["id"]):
-            if version["status"] not in {"current", "historical"}:
-                skipped += 1
-                continue
-            try:
-                stored = resolve_version_path(versions_root, version["file_path"])
-            except (OSError, ValueError):
-                conflicts += 1
-                continue
-            if not stored.is_relative_to(staging_root):
-                unchanged += 1
-                continue
-            try:
-                final_path = final_version_path(
-                    versions_root,
-                    document["id"],
-                    version["version_no"],
-                    version["original_filename"],
-                )
-                if not stored.is_file():
-                    if final_path.is_file():
-                        # A previous attempt moved the file but did not commit
-                        # the row; repair the pointer without copying bytes.
+        try:
+            with kb_mutation(db, document["kb_id"]):
+                for version in db.list_document_versions(document["id"]):
+                    if version["status"] not in {"current", "historical"}:
+                        skipped += 1
+                        continue
+                    try:
+                        stored = resolve_version_path(
+                            versions_root, version["file_path"]
+                        )
+                    except (OSError, ValueError):
+                        conflicts += 1
+                        continue
+                    if not stored.is_relative_to(staging_root):
+                        unchanged += 1
+                        continue
+                    try:
+                        final_path = final_version_path(
+                            versions_root,
+                            document["id"],
+                            version["version_no"],
+                            version["original_filename"],
+                        )
+                        if not stored.is_file():
+                            if final_path.is_file():
+                                db.set_version_file_path(
+                                    version["id"], str(final_path)
+                                )
+                                migrated += 1
+                            else:
+                                missing += 1
+                            continue
+                        if final_path.exists():
+                            conflicts += 1
+                            continue
+                        promote_version(stored, final_path)
                         db.set_version_file_path(version["id"], str(final_path))
                         migrated += 1
-                    else:
-                        missing += 1
-                    continue
-                if final_path.exists():
-                    conflicts += 1
-                    continue
-                promote_version(stored, final_path)
-                db.set_version_file_path(version["id"], str(final_path))
-                migrated += 1
-            except Exception:
-                logger.exception(
-                    "staging version migration failed",
-                    extra={
-                        "document_id": document["id"],
-                        "document_filename": version["original_filename"],
-                    },
-                )
-                conflicts += 1
+                    except Exception:
+                        logger.exception(
+                            "staging version migration failed",
+                            extra={
+                                "document_id": document["id"],
+                                "document_filename": version["original_filename"],
+                            },
+                        )
+                        conflicts += 1
+        except KBLifecycleError:
+            conflicts += 1
     return StagedVersionMigrationReport(
         migrated=migrated,
         unchanged=unchanged,
@@ -354,36 +403,51 @@ def migrate_existing_document_versions(
     missing = 0
     unchanged = 0
     for document in db.list_document_permissions_all():
-        if document.get("current_version_id") is not None:
-            unchanged += 1
-            continue
+        try:
+            with kb_mutation(db, document["kb_id"]):
+                if document.get("current_version_id") is not None:
+                    unchanged += 1
+                    continue
 
-        document_id = document["id"]
-        filename = document["doc_name"]
-        owner_id = document["owner_id"]
+                document_id = document["id"]
+                filename = document["doc_name"]
+                owner_id = document["owner_id"]
 
-        source = _resolve_legacy_source(db, document, default_upload_root)
-        if source is None:
-            version_id = db.create_document_version(
-                document_id, filename, str(versions_root / "missing"), "missing", owner_id
-            )
-            db.set_version_status(version_id, "failed")
-            missing += 1
+                source = _resolve_legacy_source(db, document, default_upload_root)
+                if source is None:
+                    version_id = db.create_document_version(
+                        document_id,
+                        filename,
+                        str(versions_root / "missing"),
+                        "missing",
+                        owner_id,
+                    )
+                    db.set_version_status(version_id, "failed")
+                    missing += 1
+                    logger.info(
+                        "migration: missing source for document",
+                        extra={"document_id": document_id, "document_filename": filename},
+                    )
+                    continue
+
+                final_path = final_version_path(
+                    versions_root, document_id, 1, filename
+                )
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, final_path)
+                digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
+                version_id = db.create_document_version(
+                    document_id, filename, str(final_path), digest, owner_id
+                )
+                db.activate_document_version(
+                    document_id, version_id, document["kb_id"], filename
+                )
+                migrated += 1
+        except KBLifecycleError:
             logger.info(
-                "migration: missing source for document",
-                extra={"document_id": document_id, "document_filename": filename},
+                "migration skipped for unavailable knowledge base",
+                extra={"kb_id": document["kb_id"], "document_id": document["id"]},
             )
-            continue
-
-        final_path = final_version_path(versions_root, document_id, 1, filename)
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, final_path)
-        digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
-        version_id = db.create_document_version(
-            document_id, filename, str(final_path), digest, owner_id
-        )
-        db.activate_document_version(document_id, version_id, document["kb_id"], filename)
-        migrated += 1
 
     return MigrationReport(migrated=migrated, missing=missing, unchanged=unchanged)
 

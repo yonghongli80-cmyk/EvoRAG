@@ -20,6 +20,7 @@ from rag.document_version_store import (
     promote_version,
     resolve_version_path,
 )
+from rag.kb_lifecycle import kb_mutation
 from rag.materials.jobs import enqueue_latest_index_job
 from rag.spreadsheets.audit import compute_risk_flags, document_sensitive_domain
 from rag.spreadsheets.edit_models import (
@@ -74,6 +75,21 @@ class SpreadsheetEditService:
         request: SpreadsheetEditRequest,
         request_meta: RequestMeta,
     ) -> SpreadsheetEditAccepted | SpreadsheetEditUnchanged:
+        document = self.db.get_document_permission_by_id(document_id)
+        if document is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="document not found")
+        with kb_mutation(self.db, document["kb_id"]):
+            return self._save(document_id, actor, request, request_meta)
+
+    def _save(
+        self,
+        document_id: int,
+        actor: dict,
+        request: SpreadsheetEditRequest,
+        request_meta: RequestMeta,
+    ) -> SpreadsheetEditAccepted | SpreadsheetEditUnchanged:
         if self.db.get_document_permission_by_id(document_id) is None:
             from fastapi import HTTPException
 
@@ -89,7 +105,13 @@ class SpreadsheetEditService:
         if not source.is_file():
             raise SpreadsheetEditServiceError("spreadsheet_version_missing", 404)
         sheet_map = self._sheet_map(document_id, current["id"])
-        staging = self.versions_root / "staging" / f"spreadsheet-{uuid.uuid4().hex}.xlsx"
+        staging = (
+            self.versions_root
+            / "staging"
+            / str(document_id)
+            / f"spreadsheet-{uuid.uuid4().hex}.xlsx"
+        )
+        staging.parent.mkdir(parents=True, exist_ok=True)
         try:
             changes = apply_cell_patches(
                 source, staging, sheet_map, request.changes
@@ -180,6 +202,21 @@ class SpreadsheetEditService:
         request: SpreadsheetStructureEditRequest,
         request_meta: RequestMeta,
     ) -> SpreadsheetEditAccepted:
+        document = self.db.get_document_permission_by_id(document_id)
+        if document is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="document not found")
+        with kb_mutation(self.db, document["kb_id"]):
+            return self._save_structure(document_id, actor, request, request_meta)
+
+    def _save_structure(
+        self,
+        document_id: int,
+        actor: dict,
+        request: SpreadsheetStructureEditRequest,
+        request_meta: RequestMeta,
+    ) -> SpreadsheetEditAccepted:
         """Apply one structure edit through the immutable version pipeline."""
         if self.db.get_document_permission_by_id(document_id) is None:
             from fastapi import HTTPException
@@ -199,8 +236,10 @@ class SpreadsheetEditService:
         staging = (
             self.versions_root
             / "staging"
+            / str(document_id)
             / f"spreadsheet-structure-{uuid.uuid4().hex}.xlsx"
         )
+        staging.parent.mkdir(parents=True, exist_ok=True)
         try:
             change = apply_structure_edit(
                 source,
@@ -297,6 +336,28 @@ class SpreadsheetEditService:
         request: SpreadsheetRestoreRequest,
         request_meta: RequestMeta,
     ) -> SpreadsheetEditAccepted:
+        document = self.db.get_document_permission_by_id(document_id)
+        if document is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="document not found")
+        with kb_mutation(self.db, document["kb_id"]):
+            return self._restore(
+                document_id,
+                source_version_id,
+                actor,
+                request,
+                request_meta,
+            )
+
+    def _restore(
+        self,
+        document_id: int,
+        source_version_id: int,
+        actor: dict,
+        request: SpreadsheetRestoreRequest,
+        request_meta: RequestMeta,
+    ) -> SpreadsheetEditAccepted:
         if self.db.get_document_permission_by_id(document_id) is None:
             from fastapi import HTTPException
 
@@ -320,7 +381,12 @@ class SpreadsheetEditService:
         if not source.is_file():
             raise SpreadsheetEditServiceError("spreadsheet_version_missing", 404)
 
-        staging = self.versions_root / "staging" / f"restore-{uuid.uuid4().hex}.xlsx"
+        staging = (
+            self.versions_root
+            / "staging"
+            / str(document_id)
+            / f"restore-{uuid.uuid4().hex}.xlsx"
+        )
         staging.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.copyfile(source, staging)
