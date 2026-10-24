@@ -41,7 +41,7 @@
 ## 写入边界
 
 - knowledge upload/link/remove：整个实际写入在一个同步worker的门禁内，上传/link复用同一导入编排；链接先保护源KB读取快照，释放源准入后再进入目标，避免跨KB嵌套死锁。保留路由patch surface与现有响应字段。
-- common version ingest、BatchImporter、spreadsheet编辑/恢复及启动期legacy/staged version与spreadsheet迁移：同KB准入覆盖文件到发布，版本预留/激活、目录完成另有事务内墓碑检查，零行UPDATE不能返回成功；迁移按KB逐条持锁，不改现有lifespan顺序。
+- common version ingest、BatchImporter、spreadsheet编辑/恢复及启动期legacy/staged version与spreadsheet迁移：同KB准入覆盖文件到发布，版本预留/激活、目录完成另有事务内墓碑检查，零行UPDATE不能返回成功；lifespan按原顺序把auto_index_on_startup和staged-version migration分别await到同步worker执行，以满足门禁只能在worker中取得的约束。
 - materials上传/归档确认、索引/修复/purge worker及启动期material metadata迁移：所有自定义KB使用现有KB编辑授权；KB删除按document IDs只取消job_scope=material任务、Wiki按page IDs只取消job_scope=wiki任务，清除lease且不触碰别的scope。OrganizationService.confirm/rollback和Recycle restore只做DB写，应在自身短事务的同一connection检查生命周期，不在事务内拿文件门禁。busy任务保留/安全重排，deleting/deleted任务取消，不重新建collection；FTS backfill在逐document gate后短事务内执行。
 - Wiki create/update/rollback/delete与reindex：用户DB准入必须覆盖Wiki DB修改及向量写；Indexer显式注入用户DB或接受当前合法准入，不能为自定义KB静默绕过。保持精确Wiki点删除边界。删除先按KB枚举Wiki page ids，取消UserDB中job_scope=wiki且document_id属于这些page ids的活动重试；再清理全部Wiki向量，全部成功后才在一个Wiki事务中删除页面/修订/链接身份。此接口由WikiIndexer.remove_kb_content(kb_id, *, db)提供，调用方需已持有delete permit；UserDB.cancel_wiki_reindex_jobs(page_ids)负责重试任务取消。
 - KB详情/查询等授权入口追加生命周期可用性检查；启动期legacy org-policy migration和离线seed的KB SQL写入，在同一事务内检查墓碑；删除重试只能显式允许deleting，同时继续做原删除权限检查。KB metadata/目录更新有事务内检查；新KB创建在物理创建前拒绝墓碑ID。
@@ -65,3 +65,8 @@
 ## 验收
 
 确定性API交错、同KB/不同KB跨进程门禁、async取消时真实写线程仍持锁、真实子进程死亡后OS锁释放及删除意图恢复、向量/文件/最终事务各断点重试、材料/Wiki/表格/批量入口、权限矩阵和其他KB不受损。每个修复先保留预期失败，再跑定向与一次稳定源码完整后端回归，fresh任务/整分支复审；前端源码不变时不重复整套前端构建。
+
+- A helper that performs whole-KB Wiki cleanup must prove it is running under the same active delete permit whose deleting tombstone has already been committed; it must not create its own deletion intent or remove Wiki data on an ordinary active KB.
+
+- The nested kb_mutation path must reject a ContextVar owner whose outer admission has exited, even when that stale Context object is replayed on the same thread.
+- KBMutationPermit.assert_delete_started() validates the active owner and committed deleting token without creating a tombstone. Whole-KB Wiki cleanup must use an active delete permit already held by its caller and call this assertion before cancelling or removing anything.

@@ -42,21 +42,21 @@
 - `db.kb_lifecycle_repo` 与 `db.get_kb_lifecycle(kb_id)->dict|None`。
 - schema `kb_lifecycle(kb_id PRIMARY KEY,state CHECK deleting/deleted,delete_token TEXT,generation INTEGER,requested_at REAL,deleted_at REAL,last_error_code TEXT)`，独立于metadata，无级联FK；无行不替代现有授权。
 - `kb_mutation(db,kb_id,*,mode='write')` 同步context manager，yield `KBMutationPermit`；mode为write/delete。rag_docs写入保持既有系统策略，delete拒绝。
-- Permit `begin_delete()->str`（授权由调用者在门禁内完成，未知metadata不写意图）；`fail_delete(code)->None`；`finish_delete(cleanup_sql:Callable[[sqlite3.Connection],None])->None`（纯SQL回调与deleted转换同事务）；token不匹配拒绝。
+- Permit assert_delete_started()->None verifies the active owned delete permit has already committed a deleting intent; begin_delete()->str (authorization is checked by caller under the gate, unknown metadata creates no intent); fail_delete(code)->None; finish_delete(cleanup_sql:Callable[[sqlite3.Connection],None])->None (pure SQL callback and terminal transition in one transaction); token mismatch rejects.
 - `assert_kb_available(db,kb_id,*,allow_deleting=False)->None` 和 `assert_kb_available_in_tx(conn,kb_id,*,allow_deleting=False)->None`，只检查生命周期，不授予权限。
 - domain errors `KBLifecycleError(code)`, `KBBusy`, `KBDeleting`, `KBDeleted`, `KBUnknown`, `KBDeleteIncomplete`；`lifecycle_http_error(error)->HTTPException`：409 busy/deleting、404 deleted/unknown、503 incomplete，detail可读字符串，机器码头 `X-KB-Lifecycle-Error`。
 
 - [x] Step 1: 写新接口的状态/迁移/回滚与互斥测试，保留未实现接口RED（如属于缺失新接口要如实标识，不伪称既有产品复现）。临时旧schema实例化后旧数据不变；墓碑不会级联删除。
 - [x] Step 2: 实现短事务state/token CAS与真实portalocker非阻塞文件锁。锁文件在规范化绝对数据库路径旁的专用目录，以KB id摘要命名；所有进程必须打开相同规范路径并共享该目录。不同挂载别名或硬链接不自动互斥；不unlink锁文件。
-- [x] Step 3: 进程内使用非重入互斥锁+ContextVar合法重入，校验PID/线程/async任务身份；异步同线程的不同任务和继承context的子任务不能借锁。准入只在同步worker中取得，持有准入时不得再派发会写入KB的asyncio.to_thread；先在请求协程读入有界临时文件可行，但所有pending/版本/向量/发布副作用必须在实际持锁worker内完成。asyncio.CancelledError不得释放仍运行worker的门禁。内存库按ConnectionManager隔离，只用进程内门禁，状态读写使用正确连接。
+- [ ] Step 3: 进程内使用非重入互斥锁+ContextVar合法重入，校验PID/线程/async任务身份；异步同线程的不同任务、继承context子任务及外层退出后重放的复制context不能借锁。kb_mutation的嵌套分支必须检查owner.active后才允许重入。准入只在同步worker中取得，持有准入时不得再派发会写入KB的asyncio.to_thread；先在请求协程读入有界临时文件可行，但所有pending/版本/向量/发布副作用必须在实际持锁worker内完成。asyncio.CancelledError不得释放仍运行worker的门禁。内存库按ConnectionManager隔离，只用进程内门禁，状态读写使用正确连接。
 - [x] Step 4: 运行 `PY -m pytest -p offline_network_guard tests/test_kb_lifecycle_core.py -q` GREEN、Ruff与架构门禁，不添加局部导入突破150；报告精确命令/退出。
-- [x] Step 5: 根审阅并提交/复审本任务，接口稳定后并行派发Task2/3/4/5。
+- [ ] Step 5: 根审阅并提交/复审本任务，接口稳定后并行派发Task2/3/4/5。
 
 ### Task 2: KB HTTP operations and resumable complete teardown
 
 **Files:** Modify `rag/routers/knowledge.py`, `rag/api_security.py`, `rag/knowledge_base.py`, `rag/kb_document_cleanup.py`; Create `rag/kb_lifecycle_cleanup.py`, `tests/test_kb_lifecycle_api.py`；必要既有测试仅 `tests/test_kb_failed_mutations.py`, `tests/test_kb_file_lifecycle.py`, `tests/test_kb_permissions.py`。
 
-**Interfaces consumed:** Task1准入、permit、可用性与HTTP映射；Task3的document_id owner staging layout；Task4的versions_root/staging/kb/<sha256(kb_id)> staging layout与两个scope-specific job cancellation方法；Task5的Wiki cleanup helper。**Produced:** knowledge upload/link复用同步导入编排 _ingest_kb_document_sync(source, db, manager, actor, roots)；删除由一个实际同步worker持有delete permit完成，按permission IDs清material/purge job、按Wiki page IDs清Wiki retry，再调用Wiki清理接口和其他外部资源清理。
+**Interfaces consumed:** Task1准入、permit与assert_delete_started()；Task3的document_id owner staging layout
 
 - [ ] Step 1: 将audit的真实ASGI/SQLite/临时Qdrant交错改成正式安全断言并观察RED；覆盖上传先入门禁、删除先入门禁、finish UPDATE丢行、链接跨库源快照；另验证已注册staging被目标KB删除回收且其他KB/unowned staging保留。禁止两个成功响应却资源缺失。
 - [ ] Step 2: 整段pending→ingest→文件/数据集→目录→audit/rollback纳入同一worker准入，保留现有路由可patch的loader/toc/summary/ingest函数和响应字段。源链接先在源准入中读取快照，释放后才进入目标，避免双KB锁环。
@@ -66,15 +66,15 @@
 
 ### Task 3: Shared version, batch and spreadsheet writers
 
-**Files:** Modify rag/document_versions.py, rag/document_version_store.py, rag/batch_importer.py, rag/repositories/doc_repo.py, rag/spreadsheets/edit_service.py, rag/spreadsheets/api.py, rag/spreadsheets/migration.py, rag/org_auth/seed.py, rag/org_auth/migration.py; Create tests/test_kb_lifecycle_writers.py；相关既有version/batch/spreadsheet测试按实际调用面补充，不能改公共conftest。
+**Files:** Modify rag/api.py, rag/document_versions.py, rag/document_version_store.py, rag/batch_importer.py, rag/repositories/doc_repo.py, rag/spreadsheets/api.py, rag/spreadsheets/edit_service.py, rag/spreadsheets/migration.py, rag/org_auth/seed.py, rag/org_auth/migration.py; Create tests/test_kb_lifecycle_writers.py and update tests/test_startup_migrations.py；相关既有version/batch/spreadsheet测试按实际调用面补充，不能改公共conftest。
 
 **Interfaces consumed:** Task1 kb_mutation、事务内可用性检查、HTTP映射；Task2不依赖本任务新签名。既有ingest/promote/batch返回契约保持。
 
 - [x] Step 1: RED证明common ingest、custom BatchImporter、表格编辑/restore及启动中的旧版本/表格迁移遇删除意图仍不能创建或激活；另证明组织seed/legacy-policy迁移遇墓碑ID时不会重新插入metadata/policy；用两连接真实SQLite与合成文件，不以mock存在性作为断言。
-- [x] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。migrate_existing_document_versions与migrate_staged_document_versions按每个权限记录的kb_id取得准入后再读写行/文件，保留api.py现有启动调用顺序；新增doc owner staging目录支持（stage_version(...,document_id=None)可选参数，原默认兼容），新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
+- [ ] Step 2: 同步公共编排获得同KB准入，嵌套同owner不重锁；所有外部写及补偿在scope内。migrate_existing_document_versions与migrate_staged_document_versions按每个权限记录的kb_id取得准入后再读写行/文件，保留调用顺序；api.py lifespan将auto_index_on_startup与staged-version migration各自await asyncio.to_thread(...)，让版本、材料metadata、表格同步迁移实际运行在持锁同步worker中。新增doc owner staging目录（stage_version(...,document_id=None)可选参数，原默认兼容），新公共导入传doc id，让崩溃待发布文件可安全归属。归属不明旧staging不擅删。
 - [x] Step 3: document permission/version预留、激活、create_kb_metadata、finish_kb_document在短事务内加墓碑fence；finish匹配零行抛冲突不假成功。低层repo只SQL检查，不在持DB事务时反向拿文件锁。组织seed保持离线维护入口；seed和migrate_legacy_knowledge_bases在插入KB metadata/policy的事务中调用assert_kb_available_in_tx(conn,kb_id)，遇墓碑整笔事务回滚或安全跳过。
 - [x] Step 4: 表格service入口和migrate_existing_spreadsheets逐KB覆盖全部实际文件/registry/mirror写入，保留edit session/base-version CAS、rollback和rag_docs/文档ACL；API映射错误正确。
-- [x] Step 5: 新用例及version/batch/spreadsheet既有定向GREEN，根提交并fresh审查。
+- [ ] Step 5: 新用例、startup migration lifespan调度断言及version/batch/spreadsheet既有定向GREEN，根提交并fresh审查。
 
 ### Task 4: Materials, archives and background jobs
 
@@ -92,11 +92,11 @@
 
 **Files:** Modify `rag/wiki/api.py`, `rag/wiki/indexer.py`, `rag/wiki/store.py`（仅确有必要的定向清理/枚举）；必要 `scripts/verify_wiki_knowledge_loop.py` 生产组合点；Create `tests/test_kb_lifecycle_wiki.py`，既有Wiki测试同步合法新依赖。
 
-**Interfaces consumed:** Task1和Task4的UserDB.cancel_wiki_reindex_jobs(page_ids)。**Produced:** get_wiki_indexer(user_db: UserDB | None = None) -> WikiIndexer；constructor兼容可选user_db，custom KB写不能静默绕过（无db时必须有当前合法permit或明确拒绝）；WikiIndexer.remove_kb_content(kb_id: str, *, db: UserDB) -> None，调用方必须已持有该KB delete permit。该方法按KB枚举page ids及revision titles，先取消这些page ids的Wiki retry、幂等清理全部向量，只有所有向量清理成功后才在一个Wiki事务中删除该KB全部page rows及其revisions/links；失败保留Wiki身份供delete retry。参数名固定user_db，接口ready后通知根与Task2/4。
+**Interfaces consumed:** Task1 and Task4 UserDB.cancel_wiki_reindex_jobs(page_ids). **Produced:** get_wiki_indexer(user_db: UserDB | None = None) -> WikiIndexer; constructor accepts optional user_db, custom KB writes cannot silently bypass (without db, require a valid current permit or reject); WikiIndexer.remove_kb_content(kb_id: str, *, db: UserDB) -> None, called within the same active delete permit after begin_delete. It re-enters the owner gate, calls permit.assert_delete_started() before mutation, cancels retry rows for collected page IDs before vector enumeration, and deletes page/revision/link rows in one Wiki transaction only after all vectors are cleaned; failures preserve Wiki identities for retry. Fixed parameter user_db; notify root and Task2/4 when ready.
 
 - [ ] Step 1: RED真实临时Wiki SQLite/Qdrant，KB删后sync/retry能重建collection的旧行为；create/update/rollback/delete与整KB删除交错，其他KB普通doc/wiki点均保留。
 - [ ] Step 2: 用户DB KB gate先于Wiki writer transaction，覆盖Wiki DB修改与向量写。保持精确page/revision点删除、既有失败重试收敛，不把每次页删除变全库清理。
-- [ ] Step 3: Wiki API/所有生产组合点接入；create/update/rollback/delete与reindex都持同KB同步准入至SQLite和向量写结束；retry enqueue在墓碑时拒绝，重试通过Task4 worker持有permit。remove_kb_content在KB删除器开始其他Wiki关系终结前调用；Task4 owns worker.py，本任务不得并行修改该文件。
+- [ ] Step 3: Wiki API/所有生产组合点接入；create/update/rollback/delete与reindex都持同KB同步准入至SQLite和向量写结束；retry enqueue在墓碑时拒绝，重试通过Task4 worker持有permit。remove_kb_content必须确认当前嵌套permit具有已开始的delete intent，并先取消retry再枚举外部向量；Task4 owns worker.py，本任务不得并行修改该文件。
 - [ ] Step 4: 新/旧Wiki API/indexer/loop回归GREEN，验证锁顺序不造成跨DB死锁，根提交并fresh审查。
 
 ### Task 6: Cross-process, cancellation and crash integration
