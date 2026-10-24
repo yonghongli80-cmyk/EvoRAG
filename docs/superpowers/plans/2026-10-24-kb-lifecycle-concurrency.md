@@ -78,12 +78,12 @@
 
 ### Task 4: Materials, archives and background jobs
 
-**Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/materials/migration.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive测试可调整。
+**Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/materials/migration.py, rag/materials/organizer.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive/organizer测试可调整。
 
 **Interfaces consumed:** Task1 gate/fence/errors；Task3既有promote函数签名保持；Task5 WikiIndexer生产实例显式 user_db=db（同接口契约并行开发，组合测试待Task5实现落盘后运行）。**Produced:** UserDB.cancel_material_jobs_for_documents(document_ids: Sequence[int]) -> int只取消job_scope=material的active任务并清lease；UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int只取消job_scope=wiki的active任务并清lease。
 
-- [ ] Step 1: RED覆盖材料custom KB无policy跳过编辑授权、deleting/deleted上传/归档确认、在途index/repair/purge与删除交错、busy后job不丢失或反复复活。
-- [ ] Step 2: 自定义KB全部走现有require_kb_edit，rag_docs保留特例。保持分块/大小限制；不在async coroutine中持生命周期permit。所有KB外部写由实际同步worker在同一准入内完成，不能为了锁无界buffer文件。migrate_material_metadata也按document permission的kb_id逐条取得准入，在短事务内fence后再补FTS/逻辑metadata。自定义KB未取得doc id的材料staging放在 versions_root/staging/kb/<sha256(kb_id)>/，保护尚未建身份时的崩溃文件归属；原staging函数新增可选kb_id参数，默认系统路径不变。
+- [ ] Step 1: RED覆盖材料custom KB无policy跳过编辑授权、deleting/deleted上传/归档确认、在途index/repair/purge与删除交错、busy后job不丢失或反复复活；组织proposal confirm/rollback和Recycle restore在删除意图后不能修改文档metadata。
+- [ ] Step 2: 自定义KB全部走现有require_kb_edit，rag_docs保留特例。保持分块/大小限制；不在async coroutine中持生命周期permit。所有KB外部写由实际同步worker在同一准入内完成，不能为了锁无界buffer文件。migrate_material_metadata按document permission的kb_id逐条取得准入，在短事务内fence后再补FTS/逻辑metadata。OrganizationService.confirm/rollback与Recycle restore仅做DB写：在已有短事务同连接内调用assert_kb_available_in_tx，不在事务里反向拿文件锁。自定义KB未取得doc id的材料staging放在 versions_root/staging/kb/<sha256(kb_id)>/，保护尚未建身份时的崩溃文件归属；原staging函数新增可选kb_id参数，默认系统路径不变。
 - [ ] Step 3: Archive upload/confirm、worker完整执行/补偿/状态完成覆盖scope。busy任务以CAS安全重排，不能把已取消job改回queued；deleting/deleted任务取消且不触向量/激活。permit在真正worker退出前一直有效，保留最新版本/权限/session CAS。Wiki retry worker由UserDB读取page所属KB，在一个同步worker准入下重新读取page并索引；墓碑后不得写向量或settle成重试。KB删除器通过material/wiki两个按scope、按ID取消方法先清队列，但不因同数值ID跨scope误取消。
 - [ ] Step 4: 生产Wiki retry实例传user_db并与Task5接口协作；取消Wiki job在清Wiki身份前可完成且不误取消别库任务。
 - [ ] Step 5: 材料/归档/worker与启动迁移定向GREEN；两份真实脱敏缺失fixture保持原跳过原因，根提交并fresh审查。
