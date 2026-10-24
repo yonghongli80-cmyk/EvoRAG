@@ -78,7 +78,7 @@
 
 ### Task 4: Materials, archives and background jobs
 
-**Files:** Modify `rag/materials/api.py`, `rag/materials/archives.py`, `rag/materials/worker.py`, `rag/materials/recycle.py`, `rag/materials/staging.py`, `rag/materials/jobs.py`, `rag/repositories/material_repo.py`; Create `tests/test_kb_lifecycle_materials.py`；相关既有material/job/archive测试可调整。
+**Files:** Modify rag/materials/api.py, rag/materials/archives.py, rag/materials/worker.py, rag/materials/recycle.py, rag/materials/staging.py, rag/materials/jobs.py, rag/repositories/material_repo.py, rag/user_db.py; Create tests/test_kb_lifecycle_materials.py；相关既有material/job/archive测试可调整。
 
 **Interfaces consumed:** Task1 gate/fence/errors；Task3既有promote函数签名保持；Task5 WikiIndexer生产实例显式 user_db=db（同接口契约并行开发，组合测试待Task5实现落盘后运行）。**Produced:** UserDB.cancel_wiki_reindex_jobs(page_ids: Sequence[int]) -> int，只将匹配page IDs且job_scope=wiki的active任务置cancelled并清lease。
 
