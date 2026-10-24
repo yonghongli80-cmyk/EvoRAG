@@ -185,6 +185,21 @@ class KBMutationPermit:
             self._delete_token = token
             return token
 
+    def assert_delete_started(self) -> None:
+        """Require this active delete permit to match a committed deletion intent."""
+        self._assert_active_owner()
+        if self.mode != "delete":
+            raise KBLifecycleError("delete_permit_required")
+        if not self._delete_token:
+            raise KBLifecycleError("delete_not_started")
+        row = self.db.get_kb_lifecycle(self.kb_id)
+        if (
+            row is None
+            or row["state"] != "deleting"
+            or row["delete_token"] != self._delete_token
+        ):
+            raise KBDeleteIncomplete("delete_token_mismatch")
+
     def fail_delete(self, code: str) -> None:
         self._assert_active_owner()
         if self.mode != "delete" or self._delete_token is None:
@@ -237,6 +252,8 @@ def kb_mutation(db: Any, kb_id: str, *, mode: str = "write") -> Iterator[KBMutat
     owner = current.get(key)
     pid, thread_id = os.getpid(), threading.get_ident()
     if owner is not None:
+        if not owner.active:
+            raise KBLifecycleError("kb_mutation_permit_inactive")
         if owner.pid != pid or owner.thread_id != thread_id or owner.task is not None:
             raise KBBusy()
         if mode == "delete" and owner.permit.mode != "delete":

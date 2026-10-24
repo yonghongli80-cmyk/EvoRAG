@@ -170,6 +170,69 @@ def test_copied_context_cannot_reuse_a_permit_after_admission_exits(tmp_path):
         db.close()
 
 
+def test_copied_context_cannot_reenter_admission_after_outer_exit(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs"):
+            copied_context = contextvars.copy_context()
+        admitted_work = []
+
+        def attempt_reentry():
+            with kb_mutation(db, "docs"):
+                admitted_work.append("ran")
+
+        with pytest.raises(KBLifecycleError):
+            copied_context.run(attempt_reentry)
+        assert admitted_work == []
+    finally:
+        db.close()
+
+
+def test_assert_delete_started_requires_committed_matching_intent(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs", mode="delete") as permit:
+            assert_started = getattr(permit, "assert_delete_started", None)
+            assert callable(assert_started), "KBMutationPermit must expose assert_delete_started()"
+            with pytest.raises(KBLifecycleError):
+                assert_started()
+            assert db.get_kb_lifecycle("docs") is None
+
+            permit.begin_delete()
+            assert_started()
+
+            db._conn.execute("UPDATE kb_lifecycle SET delete_token='replaced' WHERE kb_id='docs'")
+            db._conn.commit()
+            with pytest.raises(KBLifecycleError):
+                assert_started()
+    finally:
+        db.close()
+
+
+def test_assert_delete_started_rejects_write_mode_and_expired_copied_context(tmp_path):
+    db = UserDB(tmp_path / "users.db")
+    db.create_kb_metadata("docs", "Docs", owner_id=7)
+    try:
+        with kb_mutation(db, "docs") as write_permit:
+            assert_started = getattr(write_permit, "assert_delete_started", None)
+            assert callable(assert_started), "KBMutationPermit must expose assert_delete_started()"
+            with pytest.raises(KBLifecycleError):
+                assert_started()
+
+        with kb_mutation(db, "docs", mode="delete") as delete_permit:
+            delete_permit.begin_delete()
+            copied_context = contextvars.copy_context()
+
+        with pytest.raises(KBLifecycleError):
+            delete_permit.assert_delete_started()
+        with pytest.raises(KBLifecycleError):
+            copied_context.run(delete_permit.assert_delete_started)
+    finally:
+        db.close()
+
+
 def test_delete_permit_cannot_be_used_from_another_thread(tmp_path):
     db = UserDB(tmp_path / "users.db")
     db.create_kb_metadata("docs", "Docs", owner_id=7)
