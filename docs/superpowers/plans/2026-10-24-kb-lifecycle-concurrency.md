@@ -94,10 +94,10 @@
 
 **Interfaces consumed:** Task1 and Task4 UserDB.cancel_wiki_reindex_jobs(page_ids). **Produced:** get_wiki_indexer(user_db: UserDB | None = None) -> WikiIndexer; constructor accepts optional user_db, custom KB writes cannot silently bypass (without db, require a valid current permit or reject); WikiIndexer.remove_kb_content(kb_id: str, *, db: UserDB) -> None, called within the same active delete permit after begin_delete. It re-enters the owner gate, calls permit.assert_delete_started() before mutation, cancels retry rows for collected page IDs before vector enumeration, and deletes page/revision/link rows in one Wiki transaction only after all vectors are cleaned; failures preserve Wiki identities for retry. Fixed parameter user_db; notify root and Task2/4 when ready.
 
-- [ ] Step 1: RED真实临时Wiki SQLite/Qdrant，KB删后sync/retry能重建collection的旧行为；create/update/rollback/delete与整KB删除交错，其他KB普通doc/wiki点均保留。
-- [ ] Step 2: 用户DB KB gate先于Wiki writer transaction，覆盖Wiki DB修改与向量写。保持精确page/revision点删除、既有失败重试收敛，不把每次页删除变全库清理。
-- [ ] Step 3: Wiki API/所有生产组合点接入；create/update/rollback/delete与reindex都持同KB同步准入至SQLite和向量写结束；retry enqueue在墓碑时拒绝，重试通过Task4 worker持有permit。remove_kb_content必须确认当前嵌套permit具有已开始的delete intent，并先取消retry再枚举外部向量；Task4 owns worker.py，本任务不得并行修改该文件。
-- [ ] Step 4: 新/旧Wiki API/indexer/loop回归GREEN，验证锁顺序不造成跨DB死锁，根提交并fresh审查。
+- [x] Step 1: RED真实临时Wiki SQLite/Qdrant，KB删后sync/retry能重建collection的旧行为；create/update/rollback/delete与整KB删除交错，其他KB普通doc/wiki点均保留。
+- [x] Step 2: 用户DB KB gate先于Wiki writer transaction，覆盖Wiki DB修改与向量写。保持精确page/revision点删除、既有失败重试收敛，不把每次页删除变全库清理。
+- [x] Step 3: Wiki API/所有生产组合点接入；create/update/rollback/delete与reindex都持同KB同步准入至SQLite和向量写结束；retry enqueue在墓碑时拒绝，重试通过Task4 worker持有permit。remove_kb_content必须确认当前嵌套permit具有已开始的delete intent，并先取消retry再枚举外部向量；Task4 owns worker.py，本任务不得并行修改该文件。
+- [x] Step 4: 新/旧Wiki API/indexer/loop回归GREEN，验证锁顺序不造成跨DB死锁，根提交并fresh审查。
 
 ### Task 6: Cross-process, cancellation and crash integration
 
