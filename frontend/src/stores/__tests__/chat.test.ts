@@ -645,6 +645,81 @@ describe('chat store', () => {
     expect(store.isStreaming).toBe(false)
   })
 
+  it('ignores a late successful regenerate response after a newer request takes ownership', async () => {
+    const pending: Array<(value: any) => void> = []
+    const previousPostImplementation = vi.mocked(api.post).getMockImplementation()
+    vi.mocked(api.post).mockImplementation((() => new Promise((resolve) => {
+      pending.push(resolve)
+    })) as any)
+
+    const store = useChatStore()
+    store.currentConvId = 7
+    store.messages = [{
+      id: 20,
+      role: 'assistant',
+      content: 'Original answer',
+      sources: [{ doc_name: 'original.pdf', chunk_index: 0 }],
+      confidence_level: 'low',
+      confidence_reasons: ['original'],
+      answerability_kind: 'insufficient_evidence'
+    }]
+
+    try {
+      const oldRequest = store.regenerate(0)
+      expect(store.isStreaming).toBe(true)
+      store.stopStreaming()
+
+      const newRequest = store.regenerate(0)
+      const newRequestId = store.activeRequestId
+      expect(store.isStreaming).toBe(true)
+      expect(pending).toHaveLength(2)
+
+      pending[0]({ data: {
+        answer: 'Late old answer',
+        reliability: {
+          confidence_level: 'high',
+          confidence_reasons: ['old request'],
+          answerability_kind: 'answerable'
+        }
+      } })
+      await oldRequest
+
+      expect(store.messages[0]).toMatchObject({
+        content: 'Original answer',
+        confidence_level: 'low',
+        confidence_reasons: ['original'],
+        answerability_kind: 'insufficient_evidence'
+      })
+      expect(store.activeRequestId).toBe(newRequestId)
+      expect(store.isStreaming).toBe(true)
+
+      pending[1]({ data: {
+        answer: 'Current answer',
+        reliability: {
+          confidence_level: 'medium',
+          confidence_reasons: ['new request'],
+          answerability_kind: 'answerable'
+        }
+      } })
+      await newRequest
+
+      expect(store.messages[0]).toMatchObject({
+        content: 'Current answer',
+        confidence_level: 'medium',
+        confidence_reasons: ['new request'],
+        answerability_kind: 'answerable'
+      })
+      expect(store.isStreaming).toBe(false)
+      expect(store.activeRequestId).toBeNull()
+    } finally {
+      if (previousPostImplementation) {
+        vi.mocked(api.post).mockImplementation(previousPostImplementation)
+      } else {
+        vi.mocked(api.post).mockReset()
+      }
+    }
+  })
+
   it.each(['stop', 'reset', 'switch conversation'] as const)(
     'regenerate aborts its Axios request and ignores a late response after %s',
     async (action) => {

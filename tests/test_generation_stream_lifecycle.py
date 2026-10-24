@@ -202,3 +202,35 @@ async def test_router_close_reaches_sdk_response_and_releases_provider_gate():
         assert gate.get_inflight("test") == 0
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_parallel_router_close_cancels_workers_closes_sdk_responses_and_releases_gates():
+    bodies = [_SSEBody(wait_after_first=True), _SSEBody(wait_after_first=True)]
+    clients = [_client_for(body) for body in bodies]
+    providers = [_provider(client) for client in clients]
+    providers[0].config.provider_id = "test-a"
+    providers[1].config.provider_id = "test-b"
+    gate = DistributedConcurrencyGate()
+    router = LLMPoolRouter(providers, gate, default_provider_id="test-a")
+    stream = router.generate_stream_parallel(
+        [{"role": "user", "content": "hello"}], ["test-a", "test-b"]
+    )
+
+    try:
+        first = await anext(stream)
+        second = await anext(stream)
+        assert {first["type"], second["type"]} == {"token"}
+        await asyncio.wait_for(asyncio.gather(*(body.waiting.wait() for body in bodies)), timeout=1)
+        assert gate.get_inflight("test-a") == 1
+        assert gate.get_inflight("test-b") == 1
+
+        await stream.aclose()
+
+        assert [body.closed for body in bodies] == [True, True]
+        assert gate.get_inflight("test-a") == 0
+        assert gate.get_inflight("test-b") == 0
+    finally:
+        await stream.aclose()
+        for client in clients:
+            await client.close()
