@@ -6,6 +6,7 @@ from qdrant_client import QdrantClient
 
 import rag.vector_store as vector_store
 from rag.reliability.bundle import build_evidence_bundle
+from rag.user_db import UserDB
 from rag.wiki.chunker import MarkdownASTChunker, WikiChunk
 from rag.wiki.indexer import WikiIndexer
 from rag.wiki.store import WikiStore
@@ -52,12 +53,13 @@ def test_wiki_indexer_syncs_version_metadata_to_chunks_and_qdrant(tmp_path, monk
 
     vector_store._client = QdrantClient(path=qdrant_dir)
     store = WikiStore(db_path=wiki_file)
+    user_db = UserDB(tmp_path / "users.db")
     chunker = MarkdownASTChunker(max_chunk_chars=300, min_chunk_chars=40)
 
     def fake_embed(texts: list[str]) -> list[list[float]]:
         return [[0.1] * 1024 for _ in texts]
 
-    indexer = WikiIndexer(wiki_store=store, chunker=chunker, embed_fn=fake_embed)
+    indexer = WikiIndexer(wiki_store=store, chunker=chunker, embed_fn=fake_embed, user_db=user_db)
 
     try:
         page = store.create_page(
@@ -85,6 +87,7 @@ def test_wiki_indexer_syncs_version_metadata_to_chunks_and_qdrant(tmp_path, monk
     finally:
         vector_store.close_client()
         store.close()
+        user_db.close()
 
 
 def test_visible_current_version_ids_includes_wiki_revisions(tmp_path):

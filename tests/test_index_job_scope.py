@@ -5,7 +5,8 @@ from rag.wiki.indexer import enqueue_wiki_reindex_job
 def test_wiki_and_material_jobs_share_an_id_but_not_a_scope(tmp_path):
     db = UserDB(str(tmp_path / "jobs.db"))
     try:
-        assert enqueue_wiki_reindex_job(db, page_id=7, revision_id=1) is True
+        db.create_kb_metadata("kb_jobs", "Wiki Jobs", 1, "public")
+        assert enqueue_wiki_reindex_job(db, page_id=7, revision_id=1, kb_id="kb_jobs") is True
         db.enqueue_latest_index_job(7, 1, "hash", 0)
 
         with db.locked_read() as conn:

@@ -29,9 +29,11 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(retriever_module, "embed", lambda texts: [[0.05] * 1024 for _ in texts])
 
     store = WikiStore(db_path=wiki_db)
+    db = getattr(app.state, "user_db", None)
     indexer = WikiIndexer(
         wiki_store=store,
         embed_fn=lambda texts: [[0.05] * 1024 for _ in texts],
+        user_db=db,
     )
     trace_store = FailureTraceStore(db_path=evo_db)
 
@@ -48,7 +50,6 @@ def api_client(tmp_path, monkeypatch):
     from config import settings
     monkeypatch.setattr(settings, "auth_enabled", False)
 
-    db = getattr(app.state, "user_db", None)
     if db and not db.get_kb_metadata("kb_prod"):
         db.create_kb_metadata("kb_prod", "Prod KB", 1, "public")
 
@@ -201,7 +202,11 @@ def test_wiki_api_fine_grained_permissions(isolated_api, make_user, monkeypatch,
 
     wiki_db = str(tmp_path / "wiki_perm.db")
     store = WikiStore(db_path=wiki_db)
-    indexer = WikiIndexer(wiki_store=store, embed_fn=lambda texts: [[0.05] * 1024 for _ in texts])
+    indexer = WikiIndexer(
+        wiki_store=store,
+        embed_fn=lambda texts: [[0.05] * 1024 for _ in texts],
+        user_db=isolated_api.app.state.user_db,
+    )
     monkeypatch.setattr(wiki_api_module, "get_wiki_store", lambda: store)
     monkeypatch.setattr(wiki_api_module, "_wiki_indexer", indexer)
 
@@ -388,6 +393,12 @@ def test_worker_cancels_a_retry_for_a_deleted_page(api_client, monkeypatch, tmp_
     assert resp.status_code == 201
     page_id = resp.json()["page"]["id"]
     client.delete(f"/wiki/pages/{page_id}")
+    job = db._conn.execute(
+        "SELECT status FROM document_index_jobs WHERE document_id = ? "
+        "AND job_type = 'wiki_reindex'",
+        (page_id,),
+    ).fetchone()
+    assert job["status"] == "cancelled"
 
     from rag.materials.formats import build_default_format_registry
     from rag.materials.worker import MaterialWorker, WorkerServices
@@ -404,7 +415,7 @@ def test_worker_cancels_a_retry_for_a_deleted_page(api_client, monkeypatch, tmp_
     )
     results = worker.run(batch=5)
 
-    assert [result.status for result in results] == ["cancelled"]
+    assert results == []
 
 
 def test_wiki_content_length_is_bounded(api_client):

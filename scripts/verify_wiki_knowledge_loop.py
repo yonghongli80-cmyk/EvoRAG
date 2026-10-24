@@ -27,6 +27,7 @@ import rag.vector_store as vector_store
 from rag.evolution.gap_remediation import GapRemediationService
 from rag.evolution.gaps import KnowledgeGapTicket
 from rag.evolution.store import FailureTraceStore
+from rag.user_db import UserDB
 from rag.wiki.chunker import MarkdownASTChunker
 from rag.wiki.indexer import WikiIndexer
 from rag.wiki.store import WikiStore
@@ -56,9 +57,15 @@ def run_verification() -> bool:
         retriever_module.invalidate_bm25_cache()
 
         wiki_store = WikiStore(db_path=wiki_db)
+        user_db = UserDB(tmppath / "users.db")
         trace_store = FailureTraceStore(db_path=evo_db)
         chunker = MarkdownASTChunker(max_chunk_chars=400, min_chunk_chars=50)
-        indexer = WikiIndexer(wiki_store=wiki_store, chunker=chunker, embed_fn=mock_embed)
+        indexer = WikiIndexer(
+            wiki_store=wiki_store,
+            chunker=chunker,
+            embed_fn=mock_embed,
+            user_db=user_db,
+        )
 
         kb_id = "kb_network"
 
@@ -192,6 +199,7 @@ def run_verification() -> bool:
 
         vector_store.close_client()
         wiki_store.close()
+        user_db.close()
         trace_store.close()
         import gc
         gc.collect()

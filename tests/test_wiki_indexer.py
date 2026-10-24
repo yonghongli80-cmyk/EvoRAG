@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 import rag.bm25_store as bm25_store
 import rag.retriever as retriever_module
 import rag.vector_store as vector_store
+from rag.user_db import UserDB
 from rag.wiki.chunker import MarkdownASTChunker
 from rag.wiki.indexer import WikiIndexer
 from rag.wiki.store import WikiStore
@@ -32,8 +33,11 @@ def isolated_env(tmp_path, monkeypatch):
     retriever_module.invalidate_bm25_cache()
 
     wiki_store = WikiStore(db_path=wiki_file)
+    user_db = UserDB(str(tmp_path / "users.db"))
     chunker = MarkdownASTChunker(max_chunk_chars=300, min_chunk_chars=40)
-    indexer = WikiIndexer(wiki_store=wiki_store, chunker=chunker, embed_fn=fake_embed)
+    indexer = WikiIndexer(
+        wiki_store=wiki_store, chunker=chunker, embed_fn=fake_embed, user_db=user_db
+    )
 
     yield {
         "wiki_store": wiki_store,
@@ -50,6 +54,7 @@ def isolated_env(tmp_path, monkeypatch):
         pass
     vector_store._client = None
     wiki_store.close()
+    user_db.close()
     retriever_module.invalidate_bm25_cache()
 
 

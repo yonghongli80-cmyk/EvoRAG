@@ -10,6 +10,8 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
 import rag.vector_store as vector_store
+from rag.kb_lifecycle import KBBusy
+from rag.user_db import UserDB
 from rag.wiki.chunker import MarkdownASTChunker
 from rag.wiki.indexer import WikiIndexer
 from rag.wiki.store import WikiStore
@@ -23,16 +25,20 @@ def wiki_index_harness(tmp_path, monkeypatch):
     vector_store._client = QdrantClient(":memory:")
     monkeypatch.setattr(vector_store.settings, "bm25_db_path", str(tmp_path / "bm25.db"))
     store = WikiStore(db_path=tmp_path / "wiki.db")
+    user_db = UserDB(tmp_path / "users.db")
+    store.lifecycle_db = user_db
     indexer = WikiIndexer(
         wiki_store=store,
         chunker=MarkdownASTChunker(max_chunk_chars=300, min_chunk_chars=30),
         embed_fn=lambda texts: [[0.05] * EMBED_DIMENSION for _ in texts],
+        user_db=user_db,
     )
     try:
         yield store, indexer
     finally:
         vector_store.close_client()
         store.close()
+        user_db.close()
 
 
 def _content(label: str) -> str:
@@ -56,6 +62,7 @@ def _indexer(store: WikiStore, *, embed_fn=None) -> WikiIndexer:
         wiki_store=store,
         chunker=MarkdownASTChunker(max_chunk_chars=300, min_chunk_chars=30),
         embed_fn=embed_fn or (lambda texts: [[0.05] * EMBED_DIMENSION for _ in texts]),
+        user_db=store.lifecycle_db,
     )
 
 
@@ -180,6 +187,7 @@ def test_slow_old_revision_cannot_replace_new_revision_across_indexer_instances(
     store, _ = wiki_index_harness
     page = store.create_page(KB_ID, "Versioned", _content("revision one unique"))
     second_store = WikiStore(db_path=store._path)
+    second_store.lifecycle_db = store.lifecycle_db
     embed_started = Event()
     release_embed = Event()
 
@@ -195,9 +203,11 @@ def test_slow_old_revision_cannot_replace_new_revision_across_indexer_instances(
             old_sync = executor.submit(slow_indexer.sync_page, page.id)
             assert embed_started.wait(timeout=5)
             newer = second_store.update_page(page.id, content=_content("revision two unique"))
-            assert fast_indexer.sync_page(page.id) > 0
+            with pytest.raises(KBBusy):
+                fast_indexer.sync_page(page.id)
             release_embed.set()
             old_sync.result(timeout=10)
+            assert fast_indexer.sync_page(page.id) > 0
 
         points = [point for point in _wiki_points() if point.payload.get("document_id") == page.id]
         assert points
@@ -212,6 +222,7 @@ def test_delete_during_slow_embedding_cannot_reinsert_deleted_page(wiki_index_ha
     store, _ = wiki_index_harness
     page = store.create_page(KB_ID, "Delete race", _content("revision before delete"))
     indexer_store = WikiStore(db_path=store._path)
+    indexer_store.lifecycle_db = store.lifecycle_db
     embed_started = Event()
     release_embed = Event()
 
@@ -226,9 +237,11 @@ def test_delete_during_slow_embedding_cannot_reinsert_deleted_page(wiki_index_ha
         with ThreadPoolExecutor(max_workers=1) as executor:
             old_sync = executor.submit(slow_indexer.sync_page, page.id)
             assert embed_started.wait(timeout=5)
-            assert delete_indexer.delete_page_and_index(page.id)
+            with pytest.raises(KBBusy):
+                delete_indexer.delete_page_and_index(page.id)
             release_embed.set()
             old_sync.result(timeout=10)
+            assert delete_indexer.delete_page_and_index(page.id)
 
         assert all(point.payload.get("document_id") != page.id for point in _wiki_points())
     finally:
@@ -252,12 +265,13 @@ def test_failed_vector_cleanup_keeps_page_for_retry(wiki_index_harness, monkeypa
     assert store.get_page(page.id) is not None
 
 
-def test_delete_writer_barrier_blocks_sync_on_independent_connection(wiki_index_harness, monkeypatch):
+def test_delete_permit_rejects_sync_on_independent_connection(wiki_index_harness, monkeypatch):
     store, _ = wiki_index_harness
     page = store.create_page(KB_ID, "Concurrent delete", _content("delete boundary"))
     base_indexer = _indexer(store)
     base_indexer.sync_page(page.id)
     other_store = WikiStore(db_path=store._path)
+    other_store.lifecycle_db = store.lifecycle_db
     delete_indexer = _indexer(store)
     sync_indexer = _indexer(other_store)
     cleaned = Event()
@@ -278,12 +292,16 @@ def test_delete_writer_barrier_blocks_sync_on_independent_connection(wiki_index_
             assert cleaned.wait(timeout=5)
 
             def sync_and_mark() -> int:
-                result = sync_indexer.sync_page(page.id)
-                sync_done.set()
-                return result
+                    try:
+                        sync_indexer.sync_page(page.id)
+                    except KBBusy:
+                        return 0
+                    finally:
+                        sync_done.set()
+                    return 1
 
             syncing = executor.submit(sync_and_mark)
-            assert not sync_done.wait(timeout=0.1)
+            assert sync_done.wait(timeout=0.1)
             allow_delete.set()
             assert deleting.result(timeout=5)
             assert syncing.result(timeout=5) == 0

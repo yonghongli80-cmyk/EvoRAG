@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from rag.api_security import get_user_db, require_kb_edit, require_kb_view, require_user
+from rag.kb_lifecycle import KBLifecycleError, kb_mutation
 from rag.wiki.indexer import WikiIndexer, enqueue_wiki_reindex_job
 from rag.wiki.models import WikiPage
 from rag.wiki.store import WikiStore
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from rag.user_db import UserDB
 
 router = APIRouter(prefix="/wiki", tags=["wiki"])
 
@@ -32,12 +36,20 @@ def get_wiki_store() -> WikiStore:
     return _default_get_store()
 
 
-def get_wiki_indexer() -> WikiIndexer:
+def get_wiki_indexer(user_db: UserDB | None = None) -> WikiIndexer:
     global _wiki_indexer
     current_store = get_wiki_store()
-    if _wiki_indexer is None or _wiki_indexer.store is not current_store:
-        _wiki_indexer = WikiIndexer(wiki_store=current_store)
+    if (
+        _wiki_indexer is None
+        or _wiki_indexer.store is not current_store
+        or _wiki_indexer._user_db is not user_db
+    ):
+        _wiki_indexer = WikiIndexer(wiki_store=current_store, user_db=user_db)
     return _wiki_indexer
+
+
+def _lifecycle_http_error(exc: KBLifecycleError) -> HTTPException:
+    return HTTPException(status_code=409, detail=exc.code)
 
 
 class CreateWikiPageRequest(BaseModel):
@@ -83,7 +95,9 @@ def _sync_page_index(
         chunks_indexed = indexer.sync_page(page.id, old_title=old_title)
     except Exception:
         logger.exception("wiki page %s index sync failed; queueing a retry", page.id)
-        queued = enqueue_wiki_reindex_job(db, page.id, page.current_revision_id)
+        queued = enqueue_wiki_reindex_job(
+            db, page.id, page.current_revision_id, kb_id=page.kb_id
+        )
         return {
             "chunks_indexed": 0,
             "index_status": "retry_queued" if queued else "failed",
@@ -134,21 +148,25 @@ def create_page(
     require_kb_edit(db, body.kb_id, user)
 
     store = get_wiki_store()
-    indexer = get_wiki_indexer()
+    indexer = get_wiki_indexer(db)
 
     try:
-        page = store.create_page(
-            kb_id=body.kb_id,
-            title=body.title,
-            content=body.content,
-            slug=body.slug,
-            tags=body.tags,
-            author_id=user.get("username"),
-        )
+        with kb_mutation(db, body.kb_id):
+            page = store.create_page(
+                kb_id=body.kb_id,
+                title=body.title,
+                content=body.content,
+                slug=body.slug,
+                tags=body.tags,
+                author_id=user.get("username"),
+            )
+            sync_result = _sync_page_index(db, indexer, page)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KBLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
 
-    return {"page": page.model_dump(), **_sync_page_index(db, indexer, page)}
+    return {"page": page.model_dump(), **sync_result}
 
 
 @router.get("/pages/{page_id}", summary="获取 Wiki 页面详情及双向链接")
@@ -185,7 +203,6 @@ def update_page(
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
     store = get_wiki_store()
-    indexer = get_wiki_indexer()
 
     page = store.get_page(page_id)
     if not page:
@@ -193,24 +210,29 @@ def update_page(
 
     db = get_user_db(request)
     require_kb_edit(db, page.kb_id, user)
-    old_title = page.title
+    indexer = get_wiki_indexer(db)
 
     try:
-        updated = store.update_page(
-            page_id=page_id,
-            title=body.title,
-            content=body.content,
-            tags=body.tags,
-            comment=body.comment,
-            author_id=user.get("username"),
-        )
+        with kb_mutation(db, page.kb_id):
+            page = store.get_page(page_id)
+            if not page:
+                raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+            old_title = page.title
+            updated = store.update_page(
+                page_id=page_id,
+                title=body.title,
+                content=body.content,
+                tags=body.tags,
+                comment=body.comment,
+                author_id=user.get("username"),
+            )
+            sync_result = _sync_page_index(db, indexer, updated, old_title=old_title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KBLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
 
-    return {
-        "page": updated.model_dump(),
-        **_sync_page_index(db, indexer, updated, old_title=old_title),
-    }
+    return {"page": updated.model_dump(), **sync_result}
 
 
 @router.delete("/pages/{page_id}", summary="删除 Wiki 页面并清除索引")
@@ -220,7 +242,6 @@ def delete_page(
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
     store = get_wiki_store()
-    indexer = get_wiki_indexer()
 
     page = store.get_page(page_id)
     if not page:
@@ -228,8 +249,13 @@ def delete_page(
 
     db = get_user_db(request)
     require_kb_edit(db, page.kb_id, user)
+    indexer = get_wiki_indexer(db)
 
-    deleted = indexer.delete_page_and_index(page_id)
+    try:
+        with kb_mutation(db, page.kb_id):
+            deleted = indexer.delete_page_and_index(page_id)
+    except KBLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
     return {"deleted": deleted, "id": page_id}
 
 
@@ -259,7 +285,6 @@ def rollback_page(
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
     store = get_wiki_store()
-    indexer = get_wiki_indexer()
 
     page = store.get_page(page_id)
     if not page:
@@ -267,21 +292,26 @@ def rollback_page(
 
     db = get_user_db(request)
     require_kb_edit(db, page.kb_id, user)
-    old_title = page.title
+    indexer = get_wiki_indexer(db)
 
     try:
-        updated = store.rollback_revision(
-            page_id=page_id,
-            revision_num=body.revision_num,
-            author_id=user.get("username"),
-        )
+        with kb_mutation(db, page.kb_id):
+            page = store.get_page(page_id)
+            if not page:
+                raise HTTPException(status_code=404, detail="Wiki 页面不存在")
+            old_title = page.title
+            updated = store.rollback_revision(
+                page_id=page_id,
+                revision_num=body.revision_num,
+                author_id=user.get("username"),
+            )
+            sync_result = _sync_page_index(db, indexer, updated, old_title=old_title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KBLifecycleError as exc:
+        raise _lifecycle_http_error(exc) from exc
 
-    return {
-        "page": updated.model_dump(),
-        **_sync_page_index(db, indexer, updated, old_title=old_title),
-    }
+    return {"page": updated.model_dump(), **sync_result}
 
 
 @router.get("/pages/{page_id}/revisions/{revision_num}/diff", summary="获取指定版本的 diff 详情")
