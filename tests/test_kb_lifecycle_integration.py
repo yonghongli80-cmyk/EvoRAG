@@ -79,14 +79,26 @@ def test_portalocker_gate_is_shared_across_processes_and_per_kb(tmp_path):
             with kb_mutation(db, "kb_process_one") as nested:
                 assert nested.kb_id == "kb_process_one"
 
-            async def attempt_from_inherited_task():
+            task_body_entered = []
+            task_threads = []
+            owner_thread = threading.get_ident()
+
+            async def inherited_child_task_attempt():
+                task_threads.append(threading.get_ident())
+                with kb_mutation(db, "kb_process_one"):
+                    task_body_entered.append(True)
+
+            async def run_inherited_child_task():
+                task = asyncio.create_task(inherited_child_task_attempt())
                 try:
-                    await asyncio.to_thread(_run_gate_write, db, "kb_process_one")
-                except KBBusy:
-                    return "busy"
+                    await task
+                except KBLifecycleError as error:
+                    return error.code
                 return "accepted"
 
-            assert asyncio.run(attempt_from_inherited_task()) == "busy"
+            assert asyncio.run(run_inherited_child_task()) == "kb_mutation_requires_sync_worker"
+            assert task_threads == [owner_thread]
+            assert task_body_entered == []
             copied_owner_context = contextvars.copy_context()
 
         with pytest.raises(KBLifecycleError) as inactive:
