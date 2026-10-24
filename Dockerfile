@@ -46,6 +46,7 @@ RUN mkdir -p /app/repo_upload && \
     if [ -f /app/data/upload/.repo_files ]; then \
       cp /app/data/upload/.repo_files /app/repo_upload/.repo_files && \
       while IFS= read -r fname; do \
+        fname=$(printf '%s' "$fname" | tr -d '\r'); \
         [ -f "/app/data/upload/$fname" ] && cp "/app/data/upload/$fname" "/app/repo_upload/"; \
       done < /app/data/upload/.repo_files; \
     fi
