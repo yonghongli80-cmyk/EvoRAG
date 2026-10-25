@@ -62,7 +62,7 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 
 ### Task 4: Explicit snapshot read-only staging audit
 
-**Files:** Create `rag/materials/staging_audit.py`, `scripts/audit_staging.py`, `tests/test_staging_audit.py`。不改schema/UserDB/公共conftest。
+**Files:** Create `rag/staging_audit.py`, `scripts/audit_staging.py`, `tests/test_staging_audit.py`。不改schema/UserDB/公共conftest。
 **Interfaces:** Consume Task3 `resolve_owned_version_path`; produce `audit_staging(database: Path, versions_root: Path) -> dict`，`schema_version=1`、entries/findings/counts、每项action=inspect_only。CLI必填`--database`与`--versions-root`、恒JSON、success0/inputerror2，未知--apply拒绝。
 
 - [ ] Step 1: 用关闭后的自包含Temp DB快照与合成目录写测试；missing input不建DB、WAL/SHM拒绝、DB/tree hashes及目录清单不变、symlink/junction不跟随；先确认新接口缺失RED。
