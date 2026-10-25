@@ -30,7 +30,7 @@ def iter_visible_material_documents(db: UserDB, user: dict) -> Iterator[tuple[in
         else:
             legacy_kbs.append(kb_id)
 
-    if not legacy_kbs:
+    if len(full_kbs) == len(kb_ids):
         if full_kbs:
             documents_by_kb: dict[str, list[dict]] = {kb_id: [] for kb_id in full_kbs}
             for row in db.material_repo.list_material_documents_with_current_version():

@@ -162,3 +162,94 @@ def test_all_full_path_uses_one_bulk_query_and_only_yields_decided_kbs(projectio
 def test_kb_ids_are_ordered_from_unfiltered_live_current_rows(projection_db):
     db, _ = projection_db
     assert db.material_repo.list_material_document_kb_ids() == ["legacy", "org-kb"]
+
+
+def _create_org_visibility_db(path, *, include_allowed_kb):
+    db = UserDB(str(path))
+    db.create_material_schema()
+    user_id = db.create_user("org-visibility-user", "Password-123!")
+    with db.locked_transaction() as conn:
+        conn.execute("INSERT INTO org_units(code,parent_code,name,kind) VALUES('DENIED',NULL,'Denied','team')")
+        conn.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES('org-denied','DENIED','organization')")
+        if include_allowed_kb:
+            conn.execute("INSERT INTO org_units(code,parent_code,name,kind) VALUES('ALLOWED',NULL,'Allowed','team')")
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES('org-allowed','ALLOWED','organization')"
+            )
+            conn.execute(
+                "INSERT INTO org_people(person_code,user_id,display_name,job_title) "
+                "VALUES('ORG-USER',?,'Org User','Engineer')",
+                (user_id,),
+            )
+            conn.execute("INSERT INTO org_memberships VALUES('ORG-USER','ALLOWED',1)")
+
+    def seed(kb_id, name):
+        document_id = db.create_document_permission(name, kb_id, user_id)
+        version_id = db.create_document_version(document_id, name, f"/tmp/{name}", f"hash-{name}", user_id)
+        db.activate_document_version(document_id, version_id, kb_id, name)
+        return document_id
+
+    denied_id = seed("org-denied", "denied.txt")
+    allowed_id = seed("org-allowed", "allowed.txt") if include_allowed_kb else None
+    return db, user_id, denied_id, allowed_id
+
+
+def test_denied_only_org_kb_does_not_call_bulk_reader(tmp_path, monkeypatch):
+    db, user_id, denied_id, _ = _create_org_visibility_db(tmp_path / "denied-only.db", include_allowed_kb=False)
+    try:
+        repo = db.material_repo
+        bulk_rows_fetched = []
+        kb_rows_fetched = []
+
+        def counted_bulk_reader():
+            rows = original_bulk_reader()
+            bulk_rows_fetched.extend(rows)
+            return rows
+
+        original_bulk_reader = repo.list_material_documents_with_current_version
+        original_kb_reader = repo.list_material_documents_for_kb
+
+        def counted_kb_reader(kb_id, **kwargs):
+            rows = original_kb_reader(kb_id, **kwargs)
+            kb_rows_fetched.extend((kb_id, int(row["id"])) for row in rows)
+            return rows
+
+        monkeypatch.setattr(repo, "list_material_documents_with_current_version", counted_bulk_reader)
+        monkeypatch.setattr(repo, "list_material_documents_for_kb", counted_kb_reader)
+        assert repo.list_material_document_kb_ids() == ["org-denied"]
+        assert list(iter_visible_material_documents(db, db.get_user_by_id(user_id))) == []
+        assert bulk_rows_fetched == []
+        assert kb_rows_fetched == []
+        assert denied_id not in {row_id for _, row_id in kb_rows_fetched}
+    finally:
+        db.close()
+
+
+def test_mixed_allowed_and_denied_org_kbs_query_only_allowed_rows(tmp_path, monkeypatch):
+    db, user_id, denied_id, allowed_id = _create_org_visibility_db(tmp_path / "mixed-org.db", include_allowed_kb=True)
+    try:
+        repo = db.material_repo
+        bulk_calls = []
+        original_bulk_reader = repo.list_material_documents_with_current_version
+
+        def forbidden_bulk_reader():
+            bulk_calls.append(True)
+            return original_bulk_reader()
+
+        original_kb_reader = repo.list_material_documents_for_kb
+        kb_rows_fetched = []
+
+        def counted_kb_reader(kb_id, **kwargs):
+            rows = original_kb_reader(kb_id, **kwargs)
+            kb_rows_fetched.extend((kb_id, int(row["id"])) for row in rows)
+            return rows
+
+        monkeypatch.setattr(repo, "list_material_documents_with_current_version", forbidden_bulk_reader)
+        monkeypatch.setattr(repo, "list_material_documents_for_kb", counted_kb_reader)
+        visible = list(iter_visible_material_documents(db, db.get_user_by_id(user_id)))
+        assert [doc_id for doc_id, _ in visible] == [allowed_id]
+        assert bulk_calls == []
+        assert kb_rows_fetched == [("org-allowed", allowed_id)]
+        assert denied_id not in {row_id for _, row_id in kb_rows_fetched}
+    finally:
+        db.close()
