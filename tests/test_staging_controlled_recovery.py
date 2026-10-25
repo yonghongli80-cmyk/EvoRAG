@@ -246,11 +246,57 @@ def test_denied_kb_audit_is_rolled_back_with_preview(tmp_path: Path):
             )
             conn.execute("INSERT INTO kb_org_policies(kb_id,kb_type,active) VALUES('kb-recovery','unassigned',1)")
         before = db._conn.execute("SELECT COUNT(*) FROM org_audit_events").fetchone()[0]
+        tree_before = _snapshot(root)
+        metadata_before = db._conn.execute(
+            "SELECT owner_id,kb_id,current_version_id,deleted_at,protected FROM document_permissions WHERE id=?",
+            (request.document_id,),
+        ).fetchone()
         denied_request = replace(request, actor_user_id=denied_user)
         with pytest.raises(RecoveryError, match="authorization_denied"):
             preview_staging_recovery(db, root, denied_request)
         after = db._conn.execute("SELECT COUNT(*) FROM org_audit_events").fetchone()[0]
         assert after == before
+        assert _snapshot(root) == tree_before
+        assert (
+            db._conn.execute(
+                "SELECT owner_id,kb_id,current_version_id,deleted_at,protected FROM document_permissions WHERE id=?",
+                (request.document_id,),
+            ).fetchone()
+            == metadata_before
+        )
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_code"),
+    [("deleting", "knowledge_base_deleting"), ("deleted", "knowledge_base_deleted")],
+)
+def test_version_pointer_preview_preserves_lifecycle_error_through_acl(tmp_path: Path, state: str, expected_code: str):
+    db, root, _body, _candidate, _missing, request = _prepare(tmp_path)
+    try:
+        with db.locked_transaction() as conn:
+            conn.execute("INSERT INTO org_units(code,name,kind) VALUES('RECOVERY-MANAGERS','Recovery managers','team')")
+            conn.execute("INSERT INTO org_memberships VALUES('RECOVERY-TEST','RECOVERY-MANAGERS',1)")
+            conn.execute("INSERT INTO org_manager_scopes VALUES('RECOVERY-TEST','RECOVERY-MANAGERS')")
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type,active) "
+                "VALUES('kb-recovery','RECOVERY-MANAGERS','organization',1)"
+            )
+        with db.locked_transaction() as conn:
+            conn.execute(
+                "INSERT INTO kb_lifecycle(kb_id,state,generation,requested_at,deleted_at) VALUES(?,?,?,?,?)",
+                (
+                    "kb-recovery",
+                    state,
+                    1,
+                    time.time(),
+                    time.time() if state == "deleted" else None,
+                ),
+            )
+        with pytest.raises(KBLifecycleError) as exc_info:
+            preview_staging_recovery(db, root, request)
+        assert exc_info.value.code == expected_code
     finally:
         db.close()
 

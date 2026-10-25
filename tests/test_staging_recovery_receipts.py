@@ -45,9 +45,9 @@ def test_v5_upgrade_installs_v6_and_migration_rerun_is_idempotent(tmp_path):
     upgraded = UserDB(db_path)
     conn = upgraded._conn
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-    assert conn.execute("SELECT username FROM users WHERE username='kept'").fetchone()[0] == 'kept'
+    assert conn.execute("SELECT username FROM users WHERE username='kept'").fetchone()[0] == "kept"
     assert run_migrations(conn) == 6
-    assert conn.execute("SELECT username FROM users WHERE username='kept'").fetchone()[0] == 'kept'
+    assert conn.execute("SELECT username FROM users WHERE username='kept'").fetchone()[0] == "kept"
     upgraded.close()
 
 
@@ -153,6 +153,36 @@ def test_repo_helpers_require_caller_transaction_and_perform_cas(tmp_path):
     conn.close()
 
 
+def test_receipt_insert_only_maps_duplicate_operation_key_to_conflict(tmp_path):
+    from rag.repositories.staging_recovery_repo import (
+        insert_recovery_receipt,
+    )
+
+    conn = sqlite3.connect(tmp_path / "integrity.db")
+    _repo_db(conn)
+    conn.execute(
+        "CREATE TRIGGER reject_receipt_for_test BEFORE INSERT ON material_recovery_receipts "
+        "WHEN NEW.operation_key='nonkey' BEGIN SELECT RAISE(ABORT,'synthetic non-key integrity error'); END"
+    )
+    conn.execute("BEGIN IMMEDIATE")
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic non-key integrity error"):
+        insert_recovery_receipt(
+            conn,
+            operation_key="nonkey",
+            request_hash="h",
+            actor_user_id=1,
+            document_id=2,
+            version_id=10,
+            receipt={"ok": True},
+        )
+    assert conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM material_recovery_receipts").fetchone()[0] == 0
+    conn.rollback()
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM material_recovery_receipts").fetchone()[0] == 0
+    conn.close()
+
+
 def test_deferred_commit_failure_rolls_back_metadata_and_receipt_together(tmp_path):
     from rag.repositories.staging_recovery_repo import cas_recovery_paths, insert_recovery_receipt
 
@@ -165,9 +195,7 @@ def test_deferred_commit_failure_rolls_back_metadata_and_receipt_together(tmp_pa
         "REFERENCES deferred_parent(id) DEFERRABLE INITIALLY DEFERRED);"
     )
     conn.execute("BEGIN IMMEDIATE")
-    cas_recovery_paths(
-        conn, version_id=10, expected_version_path="old.bin", destination_path="new.bin"
-    )
+    cas_recovery_paths(conn, version_id=10, expected_version_path="old.bin", destination_path="new.bin")
     insert_recovery_receipt(
         conn,
         operation_key="rollback",
@@ -182,7 +210,5 @@ def test_deferred_commit_failure_rolls_back_metadata_and_receipt_together(tmp_pa
         conn.commit()
     conn.rollback()
     assert conn.execute("SELECT file_path FROM document_versions WHERE id=10").fetchone()[0] == "old.bin"
-    assert conn.execute(
-        "SELECT 1 FROM material_recovery_receipts WHERE operation_key='rollback'"
-    ).fetchone() is None
+    assert conn.execute("SELECT 1 FROM material_recovery_receipts WHERE operation_key='rollback'").fetchone() is None
     conn.close()

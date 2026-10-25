@@ -144,6 +144,8 @@ def _require_actor_and_acl(db: Any, request: RecoveryRequest) -> tuple[dict[str,
     except RecoveryError:
         raise
     except HTTPException as exc:
+        if isinstance(exc.__cause__, KBLifecycleError):
+            raise exc.__cause__ from exc
         raise RecoveryError("authorization_denied") from exc
     return user, permission
 
