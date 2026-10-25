@@ -2,6 +2,7 @@
 
 import hashlib
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 from rag.kb_file_store import resolve_stored_path
@@ -154,12 +155,14 @@ def resolve_kb_document_paths(
     kb_files_root: Path,
     *,
     kb_wide: bool = False,
+    version_loader: Callable[[int], list[dict]] | None = None,
 ) -> list[Path]:
     """Resolve and validate every file owned by a KB document before deletion."""
     candidates: set[Path] = set()
     permission = user_db.get_document_permission(record["filename"], kb_id)
     if permission:
-        for version in user_db.list_document_versions(permission["id"]):
+        load_versions = version_loader if version_loader is not None else user_db.list_document_versions
+        for version in load_versions(permission["id"]):
             candidates.add(
                 _resolve_owned_version_path(
                     versions_root,

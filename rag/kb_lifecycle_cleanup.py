@@ -90,6 +90,13 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
     all_permission_by_id = {int(row["id"]): row for row in all_permissions}
     permission_by_id = {int(row["id"]): row for row in permissions}
     documents = db.list_kb_documents(kb_id)
+    versions_by_document_id = {}
+
+    def load_document_versions(document_id: int):
+        if document_id not in versions_by_document_id:
+            versions_by_document_id[document_id] = db.list_document_versions(document_id)
+        return versions_by_document_id[document_id]
+
     document_ids = set(permission_by_id)
     paths: set[Path] = set()
     for row in documents:
@@ -171,7 +178,13 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
         try:
             paths.update(
                 resolve_kb_document_paths(
-                    db, kb_id, row, versions_root, kb_files_root, kb_wide=True
+                    db,
+                    kb_id,
+                    row,
+                    versions_root,
+                    kb_files_root,
+                    kb_wide=True,
+                    version_loader=load_document_versions,
                 )
             )
         except ValueError as exc:
@@ -181,7 +194,7 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
 
     # Include version files for permissions that do not have a directory row.
     for permission_id in permission_by_id:
-        for version in db.list_document_versions(permission_id):
+        for version in load_document_versions(permission_id):
             try:
                 paths.add(
                     resolve_owned_version_path(
