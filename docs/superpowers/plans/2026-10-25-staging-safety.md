@@ -75,14 +75,18 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 
 **Files:** Create `docs/reviews/2026-10-25-staging-safety.md`, `docs/staging-audit.md`; update本计划、`docs/README.md`、`docs/handoff-2026-10-24.md`。
 
-- [ ] Step 1: root核对所有任务的接口/文件无冲突，fresh任务复审与整分支复审，处理实际Critical/Important并冻结源码。
-- [ ] Step 2: 使用同一锁定环境/离线guard/系统Temp短基准目录完成稳定源码完整后端（最多4worker/loadfile、BelowNormal、BLAS1），全树Ruff/架构与必要runtime smoke；不重复未变frontend。
-- [ ] Step 3: 写只读CLI快照来源、报告code/限制、promotion补偿/无自动恢复的真实边界；保留失败日志，不用分项数拼全量结果。
-- [ ] Step 4: 只读核对原PID/ready/.env hash，根统一代码文档提交；真实清理/rehome/业务切换不在本任务执行范围。
+- [x] Step 1: root核对所有任务的接口/文件无冲突，fresh任务复审与整分支复审，处理实际Critical/Important并冻结源码。
+- [x] Step 2: 使用同一锁定环境/离线guard/系统Temp短基准目录完成稳定源码完整后端（最多4worker/loadfile、BelowNormal、BLAS1），全树Ruff/架构与必要runtime smoke；不重复未变frontend。
+- [x] Step 3: 写只读CLI快照来源、报告code/限制、promotion补偿/无自动恢复的真实边界；保留失败日志，不用分项数拼全量结果。
+- [x] Step 4: 只读核对原PID/ready/.env hash，根统一代码文档提交；真实清理/rehome/业务切换不在本任务执行范围。
 - [ ] Step 5: 提交当前计时T-1875641B3C7F的唯一公司记录并核对成功，保留工作树和证据。
 
 ## 整分支审查后的唯一修复波次
 
-- [ ] reviewed HEAD `8f45b88` 的补偿DELETE事务污染、default rag_docs global-stage候选漏报、NUL路径JSON错误契约三项一并修复并完成一次fresh增量复审。
+- [x] reviewed HEAD `8f45b88` 的补偿DELETE事务污染、default rag_docs global-stage候选漏报、NUL路径JSON错误契约三项一并修复并完成一次fresh增量复审。
 - Files: `rag/repositories/doc_repo.py`（仅两个DELETE helper）、`rag/staging_audit.py`、new `tests/test_staging_recovery_integration.py`、`tests/test_staging_audit.py`。
-- 真实deferred DELETE commit、实际rag_docs route→snapshot、含NUL SQLite路径先RED再GREEN；root全量仍待冻结后统一跑。具体边界与复审证据保留于本计划SDD final-review/final-fix报告。
+- 真实deferred DELETE commit、实际rag_docs route→snapshot、含NUL SQLite路径先RED再GREEN；修复提交`192aa8e`，28项新回归与58项相关回归通过，fresh增量复审三项均ADDRESSED、无新问题。源码冻结后由root统一全量，具体证据见本轮最终报告。
+
+## 最终验收
+
+代码/测试冻结`192aa8e`。首轮宿主工具异常停在约96%，无pytest退出码/JUnit，不计为完整通过；确认旧测试进程全部退出后，以2 worker/BelowNormal/BLAS1、短系统Temp与离线guard重新完整运行：**3207通过/4跳过**，830.29秒、退出0；JUnit3211项、0失败、0错误。全树Ruff、生产锁烟测及架构预算通过，原PID48512/ready200/启动时间/.env哈希保持。详情与运行/部署边界见[最终报告](../../reviews/2026-10-25-staging-safety.md)。本轮新分支尚未合并main或双推。
