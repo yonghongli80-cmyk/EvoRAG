@@ -18,4 +18,4 @@ KB清理目标版本快照/目录索引、401/403会话与Compose契约、历史
 
 完整后端、私有前端测试/构建、Ruff通过后，再fetch两端，D main快进至受测源码等价候选；C同源码烟测后按origin main、github main、origin --tags、github --tags依次推，不force。实际heads/tags及服务核对是完成依据，不预填成功。
 
-合并后C同源码烟测11通过/12.87秒及生产锁维护Python API4通过/1.526秒，实际exit均0。20:58:42原PID/start/ready200/env hash保持，D跟踪干净。公司timer T-CD7DA0E4EFE2实际submit回执收尾补入。交付完成后，按用户顺序另写材料定位优化设计/计划，在新codex分支并行Luna；当前只读勘查不修改产品。拟优先减少未授权元数据载入和默认路径重复映射，保持完整model_input、语义允许集合、组织/legacy/admin权限、custom callback、FTS与结果顺序；不用跨请求缓存或截断伪造收益。
+合并后C同源码烟测11通过/12.87秒及生产锁维护Python API4通过/1.526秒，实际exit均0。20:58:42原PID/start/ready200/env hash保持，D跟踪干净。公司timer T-CD7DA0E4EFE2实际submit成功，记录R-20261025-97CCAC5F（pending_review），验收文档5697e8a。交付完成后，按用户顺序另写材料定位优化设计/计划，在新codex分支并行Luna；当前只读勘查不修改产品。拟优先减少未授权元数据载入和默认路径重复映射，保持完整model_input、语义允许集合、组织/legacy/admin权限、custom callback、FTS与结果顺序；不用跨请求缓存或截断伪造收益。
