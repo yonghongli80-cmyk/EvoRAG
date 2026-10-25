@@ -58,6 +58,17 @@ def _require_directory_if_present(path: Path) -> None:
         raise ValueError("cleanup_path_invalid")
 
 
+def _minimal_cleanup_dirs(paths: list[Path]) -> list[Path]:
+    """Keep the old order while removing paths already covered by a parent."""
+    ordered = sorted(set(paths), key=lambda path: len(path.parts))
+    planned_dirs = set(ordered)
+    return [
+        path
+        for path in ordered
+        if not any(parent in planned_dirs for parent in path.parents)
+    ]
+
+
 def _path_references_cleanup_target(
     stored_path: str,
     *,
@@ -78,7 +89,7 @@ def _path_references_cleanup_target(
     for reference in candidates:
         if reference in planned_paths:
             return True
-        if any(reference.is_relative_to(directory) for directory in planned_dirs):
+        if reference in planned_dirs or any(parent in planned_dirs for parent in reference.parents):
             return True
     return False
 
@@ -234,11 +245,7 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
             raise KBDeleteIncomplete("cleanup_path_invalid") from exc
         cleanup_dirs.append(validated)
     # Deduplicate nested staging roots so their parent is removed once.
-    cleanup_dirs = sorted(set(cleanup_dirs), key=lambda path: len(path.parts))
-    cleanup_dirs = [
-        path for path in cleanup_dirs
-        if not any(parent != path and path.is_relative_to(parent) for parent in cleanup_dirs)
-    ]
+    cleanup_dirs = _minimal_cleanup_dirs(cleanup_dirs)
 
     planned_paths = set(paths)
     planned_paths.update(path.resolve() for path in paths)
