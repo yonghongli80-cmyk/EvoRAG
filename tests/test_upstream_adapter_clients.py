@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -103,9 +104,24 @@ def test_agent_attaches_to_cached_default_sync_and_async_clients(monkeypatch, ca
 
     import langchain.agents as langchain_agents
     import langchain_openai
+    from langchain_openai.chat_models import _client_utils
 
     from rag.agent import RAGAgent
 
+    original_sync_cache = _client_utils._cached_sync_httpx_client
+    original_async_cache = _client_utils._cached_async_httpx_client
+    original_sync_cache_info = original_sync_cache.cache_info()
+    original_async_cache_info = original_async_cache.cache_info()
+    sync_cache_parameters = original_sync_cache.cache_parameters()
+    async_cache_parameters = original_async_cache.cache_parameters()
+    local_sync_cache = functools.lru_cache(
+        maxsize=sync_cache_parameters["maxsize"],
+        typed=sync_cache_parameters["typed"],
+    )(original_sync_cache.__wrapped__)
+    local_async_cache = functools.lru_cache(
+        maxsize=async_cache_parameters["maxsize"],
+        typed=async_cache_parameters["typed"],
+    )(original_async_cache.__wrapped__)
     real_chat_openai = langchain_openai.ChatOpenAI
     captured = []
     patched_transports = {}
@@ -163,8 +179,11 @@ def test_agent_attaches_to_cached_default_sync_and_async_clients(monkeypatch, ca
     first = RAGAgent(retriever=object(), db_path=":memory:")
     second = RAGAgent(retriever=object(), db_path=":memory:")
     caplog.set_level(logging.INFO, logger=LOGGER_NAME)
+    local_cache_patch = pytest.MonkeyPatch()
 
     try:
+        local_cache_patch.setattr(_client_utils, "_cached_sync_httpx_client", local_sync_cache)
+        local_cache_patch.setattr(_client_utils, "_cached_async_httpx_client", local_async_cache)
         first._ensure_agent()
         second._ensure_agent()
 
@@ -191,6 +210,12 @@ def test_agent_attaches_to_cached_default_sync_and_async_clients(monkeypatch, ca
         assert async_first["http_client"] is async_second["http_client"]
         assert sync_first["transport"] is sync_second["transport"]
         assert async_first["transport"] is async_second["transport"]
+        assert local_sync_cache.cache_info().hits == 1
+        assert local_sync_cache.cache_info().misses == 1
+        assert local_sync_cache.cache_info().currsize == 1
+        assert local_async_cache.cache_info().hits == 1
+        assert local_async_cache.cache_info().misses == 1
+        assert local_async_cache.cache_info().currsize == 1
 
         for first_mode, second_mode in ((sync_first, sync_second), (async_first, async_second)):
             hooks = first_mode["http_client"].event_hooks["response"]
@@ -226,16 +251,35 @@ def test_agent_attaches_to_cached_default_sync_and_async_clients(monkeypatch, ca
         assert "task3-agent-async-id" not in _observer_log_text(caplog)
         assert second.llm.root_async_client._client.is_closed is True
     finally:
-        for transport, method_name, original_handler in patched_transports.values():
-            setattr(transport, method_name, original_handler)
-        if captured:
-            last_model = captured[-1]["model"]
-            last_model.root_client.close()
-            if not last_model.root_async_client._client.is_closed:
-                asyncio.run(last_model.root_async_client.close())
+        try:
+            for transport, method_name, original_handler in patched_transports.values():
+                setattr(transport, method_name, original_handler)
+        finally:
+            try:
+                if captured:
+                    last_model = captured[-1]["model"]
+                    try:
+                        last_model.root_client.close()
+                    finally:
+                        if not last_model.root_async_client._client.is_closed:
+                            asyncio.run(last_model.root_async_client.close())
+            finally:
+                try:
+                    local_sync_cache.cache_clear()
+                finally:
+                    try:
+                        local_async_cache.cache_clear()
+                    finally:
+                        local_cache_patch.undo()
 
     assert captured[0]["sync"]["http_client"].is_closed is True
     assert captured[0]["async"]["http_client"].is_closed is True
+    assert _client_utils._cached_sync_httpx_client is original_sync_cache
+    assert _client_utils._cached_async_httpx_client is original_async_cache
+    assert original_sync_cache.cache_info() == original_sync_cache_info
+    assert original_async_cache.cache_info() == original_async_cache_info
+    assert local_sync_cache.cache_info().currsize == 0
+    assert local_async_cache.cache_info().currsize == 0
 
 
 def test_jev_project_constructor_observes_httpx2_retries_and_maps_missing_id(monkeypatch, caplog):
