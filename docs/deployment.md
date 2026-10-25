@@ -50,6 +50,14 @@ docker compose logs -f rag-app
 
 服务默认暴露在 <http://服务器地址:8000>，健康检查地址为 `/health`。
 
+## 运行拓扑与探针约定
+
+当前 Compose 部署是单实例拓扑。默认空的 `RAG_QDRANT_URL` 使用挂载到 `/app/qdrant_data` 的本地路径；设置为 `http://qdrant:6333` 才使用 Compose 中的 Qdrant server。Compose-local 与 Compose-server 都会等待 Redis、Qdrant 健康后再启动应用；这只是启动门禁。`RAG_REDIS_REQUIRED` 单独控制运行期间 Redis 故障是否阻塞 `/ready`，默认 `false` 时 Redis 可降级而 `/ready` 仍返回 200。
+
+Compose 健康检查使用 `/health`，它用于进程存活，不代表依赖已就绪。部署脚本优先检查 `/ready` 并要求 200；只有 `/ready` 返回 404 时才回退检查 `/health`。拓扑矩阵、故障含义和回滚边界见 [运行拓扑契约](runtime-topology-contract.md)。
+
+`qdrant_data` 是本地路径模式下可写的数据卷。切换到 server 模式后保留该卷，不会使它变成只读或不可变备份；回滚前应使用已验证的备份和维护流程。当前仍未支持多实例。多副本、共享缓存或共享锁部署必须设置 `RAG_REDIS_REQUIRED=true`，并先设计、验证共享数据库、存储与锁方案；仅设置 Qdrant URL 不足以启用多实例。
+
 ## 演示组织种子与远程启动护栏（重要）
 
 `rag.org_auth.seed` 会创建 `demo001`–`demo280` 共 280 个演示账号，初始密码统一为 `123456`（其中 `demo001`、`demo002` 是公司管理员）。`start.py` 在绑定非回环地址时，只要发现任一 **active** 组织账号仍使用 `123456`，就会拒绝启动。Docker 通过 `DOCKER_CONTAINER=1` 固定绑定 `0.0.0.0`，因此：

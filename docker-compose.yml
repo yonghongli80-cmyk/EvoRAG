@@ -48,14 +48,14 @@ services:
     environment:
       - RAG_REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
       - RAG_BACKUP_ROOT=/app/backups
-      # Phase 1：Qdrant 连接。默认空 = 仍用本地目录 /app/qdrant_data（兼容旧部署）；
-      # 设为 http://qdrant:6333 切 server 模式。回滚 = 清空该变量并重启。
+      # Qdrant 连接。默认空 = 使用可写的本地目录 /app/qdrant_data；
+      # 设为 http://qdrant:6333 切 server 模式。回滚需按已验证备份/维护流程处理旧卷。
       - RAG_QDRANT_URL=${RAG_QDRANT_URL:-}
       - RAG_QDRANT_API_KEY=${QDRANT_API_KEY:-}
     volumes:
       # 命名卷首次挂载时继承镜像内 rag 用户的目录属主，非 root 进程可写
       - rag_data:/app/data
-      # 本地 path 模式的旧目录：保留只读副本用于 Phase 1 回滚
+      # 本地 path 模式使用的可写数据目录；切换 server 模式后卷仍可写，保留不等于只读备份。
       - qdrant_data:/app/qdrant_data
       - backup_data:/app/backups
     depends_on:
