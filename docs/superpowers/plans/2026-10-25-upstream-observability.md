@@ -33,28 +33,28 @@ PY=artifacts/review-backlog-2026-10-24/env/developer-python/Scripts/python.exe�
 **Files:** Create `rag/upstream_observability.py`, `tests/test_upstream_observability.py`。
 **Interfaces:** 产出规格的三个attach函数，签名和bool语义完全一致。模块纯导入；实际HTTPX/HTTPX2 hook和requests hook共用安全事件构造。logger=`rag.upstream_observability`，所有payload值和ID校验按spec，不改logging_config。
 
-- [ ] 写明确RED：新模块不存在；真实HTTPX/HTTPX2及requests合成响应，JSON schema/ID哈希/缺失/invalid/status验证（含空白primary fallback、invalid primary不fallback、UTF-8 surrogate、bool状态码）；不访问body的poison stream，原hook顺序、重复及并发挂接、sync/async logging_context隔离、错误mode拒绝、带抛错__eq__的已有hook不影响身份去重，注册和logger普通异常不外溢。
-- [ ] 用真实锁定OpenAI+MockTransport证明500/429后成功的全部响应事件、最终APIStatusError、纯连接失败无事件、流式在读取前记录且不提前消费。对比挂接前后同一SDK/_client/transport/timeout/limits/follow_redirects/close身份与参数，不改默认重试以迁就测试（可用Retry-After:0避免等待）。
-- [ ] 实现最小模块：锁保护注册、固定回调去重、安全字段白名单/哈希、hook普通异常隔离；unsupported后端安全降级，不全局patch。
-- [ ] 新测试GREEN，Ruff/compile/diff；root选择性提交，fresh规格/质量复审通过后Task2/3才能接入。
+- [x] 写明确RED：新模块不存在；真实HTTPX/HTTPX2及requests合成响应，JSON schema/ID哈希/缺失/invalid/status验证（含空白primary fallback、invalid primary不fallback、UTF-8 surrogate、bool状态码）；不访问body的poison stream，原hook顺序、重复及并发挂接、sync/async logging_context隔离、错误mode拒绝、带抛错__eq__的已有hook不影响身份去重，注册和logger普通异常不外溢。
+- [x] 用真实锁定OpenAI+MockTransport证明500/429后成功的全部响应事件、最终APIStatusError、纯连接失败无事件、流式在读取前记录且不提前消费。对比挂接前后同一SDK/_client/transport/timeout/limits/follow_redirects/close身份与参数，不改默认重试以迁就测试（可用Retry-After:0避免等待）。
+- [x] 实现最小模块：锁保护注册、固定回调去重、安全字段白名单/哈希、hook普通异常隔离；unsupported后端安全降级，不全局patch。
+- [x] 新测试GREEN，Ruff/compile/diff；root选择性提交，fresh规格/质量复审通过后Task2/3才能接入。
 
 ### Task 2: Native OpenAI clients
 
 **Files:** Modify `rag/generator.py`, `rag/embedder.py`, `rag/llm_pool/provider.py`, `rag/evolution/candidate_generator.py`, `rag/evolution/diagnoser.py`, `rag/evolution/patch_generator.py`；Create `tests/test_upstream_native_clients.py`。
 **Interfaces:** 消费`attach_openai_observer(client, asynchronous=False)->bool`，在原构造之后、首次请求之前调用；不向SDK构造器传自定义http_client。同步/异步对应值为False/True。
 
-- [ ] 新集成RED：真实SDK+MockTransport经项目入口调用，generator sync/stream、embedding批次/缓存、pool sync/stream、三个evolution构造均能观测；原返回/token/错误对象、breaker计数、重试次数和关闭行为保持。
-- [ ] 只添加顶层helper导入及构造点挂接；不复制事件逻辑、不加额外调用、不改现有请求参数或异常策略。
-- [ ] 新测试及generator/embedder/pool/evolution现有相关定向GREEN，Ruff/compile/架构；root提交与fresh规格/质量复审。
+- [x] 新集成RED：真实SDK+MockTransport经项目入口调用，generator sync/stream、embedding批次/缓存、pool sync/stream、三个evolution构造均能观测；原返回/token/错误对象、breaker计数、重试次数和关闭行为保持。
+- [x] 只添加顶层helper导入及构造点挂接；不复制事件逻辑、不加额外调用、不改现有请求参数或异常策略。
+- [x] 新测试及generator/embedder/pool/evolution现有相关定向GREEN，Ruff/compile/架构；root提交与fresh规格/质量复审。
 
 ### Task 3: Agent, Jev and reranker native clients
 
 **Files:** Modify `rag/agent.py`, `rag/jev/client.py`, `rag/reranker.py`；Create `tests/test_upstream_adapter_clients.py`。
 **Interfaces:** Agent在ChatOpenAI构造后挂接`root_client`和`root_async_client`（False/True）；Jev在TypeSafeClient原构造后调用`attach_typesafe_observer`；reranker在requests.Session原构造/配置后调用`attach_requests_observer`。所有client仍惰性创建，现有ownership保持。
 
-- [ ] 新集成RED：实际默认LangChain客户端及共享包装器不被替换、sync/async hook均在；项目Agent构造点实际调用挂接。真实HTTPX2+TypeSafe合成transport验证response ID/重试和缺头不影响mapper；requests合成adapter验证rerank错误/成功均记录、输出结果保持。
-- [ ] 仅接入原构造点，不启用include_response_headers、不改SDK日志级别、业务错误分类或投票，不改Session认证与关闭逻辑。
-- [ ] 新测试及Agent/Jev/reranker/网络资源关闭相关定向GREEN，Ruff/compile/架构；root提交与fresh规格/质量复审。
+- [x] 新集成RED：实际默认LangChain客户端及共享包装器不被替换、sync/async hook均在；项目Agent构造点实际调用挂接。真实HTTPX2+TypeSafe合成transport验证response ID/重试和缺头不影响mapper；requests合成adapter验证rerank错误/成功均记录、输出结果保持。
+- [x] 仅接入原构造点，不启用include_response_headers、不改SDK日志级别、业务错误分类或投票，不改Session认证与关闭逻辑。
+- [x] 新测试及Agent/Jev/reranker/网络资源关闭相关定向GREEN，Ruff/compile/架构；root提交与fresh规格/质量复审。
 
 ### Task 4: Final integration, evidence and handoff
 
