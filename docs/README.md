@@ -6,11 +6,14 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-25-upstream-observability.md`：供应商HTTP响应ID摘要与内部日志关联、SDK真实构造点接入、独立复审及最终验收状态。
+- `superpowers/plans/2026-10-25-upstream-observability.md`：上游观测实施与分项/统一验证记录。
+- `upstream-observability.md`：事件schema、JSON日志读取、ID摘要和供应商追溯边界及SDK升级检查。
 - `reviews/2026-10-25-staging-safety.md`：材料暂存所有权、上传取消与提交一致性、KB删除前置校验和只读快照审计；定向证据与最终验收状态分开记录。
 - `superpowers/specs/2026-10-25-staging-safety-design.md`：本轮安全边界、事务/owner设计与只读审计契约。
 - `superpowers/plans/2026-10-25-staging-safety.md`：本轮实现任务、审查和统一验证记录；最终证据以交接和审查报告为准。
 - `staging-audit.md`：显式快照输入的只读CLI使用说明、报告码及候选/自动恢复边界。
-- `handoff-2026-10-24.md`：当前交接，顶部为2026-10-25材料暂存安全整改状态，其后保留KB生命周期并发、深度审查、Docker运行边界等历史记录。
+- `handoff-2026-10-24.md`：当前交接，顶部为2026-10-25上游响应观测整改状态，其后保留材料暂存安全、KB生命周期并发、深度审查和Docker运行边界等历史记录。
 - `reviews/2026-10-24-kb-lifecycle-concurrency.md`：KB删除/上传生命周期并发协议、崩溃重试、失败归档所有权、最终完整回归与部署边界。
 - `superpowers/plans/2026-10-24-kb-lifecycle-concurrency.md`：KB生命周期并发整改的TDD计划及完成状态。
 - `reviews/2026-10-24-deep-audit.md`：上一轮深度审查、增量缺陷修复、实际验证、过程偏差与剩余专项设计/运行条件。

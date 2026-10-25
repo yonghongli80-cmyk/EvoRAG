@@ -46,6 +46,7 @@ operation固定为`generation/embedding/jev/rerank/other`。HTTPX端点无法识
 - 内部request_id与供应商ID各有来源，不互相冒充；响应正文的completion ID也不是HTTP request-ID。
 - 摘要可与供应商合法导出的ID按相同算法比对。仅持有摘要无法向供应商直接查单，也不能单独证明供应商身份或计费唯一性；本轮没有raw-ID保管和反查功能。
 - 多个并发上游调用可以共享同一个内部请求上下文。事件逐HTTP响应记录，不提供新的逻辑SDK调用树或attempt序号。
+- 后台任务或独立脚本没有入站HTTP上下文时，外层request_id等字段可以为`-`；观察器不新建或伪造内部请求ID。
 - 本地事件不能补回此前基线中未采得的844条ID，也不代表已经在真实供应商上验证了返回头。
 - IDs及摘要只进日志，不成为metrics标签，不进入HTTP/SSE返回或业务DB。
 
