@@ -1,0 +1,252 @@
+{
+  "baseline_source": "tests/fixtures/material_locator_542a36f.py",
+  "baseline_sha256": "54593297c81a31000dee9c26336db3198bc85e3e334f001cddb7f33766434bfc",
+  "comparison": {
+    "ordered_fields": [
+      "document_id",
+      "document_version_id",
+      "filename",
+      "logical_path",
+      "document_type",
+      "updated_at",
+      "ocr_warning",
+      "citation.location.kind",
+      "citation.location.value",
+      "rank",
+      "source"
+    ],
+    "also_compare": [
+      "model_input_exact_string",
+      "semantic_allowed_version_ids_exact_set",
+      "semantic_call_arguments_exact",
+      "fts_call_arguments_exact",
+      "permission_denials_exact"
+    ],
+    "ordered_sources": [
+      "exact",
+      "fts",
+      "semantic"
+    ],
+    "scenarios": [
+      "legacy_user_owner_public_shared_view_shared_edit_same_name",
+      "legacy_admin_and_organization_read_access",
+      "query_filters_subject_types_timestamp_path_combinations",
+      "deleted_historical_and_missing_current_version",
+      "custom_visible_callback_shapes_and_instance_override",
+      "exact_fts_semantic_overlap_and_allowed_versions_above_top_k"
+    ]
+  },
+  "expected_cases": {
+    "alice": {
+      "result": [
+        {
+          "document_id": 1,
+          "document_version_id": 1,
+          "filename": "dup.txt",
+          "logical_path": "HR/Shared",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "subject",
+          "rank": 0.0,
+          "source": "exact"
+        },
+        {
+          "document_id": 3,
+          "document_version_id": 3,
+          "filename": "owner.txt",
+          "logical_path": "HR/Shared",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "subject",
+          "rank": 0.0,
+          "source": "exact"
+        }
+      ],
+      "model_input": "dup.txt HR/Shared memo\nowner.txt HR/Shared memo\nunicode-path.txt 资料/入职材料 memo\norg-visible.txt HR/Shared memo",
+      "semantic_calls": [
+        [
+          "searchable",
+          [
+            1,
+            3,
+            9,
+            10
+          ],
+          2
+        ]
+      ],
+      "fts_calls": [
+        [
+          "searchable",
+          2
+        ]
+      ]
+    },
+    "bob": {
+      "result": [
+        {
+          "document_id": 6,
+          "document_version_id": 6,
+          "filename": "private.txt",
+          "logical_path": "HR/Shared",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "subject",
+          "rank": 0.0,
+          "source": "exact"
+        },
+        {
+          "document_id": 2,
+          "document_version_id": 2,
+          "filename": "dup.txt",
+          "logical_path": "HR/Shared",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "subject",
+          "rank": 0.0,
+          "source": "exact"
+        }
+      ],
+      "model_input": "private.txt HR/Shared memo\ndup.txt HR/Shared memo",
+      "semantic_calls": [
+        [
+          "searchable",
+          [
+            2,
+            6
+          ],
+          2
+        ]
+      ],
+      "fts_calls": [
+        [
+          "searchable",
+          2
+        ]
+      ]
+    },
+    "admin": {
+      "result": [],
+      "model_input": "",
+      "semantic_calls": [],
+      "fts_calls": []
+    },
+    "subject_zero_positive": {
+      "result": [
+        {
+          "document_id": 9,
+          "document_version_id": 8,
+          "filename": "zero-subject.txt",
+          "logical_path": "HR/Zero",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "subject",
+          "rank": 0.0,
+          "source": "exact"
+        }
+      ],
+      "model_input": "zero-subject.txt HR/Zero memo",
+      "semantic_calls": [
+        [
+          "searchable",
+          [
+            8
+          ],
+          1
+        ]
+      ],
+      "fts_calls": [
+        [
+          "searchable",
+          1
+        ]
+      ]
+    },
+    "subject_zero_negative": {
+      "result": [],
+      "model_input": "",
+      "semantic_calls": [],
+      "fts_calls": []
+    },
+    "path_case_positive": {
+      "result": [
+        {
+          "document_id": 1,
+          "document_version_id": 1,
+          "filename": "dup.txt",
+          "logical_path": "HR/Shared",
+          "document_type": "memo",
+          "updated_at": 1750000000.0,
+          "ocr_warning": false,
+          "citation.location.kind": "metadata",
+          "citation.location.value": "fts",
+          "rank": 1.0,
+          "source": "fts"
+        }
+      ],
+      "model_input": "dup.txt HR/Shared memo\nowner.txt HR/Shared memo\nshared-view.txt HR/Shared memo\nshared-edit.txt HR/Shared memo\nzero-subject.txt HR/Zero memo\norg-visible.txt HR/Shared memo\norg-hidden.txt HR/Shared memo",
+      "semantic_calls": [
+        [
+          "searchable",
+          [
+            1,
+            3,
+            4,
+            5,
+            8,
+            10,
+            11
+          ],
+          2
+        ]
+      ],
+      "fts_calls": [
+        [
+          "searchable",
+          2
+        ]
+      ]
+    },
+    "path_case_negative": {
+      "result": [],
+      "model_input": "",
+      "semantic_calls": [],
+      "fts_calls": []
+    },
+    "path_unicode_positive": {
+      "result": [],
+      "model_input": "unicode-path.txt 资料/入职材料 memo",
+      "semantic_calls": [
+        [
+          "searchable",
+          [
+            9
+          ],
+          2
+        ]
+      ],
+      "fts_calls": [
+        [
+          "searchable",
+          2
+        ]
+      ]
+    },
+    "path_unicode_negative": {
+      "result": [],
+      "model_input": "",
+      "semantic_calls": [],
+      "fts_calls": []
+    }
+  }
+}
