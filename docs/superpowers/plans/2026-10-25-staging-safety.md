@@ -65,10 +65,10 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 **Files:** Create `rag/staging_audit.py`, `scripts/audit_staging.py`, `tests/test_staging_audit.py`。不改schema/UserDB/公共conftest。
 **Interfaces:** Consume Task3 `resolve_owned_version_path`; produce `audit_staging(database: Path, versions_root: Path) -> dict`，`schema_version=1`、entries/findings/counts、每项action=inspect_only。CLI必填`--database`与`--versions-root`、恒JSON、success0/inputerror2，未知--apply拒绝。
 
-- [ ] Step 1: 用关闭后的自包含Temp DB快照与合成目录写测试；missing input不建DB、WAL/SHM拒绝、DB/tree hashes及目录清单不变、symlink/junction不跟随；先确认新接口缺失RED。
-- [ ] Step 2: mode=ro&immutable=1与显式snapshot校验，无config/.env/UserDB/app导入；表结构optional-aware，缺核心表unsupported_schema。扫描staging/archive_work而不读取正文，root外ref不做fileIO。
-- [ ] Step 3: 报告referenced/pending和未注册stage、缺文件、owner/sharedrefs、unowned archive、staging版本缺material job的事实与其它引用上下文；不将缺job或文件名当可删除owner证明。覆盖legacy committedstage与confirmed source消失的合法状态，避免误报实际可清理。对declared path missing的staging row只检查其root/document_id/version_no目录，报告regular non-link owned_version_candidate，不猜文件名/内容hash且不更新DB；加move-back+repoint同时失败组合的synthetic snapshot用例。
-- [ ] Step 4: CLI在不同cwd/无.env场景真实subprocess验证JSON/exit，所有新用例GREEN、Ruff；根提交与fresh复审。
+- [x] Step 1: 用关闭后的自包含Temp DB快照与合成目录写测试；missing input不建DB、WAL/SHM拒绝、DB/tree hashes及目录清单不变、symlink/junction不跟随；先确认新接口缺失RED。
+- [x] Step 2: mode=ro&immutable=1与显式snapshot校验，无config/.env/UserDB/app导入；表结构optional-aware，缺核心表unsupported_schema。扫描staging/archive_work而不读取正文，root外ref不做fileIO。
+- [x] Step 3: 报告referenced/pending和未注册stage、缺文件、owner/sharedrefs、unowned archive、staging版本缺material job的事实与其它引用上下文；不将缺job或文件名当可删除owner证明。覆盖legacy committedstage与confirmed source消失的合法状态，避免误报实际可清理。对declared path missing的staging row只检查其root/document_id/version_no目录，报告regular non-link owned_version_candidate，不猜文件名/内容hash且不更新DB；加move-back+repoint同时失败组合的synthetic snapshot用例。
+- [x] Step 4: CLI在不同cwd/无.env场景真实subprocess验证JSON/exit，所有新用例GREEN、Ruff；根提交与fresh复审。
 
 ### Task 5: Integration, evidence and handoff
 
