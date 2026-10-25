@@ -31,6 +31,7 @@ from rag.jev.questions import (
     build_preflight_questions,
 )
 from rag.resilience import CircuitBreaker
+from rag.upstream_observability import attach_typesafe_observer
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +286,7 @@ class JevClient:
             model=settings.jev_model,
             retry=RetryPolicy(max_retries=1, timeout=settings.jev_timeout_seconds),
         )
+        attach_typesafe_observer(self._client)
         return self._client
 
     def _run(self, stage: str, state: dict, questions: Mapping[str, Question], mapper):

@@ -10,6 +10,7 @@ import time as _time
 
 from rag.generator import deepseek_default_headers, generate
 from rag.prompt_manager import PromptManager
+from rag.upstream_observability import attach_openai_observer
 
 _pm = PromptManager()
 
@@ -204,6 +205,8 @@ class RAGAgent:
             extra_body={"thinking": {"type": "disabled"}},
             default_headers=deepseek_default_headers(),
         )
+        attach_openai_observer(getattr(self.llm, "root_client", None))
+        attach_openai_observer(getattr(self.llm, "root_async_client", None), asynchronous=True)
 
         system_prompt = _pm.get("agent_system")
         self.agent = create_agent(

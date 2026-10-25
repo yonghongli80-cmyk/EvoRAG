@@ -10,6 +10,7 @@ import requests
 from config import settings
 from rag.models import Chunk
 from rag.resilience import CircuitBreaker, retry
+from rag.upstream_observability import attach_requests_observer
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class Reranker:
                     if key:
                         headers["Authorization"] = f"Bearer {key}"
                     self._client.headers.update(headers)
+                    attach_requests_observer(self._client)
         return self._client
 
     def close(self) -> None:
