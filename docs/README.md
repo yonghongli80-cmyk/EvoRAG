@@ -6,6 +6,7 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-25-material-locator-overhead.md`：本地材料定位 SQL 授权投影与分配优化、完整等价、84 项回归及生产锁 4 项烟测；正式配对性能矩阵因资源门禁待补，尚未再次交付 main。
 - `reviews/2026-10-25-local-results-delivery.md`：KB清理/会话与Compose/恢复/容量架构四专项新增成果的集成、快进双推、3341/5+330及运行保护核对。
 - `capacity-and-slo.md`：单机试点建议、27组材料定位组件结果、候选SLO及正式业务验收条件。
 - `architecture/data-access-postgresql.md`、`architecture/shared-state-storage-workers.md`：源码盘点、全writer迁移水位、SQL原子epoch及后续共享存储/worker门禁；提案不等于已实现。
