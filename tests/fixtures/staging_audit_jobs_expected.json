@@ -1,0 +1,863 @@
+{
+  "normalization": "Absolute paths under each synthetic temporary root are replaced only by <TMP> plus their POSIX relative suffix; all other report values and list order are preserved.",
+  "reports": {
+    "jobs_table_missing": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 11,
+          "document_id": 1,
+          "version_no": 1,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "one.txt",
+          "declared_path": "<TMP>/jobs_table_missing/versions/1/1/one.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "permission_current_version",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "pending": false
+            },
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "missing",
+            "statuses": []
+          }
+        }
+      ],
+      "findings": [
+        {
+          "code": "staging_version_missing_material_job",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "document_id": 1,
+            "reference_count": 2
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_candidate_directory_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "document_id": 1,
+            "version_no": 1
+          }
+        }
+      ],
+      "counts": {
+        "entries": 1,
+        "findings": 3,
+        "by_kind": {
+          "document_version": 1
+        },
+        "by_code": {
+          "owned_candidate_directory_missing": 1,
+          "staging_version_missing_material_job": 1,
+          "version_file_missing": 1
+        }
+      },
+      "inputs": {
+        "database": "<TMP>/jobs_table_missing/snapshot.sqlite",
+        "versions_root": "<TMP>/jobs_table_missing/versions"
+      }
+    },
+    "minimal_jobs_table": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 11,
+          "document_id": 1,
+          "version_no": 1,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "one.txt",
+          "declared_path": "<TMP>/minimal_jobs_table/versions/1/1/one.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "permission_current_version",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "pending": false
+            },
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "active",
+            "statuses": [
+              "RUNNING",
+              "completed"
+            ]
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 12,
+          "document_id": 1,
+          "version_no": 2,
+          "kb_id": "kb-synthetic",
+          "status": "current",
+          "original_filename": "two.txt",
+          "declared_path": "<TMP>/minimal_jobs_table/versions/1/2/two.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "active",
+            "statuses": [
+              "queued"
+            ]
+          }
+        }
+      ],
+      "findings": [
+        {
+          "code": "material_job_pending",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "job_ids": [
+              3
+            ]
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_candidate_directory_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 11,
+            "document_id": 1,
+            "version_no": 1
+          }
+        },
+        {
+          "code": "material_job_pending",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 12,
+            "job_ids": [
+              7
+            ]
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 12,
+            "document_id": 1,
+            "status": "current"
+          }
+        }
+      ],
+      "counts": {
+        "entries": 2,
+        "findings": 5,
+        "by_kind": {
+          "document_version": 2
+        },
+        "by_code": {
+          "material_job_pending": 2,
+          "owned_candidate_directory_missing": 1,
+          "version_file_missing": 2
+        }
+      },
+      "inputs": {
+        "database": "<TMP>/minimal_jobs_table/snapshot.sqlite",
+        "versions_root": "<TMP>/minimal_jobs_table/versions"
+      }
+    },
+    "scope_type_values": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 21,
+          "document_id": 1,
+          "version_no": 1,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "one.txt",
+          "declared_path": "<TMP>/scope_type_values/versions/1/1/one.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "permission_current_version",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "pending": false
+            },
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "active",
+            "statuses": [
+              "running",
+              "completed"
+            ]
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 22,
+          "document_id": 1,
+          "version_no": 2,
+          "kb_id": "kb-synthetic",
+          "status": "current",
+          "original_filename": "two.txt",
+          "declared_path": "<TMP>/scope_type_values/versions/1/2/two.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "missing",
+            "statuses": []
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 23,
+          "document_id": 1,
+          "version_no": 3,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "three.txt",
+          "declared_path": "<TMP>/scope_type_values/versions/1/3/three.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "missing",
+            "statuses": []
+          }
+        }
+      ],
+      "findings": [
+        {
+          "code": "material_job_pending",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 21,
+            "job_ids": [
+              20
+            ]
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 21,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_candidate_directory_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 21,
+            "document_id": 1,
+            "version_no": 1
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 22,
+            "document_id": 1,
+            "status": "current"
+          }
+        },
+        {
+          "code": "staging_version_missing_material_job",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 23,
+            "document_id": 1,
+            "reference_count": 1
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 23,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_candidate_directory_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 23,
+            "document_id": 1,
+            "version_no": 3
+          }
+        }
+      ],
+      "counts": {
+        "entries": 3,
+        "findings": 7,
+        "by_kind": {
+          "document_version": 3
+        },
+        "by_code": {
+          "material_job_pending": 1,
+          "owned_candidate_directory_missing": 2,
+          "staging_version_missing_material_job": 1,
+          "version_file_missing": 3
+        }
+      },
+      "inputs": {
+        "database": "<TMP>/scope_type_values/snapshot.sqlite",
+        "versions_root": "<TMP>/scope_type_values/versions"
+      }
+    },
+    "ordered_mixed_report": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 31,
+          "document_id": 1,
+          "version_no": 1,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "first.txt",
+          "declared_path": "<TMP>/ordered_mixed_report/versions/1/1/first.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "permission_current_version",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "pending": false
+            },
+            {
+              "kind": "kb_document_version",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "status": "pending",
+              "pending": true
+            },
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "active",
+            "statuses": [
+              "running",
+              "completed"
+            ]
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 32,
+          "document_id": 1,
+          "version_no": 2,
+          "kb_id": "kb-synthetic",
+          "status": "current",
+          "original_filename": "second.txt",
+          "declared_path": "<TMP>/ordered_mixed_report/versions/1/2/second.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "archive_manifest_container",
+              "manifest_id": 8,
+              "document_id": 1,
+              "status": "pending",
+              "pending": true
+            },
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "active",
+            "statuses": [
+              "retry",
+              "failed"
+            ]
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "document_version",
+          "version_id": 33,
+          "document_id": 1,
+          "version_no": 3,
+          "kb_id": "kb-synthetic",
+          "status": "staging",
+          "original_filename": "third.txt",
+          "declared_path": "<TMP>/ordered_mixed_report/versions/1/3/third.txt",
+          "ownership": "owned",
+          "file_state": "missing",
+          "references": [
+            {
+              "kind": "document_permission_owner",
+              "document_id": 1,
+              "kb_id": "kb-synthetic",
+              "doc_name": "synthetic-document",
+              "pending": false
+            }
+          ],
+          "shared_version_ids": [],
+          "shared_reference_count": 0,
+          "material_job": {
+            "state": "missing",
+            "statuses": []
+          }
+        },
+        {
+          "action": "inspect_only",
+          "kind": "owned_version_candidate",
+          "path": "<TMP>/ordered_mixed_report/versions/1/3/candidate.txt",
+          "document_id": 1,
+          "version_id": 33,
+          "version_no": 3,
+          "declared_path_missing": true,
+          "candidate_only": true
+        },
+        {
+          "action": "inspect_only",
+          "kind": "pending_kb_document",
+          "kb_document_id": 4,
+          "document_id": 1,
+          "document_version_id": 31,
+          "kb_id": "kb-synthetic",
+          "status": "pending"
+        },
+        {
+          "action": "inspect_only",
+          "kind": "archive_manifest",
+          "manifest_id": 8,
+          "container_document_id": 1,
+          "container_version_id": 32,
+          "status": "pending",
+          "source_path": "<TMP>/ordered_mixed_report/versions/staging/kb/8beebfcf40a7afed756f29823674f7227cb24981b0b12a7b76ef3124f2a56fa1/pending-source.bin",
+          "source_state": "present"
+        },
+        {
+          "action": "inspect_only",
+          "kind": "stage_file",
+          "path": "<TMP>/ordered_mixed_report/versions/staging/orphan-stage.bin",
+          "state": "unregistered",
+          "namespace": "staging"
+        },
+        {
+          "action": "inspect_only",
+          "kind": "stage_file",
+          "path": "<TMP>/ordered_mixed_report/versions/staging/kb/8beebfcf40a7afed756f29823674f7227cb24981b0b12a7b76ef3124f2a56fa1/pending-source.bin",
+          "state": "registered_reference",
+          "namespace": "staging"
+        }
+      ],
+      "findings": [
+        {
+          "code": "material_job_pending",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 31,
+            "job_ids": [
+              15
+            ]
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 31,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_candidate_directory_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 31,
+            "document_id": 1,
+            "version_no": 1
+          }
+        },
+        {
+          "code": "material_job_pending",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 32,
+            "job_ids": [
+              45
+            ]
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 32,
+            "document_id": 1,
+            "status": "current"
+          }
+        },
+        {
+          "code": "staging_version_missing_material_job",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 33,
+            "document_id": 1,
+            "reference_count": 1
+          }
+        },
+        {
+          "code": "version_file_missing",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 33,
+            "document_id": 1,
+            "status": "staging"
+          }
+        },
+        {
+          "code": "owned_version_candidate",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "version_id": 33,
+            "document_id": 1,
+            "version_no": 3,
+            "path": "<TMP>/ordered_mixed_report/versions/1/3/candidate.txt"
+          }
+        },
+        {
+          "code": "pending_kb_document_reference",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "kb_document_id": 4,
+            "status": "pending"
+          }
+        },
+        {
+          "code": "pending_archive_manifest",
+          "severity": "info",
+          "action": "inspect_only",
+          "subject": {
+            "manifest_id": 8,
+            "status": "pending"
+          }
+        },
+        {
+          "code": "unregistered_stage_file",
+          "severity": "warning",
+          "action": "inspect_only",
+          "subject": {
+            "path": "<TMP>/ordered_mixed_report/versions/staging/orphan-stage.bin",
+            "namespace": "staging"
+          }
+        }
+      ],
+      "counts": {
+        "entries": 8,
+        "findings": 11,
+        "by_kind": {
+          "archive_manifest": 1,
+          "document_version": 3,
+          "owned_version_candidate": 1,
+          "pending_kb_document": 1,
+          "stage_file": 2
+        },
+        "by_code": {
+          "material_job_pending": 2,
+          "owned_candidate_directory_missing": 1,
+          "owned_version_candidate": 1,
+          "pending_archive_manifest": 1,
+          "pending_kb_document_reference": 1,
+          "staging_version_missing_material_job": 1,
+          "unregistered_stage_file": 1,
+          "version_file_missing": 3
+        }
+      },
+      "inputs": {
+        "database": "<TMP>/ordered_mixed_report/snapshot.sqlite",
+        "versions_root": "<TMP>/ordered_mixed_report/versions"
+      }
+    }
+  },
+  "errors": {
+    "missing_version_id_column": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/missing_version_id_column/snapshot.sqlite",
+        "versions_root": "<TMP>/missing_version_id_column/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "optional table document_index_jobs is missing required columns: version_id"
+      }
+    },
+    "missing_status_column": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/missing_status_column/snapshot.sqlite",
+        "versions_root": "<TMP>/missing_status_column/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "optional table document_index_jobs is missing required columns: status"
+      }
+    },
+    "invalid_id_nonmaterial": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/invalid_id_nonmaterial/snapshot.sqlite",
+        "versions_root": "<TMP>/invalid_id_nonmaterial/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "invalid positive integer metadata in document_index_jobs.id"
+      }
+    },
+    "invalid_version_id_orphan": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/invalid_version_id_orphan/snapshot.sqlite",
+        "versions_root": "<TMP>/invalid_version_id_orphan/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "invalid positive integer metadata in document_index_jobs.version_id"
+      }
+    },
+    "invalid_status_orphan": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/invalid_status_orphan/snapshot.sqlite",
+        "versions_root": "<TMP>/invalid_status_orphan/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "invalid text metadata in document_index_jobs.status"
+      }
+    },
+    "invalid_scope_nonmaterial": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/invalid_scope_nonmaterial/snapshot.sqlite",
+        "versions_root": "<TMP>/invalid_scope_nonmaterial/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "invalid nullable text metadata in document_index_jobs.job_scope"
+      }
+    },
+    "invalid_type_orphan": {
+      "schema_version": 1,
+      "action": "inspect_only",
+      "entries": [],
+      "findings": [],
+      "counts": {
+        "entries": 0,
+        "findings": 0,
+        "by_kind": {},
+        "by_code": {}
+      },
+      "inputs": {
+        "database": "<TMP>/invalid_type_orphan/snapshot.sqlite",
+        "versions_root": "<TMP>/invalid_type_orphan/versions"
+      },
+      "error": {
+        "code": "unsupported_schema",
+        "message": "invalid nullable text metadata in document_index_jobs.job_type"
+      }
+    }
+  }
+}
