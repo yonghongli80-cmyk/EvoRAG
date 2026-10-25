@@ -500,6 +500,61 @@ class MaterialRepository(BaseRepository):
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_material_document_kb_ids(self) -> list[str]:
+        """Return live/current knowledge bases in the legacy row order."""
+        with self.cm.read_connection() as conn:
+            rows = conn.execute(
+                "SELECT dp.kb_id, MIN(dp.id) AS first_document_id "
+                "FROM document_permissions dp "
+                "JOIN document_versions dv "
+                "ON dv.id = dp.current_version_id AND dv.status = 'current' "
+                "WHERE dp.deleted_at IS NULL "
+                "GROUP BY dp.kb_id ORDER BY first_document_id"
+            ).fetchall()
+        return [row["kb_id"] for row in rows]
+
+    def list_material_documents_for_kb(
+        self,
+        kb_id: str,
+        *,
+        apply_legacy_acl: bool,
+        user_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load complete live/current rows in one KB, optionally applying legacy ACL.
+
+        ``apply_legacy_acl`` is deliberately explicit: callers may request an
+        unrestricted projection only after resolving full KB access.
+        """
+        statement = (
+            "SELECT dp.id, dp.doc_name, dp.kb_id, dp.owner_id, dp.scope, "
+            "dp.protected, dp.current_version_id, dp.logical_path, "
+            "dp.document_type, dp.tags_json, dp.subject_user_id, dp.updated_at, "
+            "dp.metadata_version, dp.deleted_at, "
+            "dv.original_filename AS current_filename, "
+            "dv.validity_status AS current_validity_status, "
+            "dv.version_no AS current_version_no "
+            "FROM document_permissions dp "
+            "JOIN document_versions dv "
+            "ON dv.id = dp.current_version_id AND dv.status = 'current' "
+            "WHERE dp.deleted_at IS NULL AND dp.kb_id = ?"
+        )
+        params: tuple[Any, ...] = (kb_id,)
+        if apply_legacy_acl:
+            statement += (
+                " AND dp.doc_name COLLATE BINARY IN ("
+                "SELECT DISTINCT names.doc_name COLLATE BINARY "
+                "FROM document_permissions names "
+                "WHERE names.kb_id = ? AND (names.owner_id = ? "
+                "OR names.scope = 'public' OR (names.scope = 'shared' "
+                "AND names.id IN (SELECT doc_id FROM document_shares WHERE user_id = ?)))"
+                ")"
+            )
+            params = (kb_id, kb_id, user_id, user_id)
+        statement += " ORDER BY dp.id"
+        with self.cm.read_connection() as conn:
+            rows = conn.execute(statement, params).fetchall()
+        return [dict(row) for row in rows]
+
     def create_organization_proposal(
         self, actor_id: int, instruction_hash: str, expires_at: float
     ) -> int:
