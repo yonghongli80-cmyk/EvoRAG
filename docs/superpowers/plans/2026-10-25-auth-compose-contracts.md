@@ -58,7 +58,7 @@
 
 **Files:** Update本计划、总计划、docs/README.md及handoff；Create `docs/reviews/2026-10-25-auth-compose-contracts.md`。
 
-- [ ] Task1/2独立规格/质量复审，整分支复查；实际发现一个最终修复波次及一次增量复查，冻结源/测试。
-- [ ] 私有Node22单worker完整frontend tests、vue-tsc、私有生产构建及相关Python部署/readiness/Auth测试/Ruff；按实际结果记录，不将旧316测试基线计为新通过。静态构建只artifact，不改C/D原static。
+- [x] Task1/2独立规格/质量复审，整分支复查；最终无发现，冻结源/测试e868649。
+- [x] 私有Node22单worker完整frontend 41文件330项、vue-tsc、私有生产构建及相关Python六文件42项/Ruff通过。静态构建只artifact，不改C/D原static。
 - [ ] 只读核对原服务identity/ready/env hash，确认源码/镜像对应，交接/裁决/局限齐全；唯一实际submit记录并保留证据环境。
 - [ ] 更新总计划契约项，继续第三阶段历史暂存恢复写流程，再推进容量/SLO及长期架构，不在本专项结束整个顺序请求。

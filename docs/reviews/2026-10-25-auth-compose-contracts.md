@@ -1,6 +1,6 @@
 # 401/403与运行拓扑契约（2026-10-25）
 
-状态：两个源码/文档任务独立规格质量复查PASS；私有Node准备和类型检查通过。整分支复查、完整前端及最终根验收待完成。基线为本地第二阶段`02c9192`，分支`codex/auth-compose-contracts-2026-10-25`；D main及两个远端仍为`1d413ed`，未部署或操作真实会话/容器。
+状态：独立任务复审和整分支复审均APPROVE/PASS，冻结`e868649`的根验收通过。基线为本地第二阶段`02c9192`，分支`codex/auth-compose-contracts-2026-10-25`；D main及两个远端仍为`1d413ed`，本专项未合并、双推或部署。
 
 ## 最终行为
 
@@ -17,7 +17,9 @@ Compose解析值及env示例非注释赋值完全保持。契约区分host、Com
 - Node私有镜像122个跟踪文件，依赖C普通目录，锁hash`A8DF9E18D4616147EEDF34C46D200D7E8923D2096BB2BE2BBF56A88E97D44E83`一致。Node22.23.4、单worker、BelowNormal与网络guard：非loopback及8080拒绝，测试IPC/随机loopback允许。初版准备的cwd遗漏及normalized tuple假阳性在任何产品测试前被root发现并修正；真实Node归一化参数现在按指定保护错误码检查，priority失败即终止。
 - 最终runner在私有frontend cwd执行，写开始时PID/start/hash及运行元数据，独立stdout/stderr和结束真实exit/hash保留。source hash只读镜像的Git跟踪源码，不递归依赖junction。vue-tsc第一次root执行退出0，前后frontend hash均`DC92BFDEF9940AC7B41ECC4D92CB2C089A465175C4D3B50B2C6F602466B5D8CE`。
 
-定向结果有重叠，不相加为完整前端总数。完整frontend、私有生产构建、相关Python/Ruff及服务核对结果待补；旧316项基线不是本轮结果。原frontend/node_modules指向D，所有测试/构建使用artifact私有镜像和C依赖，原C/D static不重建。
+根验收：私有Node22单worker完整前端 **41文件330项通过**，234.18秒；vue-tsc及Vite生产构建均实际退出0，构建7.95秒、产物仅写本专项artifact/static。相关Python部署/readiness/Auth六文件 **42通过**，30.28秒、JUnit无失败错误；全树Ruff通过。定向结果有重叠，不相加。全部Node根验收的跟踪镜像源码前后hash相同；原frontend/node_modules指向D，所有测试/构建使用artifact私有镜像和C依赖，原C/D static不重建。
+
+18:10:07只读检查：原服务PID48512及启动时间保持，/ready 200，SQLite/Qdrant local OK、可选Redis degraded；D.env哈希保持，D main仍1d413ed且无跟踪改动，C树无.env。这是原服务保护核对，不表示新代码已部署。原始元数据、stdout/stderr、JUnit及汇总保留于`artifacts/auth-compose-contracts-2026-10-25/`。
 
 ## 根裁决及代价
 
@@ -30,4 +32,4 @@ Compose解析值及env示例非注释赋值完全保持。契约区分host、Com
 
 ## 交付与接续
 
-本专项未合并/双推/部署，唯一timer`T-D4CB7672EA41`待根验收后实际submit。完成后继续总顺序中的历史暂存恢复写流程，再做容量/SLO与长期数据架构；本专项不是整个用户请求终点。
+本专项未合并/双推/部署，唯一timer`T-D4CB7672EA41`的实际工作记录回执在收尾时补入。继续总顺序中的历史暂存恢复写流程，再做容量/SLO与长期数据架构；本专项不是整个用户请求终点。
