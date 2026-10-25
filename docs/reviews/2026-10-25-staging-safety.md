@@ -82,7 +82,7 @@ fresh Luna对`8f45b88..192aa8e`只做一次增量复查：三项均ADDRESSED、�
 
 D主目录main和两端只读ls-remote仍一致为`3f524904e16b19119fe76009c41763b89bbdae8d`，标签一致、D tracked状态干净。前批KB交付已完成合并双推；本轮代码仍在`codex/staging-recovery-2026-10-25`，尚未合并或推送。验收通过不表示已经上线。C工作树、环境、SDD和artifact证据继续保留。
 
-当前实现事项的公司记录在代码文档提交后由root统一提交，不能用前一阶段交付记录或子代理审查记录代替。
+根实现事项在代码文档提交`634e4bc`后实际使用ASCII JSON执行`submit --timer-id T-1875641B3C7F`，退出0；记录`R-20261025-326EBF8F`已创建，状态`pending_review`。原始返回见`verification/work-record-submit-attempt-1.log`。该记录没有复用前一阶段交付记录或子代理审查记录；本段与计划勾选属于仅文档收尾，不修改受测源码。
 
 ## 后续事项的范围
 

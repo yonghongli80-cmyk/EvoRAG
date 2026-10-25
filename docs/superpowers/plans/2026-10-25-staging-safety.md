@@ -79,7 +79,7 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 - [x] Step 2: 使用同一锁定环境/离线guard/系统Temp短基准目录完成稳定源码完整后端（最多4worker/loadfile、BelowNormal、BLAS1），全树Ruff/架构与必要runtime smoke；不重复未变frontend。
 - [x] Step 3: 写只读CLI快照来源、报告code/限制、promotion补偿/无自动恢复的真实边界；保留失败日志，不用分项数拼全量结果。
 - [x] Step 4: 只读核对原PID/ready/.env hash，根统一代码文档提交；真实清理/rehome/业务切换不在本任务执行范围。
-- [ ] Step 5: 提交当前计时T-1875641B3C7F的唯一公司记录并核对成功，保留工作树和证据。
+- [x] Step 5: 提交当前计时T-1875641B3C7F的唯一公司记录并核对成功，保留工作树和证据。
 
 ## 整分支审查后的唯一修复波次
 
@@ -90,3 +90,5 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 ## 最终验收
 
 代码/测试冻结`192aa8e`。首轮宿主工具异常停在约96%，无pytest退出码/JUnit，不计为完整通过；确认旧测试进程全部退出后，以2 worker/BelowNormal/BLAS1、短系统Temp与离线guard重新完整运行：**3207通过/4跳过**，830.29秒、退出0；JUnit3211项、0失败、0错误。全树Ruff、生产锁烟测及架构预算通过，原PID48512/ready200/启动时间/.env哈希保持。详情与运行/部署边界见[最终报告](../../reviews/2026-10-25-staging-safety.md)。本轮新分支尚未合并main或双推。
+
+根实现事项已实际执行ASCII JSON提交，`submit --timer-id T-1875641B3C7F`退出0，记录`R-20261025-326EBF8F`已创建，状态`pending_review`；不是仅计时或准备JSON。原始返回保留于`verification/work-record-submit-attempt-1.log`。
