@@ -32,28 +32,28 @@
 **Files:** Modify `rag/kb_document_cleanup.py`、`rag/kb_lifecycle_cleanup.py`；Create `tests/test_kb_cleanup_snapshot_queries.py`。
 **Interfaces:** helper新增keyword-only `version_loader: Callable[[int], list[dict]] | None = None`；collect内部局部loader共用于resolver和补充permission循环，无新持久对象。
 
-- [ ] 用真实合成DB/collect入口写查询计数RED：重复目录行指向同permission、目录/permission双路径、无目录permission、空列表、多个版本；每ID最多查一次、collect再次调用会重新取新版本。不得stub预制计划。
-- [ ] 实现可选loader和懒缓存，不提前SQL、不改原全局读取/manifest/source/owner/路径/错误序；默认helper不注入loader时使用原方法。
-- [ ] 定向GREEN及helper默认兼容/归档错误优先级守卫，Ruff/新测试format/compile。报告task-1-report.md，root提交并fresh规格/质量复审后Task2才可改同一产品文件。
+- [x] 用真实合成DB/collect入口写查询计数RED：重复目录行指向同permission、目录/permission双路径、无目录permission、空列表、多个版本；每ID最多查一次、collect再次调用会重新取新版本。不得stub预制计划。
+- [x] 实现可选loader和懒缓存，不提前SQL、不改原全局读取/manifest/source/owner/路径/错误序；默认helper不注入loader时使用原方法。
+- [x] 定向GREEN及helper默认兼容/归档错误优先级守卫，Ruff/新测试format/compile。报告task-1-report.md，root提交并fresh规格/质量复审后Task2才可改同一产品文件。
 
 ### Task 2: Parent-index directory membership and deduplication
 
 **Files:** Modify `rag/kb_lifecycle_cleanup.py`；Create `tests/test_kb_cleanup_directory_index.py`。
 **Interfaces:** 原`_path_references_cleanup_target`签名保持；新增`_minimal_cleanup_dirs(paths:list[Path])->list[Path]`，collect消费其返回值。
 
-- [ ] 旧版目录扫描/去重计数RED：D=1/16/64，负匹配和深层后代，实际算法输入/迭代次数不随D全扫描；测试不可仅镜像实现，需关系结果与原谓词对照。
-- [ ] 保持候选absolute/resolve及fallback，替换目录扫描为自身/parent集合查询；保留原sorted(set,key=len)及列表序，去重按严格parent集合判定。
-- [ ] 覆盖目录自身、根、兄弟前缀、重复/嵌套/相对、点段、resolve失败及平台大小写；在collect路径确认调用新去重helper。定向GREEN、Ruff/新测试format/compile，root提交与fresh复审。
+- [x] 旧版目录扫描/去重计数RED：D=1/16/64，负匹配和深层后代，实际算法输入/迭代次数不随D全扫描；测试不可仅镜像实现，需关系结果与原谓词对照。
+- [x] 保持候选absolute/resolve及fallback，替换目录扫描为自身/parent集合查询；保留原sorted(set,key=len)及列表序，去重按严格parent集合判定。
+- [x] 覆盖目录自身、根、兄弟前缀、重复/嵌套/相对、点段、resolve失败及平台大小写；在collect路径确认调用新去重helper。定向GREEN、Ruff/新测试format/compile，root提交与fresh复审。
 
 ### Task 3: Independent complete plan and rejection compatibility
 
 **Files:** Create `tests/test_kb_cleanup_index_compatibility.py`、`tests/fixtures/kb_cleanup_index_expected.json`。
 **Interfaces:** 只消费`collect_kb_cleanup`与原异常契约，合成SQLite duck-adapter须执行真实SELECT且正确ORDER BY；期望由冻结旧模块生成，最终测试只依赖repo JSON及Temp数据。
 
-- [ ] 创建完整计划golden：多permission/版本/重复目录行、material与document staging、dataset、归档source、外部不冲突行及合法缺失路径。比较所有返回字段/列表顺序，仅规范临时路径前缀。cleanup_dirs原同深度顺序依赖Path哈希：以golden冻结成员映回本次Temp后用旧算法生成该字段预期顺序，不重排实际输出，其它字段直接比golden。
-- [ ] 拒绝矩阵：错owner、外部版本或manifest共享文件/目录/身份、manifest身份错配、全局旧archive源与坏版本同时存在、symlink/junction或目录当文件；原拒绝代码与先后保持。平台链接无法创建须明确记录，不悄悄略过安全断言。
-- [ ] 冻结基线模块必须绑定冻结版helper函数以避免import当前优化helper混作旧oracle；验证sources.json哈希并记录。旧基线先GREEN，当前产品完整patch/compile后GREEN；这是语义守卫，不伪造RED。collect不执行删除，前后DB/文件树hash保持。
-- [ ] 正常conftest定向、Ruff/format/compile，报告task-3-report.md；root提交并fresh复审。
+- [x] 创建完整计划golden：多permission/版本/重复目录行、material与document staging、dataset、归档source、外部不冲突行及合法缺失路径。比较所有返回字段/列表顺序，仅规范临时路径前缀。cleanup_dirs原同深度顺序依赖Path哈希：以golden冻结成员映回本次Temp后用旧算法生成该字段预期顺序，不重排实际输出，其它字段直接比golden。
+- [x] 拒绝矩阵：错owner、外部版本或manifest共享文件/目录/身份、manifest身份错配、全局旧archive源与坏版本同时存在、symlink/junction或目录当文件；原拒绝代码与先后保持。平台链接无法创建须明确记录，不悄悄略过安全断言。
+- [x] 冻结基线模块必须绑定冻结版helper函数以避免import当前优化helper混作旧oracle；验证sources.json哈希并记录。旧基线先GREEN，当前产品完整patch/compile后GREEN；这是语义守卫，不伪造RED。collect不执行删除，前后DB/文件树hash保持。
+- [x] 正常conftest定向、Ruff/format/compile，报告task-3-report.md；root提交并fresh复审。
 
 ### Task 4: Synthetic benchmark preparation
 
