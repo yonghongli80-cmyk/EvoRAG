@@ -62,4 +62,11 @@ $env:NUMEXPR_NUM_THREADS = '1'
 - 本次提交未应用到 D 主工作树的运行实例，不能据此声称业务库已启用 lifecycle gate，也没有回填或清理既有孤儿路径。
 - 同库跨进程互斥保证仍要求各进程使用相同规范化绝对 DB 路径和可靠共享文件系统锁；`:memory:` 只在其 ConnectionManager 内互斥。路径别名/硬链接和不可靠共享文件系统不在保证范围。部署前应备份、停写并排空旧版本写者，再统一升级所有可能写KB的进程；不支持新gate/tombstone的写者不得与新版本并行运行。本轮未安排该业务停写窗口。DELETE worker 会在gate内重新检查administer权限，排队期间撤权返回403且不开始删除。
 - Promotion 失败按现有契约保留无文档身份的 staging 文件；后续需由重试或人工/清理流程处置。无法证明归属的 archive 源则连同 manifest 留存，需人工解析后重试。
-- 代码已提交到隔离分支 `a874516`；本轮未合并共享 main、未推送Gitee/GitHub、未部署或重启服务。合并/双远端推送属于后续独立交付动作。
+- 2026-10-25按用户授权，将已验收分支快进并入main（`9f0574b` → `d5ff13e`），并推送Gitee/GitHub；两个远端主分支及全部标签实际核对一致。运行服务未部署或重启。
+
+## 2026-10-25 合并与双远端交付
+
+- 合并为fast-forward，main源码/测试与已完整验收的`a874516`一致；其后只有文档变化。合并后在无业务配置的C隔离worktree执行22项生命周期、架构、真实协调器崩溃重试及promotion保留冒烟，`22 passed in 44.47s`、退出0。
+- 交接四条push命令全部成功；首次核对Gitee/GitHub main均为`d5ff13e2826bf61a502cfb0dc7d5934419384654`，两个本地tag refs与两端零差异，无强推。后续本段交付说明为纯文档收尾，最终SHA以本地main及两端ls-remote为准。
+- 原PID48512及启动时间保持，`/ready`200、Qdrant local、Redis optional degraded，`.env`哈希保持。没有业务停写、数据迁移或服务重启。
+- 交付证据保留在C隔离worktree的`artifacts/kb-lifecycle-concurrency-2026-10-24/delivery/`，包括冒烟日志和真实ref/tag核对JSON；工作树与私有环境保留供后续工作使用。
