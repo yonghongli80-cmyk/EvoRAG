@@ -50,7 +50,8 @@
 1. 一个请求/命令显式创建 UnitOfWork：`read` 或 `write` 事务、同一连接/session、退出时唯一 commit/rollback 所有者；repository 不得暗中 `commit()`。嵌套只通过 savepoint 或禁止，不复用但无隔离的 SQLite nesting 语义。
 2. 将 `BEGIN IMMEDIATE` 的意图翻译成 PG 明确语义：对具体竞争行使用 `SELECT ... FOR UPDATE`/条件更新及唯一约束；必要时采用 `SERIALIZABLE`，对 serialization failure/deadlock 整个事务重放。不得把全表/无关行锁当成替代。
 3. 条件更新必须以 expected version/状态谓词和 `rowcount == 1` 作为成功条件。唯 current version pointer 权威保持在 SQL `document_permissions.current_version_id`；FTS、向量和文件不可成为 ACL 或 current pointer 的权威。
-4. 建立 `UnitOfWork.run(command, retry_policy)`：仅对识别的可重试 SQLSTATE（至少 serialization failure `40001`、deadlock `40P01`）在事务外退避重试**整个命令**；重试上限/总 deadline 有界；唯一键冲突、ACL deny、CAS 失败、校验错误、非瞬态网络错误不重试。command 内外部副作用必须先写 outbox 或具备幂等键，在重试期间不得重复发送、写文件或调向量服务。写入提交结果不明时须通过幂等键查询 reconcile，不能盲目重复写。PostgreSQL `SERIALIZABLE` 会因并发冲突中止事务且要求应用重试整个事务，这是官方文档支持的引擎事实；上述接口/分类是本 ADR 的工程推论。[PostgreSQL transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html)、[PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)
+4. 为接上 Task 3 的 shared cache/lease 方案，ACL/data 变更与其持久化 SQL epoch 必须在同一 UnitOfWork/事务内提交；缓存删除通知、Redis message 或本地失效回调只是加速传播，不是授权正确性的权威。读缓存前仍需可验证的 epoch/ACL 版本并重新鉴权；提交不确定时以 SQL 状态核对。
+5. 建立 `UnitOfWork.run(command, retry_policy)`：仅对识别的可重试 SQLSTATE（至少 serialization failure `40001`、deadlock `40P01`）在事务外退避重试**整个命令**；重试上限/总 deadline 有界；唯一键冲突、ACL deny、CAS 失败、校验错误、非瞬态网络错误不重试。command 内外部副作用必须先写 outbox 或具备幂等键，在重试期间不得重复发送、写文件或调向量服务。写入提交结果不明时须通过幂等键查询 reconcile，不能盲目重复写。PostgreSQL `SERIALIZABLE` 会因并发冲突中止事务且要求应用重试整个事务，这是官方文档支持的引擎事实；上述接口/分类是本 ADR 的工程推论。[PostgreSQL transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html)、[PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)
 
 ### Dialect、schema、migration 和 ID
 
@@ -70,22 +71,26 @@
 ### 切换前：可恢复快照
 
 1. 选定维护窗、责任人、冻结范围、允许的停机时长和最大数据丢失/恢复时间；提前演练写停止、备份和恢复。先登记运行中 app/worker/request/lease 与所有文件根目录。
-2. 阻止新请求、索引 worker、后台调度和人工写入；等待活跃 UnitOfWork、index lease、`staging` upload、`quarantine`、`archive_work` 确认/解包，以及 backup/restore 完成。停止写后导出最终 source watermark/change journal。
-3. 生成一个**应用一致性**备份包：所有 SQLite DB 的一致性副本；每个被数据库引用的 immutable version 文件；upload/quarantine/staging/archive_work 临时材料（含 hash、owner KB/document/version、状态、能否恢复）；Qdrant collections/points 快照或可验证重建材料；embedding cache/index state 的显式 include/exclude；一份跨存储 manifest。现有 backup manifest 不包含 Qdrant，并排除了 transient dirs，因此必须另扩建/包装；不能将单独 SQLite online backup 宣称完整。[`rag/backups/service.py`](../../rag/backups/service.py#L39)、[`rag/backups/service.py`](../../rag/backups/service.py#L45)、[`rag/backups/service.py`](../../rag/backups/service.py#L231)
-4. Manifest 对每个对象记录稳定逻辑 ID、存储位置、字节长度、SHA-256、数据库版本/表行数和最大事件序号；保存签名/校验和并异地只读留存。使用恢复副本验证 manifest、外键、每个引用文件 hash、当前版本唯一性、FTS rebuild 与向量对齐；本地 WAL/SHM 文件不得作为未 checkpoint 的独立备份替代。
+2. 通过持久 fence 阻止新请求、索引 worker、后台调度和人工写入；等待活跃 UnitOfWork、index lease、`staging` upload、`quarantine`、`archive_work` 确认/解包，以及 backup/restore 完成。撤销旧 generation 提交能力并验证 drain 后，封存一致 SQL snapshot ID、完整 change journal/audit 与跨存储清单；snapshot ID 代表快照身份，不以递增 ID 冒充提交水位。
+3. 迁移首版使用**持久准入 fence + 完全停写**。所有 API、worker、后台维护/定时任务、迁移器、人工管理入口和外部 writer 必须先向同一个权威 fence 取得写准入，并在每个业务事务中验证当前 generation。冻结新准入后等待所有已准入命令、数据库事务和外部写副作用排空；撤销旧 generation 的提交能力（例如撤销旧数据库角色/凭据并终止旧会话，具体以环境演练证明），再封存一致 SQL 快照、完整 journal 集合及跨存储对象。无法枚举/封锁外部 writer、无法证明旧代 writer 不可能再提交，或未确认 drain 完成时，拒绝切换。应用内暂停标志本身不构成 fence。
+4. 生成一个**应用一致性**备份包：所有 SQLite DB 的一致性副本；每个被数据库引用的 immutable version 文件；upload/quarantine/staging/archive_work 临时材料（含 hash、owner KB/document/version、状态、能否恢复）；Qdrant collections/points 快照或可验证重建材料；embedding cache/index state 的显式 include/exclude；一份跨存储 manifest。现有 backup manifest 不包含 Qdrant，并排除了 transient dirs，因此必须另扩建/包装；不能将单独 SQLite online backup 宣称完整。[`rag/backups/service.py`](../../rag/backups/service.py#L39)、[`rag/backups/service.py`](../../rag/backups/service.py#L45)、[`rag/backups/service.py`](../../rag/backups/service.py#L231)
+5. Manifest 对每个对象记录稳定逻辑 ID、存储位置、字节长度、SHA-256、数据库 schema/version、业务行数和一致性快照标识；保留完整审计记录并保存签名/校验和、异地只读留存。恢复副本验证 manifest、外键、每个引用文件 hash、当前版本唯一性、FTS rebuild 与向量对齐；本地 WAL/SHM 文件不得作为未 checkpoint 的独立备份替代。分配 ID/sequence 只用于标识、关联和审计，既不表示事务提交顺序，也不证明 ID 无缺口。
 
 ### 导入、核对与切换
 
-1. 在隔离的 PG 主从/备份/驱动环境恢复 schema 到空目标；预计算 deterministic mapping，保留主键；以一致性快照 bulk load 后按明细处理 delta/change journal。验证每表行数及 checksum（按排序业务键规范化）、FK/unique/check、org/legacy ACL 与 tombstone、每文档 current-version 状态、migration 高水位、索引/FTS rebuild、每个文件和向量引用。
+1. 在隔离的 PG 主从/备份/驱动环境恢复 schema 到空目标；预计算 deterministic mapping，保留主键；在全 writer fence 生效、旧代不能再提交并 drain 后，从权威一致性快照全量装载，不使用在线 `MAX(id)`/`MAX(sequence)` 作 delta 游标。另行封存完整审计/journal，逐笔对账其事务归属与快照，不能把 sequence gap 当作未提交记录，也不能因高 ID 已出现就越过仍未提交的低 ID。验证每表行数及 checksum（按排序业务键规范化）、FK/unique/check、org/legacy ACL 与 tombstone、每文档 current-version 状态、schema migration 状态、索引/FTS rebuild、每个文件和向量引用。
 2. 对合成数据和受批准的脱敏只读快照执行 shadow read 比对；禁止 shadow endpoint 读取未经批准的真实内容。比较 repository 返回值、权限拒绝、冲突、排序/FTS、计数和错误类别；逐项差异需归因并签字关闭。
-3. 维护窗开始后再次全停写及排空；导出并应用 journal 到最终 watermark；复核总量/抽样hash/ACL/FTS/query smoke/backups。切换为 PG connection config，验证应用只使用 PG 主库、schema版本和 readiness；随后仅恢复一个 writer，并观察审计、数据库错误、权限拒绝、索引队列/文件引用完整性。恢复前置门槛不满足则不打开写入。
+3. 维护窗开始后所有写入口再次进入同一 fence：先冻结新准入、排空事务和外部副作用、撤销旧代提交能力并验证无未知 writer，然后封存完整快照与 journal 集合。按一致权威最终状态完成 deterministic full reconcile；依业务主键、行版本/CAS 和跨存储引用核验冲突，不按任意 ID 顺序盲目重放互相依赖的操作。复核总量/checksum/ACL/FTS/query smoke/backups。切换为 PG connection config，验证应用只使用 PG 主库、schema 版本和 readiness；随后仅放行一个新 generation writer。恢复前置门槛不满足则不打开写入。
+
+**首版不依赖 online CDC。** 若后续选择不停写复制，须另行设计并验证数据库 commit-order capture（例如经验证的 WAL/LSN、slot 与一致快照边界）、保留期、lag/gap 监控和故障恢复协议；它不属于当前可执行方案，分配 ID、sequence 或观察到的 `MAX(id)` 都不是 commit-safe watermark。
 
 ### 切换后失败：先保写入，再恢复服务
 
 - 切换后 PG 已接受的新写入可能尚未存在 SQLite。严禁仅把 URL 改回旧 SQLite，否则会丢失这些写入并可能让 Qdrant/文件引用倒退。
-- 每个 PG 业务变更在同一 PG 事务写 append-only change journal/outbox：有单调 commit sequence、operation ID/idempotency key、实体/版本 ID、actor/KB、必要的 before/after 或可重放 payload、hash。切换前持续或维护窗最终按 journal reverse-apply 到隔离 SQLite 副本并校验。未验证可逆的变更（schema destructive migration、外部 side effect、ACL/版本冲突）进入人工 reconcile，不能自动覆盖。
-- 如果 journal 不完整、落后 watermark 或 reconcile 有冲突：保持写停、留存 PG 与所有跨存储对象、收敛事件清单并逐项裁决，修复目标副本后再经门禁切回；可以继续在 PG 修复并恢复 PG 服务，不能损害 PG 已提交的新数据。
-- 演练需模拟切换前中断、切换后部分成功、PG 提交结果超时不明、文件 promote 成功而 DB rollback、DB commit 后 FTS/outbox 消费失败、旧 writer/worker 仍提交、ACL revoke 与回滚同时发生。所有结果均校验新写的保留、幂等、不重复索引、current pointer、owner 和 tombstone。
+- 切回旧目标必须重复同一持久 fence：冻结新准入、排空所有在途事务/副作用、撤销 PG 旧代凭据/提交能力，确认不存在未知 writer 后封存 PG 一致性快照、完整 journal/audit 集合与跨存储 manifest。依该快照构建隔离 SQLite 候选副本，对全部权威业务行、行版本、ACL、current pointer、外键和文件/向量引用做 deterministic full reconcile；完整保留审计及 PG 已确认的所有新写入。冲突或无法确定语义时冻结写入并人工裁决，不依赖按任意 ID 顺序反向重放。
+- journal 的分配 sequence/ID 仅是身份与关联键：事务 A 可先分配低 ID 后暂停，事务 B 分配高 ID 并先提交；回滚也可能留下 sequence gap。禁止在线读取 `MAX(id)`/`MAX(sequence)` 后把它当提交水位或跨过可能稍后提交的低 ID。首版只有停写/drain/seal/全量核验方案。若采用在线 CDC，必须单独实现并验证 commit-order LSN/slot/snapshot 协议、无 gap/lag 与保留保证，当前没有该能力。
+- 如果无法证明所有外部 writer 已加入 fence、旧 generation 不可能再提交、事务与外部副作用已排空，或者快照/journal/manifest 完整性与 reconcile 有冲突：拒绝切换/切回，保持原服务目标和写入冻结状态，保留两边数据并查明差异。可在 PG 修复后继续服务，不能以回指旧 URL 替代数据恢复。
+- 演练需模拟：低 ID 晚于高 ID 提交；事务 rollback 产生 sequence gap；drain 后旧 generation writer 尝试提交；journal replay 遇到相互依赖写/唯一冲突；切换前中断；切换后部分成功；PG 提交结果超时不明；文件 promote 成功而 DB rollback；DB commit 后 FTS/outbox 消费失败；ACL revoke 与回滚同时发生。校验不得漏写、审计完整、无重复副作用、current pointer/owner/tombstone/跨存储引用一致。
 
 ## 隔离验证矩阵（计划，不表示已验证）
 
@@ -94,12 +99,15 @@
 | SQLite → PG schema/schema history | DDL 版本与校验和、约束、索引、sequence 高水位可重建；新增迁移幂等 | 未运行；待无业务隔离 PG 环境 |
 | Repository golden behavior | 每域 CRUD、分页、NULL/排序/时间/布尔/JSON/唯一冲突及 ID 返回等价 | 未运行；需双 adapter fixture |
 | Transaction/UoW | commit、异常 rollback、嵌套/savepoint、读隔离、多 repository 共享事务 | 未运行；当前 SQLite nesting 复用无 savepoint |
+| 持久 admission fence / epoch | 所有 API、worker、maintenance、migration 和外部 writer 同一 generation 准入；业务 ACL/data 变更与 SQL 持久 epoch 同事务提交；冻结后旧 generation 不可提交，未登记 writer 阻止 seal | 未运行；需独立跨入口/fault-injection 环境 |
 | CAS 与锁竞争 | 同版本双激活只成功一个；相同文档串行、不同文档并发；deadlock/40001 整事务重放且无重复副作用 | 未运行；需可控并发 fault injection |
 | ACL / org / admin / legacy | owner/public/share、org read/manage/deny、unassigned fail-closed、admin 特权及撤权竞态全等价 | 未运行；只准合成身份与KB |
 | FTS 中文等价 | 目标中文切词和上述标点/混合语言用例、current/tombstone、排序、命中数、ACL 无泄露 | 未运行；依赖中文 PoC/接受阈值 |
 | Cross-store consistency | 文件 promote、SQL commit/rollback、Qdrant 更新、FTS/outbox 失败恢复与幂等 | 未运行；仅本地隔离对象/向量实例 |
-| Snapshot/import/reconcile | DB、stage、archive_work、版本文件、manifest、索引可验证恢复；journal watermark 无 gap | 未运行；须备份演练及停写窗口 |
-| Cutover & reverse migration | 停写门禁、最终 delta、单 writer、故障后新写反向 reconcile；URL 回旧库被流程阻止 | 未运行；生产切换须单独审批和可审计 runbook |
+| Snapshot/import/reconcile | DB、stage、archive_work、版本文件、manifest、索引可验证恢复；freeze/drain/seal 后完整收齐该快照前已提交的 journal/audit 记录，不把 sequence gap 当提交顺序或无缺口证明 | 未运行；须备份演练及停写窗口 |
+| Sequence/commit-order hazards | 低 ID 晚于高 ID 提交不能被 MAX 游标越过；rollback gap 不阻止完整 seal；旧 writer 在撤销 generation 后不能提交 | 未运行；设计断言，首版 fence/drain/seal；online LSN/slot CDC 不实现 |
+| Reconcile conflicts | 全量快照保留所有新写；相互依赖变更按权威最终状态/行版本/引用确定性 reconcile，冲突冻结并报告，不任意顺序重放 | 未运行；需可重复故障注入 |
+| Cutover & reverse migration | 同一持久 fence、drain、旧代撤权、快照/journal seal/核验、确定性全量 reconcile；未知外部 writer 时 fail-closed；URL 回旧库被流程阻止 | 未运行；生产切换须单独审批和可审计 runbook |
 
 ## 前提与后续任务
 
