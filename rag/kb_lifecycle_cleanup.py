@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import stat
 from pathlib import Path
 
 from rag.kb_document_cleanup import (
+    _require_regular_file_if_present,
     delete_kb_document_files,
     resolve_document_staging_directory,
     resolve_kb_document_paths,
@@ -42,6 +44,18 @@ def _validate_tree(path: Path, root: Path) -> Path:
             if child.is_symlink() or getattr(child, "is_junction", lambda: False)():
                 raise ValueError("cleanup tree contains a link")
     return candidate
+
+
+def _require_directory_if_present(path: Path) -> None:
+    """Accept a missing cleanup root but reject existing non-directory paths."""
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ValueError("cleanup_path_invalid") from exc
+    if not stat.S_ISDIR(path_stat.st_mode):
+        raise ValueError("cleanup_path_invalid")
 
 
 def _path_references_cleanup_target(
@@ -161,8 +175,8 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
                 )
             )
         except ValueError as exc:
-            if str(exc) == "version_path_unowned":
-                raise KBDeleteIncomplete("version_path_unowned") from exc
+            if str(exc) in {"version_path_unowned", "cleanup_path_invalid"}:
+                raise KBDeleteIncomplete(str(exc)) from exc
             raise
 
     # Include version files for permissions that do not have a directory row.
@@ -184,7 +198,12 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
         expected = resolve_dataset_path(
             datasets_root, int(dataset["document_id"]), int(dataset["document_version_id"])
         )
-        paths.add(_validate_tree(expected, datasets_root))
+        validated = _validate_tree(expected, datasets_root)
+        try:
+            _require_regular_file_if_present(validated, "cleanup_path_invalid")
+        except ValueError as exc:
+            raise KBDeleteIncomplete("cleanup_path_invalid") from exc
+        paths.add(validated)
 
     material_staging = _owned_directory(Path(versions_root) / "staging" / "kb", kb_hash)
     # Task 3 document_id-scoped staging; only remove direct positive numeric owners.
@@ -193,10 +212,14 @@ def collect_kb_cleanup(db, kb_id: str, versions_root: Path, kb_files_root: Path,
         for document_id in permission_by_id
     ]
 
-    cleanup_dirs = [
-        _validate_tree(path, Path(versions_root))
-        for path in [material_staging, *document_staging]
-    ]
+    cleanup_dirs = []
+    for path in [material_staging, *document_staging]:
+        validated = _validate_tree(path, Path(versions_root))
+        try:
+            _require_directory_if_present(validated)
+        except ValueError as exc:
+            raise KBDeleteIncomplete("cleanup_path_invalid") from exc
+        cleanup_dirs.append(validated)
     # Deduplicate nested staging roots so their parent is removed once.
     cleanup_dirs = sorted(set(cleanup_dirs), key=lambda path: len(path.parts))
     cleanup_dirs = [

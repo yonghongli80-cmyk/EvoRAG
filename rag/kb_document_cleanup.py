@@ -1,9 +1,22 @@
 """Confined cleanup for KB document files and immutable version files."""
 
 import hashlib
+import stat
 from pathlib import Path
 
 from rag.kb_file_store import resolve_stored_path
+
+
+def _require_regular_file_if_present(path: Path, error_code: str) -> None:
+    """Accept a missing retry target but reject existing non-file path types."""
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ValueError(error_code) from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError(error_code)
 
 
 def _resolve_owned_path(root: Path, stored_path: str, owner_parts: tuple[str, ...], resolver) -> Path:
@@ -27,6 +40,7 @@ def _resolve_owned_path(root: Path, stored_path: str, owner_parts: tuple[str, ..
     resolved = resolver(root, str(candidate))
     if not resolved.is_relative_to(owner_root.resolve()):
         raise ValueError("resolved path belongs to another document")
+    _require_regular_file_if_present(resolved, "cleanup_path_invalid")
     return resolved
 
 
@@ -111,6 +125,7 @@ def _resolve_owned_version_path(
         allow_kb_staging=allow_kb_staging,
     ):
         raise ValueError("version_path_unowned")
+    _require_regular_file_if_present(resolved, "version_path_unowned")
     return resolved
 
 

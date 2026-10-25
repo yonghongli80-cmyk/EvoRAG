@@ -1,6 +1,8 @@
 """Owner checks for KB teardown paths and archive references."""
 
 import hashlib
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -461,3 +463,242 @@ def test_single_document_cleanup_does_not_accept_kb_wide_stage(
         kb_wide=True,
     ) == [kb_stage]
     assert kb_stage.read_bytes() == b"archive"
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "error_code"),
+    [
+        ("version_directory", "version_path_unowned"),
+        ("archive_source_directory", "archive_source_unowned"),
+        ("legacy_file_directory", "cleanup_path_invalid"),
+        ("dataset_directory", "cleanup_path_invalid"),
+        ("kb_staging_root_file", "cleanup_path_invalid"),
+        ("document_staging_root_file", "cleanup_path_invalid"),
+    ],
+)
+def test_kb_delete_rejects_non_regular_owned_targets_before_manager_calls(
+    isolated_api, make_user, monkeypatch, path_kind, error_code
+):
+    owner, headers = make_user(f"cleanup-owner-non-regular-{path_kind}")
+    db = api.app.state.user_db
+    kb_id = f"kb_non_regular_{path_kind}"
+    db.create_kb_metadata(kb_id, "Target", owner["id"], "private")
+    versions_root = Path(api.app.state.document_versions_root)
+    kb_files_root = Path(api.app.state.kb_files_root)
+    datasets_root = Path(api.app.state.structured_datasets_root)
+    document_id = None
+    version_id = None
+    manifest_id = None
+    kb_document_id = None
+
+    if path_kind == "version_directory":
+        document_id = db.create_document_permission("target.txt", kb_id, owner["id"])
+        malformed_path = versions_root / str(document_id) / "1" / "claimed-file"
+        protected_file = malformed_path / "keep.bin"
+        protected_file.parent.mkdir(parents=True)
+        protected_file.write_bytes(b"version directory payload")
+        version_id = db.create_document_version(
+            document_id, "target.txt", str(malformed_path), "hash", owner["id"]
+        )
+    elif path_kind == "archive_source_directory":
+        document_id = db.create_document_permission("archive.zip", kb_id, owner["id"])
+        version_id, version_path = _create_version(
+            db, versions_root, document_id, "archive.zip", owner["id"]
+        )
+        malformed_path = (
+            versions_root
+            / "staging"
+            / "kb"
+            / hashlib.sha256(kb_id.encode()).hexdigest()
+            / "claimed-source"
+        )
+        protected_file = malformed_path / "keep.bin"
+        protected_file.parent.mkdir(parents=True)
+        protected_file.write_bytes(b"archive directory payload")
+        manifest_id = db.create_material_archive_manifest(
+            document_id, version_id, str(malformed_path), owner["id"], 4_102_444_800
+        )
+    elif path_kind == "legacy_file_directory":
+        kb_document_id = db.create_kb_document_pending(kb_id, "legacy.txt")
+        malformed_path = kb_files_root / kb_id / str(kb_document_id) / "legacy.txt"
+        protected_file = malformed_path / "keep.bin"
+        protected_file.parent.mkdir(parents=True)
+        protected_file.write_bytes(b"legacy directory payload")
+        db.finish_kb_document(kb_document_id, str(malformed_path), "[]", "summary", 1)
+    elif path_kind == "dataset_directory":
+        document_id = db.create_document_permission("table.xlsx", kb_id, owner["id"])
+        version_id, _version_path = _create_version(
+            db, versions_root, document_id, "table.xlsx", owner["id"]
+        )
+        db.create_structured_dataset(document_id, version_id, "xlsx", "schema_only")
+        malformed_path = datasets_root / str(document_id) / str(version_id) / "dataset.sqlite3"
+        protected_file = malformed_path / "keep.bin"
+        protected_file.parent.mkdir(parents=True)
+        protected_file.write_bytes(b"dataset directory payload")
+    elif path_kind == "kb_staging_root_file":
+        malformed_path = (
+            versions_root
+            / "staging"
+            / "kb"
+            / hashlib.sha256(kb_id.encode()).hexdigest()
+        )
+        malformed_path.parent.mkdir(parents=True)
+        malformed_path.write_bytes(b"staging root file")
+        protected_file = malformed_path
+    else:
+        document_id = db.create_document_permission("staging.txt", kb_id, owner["id"])
+        malformed_path = versions_root / "staging" / str(document_id)
+        malformed_path.parent.mkdir(parents=True, exist_ok=True)
+        malformed_path.write_bytes(b"document staging file")
+        protected_file = malformed_path
+
+    protected_bytes = protected_file.read_bytes()
+    manager_calls = []
+    _stub_delete_side_effects(monkeypatch, manager_calls)
+    response = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+    assert response.status_code == 503
+    assert response.headers["X-KB-Lifecycle-Error"] == error_code
+    assert manager_calls == []
+    assert protected_file.read_bytes() == protected_bytes
+    assert db.get_kb_metadata(kb_id) is not None
+    if document_id is not None:
+        assert db.get_document_permission_by_id(document_id) is not None
+    if version_id is not None:
+        assert db.get_document_version_by_id(version_id) is not None
+    if manifest_id is not None:
+        assert db.get_material_archive_manifest(manifest_id) is not None
+    if kb_document_id is not None:
+        assert db.get_kb_document(kb_id, "legacy.txt")["id"] == kb_document_id
+
+
+@pytest.mark.parametrize(
+    "missing_kind",
+    ["version_file", "archive_source", "legacy_file", "dataset_file"],
+)
+def test_kb_delete_keeps_missing_file_retry_behavior(
+    isolated_api, make_user, monkeypatch, missing_kind
+):
+    owner, headers = make_user(f"cleanup-owner-missing-{missing_kind}")
+    db = api.app.state.user_db
+    kb_id = f"kb_missing_{missing_kind}"
+    db.create_kb_metadata(kb_id, "Target", owner["id"], "private")
+    versions_root = Path(api.app.state.document_versions_root)
+    kb_files_root = Path(api.app.state.kb_files_root)
+    datasets_root = Path(api.app.state.structured_datasets_root)
+    document_id = None
+    missing_path = None
+
+    if missing_kind == "version_file":
+        document_id = db.create_document_permission("missing.txt", kb_id, owner["id"])
+        missing_path = versions_root / str(document_id) / "1" / "missing.txt"
+        db.create_document_version(
+            document_id, "missing.txt", str(missing_path), "missing-hash", owner["id"]
+        )
+    elif missing_kind == "archive_source":
+        document_id = db.create_document_permission("archive.zip", kb_id, owner["id"])
+        version_id, _version_path = _create_version(
+            db, versions_root, document_id, "archive.zip", owner["id"]
+        )
+        missing_path = (
+            versions_root
+            / "staging"
+            / "kb"
+            / hashlib.sha256(kb_id.encode()).hexdigest()
+            / "missing.zip"
+        )
+        db.create_material_archive_manifest(
+            document_id, version_id, str(missing_path), owner["id"], 4_102_444_800
+        )
+    elif missing_kind == "legacy_file":
+        kb_document_id = db.create_kb_document_pending(kb_id, "missing.txt")
+        missing_path = kb_files_root / kb_id / str(kb_document_id) / "missing.txt"
+        db.finish_kb_document(kb_document_id, str(missing_path), "[]", "summary", 1)
+    else:
+        document_id = db.create_document_permission("table.xlsx", kb_id, owner["id"])
+        version_id, _version_path = _create_version(
+            db, versions_root, document_id, "table.xlsx", owner["id"]
+        )
+        db.create_structured_dataset(document_id, version_id, "xlsx", "schema_only")
+        missing_path = datasets_root / str(document_id) / str(version_id) / "dataset.sqlite3"
+
+    assert not missing_path.exists()
+    manager_calls = []
+    _stub_delete_side_effects(monkeypatch, manager_calls)
+    response = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert not missing_path.exists()
+    assert db.get_kb_metadata(kb_id) is None
+    if document_id is not None:
+        assert db.get_document_permission_by_id(document_id) is None
+    if missing_kind == "legacy_file":
+        assert db.get_kb_document(kb_id, "missing.txt") is None
+
+
+def _create_windows_junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows directory junctions are unavailable on this platform")
+    env = os.environ.copy()
+    env["KB_CLEANUP_TEST_JUNCTION_LINK"] = str(link)
+    env["KB_CLEANUP_TEST_JUNCTION_TARGET"] = str(target)
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "$ErrorActionPreference='Stop'; New-Item -ItemType Junction "
+            "-Path $env:KB_CLEANUP_TEST_JUNCTION_LINK "
+            "-Target $env:KB_CLEANUP_TEST_JUNCTION_TARGET | Out-Null",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert link.is_junction()
+
+
+def test_owned_version_junction_is_rejected_by_helper_and_delete_route(
+    isolated_api, make_user, monkeypatch, tmp_path
+):
+    owner, headers = make_user("cleanup-owner-junction")
+    db = api.app.state.user_db
+    kb_id = "kb_version_junction_owner"
+    db.create_kb_metadata(kb_id, "Target", owner["id"], "private")
+    document_id = db.create_document_permission("target.txt", kb_id, owner["id"])
+    versions_root = Path(api.app.state.document_versions_root)
+    target_dir = versions_root / str(document_id) / "1" / "real-directory"
+    target_file = target_dir / "target.txt"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_bytes(b"preserve junction target")
+    junction = versions_root / str(document_id) / "1" / "junction"
+    stored_path = junction / "target.txt"
+    version_id = db.create_document_version(
+        document_id, "target.txt", str(stored_path), "junction-hash", owner["id"]
+    )
+    _create_windows_junction(junction, target_dir)
+
+    try:
+        with pytest.raises(ValueError, match="version_path_unowned"):
+            resolve_owned_version_path(
+                versions_root,
+                str(stored_path),
+                document_id=document_id,
+                kb_id=kb_id,
+            )
+
+        manager_calls = []
+        _stub_delete_side_effects(monkeypatch, manager_calls)
+        response = isolated_api.delete(f"/knowledge-bases/{kb_id}", headers=headers)
+
+        assert response.status_code == 503
+        assert response.headers["X-KB-Lifecycle-Error"] == "version_path_unowned"
+        assert manager_calls == []
+        assert target_file.read_bytes() == b"preserve junction target"
+        assert db.get_document_version_by_id(version_id)["file_path"] == str(stored_path)
+        assert db.get_document_permission_by_id(document_id) is not None
+    finally:
+        if junction.is_junction():
+            junction.rmdir()
