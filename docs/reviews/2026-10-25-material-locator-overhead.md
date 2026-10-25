@@ -39,7 +39,7 @@
 
 ## 运行保护与后续
 
-22:03 原 8080 服务仍为 PID48512、启动时间 2026-10-23T14:09:17.6870660+08:00，ready 200、SQLite/Qdrant local 正常、Redis optional degraded；D `.env` 仅核对哈希且保持，D main 为 `542a36f`、跟踪树干净。未重启、reload、部署、执行业务恢复/迁移或读取业务数据库及材料。结束时另保存最终服务核对。
+22:03 原 8080 服务仍为 PID48512、启动时间 2026-10-23T14:09:17.6870660+08:00，ready 200、SQLite/Qdrant local 正常、Redis optional degraded；D `.env` 仅核对哈希且保持，D main 为 `542a36f`、跟踪树干净。未重启、reload、部署、执行业务恢复/迁移或读取业务数据库及材料。22:09:49 最终核对仍保持相同 PID/start、ready200、配置哈希及 D main/跟踪树状态。
 
 源码正确性门禁已通过。下一步是在资源充足的隔离时段执行完整新配对运行，保留既定门槛和全部样本；若结果不佳，按分段/SQL/计数定位，再做同负载对照。完整矩阵通过及代价审查前，不将本分支作为已完成性能验收的版本交付 main。
 
@@ -50,4 +50,4 @@
 & .\artifacts\material-locator-optimization-2026-10-25\verification\run-paired-benchmark.ps1 -Attempt 4
 ```
 
-该命令创建新证据和 fixture，不覆盖前三次或续拼部分结果，仍执行源码/helper 冻结校验。具体计划见[实施计划](../superpowers/plans/2026-10-25-material-locator-overhead.md)，设计/裁决见[设计文档](../superpowers/specs/2026-10-25-material-locator-overhead-design.md)。原始日志、JSON、JUnit、脚本和分项/最终复审在本工作树 ignored `artifacts/material-locator-optimization-2026-10-25/` 与专属 `.superpowers/sdd/2026-10-25-material-locator-overhead/`，保留原件。公司工作记录在实际 submit 后补回执，不预填成功。
+该命令创建新证据和 fixture，不覆盖前三次或续拼部分结果，仍执行源码/helper 冻结校验。具体计划见[实施计划](../superpowers/plans/2026-10-25-material-locator-overhead.md)，设计/裁决见[设计文档](../superpowers/specs/2026-10-25-material-locator-overhead-design.md)。原始日志、JSON、JUnit、脚本和分项/最终复审在本工作树 ignored `artifacts/material-locator-optimization-2026-10-25/` 与专属 `.superpowers/sdd/2026-10-25-material-locator-overhead/`，保留原件。公司工作记录已实际 submit 成功：`R-20261025-749029B5`，状态 `pending_review`，timer `T-65C48915576F`；记录如实标记性能验收待补，未把计时当作记录成功。验收文档提交 `d3500d2`，之后仅补回执。

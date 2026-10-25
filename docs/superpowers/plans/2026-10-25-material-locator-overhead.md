@@ -58,4 +58,4 @@
 - [x] 分项规格/质量与原implementer修复/增量复审，最终一次整分支复查及必要单次修复波次，冻结源码。
 - [x] 新3文件+既有locator/batched/organizer/FTS/org/doc-security相关统一回归、Ruff/format、生产锁实际locator API烟测；不在D业务配置下测试。
 - [ ] **deferred_resource：前三次正式尝试均退出2，完整性能验收待补。** pytest结束后root成对基准，核对完整等价/全表hash/真实计数和资源；按实际值报告收益/代价，未达改进则回到证据定位而非删保护或改口径。
-- [ ] **文档已更新，公司记录待实际submit。** 更新交接、计划、验收/裁决和公司实际submit；原服务PID/start/ready/env hash保持。源码留本地新分支可审阅，不自动再次合并或部署；main/两远端已交付542a36f事实保持。
+- [x] **文档已更新，公司记录 R-20261025-749029B5 实际submit成功。** 更新交接、计划、验收/裁决和公司实际submit；原服务PID/start/ready/env hash保持。源码留本地新分支可审阅，不自动再次合并或部署；main/两远端已交付542a36f事实保持。
