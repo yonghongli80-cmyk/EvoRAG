@@ -1,5 +1,7 @@
 # RAGv3 生产化升级方案（多实例）
 
+> 2026-10-25：新增[容量与候选SLO](docs/capacity-and-slo.md)、[DAL/PostgreSQL ADR](docs/architecture/data-access-postgresql.md)和[共享状态/存储/worker ADR](docs/architecture/shared-state-storage-workers.md)。材料定位组件27组合成测量已完成；ADR为设计与门禁，PG/对象存储/共享fencing/多实例未实现或运行验收，正式业务SLO未验收。详见[本轮报告](docs/reviews/2026-10-25-capacity-architecture.md)。
+
 > **状态：Phase 0 观测与真实模型合成资料基线已完成，真实业务分布/容量/稳定SLO仍待验收；Phase 1 配置与独立合成运行验收已完成，用户业务存量迁移未执行。** 日期：2026-10-24。
 > 2026-10-24 复查待办、独立锁环境、宿主Docker当前修复与新验收口径见 [`docs/handoff-2026-10-24.md`](docs/handoff-2026-10-24.md)；下文带日期的探测/基线为历史事实。
 > 本文只回答“单机跑通之后，怎样安全地变成可上线的多实例系统”；
@@ -35,9 +37,9 @@ Phase 4 对象存储 → Phase 5 多副本与独立 worker → Phase 6 安全与
 | 组件 | 现状 | 阻塞点 | 证据 |
 | --- | --- | --- | --- |
 | API | 单进程 | 无副本、无优雅摘流 | `start.py` 只 `Popen` 一个 uvicorn |
-| Qdrant | `QdrantClient(path=settings.qdrant_path)`，或 `url=settings.qdrant_url`（Phase 1 已加，默认空） | **进程级独占目录**，第二个进程打不开；基准/沙箱必须停服务 | `rag/vector_store.py::_get_client` |
+| Qdrant | `QdrantClient(path=settings.qdrant_path)`，或 `url=settings.qdrant_url`（Phase 1 已加，默认空） | **同一路径进程级独占**；隔离基准/沙箱应使用独立路径或server，不与业务目录共用 | `rag/vector_store.py::_get_client` |
 | SQLite | `ConnectionManager`：单写连接 + 线程本地只读连接 | 多副本写会锁；WAL 放共享盘不安全 | `rag/db/connection.py` |
-| SQL 方言 | 56 张表、`INSERT OR IGNORE`、`lastrowid`、`PRAGMA`、FTS5 | 不能直接换 Postgres | `rag/repositories/schema.py`、`rag/db/migrations/` |
+| SQL 方言 | 多张SQLite表、`INSERT OR IGNORE`、`lastrowid`、`PRAGMA`、FTS5；不沿用历史56表数量 | 不能直接换 Postgres，盘点见新ADR | `rag/repositories/schema.py`、`rag/db_migrations.py` |
 | Redis | 只给 LLM 池并发门用 | 答案缓存 `cached=None`；改写缓存是进程内 | `rag/llm_pool/router.py`、`rag/pipeline_prepare.py` |
 | 文件 | `data/upload`、`data/document_versions`、`data/structured_datasets` | 本机盘；Docker `COPY . .` 有带入风险 | `rag/context.py:27`、`.dockerignore` |
 | Worker | 素材/演化/备份在 API 进程内启动 | 多副本会重复跑 | `rag/api.py` lifespan |
