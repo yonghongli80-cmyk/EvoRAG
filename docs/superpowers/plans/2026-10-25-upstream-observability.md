@@ -63,6 +63,8 @@ PY=artifacts/review-backlog-2026-10-24/env/developer-python/Scripts/python.exe�
 - [x] root核对任务接口/报告和源码范围，整分支独立复审；统一修复实际发现并冻结源码。
 - [x] 同一冻结源码完整后端2 worker/loadfile/BelowNormal/BLAS1及offline guard，保存退出码、stdout/stderr/JUnit；全树Ruff和生产锁离线SDK/stream/TypeSafe/requests烟测，显式核对生产2.53.0/1.4.2/2.16.0的私有属性、两种hook模式及重试，保留任何失败，不拼接数字。
 - [x] 写事件schema与嵌套JSON解析、ID摘要匹配限制、缺头/无响应边界和SDK私有属性升级检查；历史基线不回填。核对原PID/start/ready/.env哈希，记录真实结果。
-- [ ] 根选择性提交代码文档，实际submit当前T-D911F87810FD的唯一中文公司记录并核对成功；保留工作树、环境和原始证据。
+- [x] 根选择性提交代码文档，实际submit当前T-D911F87810FD的唯一中文公司记录并核对成功；保留工作树、环境和原始证据。
 
 最终代码验收：产品源`73c74d9`、测试源`f80784c`。完整第1次会话中断、无exit/JUnit不判通过；第2次单次完整运行3248通过/4跳过、939.77秒、退出0，JUnit3252项且0失败0错误。跳过为Windows terminate/fork限制及两项缺失脱敏夹具。生产锁9项烟测和最终全树Ruff通过，冻结源及日志哈希核对一致；14:40:19原服务身份、ready200及环境哈希保持。原始证据、工作树和环境保留，未合并/推送或部署，详见[验收报告](../../reviews/2026-10-25-upstream-observability.md)。
+
+根收尾：验收文档提交`824c703`后，实际submit返回`R-20261025-61811CC2`、`pending_review`；本地唯一记录创建成功，待人工复核。之后仅补回执文档，不修改受测源码。本轮任务全部完成，后续独立待办见报告末表。
