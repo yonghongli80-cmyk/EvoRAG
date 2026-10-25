@@ -19,7 +19,7 @@
 - `superpowers/specs/2026-10-25-staging-safety-design.md`：本轮安全边界、事务/owner设计与只读审计契约。
 - `superpowers/plans/2026-10-25-staging-safety.md`：本轮实现任务、审查和统一验证记录；最终证据以交接和审查报告为准。
 - `staging-audit.md`：显式快照输入的只读CLI使用说明、报告码及候选/自动恢复边界。
-- `handoff-2026-10-24.md`：当前交接，顶部为2026-10-25三轮成果合并双推；后续保留各轮验收及部署/Docker历史边界，当前main以最新实际远端核对为准。
+- `handoff-2026-10-24.md`：当前阶段交接，顶部区分本地验收与已交付状态；保留各轮验收及部署/Docker历史边界，main以最新实际远端核对为准。
 - `reviews/2026-10-24-kb-lifecycle-concurrency.md`：KB删除/上传生命周期并发协议、崩溃重试、失败归档所有权、最终完整回归与部署边界。
 - `superpowers/plans/2026-10-24-kb-lifecycle-concurrency.md`：KB生命周期并发整改的TDD计划及完成状态。
 - `reviews/2026-10-24-deep-audit.md`：上一轮深度审查、增量缺陷修复、实际验证、过程偏差与剩余专项设计/运行条件。

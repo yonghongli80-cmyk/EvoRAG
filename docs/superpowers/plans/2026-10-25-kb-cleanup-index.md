@@ -71,4 +71,6 @@
 - [x] 任务复审通过后整分支复查；实际发现集中一个最终修复波次和一次增量复审，冻结源/测试。
 - [x] 正常conftest统一`tests/test_kb_cleanup_snapshot_queries.py tests/test_kb_cleanup_directory_index.py tests/test_kb_cleanup_index_compatibility.py tests/test_kb_cleanup_ownership.py tests/test_kb_lifecycle_integration.py tests/test_kb_lifecycle_api.py tests/test_document_versions.py tests/test_document_security_boundaries.py tests/test_architecture_budget.py`，至多2worker；Ruff与新测试format/compile，保存JUnit/exit/log。
 - [x] 原生运行Task4旧新基准及生产锁cleanup-plan smoke，文件/DB输入不变、错误一致；只读原服务identity/ready/env hash核对。
-- [ ] 完善所有证据/裁决/剩余条件，选择性提交、实际submit阶段唯一中文工作记录。保留可审阅分支、环境和证据，更新总计划Phase2后继续Phase3，不在此结束整个用户请求。
+- [x] 完善所有证据/裁决/剩余条件，选择性提交、实际submit阶段唯一中文工作记录。保留可审阅分支、环境和证据，更新总计划Phase2后继续Phase3，不在此结束整个用户请求。
+
+阶段2收尾：验收文档acaa9f7后，实际submit返回R-20261025-884467AF/pending_review，阶段唯一记录已创建。受测7c22af9不变，之后仅文档回执。继续总计划Phase3，不停止用户整个顺序请求。
