@@ -6,6 +6,8 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-25-kb-cleanup-index.md`：KB清理调用内版本快照、目录祖先集合优化、旧新完整计划/拒绝矩阵、真实SQLite合成对照及统一验收。
+- `superpowers/plans/2026-10-25-kb-cleanup-index.md`：顺序产品任务、并行兼容/基准准备、独立复审及根验收记录。
 - `reviews/2026-10-25-three-phase-delivery.md`：暂存安全、上游观测、jobs索引三轮成果的完整集成、合并双推、原始证据归档及运行边界。
 - `superpowers/plans/2026-10-25-sequential-followups.md`：用户授权的交付→KB清理优化→策略/架构逐项执行顺序和进展。
 - `reviews/2026-10-25-staging-audit-jobs-index.md`：暂存审计jobs预索引、报告兼容/复杂度回归、旧新合成测量及统一验收。

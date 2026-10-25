@@ -60,15 +60,15 @@
 **Files:** Create ignored `artifacts/kb-cleanup-index-2026-10-25/benchmark_cleanup.py`、本计划`task-4-report.md`；不改产品/永久测试。
 **Interfaces:** old/new绑定同一显式合成SQLite/目录，冻结旧helper绑定保证oracle；guard和低优先级先于产品导入。
 
-- [ ] 准备N=20/100/300目标permission，各含目录行/版本，另有外部版本/manifest；原/新collect只生成计划，不调用删除。交替各3轮，完整结果或拒绝错误一致，输入hash保持。
-- [ ] 记录实际版本查询数、可观测目录关联访问数、耗时/峰值内存/结果大小及source/hash/priority；无壁钟通过阈值，不推断生产SLO。目录计数不能稳定观测时明确限制并用Task2确定性测试作主证据。
-- [ ] compile-only准备报告，root最终冻结和复审后执行并保存退出码/原始结果。
+- [x] 准备N=20/100/300目标permission，各含目录行/版本，另有外部版本/manifest；原/新collect只生成计划，不调用删除。交替各3轮，完整结果或拒绝错误一致，输入hash保持。
+- [x] 记录实际版本查询数、可观测目录关联访问数、耗时/峰值内存/结果大小及source/hash/priority；无壁钟通过阈值，不推断生产SLO。目录计数不能稳定观测时明确限制并用Task2确定性测试作主证据。
+- [x] compile-only准备报告，root最终冻结和复审后执行并保存退出码/原始结果。
 
 ### Task 5: Root integration and handoff
 
 **Files:** Update本计划、总顺序计划、docs/README.md、docs/handoff-2026-10-24.md；Create `docs/reviews/2026-10-25-kb-cleanup-index.md`。
 
-- [ ] 任务复审通过后整分支复查；实际发现集中一个最终修复波次和一次增量复审，冻结源/测试。
-- [ ] 正常conftest统一`tests/test_kb_cleanup_snapshot_queries.py tests/test_kb_cleanup_directory_index.py tests/test_kb_cleanup_index_compatibility.py tests/test_kb_cleanup_ownership.py tests/test_kb_lifecycle_integration.py tests/test_kb_lifecycle_api.py tests/test_document_versions.py tests/test_document_security_boundaries.py tests/test_architecture_budget.py`，至多2worker；Ruff与新测试format/compile，保存JUnit/exit/log。
-- [ ] 原生运行Task4旧新基准及生产锁cleanup-plan smoke，文件/DB输入不变、错误一致；只读原服务identity/ready/env hash核对。
+- [x] 任务复审通过后整分支复查；实际发现集中一个最终修复波次和一次增量复审，冻结源/测试。
+- [x] 正常conftest统一`tests/test_kb_cleanup_snapshot_queries.py tests/test_kb_cleanup_directory_index.py tests/test_kb_cleanup_index_compatibility.py tests/test_kb_cleanup_ownership.py tests/test_kb_lifecycle_integration.py tests/test_kb_lifecycle_api.py tests/test_document_versions.py tests/test_document_security_boundaries.py tests/test_architecture_budget.py`，至多2worker；Ruff与新测试format/compile，保存JUnit/exit/log。
+- [x] 原生运行Task4旧新基准及生产锁cleanup-plan smoke，文件/DB输入不变、错误一致；只读原服务identity/ready/env hash核对。
 - [ ] 完善所有证据/裁决/剩余条件，选择性提交、实际submit阶段唯一中文工作记录。保留可审阅分支、环境和证据，更新总计划Phase2后继续Phase3，不在此结束整个用户请求。
