@@ -342,8 +342,11 @@ def test_replay_rechecks_current_acl_before_returning_receipt(tmp_path: Path):
         ("archive_rehome", "manifest_status"),
         ("archive_rehome", "manifest_expiry"),
         ("archive_rehome", "new_version_reference"),
+        ("archive_rehome", "new_version_source_reference"),
         ("archive_rehome", "new_manifest_reference"),
+        ("archive_rehome", "new_manifest_source_reference"),
         ("archive_rehome", "new_kb_document_reference"),
+        ("archive_rehome", "new_kb_document_source_reference"),
         ("archive_rehome", "new_active_job"),
     ],
 )
@@ -391,7 +394,27 @@ def test_replay_rejects_changed_post_state(tmp_path: Path, kind: str, change: st
                     "UPDATE document_versions SET status='staging',file_path=? WHERE id=?",
                     (public_receipt["destination_path"], other_version),
                 )
-            elif change == "new_manifest_reference":
+            elif change == "new_version_source_reference":
+                other_doc = db.create_document_permission(
+                    "new-source-reference.txt", "kb-recovery", request.actor_user_id, 1, False
+                )
+                other_version = db.create_document_version(
+                    other_doc,
+                    "new-source-reference.txt",
+                    str(source),
+                    _digest(body),
+                    request.actor_user_id,
+                )
+                conn.execute(
+                    "UPDATE document_versions SET status='staging',file_path=? WHERE id=?",
+                    ("staging/legacy-archive.bin", other_version),
+                )
+            elif change in {"new_manifest_reference", "new_manifest_source_reference"}:
+                referenced_path = (
+                    "staging/legacy-archive.bin"
+                    if change.endswith("source_reference")
+                    else public_receipt["destination_path"]
+                )
                 conn.execute(
                     "INSERT INTO material_archive_manifests "
                     "(container_document_id,container_version_id,status,created_by,source_path,expires_at) "
@@ -400,15 +423,20 @@ def test_replay_rejects_changed_post_state(tmp_path: Path, kind: str, change: st
                         request.document_id,
                         request.version_id,
                         request.actor_user_id,
-                        public_receipt["destination_path"],
+                        referenced_path,
                         time.time() + 3600,
                     ),
                 )
-            elif change == "new_kb_document_reference":
+            elif change in {"new_kb_document_reference", "new_kb_document_source_reference"}:
+                referenced_path = (
+                    "staging/legacy-archive.bin"
+                    if change.endswith("source_reference")
+                    else public_receipt["destination_path"]
+                )
                 conn.execute(
                     "INSERT INTO kb_documents(kb_id,filename,file_path,document_id,document_version_id) "
                     "VALUES('kb-recovery','new-reference.txt',?,?,?)",
-                    (public_receipt["destination_path"], request.document_id, request.version_id),
+                    (referenced_path, request.document_id, request.version_id),
                 )
             elif change == "new_active_job":
                 conn.execute(
