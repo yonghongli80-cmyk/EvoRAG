@@ -33,19 +33,19 @@
 **Files:** Modify `rag/staging_audit.py`；Create `tests/test_staging_audit_jobs_index.py`。
 **Interfaces:** 原`audit_staging`不变；`_collect_database_references`产出`material_jobs_by_version`内部键，`_diagnose_version`消费其version桶；无新公共helper要求。
 
-- [ ] 新计数回归经真实`audit_staging`/合成SQLite/_select_rows路径包装jobs列表（保留原数据），对V=1、12、48且含多job/孤儿/非material行的情形，断言jobs只装载一次、完整行遍历不超过校验加索引两遍；V=12/48在旧实现必须因重复访问RED。不得以stub直接返回预制报告或以时间作门槛。
-- [ ] 最小实现：完整校验之后建立有序桶，原行引用及原jobs列表保持；诊断仅查桶，保持既有状态/输出逻辑，避免无关重构及增加依赖。
-- [ ] 定向GREEN，Ruff/format/compile及diff通过，写task-1-report.md，列实际命令、RED/GREEN计数和风险；root选择性提交，fresh规格/质量复审。
+- [x] 新计数回归经真实`audit_staging`/合成SQLite/_select_rows路径包装jobs列表（保留原数据），对V=1、12、48且含多job/孤儿/非material行的情形，断言jobs只装载一次、完整行遍历不超过校验加索引两遍；V=12/48在旧实现必须因重复访问RED。不得以stub直接返回预制报告或以时间作门槛。
+- [x] 最小实现：完整校验之后建立有序桶，原行引用及原jobs列表保持；诊断仅查桶，保持既有状态/输出逻辑，避免无关重构及增加依赖。
+- [x] 定向GREEN，Ruff/format/compile及diff通过，写task-1-report.md，列实际命令、RED/GREEN计数和风险；root选择性提交，fresh规格/质量复审。
 
 ### Task 2: Independent full-report and schema compatibility coverage
 
 **Files:** Create `tests/test_staging_audit_jobs_compatibility.py`、`tests/fixtures/staging_audit_jobs_expected.json`。
 **Interfaces:** 仅消费公共`audit_staging`，用root导出的基线模块生成golden；最终测试只依赖仓库fixture和临时合成快照，不依赖基线模块/源代码/Git/artifacts。
 
-- [ ] 准备四类合成golden：jobs表缺失；只有id/version_id/status的最小表；完整scope/type列含NULL/空串/大小写/非material；多版本多job混合活跃/终态/缺失与孤儿。反向插入job id，覆盖报告statuses及pending job_ids排序；至少一例含既有KB引用、manifest及stage文件以锁住完整报告阶段顺序。
-- [ ] 使用冻结基线生成并核对完整报告golden，仅递归规范临时绝对路径前缀为`<TMP>`（路径后缀用posix表示），不删字段/条目、不排序输出。基线必须先通过，明确这是等价守卫，不宣称它有初始RED。
-- [ ] 对jobs缺必需列及非法正整数id/version_id、非法status、非文本scope/type参数化，包含非material和孤儿行，断言完整unsupported_schema错误、无部分诊断；每例输入数据库hash和树快照保持。
-- [ ] 在当前实现运行新文件GREEN，Ruff/format/compile，写task-2-report.md含golden来源及旧/新实测结果；root提交及fresh规格/质量复审。若Task1尚未落地，可先验证旧版，最终统一gate验证新旧等价。
+- [x] 准备四类合成golden：jobs表缺失；只有id/version_id/status的最小表；完整scope/type列含NULL/空串/大小写/非material；多版本多job混合活跃/终态/缺失与孤儿。反向插入job id，覆盖报告statuses及pending job_ids排序；至少一例含既有KB引用、manifest及stage文件以锁住完整报告阶段顺序。
+- [x] 使用冻结基线生成并核对完整报告golden，仅递归规范临时绝对路径前缀为`<TMP>`（路径后缀用posix表示），不删字段/条目、不排序输出。基线必须先通过，明确这是等价守卫，不宣称它有初始RED。
+- [x] 对jobs缺必需列及非法正整数id/version_id、非法status、非文本scope/type参数化，包含非material和孤儿行，断言完整unsupported_schema错误、无部分诊断；每例输入数据库hash和树快照保持。
+- [x] 在当前实现运行新文件GREEN，Ruff/format/compile，写task-2-report.md含golden来源及旧/新实测结果；root提交及fresh规格/质量复审。若Task1尚未落地，可先验证旧版，最终统一gate验证新旧等价。
 
 ### Task 3: Prepare reproducible old/new synthetic measurement
 

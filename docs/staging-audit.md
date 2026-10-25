@@ -65,3 +65,9 @@ python scripts/audit_staging.py --database C:\Temp\snapshot\users.db --versions-
 KB删除遇到不明archive源、错owner、共享引用或错误文件类型时先返回503并保留身份。存在的manifest source必须仍在该KB的hashed staging；container version自己可以已在final目录。不能直接把错误码当作授权去删路径或手工改指针。旧global archive的显式rehome/重试写流程尚未由此CLI实现。
 
 本轮所有工具验证均使用合成Temp快照；业务目录、真实归档和运行服务不参与。
+
+## jobs关联与规模成本
+
+快照中的全部jobs仍先经过原元数据校验，再按version建立material jobs内存索引；版本诊断只查看对应桶。缺少scope/type列的旧表沿用默认material语义，显式NULL、空串和不匹配值仍不属于material索引任务。原报告字段、顺序、状态判断和只读边界保持。
+
+这消除了逐版本扫描全局jobs的关联成本，增加O(J)级行引用和桶内存；路径检查、排序和必须输出的报告规模仍有成本，不能据此认为整个审计为线性时间或已经达到生产容量/SLO。设计及本轮验收入口见[索引优化计划](superpowers/plans/2026-10-25-staging-audit-jobs-index.md)，实际测量与交付状态以最新交接为准。
