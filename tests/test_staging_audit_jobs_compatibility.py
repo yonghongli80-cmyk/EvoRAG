@@ -121,6 +121,7 @@ def _create_case(case: str, root: Path) -> tuple[Path, Path]:
                 "INSERT INTO document_index_jobs(id, version_id, status, job_scope, job_type) VALUES (?, ?, ?, ?, ?)",
                 [
                     (95, 31, "completed", "material", "material_index"),
+                    (55, 31, "retry", "material", "material_index"),
                     (15, 31, "running", "material", "material_index"),
                     (75, 32, "failed", "material", "material_index"),
                     (45, 32, "retry", "material", "material_index"),
@@ -197,7 +198,14 @@ def test_full_report_matches_frozen_jobs_compatibility_golden(case: str, tmp_pat
 
     report = audit_staging(database, versions_root)
 
-    assert _normalize(report, tmp_path) == _expected()["reports"][case]
+    normalized_report = _normalize(report, tmp_path)
+    assert normalized_report == _expected()["reports"][case]
+    if case == "ordered_mixed_report":
+        assert [
+            finding["subject"]["job_ids"]
+            for finding in normalized_report["findings"]
+            if finding["code"] == "material_job_pending" and finding["subject"]["version_id"] == 31
+        ] == [[15, 55]]
     assert hashlib.sha256(database.read_bytes()).hexdigest() == before_database
     assert _hash_tree(versions_root) == before_tree
 

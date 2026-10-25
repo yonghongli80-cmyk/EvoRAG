@@ -465,6 +465,7 @@
             "state": "active",
             "statuses": [
               "running",
+              "retry",
               "completed"
             ]
           }
@@ -587,7 +588,8 @@
           "subject": {
             "version_id": 31,
             "job_ids": [
-              15
+              15,
+              55
             ]
           }
         },
