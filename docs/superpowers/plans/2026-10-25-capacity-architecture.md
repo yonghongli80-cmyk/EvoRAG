@@ -55,4 +55,6 @@
 - [x] 任务独立规格/质量复查（artifact helper亦审边界），一次整专项复查/必要单次修复波次；不重复已通过定向检查。
 - [x] 原服务/内存读前检查，受限单进程运行正式profile一次，资源gate停止保留partial不降低门槛；解析实际raw samples/正确性/hash/exit，不以主观预期填表。
 - [x] 形成`docs/capacity-and-slo.md`及`docs/reviews/2026-10-25-capacity-architecture.md`，链接所有工程建议、正式验收条件及ADR，按实际结果决定是否需另立优化；更新UPGRADE/索引/handoff/总计划。
-- [ ] 若生产源保持，沿用3.2受测冻结并核对无源差异；仅对profile所调用MaterialLocator既有回归做一次合成定向检查，Ruff/文档/原服务核对。实际submit唯一工作记录、保留证据，最后报告整个顺序任务的完成与外部运行门禁。
+- [x] 若生产源保持，沿用3.2受测冻结并核对无源差异；仅对profile所调用MaterialLocator既有回归做一次合成定向检查，Ruff/文档/原服务核对。实际submit唯一工作记录、保留证据，最后报告整个顺序任务的完成与外部运行门禁。
+
+结项：整专项复查PASS，27组2520样本/实际exit0、Locator4/实际exit0、Ruff/文档校验通过，19:47原服务保持。唯一记录R-20261025-6232BD41已实际submit，pending_review；保留全部证据/环境。源设计工作完成，真实业务SLO和基础设施实现/迁移仍是外部门禁。
