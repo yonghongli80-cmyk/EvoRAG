@@ -1,0 +1,92 @@
+{
+  "baseline_commit": "1d413edbb1f6f7cc1d3bd4535e4ca85795680b58",
+  "baseline_sha256": {
+    "kb_document_cleanup.py": "b116cd5f06a427e941f472c34f6416f5349c82c8be4eac81e912552d1529de7d",
+    "kb_lifecycle_cleanup.py": "246782cf9f8583a38b8c4bb1c57847cedd6ee587c7a47217436afb059eceed16"
+  },
+  "complete_plan": {
+    "permissions": [
+      {
+        "id": 11,
+        "filename": "material.zip",
+        "kb_id": "compat-target",
+        "owner_id": 7
+      },
+      {
+        "id": 12,
+        "filename": "table.xlsx",
+        "kb_id": "compat-target",
+        "owner_id": 7
+      },
+      {
+        "id": 13,
+        "filename": "missing.txt",
+        "kb_id": "compat-target",
+        "owner_id": 7
+      }
+    ],
+    "documents": [
+      {
+        "id": 301,
+        "kb_id": "compat-target",
+        "filename": "material.zip",
+        "file_path": "$KB_FILES\\compat-target\\301\\material.zip"
+      },
+      {
+        "id": 302,
+        "kb_id": "compat-target",
+        "filename": "material.zip",
+        "file_path": "$KB_FILES\\compat-target\\302\\material.zip"
+      },
+      {
+        "id": 303,
+        "kb_id": "compat-target",
+        "filename": "legacy.txt",
+        "file_path": "$KB_FILES\\compat-target\\303\\legacy.txt"
+      }
+    ],
+    "document_ids": [
+      11,
+      12,
+      13,
+      301,
+      302,
+      303
+    ],
+    "paths": [
+      "$DATASETS\\12\\1201\\dataset.sqlite3",
+      "$KB_FILES\\compat-target\\301\\material.zip",
+      "$KB_FILES\\compat-target\\302\\material.zip",
+      "$KB_FILES\\compat-target\\303\\legacy.txt",
+      "$VERSIONS\\11\\1\\material-v1.zip",
+      "$VERSIONS\\11\\2\\material-v2.zip",
+      "$VERSIONS\\12\\1\\table.xlsx",
+      "$VERSIONS\\13\\1\\absent.txt",
+      "$VERSIONS\\staging\\kb\\41d617038ddb211b42294eabb77a6ff06e6faea72fab5b9f900396e1e20ccf30\\source.zip"
+    ],
+    "cleanup_dirs": [
+      "$VERSIONS\\staging\\11",
+      "$VERSIONS\\staging\\13",
+      "$VERSIONS\\staging\\12",
+      "$VERSIONS\\staging\\kb\\41d617038ddb211b42294eabb77a6ff06e6faea72fab5b9f900396e1e20ccf30"
+    ],
+    "dataset_ids": [
+      501
+    ],
+    "archive_manifest_ids": [
+      701
+    ]
+  },
+  "rejections": {
+    "wrong_owner": "version_path_unowned",
+    "shared_file": "cleanup_path_shared",
+    "shared_directory": "cleanup_path_shared",
+    "shared_identity": "cleanup_path_shared",
+    "shared_manifest_file": "cleanup_path_shared",
+    "shared_manifest_directory": "cleanup_path_shared",
+    "wrong_manifest_identity": "archive_identity_mismatch",
+    "archive_priority": "archive_source_unowned",
+    "link": "version_path_unowned",
+    "directory_as_file": "version_path_unowned"
+  }
+}
