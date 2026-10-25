@@ -31,6 +31,17 @@ function unauthorized(config: InternalAxiosRequestConfig) {
   return new AxiosError('Unauthorized', AxiosError.ERR_BAD_REQUEST, config, undefined, result)
 }
 
+function forbidden(config: InternalAxiosRequestConfig) {
+  const result = {
+    status: 403,
+    statusText: 'Forbidden',
+    data: {},
+    headers: {},
+    config,
+  }
+  return new AxiosError('Forbidden', AxiosError.ERR_BAD_REQUEST, config, undefined, result)
+}
+
 describe('auth with the actual API response interceptor', () => {
   let previousAdapter: AxiosAdapter
 
@@ -62,6 +73,54 @@ describe('auth with the actual API response interceptor', () => {
     expect(store.user).toBeNull()
     expect(store.isAuthenticated).toBe(false)
     expect(store.sessionChecked).toBe(true)
+  })
+
+  it('clears current auth and shared stores on an ordinary 401 while already at login', async () => {
+    api.defaults.adapter = async (config) => { throw unauthorized(config) }
+    const store = useAuthStore()
+    store.user = { id: 1, username: 'alice' }
+    const pinia = await import('pinia')
+    const chat = (await import('../chat')).useChatStore(pinia.getActivePinia()!)
+    const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
+    chat.messages = [{ role: 'assistant', content: 'private message' }]
+    files.files = [{ name: 'private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+
+    const error = await api.get('/protected').catch((reason) => reason)
+
+    expect(error.response.status).toBe(401)
+    expect(store.user).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.sessionChecked).toBe(true)
+    expect(chat.messages).toEqual([])
+    expect(files.files).toEqual([])
+    expect(window.location.pathname).toBe('/login')
+  })
+
+  it('clears current auth and shared stores on a streaming 401', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      clone: () => ({ json: async () => ({ detail: 'expired' }) }),
+      json: async () => ({ detail: 'expired' }),
+    })))
+    const store = useAuthStore()
+    store.user = { id: 1, username: 'alice' }
+    const pinia = await import('pinia')
+    const chat = (await import('../chat')).useChatStore(pinia.getActivePinia()!)
+    const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
+    chat.messages = [{ role: 'assistant', content: 'private message' }]
+    files.files = [{ name: 'private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+    const { streamRequest } = await import('../../utils/api')
+
+    const error = await streamRequest('/query/stream', { method: 'POST' }).catch((reason) => reason)
+
+    expect(error.response.status).toBe(401)
+    expect(store.user).toBeNull()
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.sessionChecked).toBe(true)
+    expect(chat.messages).toEqual([])
+    expect(files.files).toEqual([])
+    vi.unstubAllGlobals()
   })
 
   it('does not let an old /me 401 clear the account that logged in later', async () => {
@@ -120,6 +179,8 @@ describe('auth with the actual API response interceptor', () => {
     const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
     chat.messages = [{ role: 'assistant', content: 'Bob private message' }]
     files.files = [{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+    const { ElMessage } = await import('element-plus')
+    vi.mocked(ElMessage.error).mockClear()
     const navigationError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     oldResponse.reject(unauthorized(oldRequestConfig!))
@@ -128,6 +189,7 @@ describe('auth with the actual API response interceptor', () => {
     expect(chat.messages).toEqual([{ role: 'assistant', content: 'Bob private message' }])
     expect(files.files).toEqual([{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }])
     expect(navigationError).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(window.location.pathname).toBe('/files')
 
     newResponse.resolve(response(newRequestConfig!, { id: 2, username: 'bob' }))
@@ -157,6 +219,8 @@ describe('auth with the actual API response interceptor', () => {
     const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
     chat.messages = [{ role: 'assistant', content: 'Bob private message' }]
     files.files = [{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+    const { ElMessage } = await import('element-plus')
+    vi.mocked(ElMessage.error).mockClear()
     const navigationError = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     oldResponse.reject(unauthorized(oldRequestConfig!))
@@ -166,6 +230,7 @@ describe('auth with the actual API response interceptor', () => {
     expect(chat.messages).toEqual([{ role: 'assistant', content: 'Bob private message' }])
     expect(files.files).toEqual([{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }])
     expect(navigationError).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
     expect(window.location.pathname).toBe('/files')
     navigationError.mockRestore()
   })
@@ -235,16 +300,99 @@ describe('auth with the actual API response interceptor', () => {
   })
 
   it('does not clear auth when the actual API interceptor handles a permission 403', async () => {
-    api.defaults.adapter = async (config) => {
-      const result = { status: 403, statusText: 'Forbidden', data: {}, headers: {}, config }
-      throw new AxiosError('Forbidden', AxiosError.ERR_BAD_REQUEST, config, undefined, result)
-    }
+    api.defaults.adapter = async (config) => { throw forbidden(config) }
     const store = useAuthStore()
     store.user = { id: 3, username: 'authorized' }
+    const pinia = await import('pinia')
+    const chat = (await import('../chat')).useChatStore(pinia.getActivePinia()!)
+    const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
+    chat.messages = [{ role: 'assistant', content: 'private message' }]
+    files.files = [{ name: 'private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
 
     await expect(api.get('/protected')).rejects.toBeDefined()
 
     expect(store.user).toEqual({ id: 3, username: 'authorized' })
     expect(store.isAuthenticated).toBe(true)
+    expect(chat.messages).toEqual([])
+    expect(files.files).toEqual([])
+  })
+
+  it('ignores an old ordinary 403 without clearing the new account or its stores', async () => {
+    const oldResponse = deferred<never>()
+    let oldRequestConfig: InternalAxiosRequestConfig | undefined
+    api.defaults.adapter = async (config) => {
+      if (config.url === '/protected') {
+        oldRequestConfig = config
+        return oldResponse.promise
+      }
+      if (config.url === '/login') return response(config, { username: 'bob' })
+      if (config.url === '/me') return response(config, { id: 2, username: 'bob' })
+      throw new Error(`unexpected request: ${config.url}`)
+    }
+    window.history.replaceState({}, '', '/files')
+    const store = useAuthStore()
+    const oldRequest = api.get('/protected').catch((error) => error)
+    await store.login('bob', 'password')
+    const pinia = await import('pinia')
+    const chat = (await import('../chat')).useChatStore(pinia.getActivePinia()!)
+    const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
+    chat.messages = [{ role: 'assistant', content: 'Bob private message' }]
+    files.files = [{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+    const { ElMessage } = await import('element-plus')
+    vi.mocked(ElMessage.error).mockClear()
+    const navigationError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    oldResponse.reject(forbidden(oldRequestConfig!))
+    const error = await oldRequest
+
+    expect(error.response.status).toBe(403)
+    expect(store.user).toEqual({ id: 2, username: 'bob' })
+    expect(chat.messages).toEqual([{ role: 'assistant', content: 'Bob private message' }])
+    expect(files.files).toEqual([{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }])
+    expect(navigationError).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(window.location.pathname).toBe('/files')
+    navigationError.mockRestore()
+  })
+
+  it('ignores an old streaming 403 without clearing the new account or its stores', async () => {
+    const oldResponse = deferred<any>()
+    vi.stubGlobal('fetch', vi.fn(() => oldResponse.promise))
+    api.defaults.adapter = async (config) => {
+      if (config.url === '/login') return response(config, { username: 'bob' })
+      if (config.url === '/me') return response(config, { id: 2, username: 'bob' })
+      throw new Error(`unexpected request: ${config.url}`)
+    }
+    window.history.replaceState({}, '', '/files')
+    const store = useAuthStore()
+    const { streamRequest } = await import('../../utils/api')
+    const oldRequest = streamRequest('/query/stream', { method: 'POST' }).catch((error) => error)
+    await store.login('bob', 'password')
+    const pinia = await import('pinia')
+    const chat = (await import('../chat')).useChatStore(pinia.getActivePinia()!)
+    const files = (await import('../files')).useFilesStore(pinia.getActivePinia()!)
+    chat.messages = [{ role: 'assistant', content: 'Bob private message' }]
+    files.files = [{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }]
+    const { ElMessage } = await import('element-plus')
+    vi.mocked(ElMessage.error).mockClear()
+    const navigationError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    oldResponse.resolve({
+      ok: false,
+      status: 403,
+      clone: () => ({ json: async () => ({ detail: 'forbidden' }) }),
+      json: async () => ({ detail: 'forbidden' }),
+    })
+    const error = await oldRequest
+
+    expect(error.response.status).toBe(403)
+    expect(store.user).toEqual({ id: 2, username: 'bob' })
+    expect(chat.messages).toEqual([{ role: 'assistant', content: 'Bob private message' }])
+    expect(files.files).toEqual([{ name: 'bob-private.pdf', size: 1, size_human: '1 B', ext: '.pdf' }])
+    expect(navigationError).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
+    expect(window.location.pathname).toBe('/files')
+    navigationError.mockRestore()
+    vi.unstubAllGlobals()
   })
 })

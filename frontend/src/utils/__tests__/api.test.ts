@@ -37,6 +37,12 @@ vi.mock('element-plus', () => ({
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
 
+function stubWindowLocation(pathname: string) {
+  const location = { pathname, href: pathname }
+  vi.stubGlobal('window', { location })
+  return location
+}
+
 describe('api base URL', () => {
   it('uses same-origin root for production builds', async () => {
     const { resolveApiBase } = await import('../api')
@@ -85,6 +91,10 @@ describe('api base URL', () => {
 describe('api interceptor', () => {
   let responseErrorInterceptor: (error: any) => Promise<never>
 
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   beforeEach(async () => {
     vi.clearAllMocks()
     vi.resetModules()
@@ -106,10 +116,12 @@ describe('api interceptor', () => {
   })
 
   it('401 response rejects without relying on browser token storage', async () => {
+    const location = stubWindowLocation('/files')
     const error = { response: { status: 401 } }
 
     await expect(responseErrorInterceptor(error)).rejects.toBeDefined()
     expect(mockRequestInterceptorUse).toHaveBeenCalledTimes(1)
+    expect(location.href).toBe('/login')
   })
 
   it('does not redirect an unauthenticated login page back to itself', async () => {
@@ -152,6 +164,7 @@ describe('api interceptor', () => {
   })
 
   it('notifies the registered session reset handler on 401 and 403', async () => {
+    const location = stubWindowLocation('/files')
     const { registerSessionResetHandler } = await import('../api')
     const onSessionReset = vi.fn()
     registerSessionResetHandler(onSessionReset)
@@ -159,9 +172,11 @@ describe('api interceptor', () => {
     try {
       await expect(responseErrorInterceptor({ response: { status: 401 } })).rejects.toBeDefined()
       expect(onSessionReset).toHaveBeenCalledTimes(1)
+      expect(location.href).toBe('/login')
 
       await expect(responseErrorInterceptor({ response: { status: 403 } })).rejects.toBeDefined()
       expect(onSessionReset).toHaveBeenCalledTimes(2)
+      expect(location.href).toBe('/login')
     } finally {
       registerSessionResetHandler(null)
     }

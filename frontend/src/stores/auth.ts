@@ -44,6 +44,11 @@ if (typeof registerSessionResetHandler === 'function') {
     if (status === 401 && request?.authProbeGeneration !== undefined) {
       unauthorizedProbeGeneration = request.authProbeGeneration
     }
+    if (status === 401) {
+      const authStore = useAuthStore()
+      authStore.user = null
+      authStore.sessionChecked = true
+    }
     resetClientSession()
     return true
   }, () => authSessionGeneration)
