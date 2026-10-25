@@ -13,10 +13,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from rag.materials.locator_visibility import iter_visible_material_documents
 from rag.materials.models import CitationLocation, MaterialLocationQuery
-from rag.org_auth.models import OrgRole
-from rag.org_auth.repository import OrgRepository, is_org_policy
-from rag.org_auth.service import OrgAuthorizationService
 from rag.user_db import UserDB
 
 
@@ -44,41 +42,13 @@ class MaterialLocationResult:
 def _visible_documents(db: UserDB, user: dict) -> dict[int, dict]:
     """Map of visible, non-deleted, current document permissions by id.
 
-    One query loads every live document with its current version, and
-    authorization is decided once per knowledge base instead of once per
-    document (D observation: the previous loop performed a permission lookup and
-    a current-version lookup for every row).  The decision is equivalent to
-    :func:`rag.api_security.require_doc_view`:
-
-    * organization KB: one READ authorization covers every document of the KB;
-    * legacy KB: the batched ``get_accessible_doc_names`` projection applies the
-      same owner/public/shared rules as ``check_doc_permission``;
-    * administrators see every live document.
+    Compatibility wrapper preserving the complete legacy mapping shape. The
+    locator's default path consumes the iterator directly to avoid this mapping.
     """
-    rows = db.material_repo.list_material_documents_with_current_version()
-    documents_by_kb: dict[str, list[dict]] = {}
-    for row in rows:
-        documents_by_kb.setdefault(row["kb_id"], []).append(row)
+    return dict(iter_visible_material_documents(db, user))
 
-    visible: dict[int, dict] = {}
-    for kb_id, documents in documents_by_kb.items():
-        policy = OrgRepository(db).get_kb_policy(kb_id)
-        if is_org_policy(policy):
-            if OrgAuthorizationService(db).authorize(
-                int(user["id"]), kb_id, OrgRole.READ
-            ).allowed:
-                for document in documents:
-                    visible[int(document["id"])] = document
-            continue
-        if user.get("is_admin"):
-            for document in documents:
-                visible[int(document["id"])] = document
-            continue
-        allowed_names = set(db.get_accessible_doc_names(kb_id, user["id"]))
-        for document in documents:
-            if document["doc_name"] in allowed_names:
-                visible[int(document["id"])] = document
-    return visible
+
+_ORIGINAL_VISIBLE_DOCUMENTS = _visible_documents
 
 
 def material_result_response(result: MaterialLocationResult, user: dict, db: UserDB) -> dict:
@@ -97,9 +67,7 @@ def material_result_response(result: MaterialLocationResult, user: dict, db: Use
                 "value": result.citation.location.value,
             }
         },
-        "download_url": (
-            f"/documents/{result.document_id}/versions/{result.document_version_id}/download"
-        ),
+        "download_url": (f"/documents/{result.document_id}/versions/{result.document_version_id}/download"),
     }
 
 
@@ -113,55 +81,59 @@ class MaterialLocator:
     ):
         self.db = db
         self.semantic_retriever = semantic_retriever
-        self._visible_docs = visible_docs or _visible_documents
+        self._visible_docs = _visible_documents if visible_docs is None else visible_docs
+        self._uses_default_visibility = self._visible_docs is _ORIGINAL_VISIBLE_DOCUMENTS
         # Authorized metadata the model was allowed to see (diagnostics only).
         self.model_input = ""
 
     def locate(self, query: MaterialLocationQuery, user: dict) -> list[MaterialLocationResult]:
-        visible = self._visible_docs(self.db, user)
-        if not visible:
-            self.model_input = ""
-            return []
-
-        docs = dict(visible)
-        versions = {}
-        for document_id, document in list(docs.items()):
-            if document.get("current_version_id") is None:
-                docs.pop(document_id, None)
-                continue
-            if document.get("current_filename") is not None:
-                # The batched visibility query already carries the current
-                # version, so no per-document lookup is needed here.
-                versions[document_id] = {
-                    "id": document["current_version_id"],
-                    "original_filename": document["current_filename"],
-                    "validity_status": document.get("current_validity_status"),
-                }
-                continue
-            current = self.db.get_current_document_version(document_id)
-            if current is None:
-                docs.pop(document_id, None)
-            else:
-                versions[document_id] = current
-
-        # Apply explicit subject/type/date/path filters inside the ACL set.
-        if query.subject == "self":
-            docs = {k: v for k, v in docs.items() if v.get("subject_user_id") == user["id"]}
-        elif isinstance(query.subject, int):
-            docs = {k: v for k, v in docs.items() if v.get("subject_user_id") == query.subject}
-        if query.document_types:
-            docs = {k: v for k, v in docs.items() if v.get("document_type") in query.document_types}
         if query.uploaded_after is not None:
             timestamp = query.uploaded_after.timestamp()
+
+        def matches_filters(document: dict) -> bool:
+            if query.subject == "self" and document.get("subject_user_id") != user["id"]:
+                return False
+            if isinstance(query.subject, int) and document.get("subject_user_id") != query.subject:
+                return False
+            if query.document_types and document.get("document_type") not in query.document_types:
+                return False
+            if query.uploaded_after is not None and (document.get("updated_at") or 0) < timestamp:
+                return False
+            return not query.logical_path_prefix or (document.get("logical_path") or "").startswith(
+                query.logical_path_prefix
+            )
+
+        use_default = self._uses_default_visibility and self._visible_docs is _ORIGINAL_VISIBLE_DOCUMENTS
+        versions: dict[int, dict] | None = None
+        if use_default:
             docs = {
-                k: v for k, v in docs.items() if (v.get("updated_at") or 0) >= timestamp
+                document_id: document
+                for document_id, document in iter_visible_material_documents(self.db, user)
+                if document.get("current_version_id") is not None and matches_filters(document)
             }
-        if query.logical_path_prefix:
-            docs = {
-                k: v
-                for k, v in docs.items()
-                if (v.get("logical_path") or "").startswith(query.logical_path_prefix)
-            }
+        else:
+            visible = self._visible_docs(self.db, user)
+            docs = dict(visible)
+            versions = {}
+            for document_id, document in list(docs.items()):
+                if document.get("current_version_id") is None:
+                    docs.pop(document_id, None)
+                    continue
+                if document.get("current_filename") is not None:
+                    versions[document_id] = {
+                        "id": document["current_version_id"],
+                        "original_filename": document["current_filename"],
+                        "validity_status": document.get("current_validity_status"),
+                    }
+                    continue
+                current = self.db.get_current_document_version(document_id)
+                if current is None:
+                    docs.pop(document_id, None)
+                else:
+                    versions[document_id] = current
+
+        if not use_default:
+            docs = {document_id: doc for document_id, doc in docs.items() if matches_filters(doc)}
         if not docs:
             self.model_input = ""
             return []
@@ -172,7 +144,13 @@ class MaterialLocator:
             for doc in docs.values()
         )
 
-        allowed_version_ids = {versions[d]["id"] for d in docs}
+        allowed_version_ids = None
+        if self.semantic_retriever is not None:
+            if use_default:
+                allowed_version_ids = {doc["current_version_id"] for doc in docs.values()}
+            else:
+                assert versions is not None
+                allowed_version_ids = {versions[document_id]["id"] for document_id in docs}
         fts_hits = self.db.search_material_search_fts(query.text, query.top_k)
         semantic_hits = (
             self.semantic_retriever(query.text, allowed_version_ids, query.top_k)
@@ -188,16 +166,25 @@ class MaterialLocator:
                 return
             seen.add(document_id)
             doc = docs[document_id]
-            version = versions[document_id]
+            if use_default:
+                version_id = doc["current_version_id"]
+                filename = doc["current_filename"]
+                validity_status = doc.get("current_validity_status")
+            else:
+                assert versions is not None
+                version = versions[document_id]
+                version_id = version["id"]
+                filename = version["original_filename"]
+                validity_status = version.get("validity_status")
             results.append(
                 MaterialLocationResult(
                     document_id=document_id,
-                    document_version_id=version["id"],
-                    filename=version["original_filename"],
+                    document_version_id=version_id,
+                    filename=filename,
                     logical_path=doc.get("logical_path") or "",
                     document_type=doc.get("document_type") or "",
                     updated_at=doc.get("updated_at"),
-                    ocr_warning=bool(version.get("validity_status") == "reported_outdated"),
+                    ocr_warning=bool(validity_status == "reported_outdated"),
                     citation=LocationCitation(location=citation),
                     rank=rank,
                     source=source,
@@ -205,13 +192,13 @@ class MaterialLocator:
             )
 
         # Exact employee subject outranks similarity.
-        for document_id, doc in docs.items():
-            is_exact_subject = (
-                (query.subject == "self" and doc.get("subject_user_id") == user["id"])
-                or (isinstance(query.subject, int) and doc.get("subject_user_id") == query.subject)
-            )
-            if is_exact_subject:
-                add(0.0, "exact", document_id, CitationLocation(kind="metadata", value="subject"))
+        if query.subject is not None:
+            for document_id, doc in docs.items():
+                is_exact_subject = (query.subject == "self" and doc.get("subject_user_id") == user["id"]) or (
+                    isinstance(query.subject, int) and doc.get("subject_user_id") == query.subject
+                )
+                if is_exact_subject:
+                    add(0.0, "exact", document_id, CitationLocation(kind="metadata", value="subject"))
 
         for hit in fts_hits:
             add(1.0, "fts", hit["document_id"], CitationLocation(kind="metadata", value="fts"))
