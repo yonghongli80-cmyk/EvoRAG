@@ -80,3 +80,9 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 - [ ] Step 3: 写只读CLI快照来源、报告code/限制、promotion补偿/无自动恢复的真实边界；保留失败日志，不用分项数拼全量结果。
 - [ ] Step 4: 只读核对原PID/ready/.env hash，根统一代码文档提交；真实清理/rehome/业务切换不在本任务执行范围。
 - [ ] Step 5: 提交当前计时T-1875641B3C7F的唯一公司记录并核对成功，保留工作树和证据。
+
+## 整分支审查后的唯一修复波次
+
+- [ ] reviewed HEAD `8f45b88` 的补偿DELETE事务污染、default rag_docs global-stage候选漏报、NUL路径JSON错误契约三项一并修复并完成一次fresh增量复审。
+- Files: `rag/repositories/doc_repo.py`（仅两个DELETE helper）、`rag/staging_audit.py`、new `tests/test_staging_recovery_integration.py`、`tests/test_staging_audit.py`。
+- 真实deferred DELETE commit、实际rag_docs route→snapshot、含NUL SQLite路径先RED再GREEN；root全量仍待冻结后统一跑。具体边界与复审证据保留于本计划SDD final-review/final-fix报告。
