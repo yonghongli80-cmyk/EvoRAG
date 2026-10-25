@@ -62,7 +62,7 @@ python scripts/audit_staging.py --database C:\Temp\snapshot\users.db --versions-
 
 新的上传交接保证请求取消不会先删除worker仍在使用的stage。完成交接后，即使HTTP等待取消，后台worker也可能继续完成提交；取消请求不等于服务器事务撤销。版本路径与job最终提交共用短事务；可补偿失败保留上传字节，补偿无法完成时保留version/permission身份。已有HTTP返回契约保持，工具也不会替用户重新上传或建立新owner记录。
 
-KB删除遇到不明archive源、错owner、共享引用或错误文件类型时先返回503并保留身份。存在的manifest source必须仍在该KB的hashed staging；container version自己可以已在final目录。不能直接把错误码当作授权去删路径或手工改指针。旧global archive的显式rehome/重试写流程尚未由此CLI实现。
+KB删除遇到不明archive源、错owner、共享引用或错误文件类型时先返回503并保留身份。存在的manifest source必须仍在该KB的hashed staging；container version自己可以已在final目录。不能直接把错误码当作授权去删路径或手工改指针。旧global archive的显式rehome须走单独维护流程；本CLI始终只读，不提供写入操作。维护流程的适用边界与门禁见[暂存恢复维护手册](staging-recovery.md)。
 
 本轮所有工具验证均使用合成Temp快照；业务目录、真实归档和运行服务不参与。
 
