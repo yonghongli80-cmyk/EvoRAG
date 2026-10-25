@@ -186,6 +186,7 @@ def _validate_row_metadata(
     nullable_integer_fields: set[str] = frozenset(),
     text_fields: set[str] = frozenset(),
     nullable_text_fields: set[str] = frozenset(),
+    filesystem_path_fields: set[str] = frozenset(),
 ) -> None:
     """Reject malformed metadata before any consumer coerces or indexes it."""
     for row in rows:
@@ -203,6 +204,12 @@ def _validate_row_metadata(
             value = row.get(field)
             if value is not None and not isinstance(value, str):
                 raise _SnapshotMetadataError(f"invalid nullable text metadata in {table}.{field}")
+        for field in filesystem_path_fields:
+            value = row.get(field)
+            if isinstance(value, str) and "\x00" in value:
+                raise _SnapshotMetadataError(
+                    f"NUL byte in filesystem path metadata in {table}.{field}"
+                )
 
 
 def _select_rows(conn: sqlite3.Connection, table: str, columns: set[str]) -> list[dict]:
@@ -390,6 +397,7 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
         "document_versions",
         integer_fields={"id", "document_id", "version_no"},
         text_fields={"file_path", "original_filename", "status"},
+        filesystem_path_fields={"file_path"},
     )
     permission_by_id = {int(row["id"]): row for row in permissions}
 
@@ -419,6 +427,7 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
             nullable_integer_fields={"document_id", "document_version_id"} & kb_document_columns,
             text_fields={"kb_id", "status"},
             nullable_text_fields={"file_path"} & kb_document_columns,
+            filesystem_path_fields={"file_path"} & kb_document_columns,
         )
         for row in kb_document_rows:
             version_id = row.get("document_version_id")
@@ -445,6 +454,7 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
             integer_fields={"id", "container_document_id", "container_version_id"},
             text_fields={"status"},
             nullable_text_fields={"source_path"} & manifest_columns,
+            filesystem_path_fields={"source_path"} & manifest_columns,
         )
         if {"id", "container_version_id"}.issubset(manifest_columns):
             for row in manifests:
@@ -535,6 +545,10 @@ def _version_path_state(
             "version_owner_missing",
             subject={"version_id": version_id, "document_id": document_id},
         )
+        if status == "staging" and _lexically_within(declared_path, versions_root):
+            state = _path_state(versions_root, declared_path)
+            if state in {"missing", "unsafe_link"}:
+                return "unowned", state, None
         return "unowned", "owner_unverified_uninspected", None
 
     try:
@@ -557,6 +571,8 @@ def _version_path_state(
         if state == "unsafe_link":
             return "unowned", state, None
         if state == "outside_root_uninspected":
+            return "unowned", state, None
+        if status == "staging" and state == "missing":
             return "unowned", state, None
         return "unowned", "unowned_path_uninspected", None
 
@@ -684,14 +700,6 @@ def _diagnose_version(
             "version_file_missing",
             subject={"version_id": version_id, "document_id": document_id, "status": status},
         )
-        if status == "staging":
-            _candidate_directory_entries(
-                report,
-                versions_root,
-                document_id=document_id,
-                version_id=version_id,
-                version_no=version_no,
-            )
     elif file_state == "unsafe_link":
         _add_finding(
             report,
@@ -704,6 +712,26 @@ def _diagnose_version(
             "legacy_committed_stage_preserve",
             severity="info",
             subject={"version_id": version_id, "status": status},
+        )
+
+    staging_declaration_missing = (
+        status == "staging"
+        and file_state == "missing"
+        and _lexically_within(declared_path, versions_root)
+    )
+    if staging_declaration_missing:
+        if ownership != "owned":
+            _add_finding(
+                report,
+                "version_file_missing",
+                subject={"version_id": version_id, "document_id": document_id, "status": status},
+            )
+        _candidate_directory_entries(
+            report,
+            versions_root,
+            document_id=document_id,
+            version_id=version_id,
+            version_no=version_no,
         )
 
 

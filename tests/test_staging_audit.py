@@ -380,6 +380,135 @@ def test_external_database_path_reference_is_reported_without_filesystem_claim(t
     assert "filesystem_exists" not in outside
 
 
+@pytest.mark.parametrize("declared_kind", ["outside", "link"])
+def test_missing_candidate_scan_skips_outside_and_link_staging_declarations(
+    tmp_path: Path, declared_kind: str
+) -> None:
+    db_path = tmp_path / "snapshot.db"
+    versions_root = tmp_path / "versions"
+    versions_root.mkdir()
+    _create_snapshot(db_path)
+    candidate = versions_root / "17" / "3" / "opaque-candidate.bin"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"candidate must not be attributed")
+
+    outside = tmp_path / "outside" / "declared-stage.bin"
+    outside.parent.mkdir()
+    outside.write_bytes(b"outside reference must remain uninspected")
+    if declared_kind == "outside":
+        declared_path = outside
+        expected_state = "outside_root_uninspected"
+    else:
+        declared_path = versions_root / "staging" / "linked-stage.bin"
+        declared_path.parent.mkdir()
+        try:
+            declared_path.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
+        expected_state = "unsafe_link"
+
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO document_permissions(id, doc_name, kb_id, owner_id, current_version_id) "
+            "VALUES (17, 'recovery.txt', 'rag_docs', 5, 31)"
+        )
+        conn.execute(
+            "INSERT INTO document_versions "
+            "(id, document_id, version_no, original_filename, file_path, content_hash, status) "
+            "VALUES (31, 17, 3, 'recovery.txt', ?, 'snapshot-hash', 'staging')",
+            (str(declared_path),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before_outside = _file_digest(outside)
+    before_tree = _tree_snapshot(versions_root)
+
+    report = audit_staging(db_path, versions_root)
+
+    version = next(entry for entry in report["entries"] if entry.get("version_id") == 31)
+    assert version["file_state"] == expected_state
+    assert not any(entry.get("kind") == "owned_version_candidate" for entry in report["entries"])
+    assert _file_digest(outside) == before_outside
+    assert _tree_snapshot(versions_root) == before_tree
+
+
+@pytest.mark.parametrize(
+    "path_metadata_field",
+    [
+        "document_versions.file_path",
+        "kb_documents.file_path",
+        "material_archive_manifests.source_path",
+    ],
+)
+def test_cli_returns_json_unsupported_schema_for_nul_path_metadata(
+    tmp_path: Path, path_metadata_field: str
+) -> None:
+    db_path = tmp_path / "snapshot.db"
+    versions_root = tmp_path / "versions"
+    working_dir = tmp_path / "cli-cwd"
+    versions_root.mkdir()
+    working_dir.mkdir()
+    _create_snapshot(db_path)
+
+    conn = _connect(db_path)
+    try:
+        if path_metadata_field == "document_versions.file_path":
+            conn.execute(
+                "INSERT INTO document_permissions(id, doc_name, kb_id, owner_id, current_version_id) "
+                "VALUES (1, 'nul.txt', 'kb-nul', 5, 11)"
+            )
+            conn.execute(
+                "INSERT INTO document_versions "
+                "(id, document_id, version_no, original_filename, file_path, content_hash, status) "
+                "VALUES (11, 1, 1, 'nul.txt', ?, 'snapshot-hash', 'staging')",
+                ("bad\x00path",),
+            )
+        elif path_metadata_field == "kb_documents.file_path":
+            conn.execute(
+                "INSERT INTO kb_documents "
+                "(id, kb_id, filename, file_path, status, document_id, document_version_id) "
+                "VALUES (21, 'kb-nul', 'nul.txt', ?, 'pending', NULL, NULL)",
+                ("bad\x00path",),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO document_permissions(id, doc_name, kb_id, owner_id, current_version_id) "
+                "VALUES (1, 'archive.zip', 'kb-nul', 5, 11)"
+            )
+            conn.execute(
+                "INSERT INTO document_versions "
+                "(id, document_id, version_no, original_filename, file_path, content_hash, status) "
+                "VALUES (11, 1, 1, 'archive.zip', ?, 'snapshot-hash', 'current')",
+                (str(versions_root / "1" / "1" / "archive.zip"),),
+            )
+            conn.execute(
+                "INSERT INTO material_archive_manifests "
+                "(id, container_document_id, container_version_id, status, source_path) "
+                "VALUES (31, 1, 11, 'pending_confirmation', ?)",
+                ("bad\x00path",),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    before_db = _file_digest(db_path)
+    before_tree = _tree_snapshot(versions_root)
+
+    result = _run_cli(db_path, versions_root, working_dir)
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    assert "Traceback" not in result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "unsupported_schema"
+    assert payload["action"] == "inspect_only"
+    assert "NUL byte" in payload["error"]["message"]
+    assert _file_digest(db_path) == before_db
+    assert _tree_snapshot(versions_root) == before_tree
+
+
 def test_cross_kb_version_references_are_reported_as_shared_context(tmp_path: Path) -> None:
     db_path = tmp_path / "snapshot.db"
     versions_root = tmp_path / "versions"

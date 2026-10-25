@@ -318,9 +318,8 @@ class DocRepository(BaseRepository):
             return new_val
 
     def delete_document_permission(self, doc_id: int) -> None:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction() as conn:
             conn.execute("DELETE FROM document_permissions WHERE id = ?", (doc_id,))
-            conn.commit()
 
     def get_accessible_doc_names(self, kb_id: str, user_id: int, user_level: int = 1) -> list[str]:
         """返回用户在指定知识库中有权查看的文档名列表。
@@ -601,11 +600,10 @@ class DocRepository(BaseRepository):
             conn.commit()
 
     def delete_document_version(self, version_id: int) -> None:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction() as conn:
             conn.execute(
                 "DELETE FROM document_versions WHERE id = ?", (version_id,)
             )
-            conn.commit()
 
     def set_version_status(self, version_id: int, status: str) -> None:
         with self.cm.write_connection() as conn:
