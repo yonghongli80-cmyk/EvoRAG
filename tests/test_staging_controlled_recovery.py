@@ -333,6 +333,96 @@ def test_replay_rechecks_current_acl_before_returning_receipt(tmp_path: Path):
         db.close()
 
 
+@pytest.mark.parametrize(
+    ("kind", "change"),
+    [
+        ("version_pointer", "owner_and_kb_still_authorized"),
+        ("archive_rehome", "owner_and_kb_still_authorized"),
+        ("archive_rehome", "manifest_container"),
+        ("archive_rehome", "manifest_status"),
+        ("archive_rehome", "manifest_expiry"),
+        ("archive_rehome", "new_version_reference"),
+        ("archive_rehome", "new_manifest_reference"),
+        ("archive_rehome", "new_kb_document_reference"),
+        ("archive_rehome", "new_active_job"),
+    ],
+)
+def test_replay_rejects_changed_post_state(tmp_path: Path, kind: str, change: str):
+    db, root, body, source, _missing, request = _prepare(tmp_path, kind)
+    try:
+        plan = preview_staging_recovery(db, root, request)
+        public_receipt = apply_staging_recovery(db, plan, maintenance_confirmed=True)
+        other_user = db.create_user("synthetic-new-owner", "Password-123!")
+        with db.locked_transaction() as conn:
+            if change == "owner_and_kb_still_authorized":
+                db.set_user_admin(request.actor_user_id, True)
+                db.create_kb_metadata("kb-other", "Other synthetic KB", other_user)
+                conn.execute(
+                    "UPDATE document_permissions SET owner_id=?,kb_id='kb-other' WHERE id=?",
+                    (other_user, request.document_id),
+                )
+            elif change == "manifest_container":
+                conn.execute(
+                    "UPDATE material_archive_manifests SET container_version_id=container_version_id+100 WHERE id=?",
+                    (request.manifest_id,),
+                )
+            elif change == "manifest_status":
+                conn.execute(
+                    "UPDATE material_archive_manifests SET status='confirmed' WHERE id=?",
+                    (request.manifest_id,),
+                )
+            elif change == "manifest_expiry":
+                conn.execute(
+                    "UPDATE material_archive_manifests SET expires_at=? WHERE id=?",
+                    (time.time() - 1, request.manifest_id),
+                )
+            elif change == "new_version_reference":
+                other_doc = db.create_document_permission(
+                    "new-reference.txt", "kb-recovery", request.actor_user_id, 1, False
+                )
+                other_version = db.create_document_version(
+                    other_doc,
+                    "new-reference.txt",
+                    str(source),
+                    _digest(body),
+                    request.actor_user_id,
+                )
+                conn.execute(
+                    "UPDATE document_versions SET status='staging',file_path=? WHERE id=?",
+                    (public_receipt["destination_path"], other_version),
+                )
+            elif change == "new_manifest_reference":
+                conn.execute(
+                    "INSERT INTO material_archive_manifests "
+                    "(container_document_id,container_version_id,status,created_by,source_path,expires_at) "
+                    "VALUES(?,?,'pending_confirmation',?,?,?)",
+                    (
+                        request.document_id,
+                        request.version_id,
+                        request.actor_user_id,
+                        public_receipt["destination_path"],
+                        time.time() + 3600,
+                    ),
+                )
+            elif change == "new_kb_document_reference":
+                conn.execute(
+                    "INSERT INTO kb_documents(kb_id,filename,file_path,document_id,document_version_id) "
+                    "VALUES('kb-recovery','new-reference.txt',?,?,?)",
+                    (public_receipt["destination_path"], request.document_id, request.version_id),
+                )
+            elif change == "new_active_job":
+                conn.execute(
+                    "INSERT INTO document_index_jobs(document_id,version_id,content_hash,status,available_at) "
+                    "VALUES(?,?,?,'running',?)",
+                    (request.document_id, request.version_id, _digest(body), time.time()),
+                )
+        with pytest.raises(RecoveryError):
+            replay = apply_staging_recovery(db, plan, maintenance_confirmed=True)
+            assert replay == public_receipt
+    finally:
+        db.close()
+
+
 def test_archive_rejects_same_path_referenced_by_another_kb_version(tmp_path: Path):
     db, root, _body, source, _missing, request = _prepare(tmp_path, "archive_rehome")
     try:

@@ -33,7 +33,7 @@ metadata fingerprint包含目标权限/版本/manifest完整行及相关全局�
 
 文件检查拒绝root/祖先/文件symlink/junction、逃逸/..、错误类型、hardlink（nlink != 1）；hash使用有界分块并在读前后比较文件身份/大小/mtime和路径身份。archive copy使用exclusive create和fsync，不覆盖；已有确定目标仅在同hash、无外部引用时允许作为上次崩溃保留copy继续。文件检查在copy前及metadata CAS前重做。维护前提仍必要，不能声称Python路径检查抵御有权限的外部恶意文件系统竞争。
 
-app迁移v6安装material_recovery_receipts：operation_key全局PRIMARY KEY、request_hash、actor_user_id、document_id、version_id、receipt_json、created_at。无cascade外键，保留删除后审计凭据。回执与metadata CAS同事务提交，repo helper不commit。相同key/hash且当前ACL/identity/最终路径字节仍有效时返回相同回执；不同请求冲突，不返回其他主体回执。失败/commit失败保留源文件、候选、已复制字节和原metadata/身份；没有成功回执。崩溃留下的完整同hash copy可同请求重试；部分或不同hash copy保留并拒绝覆盖，重新调查复核后可另用新key，不当成自动可删除垃圾。
+app迁移v6安装material_recovery_receipts：operation_key全局PRIMARY KEY、request_hash、actor_user_id、document_id、version_id、receipt_json、created_at。无cascade外键，保留删除后审计凭据。回执与metadata CAS同事务提交，repo helper不commit。receipt_json另存仅内部的CAS后metadata/ACL/引用快照hash，公开回执字段保持；无此证明的旧记录拒绝重放。相同key/hash且当前ACL、恢复后身份/全局引用、归档状态/有效期及路径字节仍有效时返回相同公开回执；不同请求冲突，不返回其他主体回执。失败/commit失败保留源文件、候选、已复制字节和原metadata/身份；没有成功回执。崩溃留下的完整同hash copy可同请求重试；部分或不同hash copy保留并拒绝覆盖，重新调查复核后可另用新key，不当成自动可删除垃圾。
 
 ## 验收
 

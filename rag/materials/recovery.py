@@ -426,6 +426,60 @@ def _plan_hash(plan: RecoveryPlan) -> str:
     )
 
 
+def _post_state_hash(conn: sqlite3.Connection, request: RecoveryRequest, receipt: dict[str, Any], root: Path) -> str:
+    permission = _row(conn, "SELECT * FROM document_permissions WHERE id=?", (request.document_id,))
+    version = _row(
+        conn,
+        "SELECT * FROM document_versions WHERE id=? AND document_id=?",
+        (request.version_id, request.document_id),
+    )
+    if permission is None or version is None:
+        raise RecoveryError("replay_identity_changed")
+    manifest = None
+    entries: list[dict[str, Any]] = []
+    if request.kind == "archive_rehome":
+        manifest = _row(conn, "SELECT * FROM material_archive_manifests WHERE id=?", (request.manifest_id,))
+        if (
+            manifest is None
+            or manifest.get("container_document_id") != request.document_id
+            or manifest.get("container_version_id") != request.version_id
+            or manifest.get("status") != "pending_confirmation"
+            or float(manifest.get("expires_at") or 0) <= time.time()
+            or manifest.get("source_path") != receipt.get("destination_path")
+        ):
+            raise RecoveryError("replay_identity_changed")
+        if _table_exists(conn, "material_archive_entries"):
+            entries = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM material_archive_entries WHERE manifest_id=? ORDER BY id",
+                    (request.manifest_id,),
+                ).fetchall()
+            ]
+    refs = _references(
+        conn,
+        request,
+        str(receipt["source_path"]),
+        str(receipt["destination_path"]),
+        root,
+    )
+    acl = _acl_snapshot(conn, permission, request.actor_user_id)
+    lifecycle = None
+    if _table_exists(conn, "kb_lifecycle"):
+        lifecycle = _row(conn, "SELECT * FROM kb_lifecycle WHERE kb_id=?", (permission["kb_id"],))
+    return _digest(
+        {
+            "permission": permission,
+            "version": version,
+            "manifest": manifest,
+            "manifest_entries": entries,
+            "references": refs,
+            "acl": acl,
+            "lifecycle": lifecycle,
+        }
+    )
+
+
 def _replay_receipt(
     db: Any, conn: sqlite3.Connection, plan: RecoveryPlan, permission: dict[str, Any], receipt_row: dict[str, Any]
 ) -> dict[str, Any]:
@@ -453,16 +507,14 @@ def _replay_receipt(
         or receipt_row.get("version_id") != request.version_id
     ):
         raise RecoveryError("operation_key_conflict")
+    post_state_hash = receipt.get("_post_state_hash")
+    if not isinstance(post_state_hash, str) or not _HASH_RE.fullmatch(post_state_hash):
+        raise RecoveryError("receipt_post_state_unavailable")
     version = _row(
         conn, "SELECT * FROM document_versions WHERE id=? AND document_id=?", (request.version_id, request.document_id)
     )
     if version is None:
         raise RecoveryError("replay_identity_changed")
-    manifest = None
-    if request.kind == "archive_rehome":
-        manifest = _row(conn, "SELECT * FROM material_archive_manifests WHERE id=?", (request.manifest_id,))
-        if manifest is None or manifest.get("source_path") != receipt.get("destination_path"):
-            raise RecoveryError("replay_identity_changed")
     if version.get("status") != "staging" or version.get("content_hash") != receipt.get("content_hash"):
         raise RecoveryError("replay_identity_changed")
     if request.kind == "version_pointer" and version.get("file_path") != plan.destination_path:
@@ -479,7 +531,9 @@ def _replay_receipt(
         raise RecoveryError(exc.code) from exc
     if copied.byte_size != receipt.get("byte_size") or original.byte_size != receipt.get("byte_size"):
         raise RecoveryError("replay_identity_changed")
-    return receipt
+    if _post_state_hash(conn, request, receipt, Path(plan.versions_root)) != post_state_hash:
+        raise RecoveryError("replay_post_state_changed")
+    return {key: value for key, value in receipt.items() if not key.startswith("_")}
 
 
 def apply_staging_recovery(db: Any, plan: RecoveryPlan, *, maintenance_confirmed: bool = False) -> dict[str, Any]:
@@ -560,6 +614,10 @@ def apply_staging_recovery(db: Any, plan: RecoveryPlan, *, maintenance_confirmed
                 "byte_size": fresh.byte_size,
                 "source_preserved": True,
             }
+            persisted_receipt = {
+                **receipt,
+                "_post_state_hash": _post_state_hash(conn, request, receipt, Path(fresh.versions_root)),
+            }
             insert_recovery_receipt(
                 conn,
                 operation_key=request.operation_key,
@@ -567,7 +625,7 @@ def apply_staging_recovery(db: Any, plan: RecoveryPlan, *, maintenance_confirmed
                 actor_user_id=request.actor_user_id,
                 document_id=request.document_id,
                 version_id=request.version_id,
-                receipt=receipt,
+                receipt=persisted_receipt,
             )
             return receipt
     except (RecoveryError, KBLifecycleError):
