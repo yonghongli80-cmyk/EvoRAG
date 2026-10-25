@@ -39,15 +39,16 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 
 ### Task 2: Atomic finalization and job enqueue
 
-**Files:** Modify `rag/document_versions.py`, `rag/repositories/material_repo.py`, `rag/user_db.py`, `rag/materials/archives.py`, Task1完成后的`rag/materials/api.py`; Create `tests/test_material_upload_commit.py`; extend `tests/test_archive_import.py`。
+**Files:** Modify `rag/db/connection.py`, `rag/document_versions.py`, `rag/repositories/material_repo.py`, `rag/user_db.py`, `rag/materials/archives.py`, Task1完成后的`rag/materials/api.py`; Create `tests/test_material_upload_commit.py`; extend `tests/test_archive_import.py`。
 **Interfaces:**
 - Add optional `finalize: Callable[[PromotedVersion], None] | None = None` to `promote_staged_version` and its private helper; existing PromotedVersion字段为version_id/version_no/file_path。finalize是纯SQL回调，在file move后由promotion helper拥有一个短locked_transaction调用；repo嵌套事务复用该连接，不允许回调内I/O或显式commit。default path behavior remains.
 - Add `UserDB.finalize_material_upload(document_id,version_id,staged_path,final_path,content_hash,not_before)->int` and repository method. Same short transaction validates permission/lifecycle and staging version/CAS oldpath, updates finalpath, cancels oldactive material jobs and inserts newjob. Factor existing enqueue SQL into `_enqueue_latest_index_job_in_tx(conn,...)` so archive's existing transaction composes without commits.
+- ConnectionManager.transaction保留nested reuse语义；body或commit失败均在write lock内对active transaction回滚，不能让补偿写入复用未清的失败事务。
 - `VersionPromotionError(message, *, recovery_required: bool=False, version_id: int | None=None, file_path: Path | None=None)`；failed move-back或无法确认补偿完整时保留reservation row/owner，尽力记录实际finalpath，API不得cascade-delete新permission。
 
-- [ ] Step 1: 先加SQLite INSERT-trigger失败用例，覆盖新document与已存在current/oldjobs；断言500 material_promotion_failed、保留字节、无新job/version且旧状态不变。另加finalize回调调用repo后抛错的事务回滚、真实move完成后再抛错的补偿、move-back失败身份保留用例；若stage/final两份同时存在且无法确认，保留两份与owner而不overwrite。archive child enqueue失败须无confirmed/idempotency且同key重试成功。
+- [ ] Step 1: 先加SQLite INSERT-trigger失败用例，覆盖新document与已存在current/oldjobs；再以真实DEFERRABLE外键+job trigger覆盖INSERT成功但COMMIT失败，assert in_transaction=False、旧job/新job/version状态回滚、stage保留且下一合法事务可成功；断言500 material_promotion_failed、保留字节、无新job/version且旧状态不变。另加finalize回调调用repo后抛错的事务回滚、真实move完成后再抛错的补偿、move-back失败身份保留用例；若stage/final两份同时存在且无法确认，保留两份与owner而不overwrite。archive child enqueue失败须无confirmed/idempotency且同key重试成功。
 - [ ] Step 2: 定向RED验证当前jobless版本/commit后enqueue缺陷；所有fixture仅临时文件，不改生产failpoint。
-- [ ] Step 3: 接入finalize callback与短事务，保留正常promotion兼容；错误补偿不删除唯一final字节/owner。archive新child job入队移入activation/manifest/result事务，commit后只做文件cleanup。
+- [ ] Step 3: 修正共享transaction的commit异常回滚边界，接入finalize callback与短事务，保留正常promotion兼容；错误补偿不删除唯一final字节/owner。archive新child job入队移入activation/manifest/result事务，commit后只做文件cleanup。
 - [ ] Step 4: 新测试、material jobs/backup/version/archive与Task1取消用例GREEN；Ruff/架构，根提交与fresh复审。
 
 ### Task 3: Owner-validated KB teardown
