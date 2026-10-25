@@ -45,7 +45,7 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 - Add `UserDB.finalize_material_upload(document_id,version_id,staged_path,final_path,content_hash,not_before)->int` and repository method. Same short transaction validates permission/lifecycle and staging version/CAS oldpath, updates finalpath, cancels oldactive material jobs and inserts newjob. Factor existing enqueue SQL into `_enqueue_latest_index_job_in_tx(conn,...)` so archive's existing transaction composes without commits.
 - `VersionPromotionError(message, *, recovery_required: bool=False, version_id: int | None=None, file_path: Path | None=None)`；failed move-back或无法确认补偿完整时保留reservation row/owner，尽力记录实际finalpath，API不得cascade-delete新permission。
 
-- [ ] Step 1: 先加SQLite INSERT-trigger失败用例，覆盖新document与已存在current/oldjobs；断言500 material_promotion_failed、保留字节、无新job/version且旧状态不变。另加finalize回调调用repo后抛错的事务回滚和move-back失败身份保留用例；archive child enqueue失败须无confirmed/idempotency且同key重试成功。
+- [ ] Step 1: 先加SQLite INSERT-trigger失败用例，覆盖新document与已存在current/oldjobs；断言500 material_promotion_failed、保留字节、无新job/version且旧状态不变。另加finalize回调调用repo后抛错的事务回滚、真实move完成后再抛错的补偿、move-back失败身份保留用例；若stage/final两份同时存在且无法确认，保留两份与owner而不overwrite。archive child enqueue失败须无confirmed/idempotency且同key重试成功。
 - [ ] Step 2: 定向RED验证当前jobless版本/commit后enqueue缺陷；所有fixture仅临时文件，不改生产failpoint。
 - [ ] Step 3: 接入finalize callback与短事务，保留正常promotion兼容；错误补偿不删除唯一final字节/owner。archive新child job入队移入activation/manifest/result事务，commit后只做文件cleanup。
 - [ ] Step 4: 新测试、material jobs/backup/version/archive与Task1取消用例GREEN；Ruff/架构，根提交与fresh复审。

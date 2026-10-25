@@ -25,7 +25,7 @@
 
 - 普通上传先保留version reservation身份，进行文件move；随后在一个短SQLite事务中CAS更新file_path、取消旧active material jobs、插入新material_index job。失败时旧job取消和新job插入一并回滚。
 - 为现有promote_staged_version增加可选纯SQL finalize回调，默认调用方式保持。file move后由helper持有短locked_transaction再调用回调，material repo复用该连接；path更新与job提交共享边界，取消原来的独立enqueue调用。回调不显式commit、不做I/O，IO不放进长SQL事务。
-- 可补偿的promotion/finalize失败把本次文件移回stage、删本次version，正常新document permission回滚；响应继续`500 material_promotion_failed`并保留字节。若移回失败，保留version/permission的owner身份和实际final路径，异常携带recovery_required，不能再级联删除唯一恢复身份。
+- 可补偿的promotion/finalize失败把本次文件移回stage、删本次version，正常新document permission回滚；响应继续`500 material_promotion_failed`并保留字节。不能只凭move函数是否返回判断副作用：stage缺失且final存在时按实际文件状态补偿。若移回失败，或两份同时存在无法确认，应保留字节与version/permission的owner身份，尽力记录实际final路径，异常携带recovery_required，不能再级联删除唯一恢复身份或overwrite另一份。
 - archive confirmation的所有新child jobs移入已有activation/manifest/idempotency同一事务；不在commit后另行入队。插入job失败则整个activation回滚，源archive保留，重试同key不会因假confirmed而跳过工作。
 - 本轮不宣称跨进程崩溃时自动重试所有upload断点；现有reservation/final owner文件保留，由只读诊断报告组合状态。无新schema、无恢复/清理API。
 
