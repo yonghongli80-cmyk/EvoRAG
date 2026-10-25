@@ -52,15 +52,17 @@
 **Files:** Create ignored `artifacts/staging-audit-jobs-index-2026-10-25/benchmark_jobs.py`与本计划`task-3-report.md`；不改产品/测试/依赖文件。
 **Interfaces:** 通过相同显式合成快照分别调用冻结基线和当前`audit_staging`；脚本先导入offline/priority guard，不导入应用config。
 
-- [ ] 准备N=100/500/1000（每版本含material job，另含孤儿/非material干扰）旧/新对照脚本，同一快照和目录顺序串行执行、交替old/new各3次，输入hash前后不变，完整报告逐值相等。
-- [ ] 记录每轮耗时、tracemalloc峰值、报告bytes/entries/findings、Python版本/实际优先级、base源码hash及参数。峰值和时间均为诊断，不设通过阈值或推断生产SLO。只compile检查，不在源未冻结时执行benchmark。
-- [ ] 写准备报告；root代码冻结和复审通过后原生低优先级执行，保留stdout/stderr/退出码及JSON结果。
+- [x] 准备N=100/500/1000（每版本含material job，另含孤儿/非material干扰）旧/新对照脚本，同一快照和目录顺序串行执行、交替old/new各3次，输入hash前后不变，完整报告逐值相等。
+- [x] 记录每轮耗时、tracemalloc峰值、报告bytes/entries/findings、Python版本/实际优先级、base源码hash及参数。峰值和时间均为诊断，不设通过阈值或推断生产SLO。只compile检查，不在源未冻结时执行benchmark。
+- [x] 写准备报告；root代码冻结和复审通过后原生低优先级执行，保留stdout/stderr/退出码及JSON结果。
 
 ### Task 4: Root integration, review and delivery
 
 **Files:** Update本计划、`docs/staging-audit.md`、`docs/README.md`、`docs/handoff-2026-10-24.md`；Create `docs/reviews/2026-10-25-staging-audit-jobs-index.md`。
 
-- [ ] root核对三路文件与接口，Task1/2独立复审及整分支复查；有实际发现则一个最终修复波次和一次增量复查，冻结产品/测试。
-- [ ] 原生统一运行`tests/test_staging_audit.py tests/test_staging_audit_jobs_index.py tests/test_staging_audit_jobs_compatibility.py tests/test_staging_recovery_integration.py tests/test_architecture_budget.py`，保存退出码/stdout/stderr/JUnit；全树Ruff及新文件format/compile。只审计相关范围，不把旧全后端基线计入本轮数字。
-- [ ] 执行Task3 benchmark及生产锁CLI smoke（临时快照、guard、原JSON/退出码/只读边界），核对旧新完整报告相等及输入不变；只读核对原服务PID/start/ready/.env hash。
+- [x] root核对三路文件与接口，Task1/2独立复审及整分支复查；有实际发现则一个最终修复波次和一次增量复查，冻结产品/测试。
+- [x] 原生统一运行`tests/test_staging_audit.py tests/test_staging_audit_jobs_index.py tests/test_staging_audit_jobs_compatibility.py tests/test_staging_recovery_integration.py tests/test_architecture_budget.py`，保存退出码/stdout/stderr/JUnit；全树Ruff及新文件format/compile。只审计相关范围，不把旧全后端基线计入本轮数字。
+- [x] 执行Task3 benchmark及生产锁CLI smoke（临时快照、guard、原JSON/退出码/只读边界），核对旧新完整报告相等及输入不变；只读核对原服务PID/start/ready/.env hash。
 - [ ] 更新验收报告、交接和索引，记录精确计数/测量及局限、root所有裁决；选择性提交，实际submit当前唯一中文公司记录并核对成功。保留隔离分支和原始证据，不自动合并/双推/部署。
+
+最终统一验收：冻结e52237c、五文件45通过0跳过、26.34秒/退出0，JUnit45项0失败0错误；Ruff/新测试format通过，生产锁CLI4项通过。旧新18次对照完整报告一致、输入不变；N1000/J3000中位6.787→5.885s，仅合成诊断。15:13:20原服务身份、ready200和环境哈希保持。独立复审及整分支复查批准、两P2测试缺口已关闭，详见验收报告。
