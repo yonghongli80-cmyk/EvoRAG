@@ -6,6 +6,8 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-25-staging-controlled-recovery.md`：历史暂存维护恢复、重放后置条件、独立复审及统一160/1和生产锁4项验收。
+- `staging-recovery.md`：显式维护preview/apply、支持范围、备份/停写、字节保留和失败重试门禁。
 - `reviews/2026-10-25-auth-compose-contracts.md`：当前401身份清除、403数据重置、Compose语义对照、独立复审及330前端/42后端验收。
 - `auth-session-contract.md`、`runtime-topology-contract.md`：会话代际和运行拓扑的有效行为边界。
 - `reviews/2026-10-25-kb-cleanup-index.md`：KB清理调用内版本快照、目录祖先集合优化、旧新完整计划/拒绝矩阵、真实SQLite合成对照及统一验收。
