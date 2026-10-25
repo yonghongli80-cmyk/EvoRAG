@@ -45,6 +45,7 @@ from rag.materials.organizer import (
 )
 from rag.materials.recycle import RecycleError, delete_to_recycle, restore_from_recycle
 from rag.materials.staging import MaterialTooLarge, stream_upload_to_stage
+from rag.materials.upload_execution import run_upload_worker
 from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
@@ -243,20 +244,32 @@ async def upload_material(
     resolution = registry.resolve(staged.filename, staged.detected_mime, _read_signature(staged.path))
     if resolution.capability is not None and resolution.capability.archive_container:
         service = ArchiveService(db, _versions_root(request), registry, _archive_limits())
+
+        def _upload_archive():
+            admitted = False
+            try:
+                with kb_mutation(db, kb_id):
+                    admitted = True
+                    try:
+                        preview = service.upload_zip(
+                            staged.filename,
+                            kb_id,
+                            user,
+                            staged.path,
+                        )
+                        _audit_org_material(db, user, "archive_uploaded", kb_id)
+                        return preview
+                    finally:
+                        staged.path.unlink(missing_ok=True)
+            except BaseException:
+                if not admitted:
+                    staged.path.unlink(missing_ok=True)
+                raise
+
         try:
-            preview = await asyncio.to_thread(
-                service.upload_zip,
-                staged.filename,
-                kb_id,
-                user,
-                staged.path,
-            )
+            preview = await run_upload_worker(_upload_archive)
         except KBLifecycleError as exc:
-            staged.path.unlink(missing_ok=True)
             raise lifecycle_http_error(exc) from exc
-        finally:
-            staged.path.unlink(missing_ok=True)
-        _audit_org_material(db, user, "archive_uploaded", kb_id)
         return {
             "status": "awaiting_archive_confirmation",
             "manifest_id": preview.manifest_id,
@@ -264,53 +277,56 @@ async def upload_material(
         }
 
     def _promote_and_enqueue():
-        with kb_mutation(db, kb_id):
-            if kb_id != "rag_docs":
-                require_kb_edit(db, kb_id, user)
-            existing = db.get_document_permission(staged.filename, kb_id)
-            created_document = existing is None
-            if existing is None:
-                document_id = db.create_document_permission(
-                    staged.filename, kb_id, user["id"], 1, False
-                )
-            else:
-                document_id = existing["id"]
-            try:
-                promoted = promote_staged_version(
-                    db,
-                    _versions_root(request),
-                    document_id=document_id,
-                    filename=staged.filename,
-                    staged_path=staged.path,
-                    content_hash=staged.sha256,
-                    uploaded_by=user["id"],
-                )
-            except VersionPromotionError as exc:
-                if created_document:
+        preserve_staged_upload = False
+        admitted = False
+        try:
+            with kb_mutation(db, kb_id):
+                admitted = True
+                try:
+                    if kb_id != "rag_docs":
+                        require_kb_edit(db, kb_id, user)
+                    existing = db.get_document_permission(staged.filename, kb_id)
+                    created_document = existing is None
+                    if existing is None:
+                        document_id = db.create_document_permission(staged.filename, kb_id, user["id"], 1, False)
+                    else:
+                        document_id = existing["id"]
                     try:
-                        db.delete_document_permission(document_id)
-                    except Exception:
-                        logger.exception("material promotion rollback failed")
-                raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
-            enqueue_latest_index_job(
-                db, document_id, promoted.version_id, staged.sha256, time.time()
-            )
-            return document_id, promoted
+                        promoted = promote_staged_version(
+                            db,
+                            _versions_root(request),
+                            document_id=document_id,
+                            filename=staged.filename,
+                            staged_path=staged.path,
+                            content_hash=staged.sha256,
+                            uploaded_by=user["id"],
+                        )
+                    except VersionPromotionError as exc:
+                        if created_document:
+                            try:
+                                db.delete_document_permission(document_id)
+                            except Exception:
+                                logger.exception("material promotion rollback failed")
+                        raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
+                    enqueue_latest_index_job(db, document_id, promoted.version_id, staged.sha256, time.time())
+                    _audit_org_material(db, user, "document_uploaded", kb_id)
+                    return document_id, promoted
+                except HTTPException as exc:
+                    if exc.status_code == 500 and exc.detail == "material_promotion_failed":
+                        preserve_staged_upload = True
+                    raise
+                finally:
+                    if not preserve_staged_upload:
+                        staged.path.unlink(missing_ok=True)
+        except BaseException:
+            if not admitted and not preserve_staged_upload:
+                staged.path.unlink(missing_ok=True)
+            raise
 
-    preserve_staged_upload = False
     try:
-        document_id, promoted = await asyncio.to_thread(_promote_and_enqueue)
+        document_id, promoted = await run_upload_worker(_promote_and_enqueue)
     except KBLifecycleError as exc:
-        staged.path.unlink(missing_ok=True)
         raise lifecycle_http_error(exc) from exc
-    except HTTPException as exc:
-        if exc.status_code == 500 and exc.detail == "material_promotion_failed":
-            preserve_staged_upload = True
-        raise
-    finally:
-        if not preserve_staged_upload:
-            staged.path.unlink(missing_ok=True)
-    _audit_org_material(db, user, "document_uploaded", kb_id)
     return {
         "status": "queued",
         "document_id": document_id,
