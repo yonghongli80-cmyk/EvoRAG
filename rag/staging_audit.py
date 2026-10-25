@@ -480,6 +480,10 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
             text_fields={"status"},
             nullable_text_fields={"job_type", "job_scope"} & job_columns,
         )
+    material_jobs_by_version: dict[int, list[dict]] = {}
+    for job in jobs:
+        if job.get("job_scope", "material") == "material" and job.get("job_type", "material_index") == "material_index":
+            material_jobs_by_version.setdefault(int(job["version_id"]), []).append(job)
 
     path_owners: dict[str, list[int]] = defaultdict(list)
     for row in versions:
@@ -520,6 +524,7 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
         "manifests": manifests,
         "manifest_columns": manifest_columns,
         "jobs": jobs,
+        "material_jobs_by_version": material_jobs_by_version,
         "path_owners": path_owners,
         "referenced_paths": referenced_paths,
     }
@@ -642,14 +647,7 @@ def _diagnose_version(
             subject={"version_id": version_id, "reference_count": len(shared_references)},
         )
 
-    version_jobs = [
-        job
-        for job in snapshot["jobs"]
-        if job.get("version_id") is not None
-        and int(job["version_id"]) == version_id
-        and job.get("job_scope", "material") == "material"
-        and job.get("job_type", "material_index") == "material_index"
-    ]
+    version_jobs = snapshot["material_jobs_by_version"].get(version_id, [])
     active_jobs = [job for job in version_jobs if str(job.get("status", "")).casefold() in _ACTIVE_JOB_STATUSES]
     material_job_state = "missing" if not version_jobs else "active" if active_jobs else "present_terminal"
     if status == "staging" and material_job_state == "missing":
