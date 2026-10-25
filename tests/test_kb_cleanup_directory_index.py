@@ -176,6 +176,41 @@ def _legacy_minimal_cleanup_dirs(paths: list[Path]) -> list[Path]:
     ]
 
 
+_NativePath = type(Path())
+
+
+class _CountingParents:
+    def __init__(self, parents, path_type):
+        self._parents = parents
+        self._path_type = path_type
+
+    def __iter__(self):
+        for parent in self._parents:
+            self._path_type.parent_steps += 1
+            yield parent
+
+    def __len__(self):
+        return len(self._parents)
+
+
+class _InstrumentedPath(_NativePath):
+    relation_checks = 0
+    parent_steps = 0
+
+    def is_relative_to(self, other):
+        type(self).relation_checks += 1
+        return super().is_relative_to(other)
+
+    @property
+    def parents(self):
+        return _CountingParents(super().parents, type(self))
+
+    @classmethod
+    def reset_counts(cls):
+        cls.relation_checks = 0
+        cls.parent_steps = 0
+
+
 def test_minimal_cleanup_dirs_matches_legacy_order_and_strict_parent_rules(tmp_path):
     parent = tmp_path / "stage"
     paths = [
@@ -190,6 +225,28 @@ def test_minimal_cleanup_dirs_matches_legacy_order_and_strict_parent_rules(tmp_p
     from rag.kb_lifecycle_cleanup import _minimal_cleanup_dirs
 
     assert _minimal_cleanup_dirs(paths) == _legacy_minimal_cleanup_dirs(paths)
+
+
+@pytest.mark.parametrize("directory_count", [1, 16, 64])
+def test_minimal_cleanup_dirs_parent_work_scales_with_depth_not_directory_count(tmp_path, directory_count):
+    from rag.kb_lifecycle_cleanup import _minimal_cleanup_dirs
+
+    paths = [_InstrumentedPath(str(tmp_path / f"cleanup-{index}")) for index in range(directory_count)]
+
+    _InstrumentedPath.reset_counts()
+    expected = _legacy_minimal_cleanup_dirs(paths)
+    legacy_relation_checks = _InstrumentedPath.relation_checks
+    assert legacy_relation_checks == directory_count * (directory_count - 1)
+
+    _InstrumentedPath.reset_counts()
+    actual = _minimal_cleanup_dirs(paths)
+    indexed_parent_steps = _InstrumentedPath.parent_steps
+    indexed_relation_checks = _InstrumentedPath.relation_checks
+    parent_depth_budget = sum(len(Path(str(path)).parents) for path in paths)
+
+    assert actual == expected
+    assert indexed_relation_checks == 0
+    assert indexed_parent_steps == parent_depth_budget
 
 
 class _ReadConnection:
