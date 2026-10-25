@@ -44,6 +44,50 @@ def _cli_environment() -> dict[str, str]:
     return env
 
 
+def _run_cli(db_path: Path, versions_root: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            CLI_BOOTSTRAP,
+            str(AUDIT_SCRIPT),
+            "--database",
+            str(db_path),
+            "--versions-root",
+            str(versions_root),
+        ],
+        cwd=cwd,
+        env=_cli_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _create_windows_junction(link: Path, target: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows directory junctions are unavailable on this platform")
+    env = os.environ.copy()
+    env["STAGING_AUDIT_TEST_JUNCTION_LINK"] = str(link)
+    env["STAGING_AUDIT_TEST_JUNCTION_TARGET"] = str(target)
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "$ErrorActionPreference='Stop'; New-Item -ItemType Junction "
+            "-Path $env:STAGING_AUDIT_TEST_JUNCTION_LINK "
+            "-Target $env:STAGING_AUDIT_TEST_JUNCTION_TARGET | Out-Null",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert link.is_junction()
+
+
 def _create_snapshot(path: Path, *, optional_tables: bool = True) -> None:
     conn = sqlite3.connect(path)
     try:
@@ -191,6 +235,26 @@ def test_dangling_versions_root_symlink_is_rejected_as_a_link(tmp_path: Path) ->
     report = audit_staging(db_path, dangling_root)
 
     assert report["error"]["code"] == "versions_root_link_unsupported"
+
+
+def test_versions_root_junction_is_rejected_without_traversing_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "snapshot.db"
+    target_root = tmp_path / "target-versions"
+    junction_root = tmp_path / "versions-junction"
+    target_root.mkdir()
+    _create_snapshot(db_path)
+    target_file = target_root / "staging" / "target.bin"
+    target_file.parent.mkdir()
+    target_file.write_bytes(b"junction target")
+    before_db = _file_digest(db_path)
+    before_tree = _tree_snapshot(target_root)
+    _create_windows_junction(junction_root, target_root)
+
+    report = audit_staging(db_path, junction_root)
+
+    assert report["error"]["code"] == "versions_root_link_unsupported"
+    assert _file_digest(db_path) == before_db
+    assert _tree_snapshot(target_root) == before_tree
 
 
 @pytest.mark.parametrize("sidecar", ["-wal", "-shm"])
@@ -528,6 +592,82 @@ def test_cli_rejects_apply_as_json_input_error(tmp_path: Path) -> None:
     report = json.loads(result.stdout)
     assert report["error"]["code"] == "invalid_arguments"
     assert report["action"] == "inspect_only"
+
+
+def test_populated_optional_archive_table_with_missing_id_is_json_schema_error(tmp_path: Path) -> None:
+    db_path = tmp_path / "malformed-archive.db"
+    versions_root = tmp_path / "versions"
+    cwd = tmp_path / "cli-cwd"
+    versions_root.mkdir()
+    cwd.mkdir()
+    sentinel = versions_root / "archive_work" / "unchanged.bin"
+    sentinel.parent.mkdir()
+    sentinel.write_bytes(b"unchanged tree")
+    _create_snapshot(db_path, optional_tables=False)
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE material_archive_manifests "
+            "(container_document_id INTEGER, container_version_id INTEGER, status TEXT, source_path TEXT)"
+        )
+        conn.execute("INSERT INTO material_archive_manifests VALUES (4, 42, 'pending_confirmation', 'archive.zip')")
+        conn.commit()
+    finally:
+        conn.close()
+    before_db = _file_digest(db_path)
+    before_tree = _tree_snapshot(versions_root)
+
+    result = _run_cli(db_path, versions_root, cwd)
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    assert report["error"]["code"] == "unsupported_schema"
+    assert _file_digest(db_path) == before_db
+    assert _tree_snapshot(versions_root) == before_tree
+
+
+@pytest.mark.parametrize("invalid_field", ["document_id", "version_no"])
+def test_cli_noninteger_version_metadata_is_json_schema_error_without_mutation(
+    tmp_path: Path, invalid_field: str
+) -> None:
+    db_path = tmp_path / "malformed-row.db"
+    versions_root = tmp_path / "versions"
+    cwd = tmp_path / "cli-cwd"
+    versions_root.mkdir()
+    cwd.mkdir()
+    sentinel = versions_root / "staging" / "unchanged.bin"
+    sentinel.parent.mkdir()
+    sentinel.write_bytes(b"unchanged tree")
+    _create_snapshot(db_path)
+    document_id: object = "not-an-integer" if invalid_field == "document_id" else 7
+    version_no: object = "not-an-integer" if invalid_field == "version_no" else 1
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO document_permissions(id, doc_name, kb_id, owner_id, current_version_id) "
+            "VALUES (7, 'typed.txt', 'kb-typed', 2, 70)"
+        )
+        conn.execute(
+            "INSERT INTO document_versions "
+            "(id, document_id, version_no, original_filename, file_path, content_hash, status) "
+            "VALUES (70, ?, ?, 'typed.txt', '7/1/typed.txt', 'db-hash', 'staging')",
+            (document_id, version_no),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    before_db = _file_digest(db_path)
+    before_tree = _tree_snapshot(versions_root)
+
+    result = _run_cli(db_path, versions_root, cwd)
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    assert report["error"]["code"] == "unsupported_schema"
+    assert _file_digest(db_path) == before_db
+    assert _tree_snapshot(versions_root) == before_tree
 
 
 def test_missing_core_table_is_unsupported_schema(tmp_path: Path) -> None:

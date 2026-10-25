@@ -29,8 +29,22 @@ _CORE_COLUMNS = {
         "status",
     },
 }
+_OPTIONAL_REQUIRED_COLUMNS = {
+    "kb_documents": {"id", "kb_id", "status"},
+    "document_index_jobs": {"id", "version_id", "status"},
+    "material_archive_manifests": {
+        "id",
+        "container_document_id",
+        "container_version_id",
+        "status",
+    },
+}
 _ACTIVE_JOB_STATUSES = {"queued", "retry", "running"}
 _PENDING_MANIFEST_STATUSES = {"pending", "pending_confirmation"}
+
+
+class _SnapshotMetadataError(ValueError):
+    """A structurally present snapshot contains unusable audit metadata."""
 
 
 def _empty_report() -> dict:
@@ -155,7 +169,40 @@ def _schema_error(conn: sqlite3.Connection) -> str | None:
         missing = required_columns - _table_columns(conn, table)
         if missing:
             return f"required columns missing from {table}: {', '.join(sorted(missing))}"
+    for table, required_columns in _OPTIONAL_REQUIRED_COLUMNS.items():
+        if table not in tables:
+            continue
+        missing = required_columns - _table_columns(conn, table)
+        if missing:
+            return f"optional table {table} is missing required columns: {', '.join(sorted(missing))}"
     return None
+
+
+def _validate_row_metadata(
+    rows: list[dict],
+    table: str,
+    *,
+    integer_fields: set[str] = frozenset(),
+    nullable_integer_fields: set[str] = frozenset(),
+    text_fields: set[str] = frozenset(),
+    nullable_text_fields: set[str] = frozenset(),
+) -> None:
+    """Reject malformed metadata before any consumer coerces or indexes it."""
+    for row in rows:
+        for field in integer_fields:
+            if field not in row or type(row[field]) is not int or row[field] <= 0:
+                raise _SnapshotMetadataError(f"invalid positive integer metadata in {table}.{field}")
+        for field in nullable_integer_fields:
+            value = row.get(field)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise _SnapshotMetadataError(f"invalid nullable integer metadata in {table}.{field}")
+        for field in text_fields:
+            if field not in row or not isinstance(row[field], str):
+                raise _SnapshotMetadataError(f"invalid text metadata in {table}.{field}")
+        for field in nullable_text_fields:
+            value = row.get(field)
+            if value is not None and not isinstance(value, str):
+                raise _SnapshotMetadataError(f"invalid nullable text metadata in {table}.{field}")
 
 
 def _select_rows(conn: sqlite3.Connection, table: str, columns: set[str]) -> list[dict]:
@@ -331,6 +378,19 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
     version_columns = _table_columns(conn, "document_versions")
     permissions = _select_rows(conn, "document_permissions", permission_columns)
     versions = _select_rows(conn, "document_versions", version_columns)
+    _validate_row_metadata(
+        permissions,
+        "document_permissions",
+        integer_fields={"id"},
+        nullable_integer_fields={"current_version_id"} & permission_columns,
+        text_fields={"doc_name", "kb_id"},
+    )
+    _validate_row_metadata(
+        versions,
+        "document_versions",
+        integer_fields={"id", "document_id", "version_no"},
+        text_fields={"file_path", "original_filename", "status"},
+    )
     permission_by_id = {int(row["id"]): row for row in permissions}
 
     refs_by_version: dict[int, list[dict]] = defaultdict(list)
@@ -352,6 +412,14 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
     if "kb_documents" in tables:
         kb_document_columns = _table_columns(conn, "kb_documents")
         kb_document_rows = _select_rows(conn, "kb_documents", kb_document_columns)
+        _validate_row_metadata(
+            kb_document_rows,
+            "kb_documents",
+            integer_fields={"id"},
+            nullable_integer_fields={"document_id", "document_version_id"} & kb_document_columns,
+            text_fields={"kb_id", "status"},
+            nullable_text_fields={"file_path"} & kb_document_columns,
+        )
         for row in kb_document_rows:
             version_id = row.get("document_version_id")
             if version_id is not None:
@@ -371,6 +439,13 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
     if "material_archive_manifests" in tables:
         manifest_columns = _table_columns(conn, "material_archive_manifests")
         manifests = _select_rows(conn, "material_archive_manifests", manifest_columns)
+        _validate_row_metadata(
+            manifests,
+            "material_archive_manifests",
+            integer_fields={"id", "container_document_id", "container_version_id"},
+            text_fields={"status"},
+            nullable_text_fields={"source_path"} & manifest_columns,
+        )
         if {"id", "container_version_id"}.issubset(manifest_columns):
             for row in manifests:
                 refs_by_version[int(row["container_version_id"])].append(
@@ -388,6 +463,13 @@ def _collect_database_references(conn: sqlite3.Connection, versions_root: Path) 
     if "document_index_jobs" in tables:
         job_columns = _table_columns(conn, "document_index_jobs")
         jobs = _select_rows(conn, "document_index_jobs", job_columns)
+        _validate_row_metadata(
+            jobs,
+            "document_index_jobs",
+            integer_fields={"id", "version_id"},
+            text_fields={"status"},
+            nullable_text_fields={"job_type", "job_scope"} & job_columns,
+        )
 
     path_owners: dict[str, list[int]] = defaultdict(list)
     for row in versions:
@@ -763,7 +845,11 @@ def _audit_connection(conn: sqlite3.Connection, database: Path, versions_root: P
         report["error"] = {"code": "unsupported_schema", "message": unsupported}
         return report
 
-    snapshot = _collect_database_references(conn, versions_root)
+    try:
+        snapshot = _collect_database_references(conn, versions_root)
+    except _SnapshotMetadataError as error:
+        report["error"] = {"code": "unsupported_schema", "message": str(error)}
+        return report
     _diagnose_versions(report, versions_root, snapshot)
     _diagnose_pending_kb_documents(report, snapshot)
     _diagnose_archive_manifests(report, versions_root, snapshot)
