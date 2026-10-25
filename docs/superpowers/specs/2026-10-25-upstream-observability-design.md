@@ -21,7 +21,7 @@ OpenAI公开文档确认`x-request-id`及响应/异常ID接口：[API overview](
 - 响应事件固定字段：`schema_version=1`、`event=upstream_http_response`、`operation`、`status_code`、`provider_request_id_state`、`provider_request_id_header`、`provider_request_id_sha256`。
 - operation仅`generation/embedding/jev/rerank/other`。HTTPX/HTTPX2的path以`/chat/completions`或`/responses`结束时为generation，以`/embeddings`结束时为embedding，以`/systemone`结束时为jev（锁定TypeSafe SDK的实际端点为`/v1/systemone`），其余other；不读取query或输出URL。requests observer固定rerank。
 - ID只允许`x-request-id`和`x-typesafe-request-id`；Jev优先后者，其余优先前者。取第一个非空允许值，保留原始字符串计算UTF-8 SHA256；不把completion ID、内部request_id或文件名当供应商ID。
-- ID状态为`present/missing/invalid`。非字符串、超过4096字符、含Unicode Cc控制字符或不能严格UTF-8编码的孤立surrogate为invalid；缺失/空白为missing。先按优先级选择首个非空值，再校验：选中值invalid时保留header名，不再落到次优头；空白值可落到次优头。present输出64位小写hex，其余hash为null。header为实际选中的允许名称，未选中为null。状态码仅接受非bool整数100..599，其余null。
+- ID状态为`present/missing/invalid`。None或空字符串可继续检查次优头；非字符串（包括0/False）、超过4096字符、含Unicode Cc控制字符或不能严格UTF-8编码的孤立surrogate为invalid。只有通过长度/Cc/UTF-8检查后的纯空白值可继续检查次优头；tab/newline或超长纯空白为invalid。选中值invalid时保留header名，不再fallback。全部允许头均无有效非空值时为missing。present输出64位小写hex，其余hash为null。header为实际选中的允许名称，未选中为null。状态码仅接受非bool整数100..599，其余null。
 - 不输出原ID、任意headers、正文、问题、向量、URL、认证字段、异常文本或任意provider/model配置名。ID和hash不进入metrics标签或客户端响应。
 - 普通观测/日志异常不得改变上游返回、重试、breaker、token或关闭行为；不吞BaseException取消/终止信号。观测失败的降级日志也只用固定字段。
 - 不支持的挂接后端返回False，WARNING message为紧凑JSON且仅含`schema_version=1`、`event=upstream_observer_unavailable`、`backend=openai/typesafe/requests`；该告警不伪装为HTTP响应，不打印对象/异常表示。
