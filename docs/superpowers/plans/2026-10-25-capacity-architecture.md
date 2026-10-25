@@ -28,31 +28,31 @@
 **Files:** Create ignored `artifacts/capacity-architecture-2026-10-25/benchmark_material_capacity.py`, preparation/selfcheck logs/manifest；report本SDD task-1-report.md。
 **Interfaces:** CLI `--output-dir <new artifact subdirectory>`、`--scales 1000 5000 10000`、`--concurrency 1 2 4`、`--repeats 3`、`--requests-per-worker 40`、`--warmup 5`，另`--selfcheck`可用N20/并发1/测量2验证完整seed/query/hash/gates；root正式执行前保存help/compile/selfcheck。不接受已有DB输入；output-dir已存在拒绝覆盖。正式运行仅root；子代理最多selfcheck。
 
-- [ ] 阅读Spec和真实UserDB/MaterialLocator/MaterialLocationQuery/FTS schema，准备单文件artifact helper；合成seed可批量SQL单事务，seed时间单列，不宣称验证上传写能力。查询必须走真实Locator，不mock visibility/FTS。
-- [ ] 严格资源/网络/环境/DB输入边界，两个普通用户交替private、每10一tombstone、每文档历史/当前两版本与两FTS行。验证所有结果当前/可见/未删除且model_input无hidden。每thread独立Locator，closed-loop；检查逻辑dump+writer changes不变。保存selfcreated fixtures、raw samples/group summaries/source/interpreter/hash/resource provenance；连接显式close，输出失败/资源延后可审计。
-- [ ] 用私有Python/guard/priority先小selfcheck，验证正确性+门禁触发能停止（可安全模拟阈值，不作正式性能数据）；Ruff/compile。不要跑正式1000/5000/10000矩阵。报告READY精确root命令/路径/exits/限制。
+- [x] 阅读Spec和真实UserDB/MaterialLocator/MaterialLocationQuery/FTS schema，准备单文件artifact helper；合成seed可批量SQL单事务，seed时间单列，不宣称验证上传写能力。查询必须走真实Locator，不mock visibility/FTS。
+- [x] 严格资源/网络/环境/DB输入边界，两个普通用户交替private、每10一tombstone、每文档历史/当前两版本与两FTS行。验证所有结果当前/可见/未删除且model_input无hidden。每thread独立Locator，closed-loop；检查逻辑dump+writer changes不变。保存selfcreated fixtures、raw samples/group summaries/source/interpreter/hash/resource provenance；连接显式close，输出失败/资源延后可审计。
+- [x] 用私有Python/guard/priority先小selfcheck，验证正确性+门禁触发能停止（可安全模拟阈值，不作正式性能数据）；Ruff/compile。不要跑正式1000/5000/10000矩阵。报告READY精确root命令/路径/exits/限制。
 
 ### Task 2: Data-access and PostgreSQL migration readiness
 
 **Files:** Create `docs/architecture/data-access-postgresql.md`；artifact `data-access-inventory.json`（只源码盘点/必要自建Temp app schema），report本SDD task-2-report.md。
 **Interfaces:** 与Task3按关系库先于shared-state/多副本，公共依赖按Spec；root唯一修改UPGRADE/README/handoff。
 
-- [ ] 定向盘点UserDB/ConnectionManager/app migrator/repositories/FTS和跨存储事务；每类给实际文件行号，不沿用旧56表数字。若报表数，区分sqlite内部/FTS shadow，数据只新建Temp，不读业务库。
-- [ ] 写中文ADR：现状/备选与推荐，UnitOfWork/driver/schema/返回ID/SQL兼容与整事务重试契约、中文FTS等价及PG验证矩阵；保持既有ACL/admin/legacy/canary/sandbox边界。没有服务器/驱动不加假实现。
-- [ ] 细化备份含stage/跨存储manifest、停写迁移、校验、切换、切换后写入的逆迁移/reconcile/冻结门禁；列环境/凭据/数据集等外部前提与下一可执行任务。引用官方SQLite WAL与PG isolation/locking页面，标明推论/尚未实施。自审链接/代码事实，不重复pytest。
+- [x] 定向盘点UserDB/ConnectionManager/app migrator/repositories/FTS和跨存储事务；每类给实际文件行号，不沿用旧56表数字。若报表数，区分sqlite内部/FTS shadow，数据只新建Temp，不读业务库。
+- [x] 写中文ADR：现状/备选与推荐，UnitOfWork/driver/schema/返回ID/SQL兼容与整事务重试契约、中文FTS等价及PG验证矩阵；保持既有ACL/admin/legacy/canary/sandbox边界。没有服务器/驱动不加假实现。
+- [x] 细化备份含stage/跨存储manifest、停写迁移、校验、切换、切换后写入的逆迁移/reconcile/冻结门禁；列环境/凭据/数据集等外部前提与下一可执行任务。引用官方SQLite WAL与PG isolation/locking页面，标明推论/尚未实施。自审链接/代码事实，不重复pytest。
 
 ### Task 3: Shared state, object storage and independent worker readiness
 
 **Files:** Create `docs/architecture/shared-state-storage-workers.md`；artifact `shared-state-inventory.json`（源码证据），report本SDD task-3-report.md。
 **Interfaces:** DAL/PG方案文件由Task2写，勿修改；本文件记录Redis->object storage->multi API/worker依赖，全部为设计门禁。
 
-- [ ] 定向核对Redis/答案缓存/LLM pool、kb_mutation/worker leases、local file/version/backup和API lifespan。按当前实际code标implemented/proposal/not-run，勿将claim_material_jobs支持wiki的既有分派误报bug。
-- [ ] 写中文ADR与故障矩阵：ACL/data epoch缓存、shared-required/failclosed、持久fencing及SQL/blob/vector旧worker写保护；不可变BlobRef/条件写/checksum/配额/outbox，保留全局refs/tombstone/补偿身份。
-- [ ] 细化API/worker未来角色/lease/重复投递/崩溃/撤权/删除并发、跨存储备份/回滚/双API隔离验收；未来flag不能写成当前命令。引用官方Redis锁、S3 conditional/versioning及Qdrant deployment，缺环境列条件，不跑容器/服务/真实数据；自审链接和代码事实。
+- [x] 定向核对Redis/答案缓存/LLM pool、kb_mutation/worker leases、local file/version/backup和API lifespan。按当前实际code标implemented/proposal/not-run，勿将claim_material_jobs支持wiki的既有分派误报bug。
+- [x] 写中文ADR与故障矩阵：ACL/data epoch缓存、shared-required/failclosed、持久fencing及SQL/blob/vector旧worker写保护；不可变BlobRef/条件写/checksum/配额/outbox，保留全局refs/tombstone/补偿身份。
+- [x] 细化API/worker未来角色/lease/重复投递/崩溃/撤权/删除并发、跨存储备份/回滚/双API隔离验收；未来flag不能写成当前命令。引用官方Redis锁、S3 conditional/versioning及Qdrant deployment，缺环境列条件，不跑容器/服务/真实数据；自审链接和代码事实。
 
 ### Task 4: Root experiment, review and closure
 
-- [ ] 任务独立规格/质量复查（artifact helper亦审边界），一次整专项复查/必要单次修复波次；不重复已通过定向检查。
-- [ ] 原服务/内存读前检查，受限单进程运行正式profile一次，资源gate停止保留partial不降低门槛；解析实际raw samples/正确性/hash/exit，不以主观预期填表。
-- [ ] 形成`docs/capacity-and-slo.md`及`docs/reviews/2026-10-25-capacity-architecture.md`，链接所有工程建议、正式验收条件及ADR，按实际结果决定是否需另立优化；更新UPGRADE/索引/handoff/总计划。
+- [x] 任务独立规格/质量复查（artifact helper亦审边界），一次整专项复查/必要单次修复波次；不重复已通过定向检查。
+- [x] 原服务/内存读前检查，受限单进程运行正式profile一次，资源gate停止保留partial不降低门槛；解析实际raw samples/正确性/hash/exit，不以主观预期填表。
+- [x] 形成`docs/capacity-and-slo.md`及`docs/reviews/2026-10-25-capacity-architecture.md`，链接所有工程建议、正式验收条件及ADR，按实际结果决定是否需另立优化；更新UPGRADE/索引/handoff/总计划。
 - [ ] 若生产源保持，沿用3.2受测冻结并核对无源差异；仅对profile所调用MaterialLocator既有回归做一次合成定向检查，Ruff/文档/原服务核对。实际submit唯一工作记录、保留证据，最后报告整个顺序任务的完成与外部运行门禁。

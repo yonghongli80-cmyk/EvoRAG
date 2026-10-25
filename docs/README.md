@@ -6,6 +6,9 @@
 
 ## 当前有效入口
 
+- `capacity-and-slo.md`：单机试点建议、27组材料定位组件结果、候选SLO及正式业务验收条件。
+- `architecture/data-access-postgresql.md`、`architecture/shared-state-storage-workers.md`：源码盘点、全writer迁移水位、SQL原子epoch及后续共享存储/worker门禁；提案不等于已实现。
+- `reviews/2026-10-25-capacity-architecture.md`：正式2520样本、两版驱动SHA、统计/资源边界、独立复审与外部条件。
 - `reviews/2026-10-25-staging-controlled-recovery.md`：历史暂存维护恢复、重放后置条件、独立复审及统一160/1和生产锁4项验收。
 - `staging-recovery.md`：显式维护preview/apply、支持范围、备份/停写、字节保留和失败重试门禁。
 - `reviews/2026-10-25-auth-compose-contracts.md`：当前401身份清除、403数据重置、Compose语义对照、独立复审及330前端/42后端验收。
