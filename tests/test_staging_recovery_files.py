@@ -31,6 +31,20 @@ def test_verify_rejects_wrong_hash(tmp_path):
     assert error.value.code == "hash_mismatch"
 
 
+def test_verify_accepts_ordinary_file_with_path_handle_stat_semantics(tmp_path):
+    root = tmp_path / "versions"
+    root.mkdir()
+    source = root / "document.bin"
+    contents = b"ordinary verification smoke"
+    source.write_bytes(contents)
+
+    result = verify_recovery_file(root, source, digest(contents))
+
+    assert result.path == source
+    assert result.sha256 == digest(contents)
+    assert result.byte_size == len(contents)
+
+
 @pytest.mark.parametrize("relative", ["../escape.bin", "nested/../../escape.bin"])
 def test_confined_path_rejects_parent_traversal(tmp_path, relative):
     root = tmp_path / "versions"
@@ -163,6 +177,68 @@ def test_verify_rejects_file_that_changes_during_read(tmp_path, monkeypatch):
     with pytest.raises(RecoveryFileError) as error:
         verify_recovery_file(root, source, digest(b"stable bytes"))
     assert error.value.code == "file_changed"
+
+
+def test_verify_rejects_ctime_change_during_read(tmp_path, monkeypatch):
+    from rag.materials import recovery_files
+
+    root = tmp_path / "versions"
+    root.mkdir()
+    source = root / "source.bin"
+    source.write_bytes(b"same size")
+    original_fstat = recovery_files.os.fstat
+    calls = 0
+
+    class ChangedCtime:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+            self.st_ctime_ns = wrapped.st_ctime_ns + 1
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    def changed_ctime_fstat(fd):
+        nonlocal calls
+        result = original_fstat(fd)
+        calls += 1
+        if calls == 2:
+            return ChangedCtime(result)
+        return result
+
+    monkeypatch.setattr(recovery_files.os, "fstat", changed_ctime_fstat)
+    with pytest.raises(RecoveryFileError) as error:
+        verify_recovery_file(root, source, digest(b"same size"))
+    assert error.value.code == "file_changed"
+
+
+def test_open_source_closes_descriptor_when_fstat_fails(tmp_path, monkeypatch):
+    from rag.materials import recovery_files
+
+    root = tmp_path / "versions"
+    root.mkdir()
+    source = root / "source.bin"
+    source.write_bytes(b"descriptor")
+    original_open = recovery_files.os.open
+    original_fstat = recovery_files.os.fstat
+    opened_fds = []
+
+    def tracked_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd
+
+    def failed_fstat(_fd):
+        raise OSError("simulated fstat failure")
+
+    monkeypatch.setattr(recovery_files.os, "open", tracked_open)
+    monkeypatch.setattr(recovery_files.os, "fstat", failed_fstat)
+    with pytest.raises(RecoveryFileError) as error:
+        verify_recovery_file(root, source, digest(b"descriptor"))
+
+    assert error.value.code == "read_failed"
+    assert len(opened_fds) == 1
+    with pytest.raises(OSError):
+        original_fstat(opened_fds[0])
 
 
 def test_copy_creates_preserved_copy_and_reuses_matching_retry(tmp_path):

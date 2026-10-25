@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -140,7 +141,7 @@ def confined_recovery_path(root: Path, path: str | Path) -> Path:
     return _candidate_path(root_real, path)
 
 
-def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
     return (
         info.st_dev,
         info.st_ino,
@@ -148,10 +149,17 @@ def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
         info.st_nlink,
         info.st_size,
         getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000)),
+        getattr(info, "st_ctime_ns", int(info.st_ctime * 1_000_000_000)),
     )
 
 
-def _open_source(root: Path, path: str | Path) -> tuple[Path, int, os.stat_result]:
+def _path_handle_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Identity fields shared by path stat and handle stat on all platforms."""
+
+    return _identity(info)[:-1]
+
+
+def _open_source(root: Path, path: str | Path) -> tuple[Path, int, os.stat_result, os.stat_result]:
     source_path = confined_recovery_path(root, path)
     try:
         before_path = source_path.lstat()
@@ -163,27 +171,42 @@ def _open_source(root: Path, path: str | Path) -> tuple[Path, int, os.stat_resul
             raise RecoveryFileError("hardlink")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(source_path, flags)
-        opened = os.fstat(fd)
+        try:
+            opened = os.fstat(fd)
+        except OSError as exc:
+            with suppress(OSError):
+                os.close(fd)
+            raise RecoveryFileError("read_failed") from exc
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
             os.close(fd)
             raise RecoveryFileError("not_regular_file")
-        if _identity(before_path) != _identity(opened):
+        # Windows can report different ctime semantics for path and handle
+        # stats. Compare their common identity fields; retain handle ctime for
+        # the before/after read check and path ctime for path-to-path checks.
+        if _path_handle_identity(before_path) != _path_handle_identity(opened):
             os.close(fd)
             raise RecoveryFileError("file_changed")
-        return source_path, fd, opened
+        return source_path, fd, opened, before_path
     except RecoveryFileError:
         raise
     except OSError as exc:
         raise RecoveryFileError("read_failed") from exc
 
 
-def _check_source_unchanged(path: Path, fd: int, before: os.stat_result) -> None:
+def _check_source_unchanged(
+    path: Path,
+    fd: int,
+    before_handle: os.stat_result,
+    before_path: os.stat_result,
+) -> None:
     try:
         after_handle = os.fstat(fd)
         after_path = path.lstat()
-        if _is_link(path) or _identity(before) != _identity(after_handle):
+        if _is_link(path) or _identity(before_handle) != _identity(after_handle):
             raise RecoveryFileError("file_changed")
-        if _identity(before) != _identity(after_path):
+        if _identity(before_path) != _identity(after_path):
+            raise RecoveryFileError("file_changed")
+        if _path_handle_identity(before_handle) != _path_handle_identity(after_path):
             raise RecoveryFileError("file_changed")
     except RecoveryFileError:
         raise
@@ -191,7 +214,12 @@ def _check_source_unchanged(path: Path, fd: int, before: os.stat_result) -> None
         raise RecoveryFileError("file_changed") from exc
 
 
-def _read_hash(path: Path, fd: int, before: os.stat_result) -> tuple[str, int]:
+def _read_hash(
+    path: Path,
+    fd: int,
+    before_handle: os.stat_result,
+    before_path: os.stat_result,
+) -> tuple[str, int]:
     digest = hashlib.sha256()
     byte_size = 0
     with os.fdopen(fd, "rb", closefd=False) as stream:
@@ -201,8 +229,8 @@ def _read_hash(path: Path, fd: int, before: os.stat_result) -> tuple[str, int]:
                 break
             digest.update(chunk)
             byte_size += len(chunk)
-    _check_source_unchanged(path, fd, before)
-    if byte_size != before.st_size:
+    _check_source_unchanged(path, fd, before_handle, before_path)
+    if byte_size != before_handle.st_size:
         raise RecoveryFileError("file_changed")
     return digest.hexdigest(), byte_size
 
@@ -211,9 +239,9 @@ def verify_recovery_file(root: Path, path: str | Path, expected_sha256: str) -> 
     """Hash a confined regular file and reject any detected read-time change."""
 
     _validate_sha256(expected_sha256)
-    source_path, fd, before = _open_source(root, path)
+    source_path, fd, before_handle, before_path = _open_source(root, path)
     try:
-        actual_hash, byte_size = _read_hash(source_path, fd, before)
+        actual_hash, byte_size = _read_hash(source_path, fd, before_handle, before_path)
     except RecoveryFileError:
         raise
     except OSError as exc:
@@ -277,7 +305,7 @@ def copy_recovery_file(
     _create_destination_parents(root_real, destination_path)
     # Revalidate after parent creation, immediately before exclusive create.
     destination_path = _candidate_path(root_real, destination_path)
-    source_path, source_fd, source_before = _open_source(root_real, source_path)
+    source_path, source_fd, source_before, source_path_before = _open_source(root_real, source_path)
     destination_fd: int | None = None
     digest = hashlib.sha256()
     byte_size = 0
@@ -298,7 +326,7 @@ def copy_recovery_file(
                 byte_size += len(chunk)
             dst.flush()
             os.fsync(destination_fd)
-        _check_source_unchanged(source_path, source_fd, source_before)
+        _check_source_unchanged(source_path, source_fd, source_before, source_path_before)
         actual_hash = digest.hexdigest()
         if byte_size != source_before.st_size:
             raise RecoveryFileError("file_changed")
