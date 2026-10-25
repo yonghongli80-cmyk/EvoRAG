@@ -93,6 +93,20 @@ USER_DB_MIGRATIONS: tuple[Migration, ...] = (
         ON spreadsheet_structure_changes(session_id);
         """,
     ),
+    (
+        6,
+        """
+        CREATE TABLE IF NOT EXISTS material_recovery_receipts (
+            operation_key TEXT PRIMARY KEY,
+            request_hash TEXT NOT NULL,
+            actor_user_id INTEGER NOT NULL,
+            document_id INTEGER NOT NULL,
+            version_id INTEGER NOT NULL,
+            receipt_json TEXT NOT NULL,
+            created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        """,
+    ),
 )
 
 
