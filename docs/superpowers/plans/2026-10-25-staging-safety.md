@@ -32,10 +32,10 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 **Files:** Modify `rag/materials/api.py`; Create `rag/materials/upload_execution.py`, `tests/test_material_upload_cancellation.py`。
 **Interfaces:** Produce `async run_upload_worker(worker: Callable[[], T]) -> T`（具体类型注解可用TypeVar）；先建立shielded task再await；外层取消只取消等待，worker结果须被观察。Task2沿用已完成后的route worker结构。
 
-- [ ] Step 1: 写真实Temp DB/文件route函数测试，用thread Event阻塞promotion/archive copy，取消caller后assert stage仍存在、gate仍忙；放行后真实worker成功并cleanup。另用单worker executor预先占用证明queued worker在caller取消后仍执行；failure分支不产生loop未处理task异常。
-- [ ] Step 2: 使用精确新测试运行并确认预期RED（当前async finally提前unlink/queuedfuture可取消）；记录exit与断言，不能以人为sleep替代barrier。
-- [ ] Step 3: 实现shielded交接，cleanup/preservation与组织audit移入实际同步worker；普通/归档都覆盖，保留API状态/响应、权限和原promotion失败保留字节契约。
-- [ ] Step 4: 新文件、`tests/test_material_backup_integration.py`、`tests/test_kb_lifecycle_materials.py`与相关material API定向GREEN；Ruff、diff检查，根选择性提交后fresh规格/质量复审。
+- [x] Step 1: 写真实Temp DB/文件route函数测试，用thread Event阻塞promotion/archive copy，取消caller后assert stage仍存在、gate仍忙；放行后真实worker成功并cleanup。另用单worker executor预先占用证明queued worker在caller取消后仍执行；failure分支不产生loop未处理task异常。
+- [x] Step 2: 使用精确新测试运行并确认预期RED（当前async finally提前unlink/queuedfuture可取消）；记录exit与断言，不能以人为sleep替代barrier。
+- [x] Step 3: 实现shielded交接，cleanup/preservation与组织audit移入实际同步worker；普通/归档都覆盖，保留API状态/响应、权限和原promotion失败保留字节契约。
+- [x] Step 4: 新文件、`tests/test_material_backup_integration.py`、`tests/test_kb_lifecycle_materials.py`与相关material API定向GREEN；Ruff、diff检查，根选择性提交后fresh规格/质量复审。
 
 ### Task 2: Atomic finalization and job enqueue
 
@@ -57,7 +57,7 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 
 - [ ] Step 1: 真实Temp DB/File构造“permission无kb_documents且version指向别KB文件”、错误archive container_version_id、外KB共享ref，路由DELETE应503有稳定机器码且manager无调用、文件和身份保持。先观察当前代码RED。
 - [ ] Step 2: 实现全version owner校验及manifest identity检查，存在legacy-global source保留既有archive_source_unowned；不要求confirmed/failed-activation的source等于合法container finalpath。外KB引用planned路径/目录时cleanup_path_shared；所有验证在collect完成前，不引入long SQL事务。
-- [ ] Step 3: 加正常pending/confirmed、失败confirm残留合法finalpath、第二KB完整性、document-ID stage、missing target、link/junction拒绝兼容GREEN。root只控制自有合成路径。
+- [ ] Step 3: 加正常pending/confirmed、失败confirm残留合法container_version.file_path final（manifest.source_path仍hash staging）、第二KB完整性、document-ID stage、missing target、link/junction拒绝兼容GREEN；source_global/source_final均拒绝且legacy paired global优先archive_source_unowned。root只控制自有合成路径。
 - [ ] Step 4: 新用例与KB cleanup/API/permissions相关GREEN；Ruff/架构，根提交与fresh复审。
 
 ### Task 4: Explicit snapshot read-only staging audit
