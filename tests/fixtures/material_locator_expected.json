@@ -20,7 +20,7 @@
       "semantic_allowed_version_ids_exact_set",
       "semantic_call_arguments_exact",
       "fts_call_arguments_exact",
-      "permission_denials_exact"
+      "unauthorized_names_absent_from_results_and_model_input"
     ],
     "ordered_sources": [
       "exact",

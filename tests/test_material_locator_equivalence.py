@@ -188,6 +188,7 @@ def test_golden_tracks_frozen_source_and_full_comparison_contract(comparison_db)
     source = BASELINE_PATH.read_text(encoding="utf-8").encode("utf-8")
     assert hashlib.sha256(source).hexdigest() == BASELINE_SHA256
     assert "model_input_exact_string" in golden["comparison"]["also_compare"]
+    assert "unauthorized_names_absent_from_results_and_model_input" in golden["comparison"]["also_compare"]
     db, people, _ = comparison_db
     expected_cases = _frozen_golden_cases(db, people)
     if os.environ.get("TASK3_REGENERATE_GOLDEN") == "1":
@@ -206,7 +207,7 @@ def test_golden_tracks_frozen_source_and_full_comparison_contract(comparison_db)
 @pytest.mark.parametrize("user_name", ["alice", "bob", "admin"])
 def test_legacy_and_org_visibility_keep_complete_outputs_and_diagnostics(comparison_db, user_name):
     db, people, _ = comparison_db
-    _, model_input, _, _ = _compare(
+    results, model_input, _, _ = _compare(
         db, people, user_name, MaterialLocationQuery(text="searchable", subject="self", top_k=2)
     )
     denied_names = {
@@ -217,6 +218,7 @@ def test_legacy_and_org_visibility_keep_complete_outputs_and_diagnostics(compari
     }[user_name]
     for name in denied_names:
         assert name not in model_input
+        assert all(result.filename != name for result in results)
 
 
 @pytest.mark.parametrize(
