@@ -11,6 +11,7 @@ from openai import AsyncOpenAI, OpenAI
 
 from rag.llm_pool.models import LLMProviderConfig
 from rag.resilience import CircuitBreaker, CircuitOpenError
+from rag.upstream_observability import attach_openai_observer
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class LLMProvider:
                         timeout=self.config.timeout_seconds,
                         default_headers=self.default_headers(),
                     )
+                    attach_openai_observer(self._async_client, asynchronous=True)
         return self._async_client
 
     def _get_sync_client(self) -> OpenAI:
@@ -54,6 +56,7 @@ class LLMProvider:
                         timeout=self.config.timeout_seconds,
                         default_headers=self.default_headers(),
                     )
+                    attach_openai_observer(self._sync_client)
         return self._sync_client
 
     def is_available(self) -> bool:

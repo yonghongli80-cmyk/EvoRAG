@@ -38,6 +38,7 @@ from pydantic import ValidationError
 import rag.generator as generator
 from config import settings
 from rag.evolution.models import DiagnosisDraft, EvidencePack
+from rag.upstream_observability import attach_openai_observer
 
 #: Version of the diagnosis prompt; stored next to every draft so a prompt
 #: revision can always be traced back (change the prompt, bump this).
@@ -136,6 +137,7 @@ def _default_model_call(
             timeout=timeout_seconds,
             default_headers=generator.deepseek_default_headers(),
         )
+        attach_openai_observer(client)
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
         response = client.chat.completions.create(
             model=settings.deepseek_model,

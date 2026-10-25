@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from config import settings
 from rag.resilience import retry
+from rag.upstream_observability import attach_openai_observer
 
 client = None
 _client_lock = threading.Lock()
@@ -84,6 +85,7 @@ def embed(texts: list[str]) -> list[list[float]]:
                     base_url=settings.bailian_base_url,
                     timeout=30.0,
                 )
+                attach_openai_observer(client)
 
     if not texts:
         return []

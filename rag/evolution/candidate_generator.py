@@ -57,6 +57,7 @@ from rag.evolution.candidates import (
 )
 from rag.evolution.diagnoser import REASON_INVALID, REASON_RATE_LIMITED, REASON_TIMEOUT
 from rag.evolution.models import DiagnosisDraft
+from rag.upstream_observability import attach_openai_observer
 
 #: Version of the candidate prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
@@ -149,6 +150,7 @@ def _default_model_call(timeout_seconds: float = 120.0, max_tokens: int = 16000)
             timeout=timeout_seconds,
             default_headers=generator.deepseek_default_headers(),
         )
+        attach_openai_observer(client)
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
         for _attempt in range(2):
             response = client.chat.completions.create(

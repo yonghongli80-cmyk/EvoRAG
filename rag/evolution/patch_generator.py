@@ -80,6 +80,7 @@ from rag.evolution.code_patches import (
 from rag.evolution.diagnoser import REASON_INVALID, REASON_RATE_LIMITED, REASON_TIMEOUT
 from rag.evolution.models import DiagnosisDraft
 from rag.evolution.symbols import SymbolIndex, window_excerpt
+from rag.upstream_observability import attach_openai_observer
 
 #: Version of the patch prompt; stored next to every candidate so a prompt
 #: revision can always be traced back (change the prompt, bump this).
@@ -233,6 +234,7 @@ def _default_model_call(timeout_seconds: float = 90.0, max_tokens: int = None) -
             timeout=timeout_seconds,
             default_headers=generator.deepseek_default_headers(),
         )
+        attach_openai_observer(client)
         clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
         response = client.chat.completions.create(
             model=settings.deepseek_model,

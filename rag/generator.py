@@ -6,6 +6,7 @@ from openai import AsyncOpenAI, OpenAI
 
 from config import settings
 from rag.resilience import CircuitBreaker, CircuitOpenError, retry
+from rag.upstream_observability import attach_openai_observer
 
 client = None
 _client_lock = threading.Lock()
@@ -42,6 +43,7 @@ def generate(messages: list[dict], temperature: float | None = None) -> str:
                     timeout=30.0,
                     default_headers=deepseek_default_headers(),
                 )
+                attach_openai_observer(client)
     # Strip reasoning_content (DeepSeek thinking mode) to avoid API rejection
     clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
     try:
@@ -125,6 +127,7 @@ async def generate_stream(messages: list[dict], temperature: float | None = None
                     timeout=30.0,
                     default_headers=deepseek_default_headers(),
                 )
+                attach_openai_observer(_async_client, asynchronous=True)
     clean_msgs = [{k: v for k, v in m.items() if k != "reasoning_content"} for m in messages]
 
     last_exc = None
