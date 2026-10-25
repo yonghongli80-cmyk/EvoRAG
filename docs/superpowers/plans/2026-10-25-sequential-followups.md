@@ -26,7 +26,7 @@
 ## Phase 1: Merge and dual push existing accepted work
 
 - [x] 核对C/D工作树、分支、两个远端及SSH fetch，确认两端main一致、候选仅ahead无behind；检查跟踪范围不含.env/artifacts，前端及锁无改动。
-- [ ] 在最终候选冻结树运行原生完整后端2worker及Ruff，保留exit/stdout/stderr/JUnit；Luna只读核对三轮验收及交付证据关联，不重复全分支源码复查。
+- [x] 在最终候选冻结树运行原生完整后端2worker及Ruff，保留exit/stdout/stderr/JUnit；Luna只读核对三轮验收及交付证据关联，不重复全分支源码复查。
 - [ ] 更新本轮交付文档，核对D无跟踪改动及hooks、远端未前进，再将main快进到候选；在相同无.env代码树做合并后定向烟测并确认tree等价。
 - [ ] 按`git push origin main`、`git push github main`、`git push origin --tags`、`git push github --tags`双推，实际ls-remote核对main和所有标签一致；原服务PID/start/ready/env hash核对保持。
 - [ ] 归档本轮及三阶段原始证据，hash核对；提交Stage1唯一工作记录并记录真实回执；继续Phase2。
