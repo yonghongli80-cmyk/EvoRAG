@@ -29,7 +29,7 @@
 - [x] 在最终候选冻结树运行原生完整后端2worker及Ruff，保留exit/stdout/stderr/JUnit；Luna只读核对三轮验收及交付证据关联，不重复全分支源码复查。
 - [x] 更新本轮交付文档，核对D无跟踪改动及hooks、远端未前进，再将main快进到候选；在相同无.env代码树做合并后定向烟测并确认tree等价。
 - [x] 按`git push origin main`、`git push github main`、`git push origin --tags`、`git push github --tags`双推，实际ls-remote核对main和所有标签一致；原服务PID/start/ready/env hash核对保持。
-- [ ] 归档本轮及三阶段原始证据，hash核对；提交Stage1唯一工作记录并记录真实回执；继续Phase2。
+- [x] 归档本轮及三阶段原始证据，hash核对；提交Stage1唯一工作记录并记录真实回执；继续Phase2。
 
 ## Phase 2: KB cleanup snapshot and directory lookup optimization
 
@@ -46,3 +46,5 @@
 - [ ] 业务容量/SLO：盘点已有真实模型及合成基线，形成明确负载和验收口径；缺少业务事实时请求必要信息，独立低并发/隔离运行，避免把合成结果当生产承诺。
 - [ ] 长期数据架构：按DAL/PostgreSQL、共享Redis、对象存储、多副本/worker依赖顺序逐项写设计与迁移/回滚门禁；仅执行已具备验证条件的隔离工作，实际业务迁移保留维护窗口与备份条件。
 - [ ] 汇总各专项完成证据、未完成条件和工作记录；不将设计、源码验收与运行切换混作同一完成状态。
+
+Phase1收尾：最终main/Gitee/GitHub同为1d413ed，完整3263/4、合并后6项及生产锁SDK9/CLI4通过；Stage1记录R-20261025-CD2FF224已实际创建。最终本轮117个artifact文件及3阶段历史证据复制D归档、hash匹配。Phase2基于此main新建隔离分支继续，不表示部署。
