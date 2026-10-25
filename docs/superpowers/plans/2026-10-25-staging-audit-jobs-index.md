@@ -63,6 +63,8 @@
 - [x] root核对三路文件与接口，Task1/2独立复审及整分支复查；有实际发现则一个最终修复波次和一次增量复查，冻结产品/测试。
 - [x] 原生统一运行`tests/test_staging_audit.py tests/test_staging_audit_jobs_index.py tests/test_staging_audit_jobs_compatibility.py tests/test_staging_recovery_integration.py tests/test_architecture_budget.py`，保存退出码/stdout/stderr/JUnit；全树Ruff及新文件format/compile。只审计相关范围，不把旧全后端基线计入本轮数字。
 - [x] 执行Task3 benchmark及生产锁CLI smoke（临时快照、guard、原JSON/退出码/只读边界），核对旧新完整报告相等及输入不变；只读核对原服务PID/start/ready/.env hash。
-- [ ] 更新验收报告、交接和索引，记录精确计数/测量及局限、root所有裁决；选择性提交，实际submit当前唯一中文公司记录并核对成功。保留隔离分支和原始证据，不自动合并/双推/部署。
+- [x] 更新验收报告、交接和索引，记录精确计数/测量及局限、root所有裁决；选择性提交，实际submit当前唯一中文公司记录并核对成功。保留隔离分支和原始证据，不自动合并/双推/部署。
 
 最终统一验收：冻结e52237c、五文件45通过0跳过、26.34秒/退出0，JUnit45项0失败0错误；Ruff/新测试format通过，生产锁CLI4项通过。旧新18次对照完整报告一致、输入不变；N1000/J3000中位6.787→5.885s，仅合成诊断。15:13:20原服务身份、ready200和环境哈希保持。独立复审及整分支复查批准、两P2测试缺口已关闭，详见验收报告。
+
+根收尾：验收文档提交`3c609b9`；唯一公司记录实际submit成功，返回`R-20261025-56747D6E`、`pending_review`，等待人工复核。本计划全部完成，后续仅补回执；工作树、SDD、私有环境及原始日志保留。
