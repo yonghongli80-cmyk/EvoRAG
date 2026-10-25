@@ -51,7 +51,7 @@
 ## 文件/接口边界
 
 - Task1拥有materials/api与新的upload_execution异步交接helper。
-- Task2拥有document_versions、material_repo、UserDB、archives及Task1完成后的materials/api窄接入。
+- Task2拥有db/connection的commit异常回滚边界、document_versions、material_repo、UserDB、archives及Task1完成后的materials/api窄接入。
 - Task3拥有kb_document_cleanup、kb_lifecycle_cleanup，产出resolve_owned_version_path供Task4读取。
 - Task4仅新增audit模块/CLI/测试，消费Task3纯路径helper，不改schema或公共conftest。
 - root统一Git、计划/报告/交接和最终验收；子代理不能写D主目录或另开代理。

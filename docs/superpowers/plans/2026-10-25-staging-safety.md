@@ -56,15 +56,15 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 **Files:** Modify `rag/kb_document_cleanup.py`, `rag/kb_lifecycle_cleanup.py`; Create `tests/test_kb_cleanup_ownership.py`；必要已有`tests/test_kb_failed_mutations.py`/`tests/test_kb_lifecycle_api.py`仅本任务调整。
 **Interfaces:** Produce pure `resolve_owned_version_path(root: Path, stored_path: str, *, document_id: int, kb_id: str) -> Path`，接受document final/doc staging/同KB hashed staging，拒绝lower symlink/junction/escape及别owner。`resolve_kb_document_paths(..., *, kb_wide: bool=False)`保持默认单文档严格owner契约，collect以kb_wide=True复用新whole-KB规则；不能放宽单文档删除。Task4可直接消费纯helper（不导入config）。
 
-- [ ] Step 1: 真实Temp DB/File构造“permission无kb_documents且version指向别KB文件”、错误archive container_version_id、外KB共享ref，路由DELETE应503有稳定机器码且manager无调用、文件和身份保持。先观察当前代码RED。
-- [ ] Step 2: 实现全version owner校验及manifest identity检查，存在legacy-global source保留既有archive_source_unowned；不要求confirmed/failed-activation的source等于合法container finalpath。外KB引用planned路径/目录时cleanup_path_shared；所有验证在collect完成前，不引入long SQL事务。
-- [ ] Step 3: 加正常pending/confirmed、失败confirm残留合法container_version.file_path final（manifest.source_path仍hash staging）、第二KB完整性、document-ID stage、missing target、link/junction拒绝兼容GREEN；source_global/source_final均拒绝且legacy paired global优先archive_source_unowned。root只控制自有合成路径。
-- [ ] Step 4: 新用例与KB cleanup/API/permissions相关GREEN；Ruff/架构，根提交与fresh复审。
+- [x] Step 1: 真实Temp DB/File构造“permission无kb_documents且version指向别KB文件”、错误archive container_version_id、外KB共享ref，路由DELETE应503有稳定机器码且manager无调用、文件和身份保持。先观察当前代码RED。
+- [x] Step 2: 实现全version owner校验及manifest identity检查，存在legacy-global source保留既有archive_source_unowned；不要求confirmed/failed-activation的source等于合法container finalpath。外KB引用planned路径/目录时cleanup_path_shared；所有验证在collect完成前，不引入long SQL事务。
+- [x] Step 3: 加正常pending/confirmed、失败confirm残留合法container_version.file_path final（manifest.source_path仍hash staging）、第二KB完整性、document-ID stage、missing target、link/junction拒绝兼容GREEN；source_global/source_final均拒绝且legacy paired global优先archive_source_unowned。root只控制自有合成路径。
+- [x] Step 4: 新用例与KB cleanup/API/permissions相关GREEN；Ruff/架构，根提交与fresh复审。
 
 ### Task 4: Explicit snapshot read-only staging audit
 
 **Files:** Create `rag/staging_audit.py`, `scripts/audit_staging.py`, `tests/test_staging_audit.py`。不改schema/UserDB/公共conftest。
-**Interfaces:** Consume Task3 `resolve_owned_version_path`; produce `audit_staging(database: Path, versions_root: Path) -> dict`，`schema_version=1`、entries/findings/counts、每项action=inspect_only。CLI必填`--database`与`--versions-root`、恒JSON、success0/inputerror2，未知--apply拒绝。
+**Interfaces:** Consume Task3 `resolve_owned_version_path`; produce `audit_staging(database: Path, versions_root: Path) -> dict`，`schema_version=1`、entries/findings/counts、每项action=inspect_only。CLI必填`--database`与`--versions-root`、报告及输入错误为JSON（--help显示标准帮助）、success0/inputerror2，未知--apply拒绝。
 
 - [x] Step 1: 用关闭后的自包含Temp DB快照与合成目录写测试；missing input不建DB、WAL/SHM拒绝、DB/tree hashes及目录清单不变、symlink/junction不跟随；先确认新接口缺失RED。
 - [x] Step 2: mode=ro&immutable=1与显式snapshot校验，无config/.env/UserDB/app导入；表结构optional-aware，缺核心表unsupported_schema。扫描staging/archive_work而不读取正文，root外ref不做fileIO。
@@ -73,7 +73,7 @@ Workdir始终显式使用`C:/Users/Syf15/.codex/worktrees/post-handoff-remediati
 
 ### Task 5: Integration, evidence and handoff
 
-**Files:** Create `docs/reviews/2026-10-25-staging-safety.md`, `docs/staging-audit.md`; update本计划、`docs/README.md`及最新交接。
+**Files:** Create `docs/reviews/2026-10-25-staging-safety.md`, `docs/staging-audit.md`; update本计划、`docs/README.md`、`docs/handoff-2026-10-24.md`。
 
 - [ ] Step 1: root核对所有任务的接口/文件无冲突，fresh任务复审与整分支复审，处理实际Critical/Important并冻结源码。
 - [ ] Step 2: 使用同一锁定环境/离线guard/系统Temp短基准目录完成稳定源码完整后端（最多4worker/loadfile、BelowNormal、BLAS1），全树Ruff/架构与必要runtime smoke；不重复未变frontend。
