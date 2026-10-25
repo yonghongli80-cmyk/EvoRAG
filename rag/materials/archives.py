@@ -33,7 +33,6 @@ from pathlib import Path
 from rag.document_version_store import final_version_path
 from rag.kb_lifecycle import kb_mutation
 from rag.materials.formats import FormatCapabilityRegistry
-from rag.materials.jobs import enqueue_latest_index_job
 from rag.materials.models import FormatCapability
 from rag.user_db import UserDB
 
@@ -736,7 +735,7 @@ def _confirm_archive_import_under_gate(
             # The activation transaction owns the lock: row mutations below run
             # directly on the connection (the ``_in_tx`` pattern) and never
             # re-acquire ``UserDB._lock``.
-            with db._lock, db.transaction(immediate=True):
+            with db._lock, db.transaction(immediate=True) as conn:
                 db._activate_document_version_in_tx(
                     container["id"], manifest["container_version_id"], container["kb_id"], container["doc_name"]
                 )
@@ -766,6 +765,14 @@ def _confirm_archive_import_under_gate(
                         manifest["container_version_id"], json.dumps(result.to_dict(), ensure_ascii=False),
                     ),
                 )
+                for c in created:
+                    db.material_repo._enqueue_latest_index_job_in_tx(
+                        conn,
+                        c["child_id"],
+                        c["version_id"],
+                        c["content_hash"],
+                        time.time(),
+                    )
         except BaseException:
             for c in created:
                 if c["new_doc"]:
@@ -783,10 +790,6 @@ def _confirm_archive_import_under_gate(
     else:
         shutil.rmtree(work_dir, ignore_errors=True)
         source_path.unlink(missing_ok=True)
-        for c in created:
-            enqueue_latest_index_job(
-                db, c["child_id"], c["version_id"], c["content_hash"], time.time()
-            )
         return result
 
 

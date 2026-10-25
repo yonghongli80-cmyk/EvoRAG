@@ -140,11 +140,11 @@ class ConnectionManager:
                 self._write_conn.execute("BEGIN")
             try:
                 yield self._write_conn
-            except BaseException:
-                self._write_conn.execute("ROLLBACK")
-                raise
-            else:
                 self._write_conn.commit()
+            except BaseException:
+                if self._write_conn.in_transaction:
+                    self._write_conn.rollback()
+                raise
 
     def close(self) -> None:
         """Close write connection and all registered read connections."""

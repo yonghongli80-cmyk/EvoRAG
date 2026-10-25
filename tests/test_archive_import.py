@@ -373,3 +373,80 @@ def test_7z_extraction_without_a_bound_is_refused(tmp_path):
         _extract_entry(archive, "7z", "a.pdf", tmp_path / "member.bin", max_bytes=None)
 
     assert "archive_entry_limit_required" in str(caught.value)
+
+
+def test_archive_child_job_insert_failure_rolls_back_activation_and_same_key_retries(
+    tmp_path, archive_service
+):
+    import sqlite3
+
+    source = write_source(tmp_path, "enqueue-atomic.zip", {"a.pdf": PDF_A})
+    preview = archive_service.upload_zip(
+        "enqueue-atomic.zip", "kb-1", archive_service.actor, source
+    )
+    db = archive_service.db
+    manifest = db.get_material_archive_manifest(preview.manifest_id)
+    source_path = Path(manifest["source_path"])
+
+    with db.locked_transaction(immediate=True) as conn:
+        conn.execute(
+            "CREATE TRIGGER reject_archive_child_job "
+            "BEFORE INSERT ON document_index_jobs "
+            "WHEN NEW.job_scope='material' AND NEW.job_type='material_index' "
+            "BEGIN SELECT RAISE(ABORT, 'injected archive child enqueue failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        archive_service.confirm(
+            preview.manifest_id,
+            archive_service.actor,
+            preview.supported_ids,
+            expected_version=0,
+            idempotency_key="archive-enqueue-retry",
+        )
+
+    assert source_path.is_file()
+    assert db.get_material_archive_manifest(preview.manifest_id)["status"] == "pending_confirmation"
+    assert db._conn.execute(
+        "SELECT COUNT(*) FROM material_archive_import_results "
+        "WHERE manifest_id=? AND idempotency_key=?",
+        (preview.manifest_id, "archive-enqueue-retry"),
+    ).fetchone()[0] == 0
+    assert archive_service.current_children() == []
+    assert db._conn.execute("SELECT COUNT(*) FROM document_index_jobs").fetchone()[0] == 0
+
+    with db.locked_transaction(immediate=True) as conn:
+        conn.execute("DROP TRIGGER reject_archive_child_job")
+
+    confirmed = archive_service.confirm(
+        preview.manifest_id,
+        archive_service.actor,
+        preview.supported_ids,
+        expected_version=0,
+        idempotency_key="archive-enqueue-retry",
+    )
+    replay = archive_service.confirm(
+        preview.manifest_id,
+        archive_service.actor,
+        preview.supported_ids,
+        expected_version=0,
+        idempotency_key="archive-enqueue-retry",
+    )
+
+    assert confirmed.status == "confirmed"
+    assert replay.status == "already_confirmed"
+    assert not source_path.exists()
+    assert archive_service.current_children() == ["a.pdf"]
+    child_rows = db._conn.execute(
+        "SELECT id, current_version_id FROM document_permissions "
+        "WHERE container_document_id=?",
+        (preview.container_document_id,),
+    ).fetchall()
+    assert len(child_rows) == 1
+    jobs = db._conn.execute(
+        "SELECT version_id, status FROM document_index_jobs WHERE document_id=?",
+        (child_rows[0]["id"],),
+    ).fetchall()
+    assert len(jobs) == 1
+    assert jobs[0]["version_id"] == child_rows[0]["current_version_id"]
+    assert jobs[0]["status"] == "queued"

@@ -6,9 +6,11 @@ import logging
 import sqlite3
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
-from rag.repositories.base import BaseRepository
+from rag.kb_lifecycle import assert_kb_available_in_tx
+from rag.repositories.base import BaseRepository, VersionConflict
 
 logger = logging.getLogger(__name__)
 
@@ -119,26 +121,85 @@ class MaterialRepository(BaseRepository):
         """Cancel active Wiki jobs for these page IDs, clearing leases."""
         return self._cancel_active_jobs("wiki", page_ids)
 
+    def _enqueue_latest_index_job_in_tx(
+        self,
+        conn: sqlite3.Connection,
+        document_id: int,
+        version_id: int,
+        content_hash: str,
+        not_before: float,
+    ) -> int:
+        """Cancel prior active work and enqueue one latest-version job in the caller's transaction."""
+        now = time.time()
+        conn.execute(
+            "UPDATE document_index_jobs SET status='cancelled', updated_at=? "
+            "WHERE document_id=? AND job_scope='material' "
+            "AND status IN ('queued','retry','running')",
+            (now, document_id),
+        )
+        cur = conn.execute(
+            "INSERT INTO document_index_jobs "
+            "(document_id, version_id, content_hash, job_type, job_scope, status, "
+            " available_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'material_index', 'material', 'queued', ?, ?, ?)",
+            (document_id, version_id, content_hash, not_before, now, now),
+        )
+        return int(cur.lastrowid)
+
     def enqueue_latest_index_job(
         self, document_id: int, version_id: int, content_hash: str, not_before: float
     ) -> int:
         """Enqueue the latest index job for a document, cancelling prior active ones."""
-        now = time.time()
         with self.cm.transaction(immediate=True) as conn:
-            conn.execute(
-                "UPDATE document_index_jobs SET status='cancelled', updated_at=? "
-                "WHERE document_id=? AND job_scope='material' "
-                "AND status IN ('queued','retry','running')",
-                (now, document_id),
+            return self._enqueue_latest_index_job_in_tx(
+                conn, document_id, version_id, content_hash, not_before
             )
-            cur = conn.execute(
-                "INSERT INTO document_index_jobs "
-                "(document_id, version_id, content_hash, job_type, job_scope, status, "
-                " available_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, 'material_index', 'material', 'queued', ?, ?, ?)",
-                (document_id, version_id, content_hash, not_before, now, now),
+
+    def finalize_material_upload(
+        self,
+        document_id: int,
+        version_id: int,
+        staged_path: str | Path,
+        final_path: str | Path,
+        content_hash: str,
+        not_before: float,
+    ) -> int:
+        """Commit a promoted path and its index job using one transaction."""
+        staged = str(staged_path)
+        final = str(final_path)
+        with self.cm.transaction(immediate=True) as conn:
+            permission = conn.execute(
+                "SELECT kb_id FROM document_permissions WHERE id=?",
+                (document_id,),
+            ).fetchone()
+            if permission is None:
+                raise VersionConflict("document permission no longer exists")
+            assert_kb_available_in_tx(conn, permission["kb_id"])
+
+            version = conn.execute(
+                "SELECT status, file_path, content_hash FROM document_versions "
+                "WHERE id=? AND document_id=?",
+                (version_id, document_id),
+            ).fetchone()
+            if (
+                version is None
+                or version["status"] != "staging"
+                or version["file_path"] != staged
+                or version["content_hash"] != content_hash
+            ):
+                raise VersionConflict("staging version changed before material finalization")
+
+            updated = conn.execute(
+                "UPDATE document_versions SET file_path=? "
+                "WHERE id=? AND document_id=? AND status='staging' AND file_path=? "
+                "AND content_hash=?",
+                (final, version_id, document_id, staged, content_hash),
             )
-            return int(cur.lastrowid)
+            if updated.rowcount != 1:
+                raise VersionConflict("staging version changed before material finalization")
+            return self._enqueue_latest_index_job_in_tx(
+                conn, document_id, version_id, content_hash, not_before
+            )
 
     def enqueue_material_job(self, document_id: int, version_id: int) -> int:
         """Enqueue a job immediately (test and maintenance helper)."""

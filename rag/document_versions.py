@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -195,7 +196,20 @@ class PromotedVersion:
 
 
 class VersionPromotionError(Exception):
-    """Raised when a staged upload cannot be committed to its final path."""
+    """Raised when staged upload promotion needs caller attention."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        recovery_required: bool = False,
+        version_id: int | None = None,
+        file_path: Path | None = None,
+    ) -> None:
+        self.recovery_required = recovery_required
+        self.version_id = version_id
+        self.file_path = file_path
+        super().__init__(message)
 
 
 def promote_staged_version(
@@ -207,6 +221,7 @@ def promote_staged_version(
     staged_path: Path,
     content_hash: str,
     uploaded_by: int,
+    finalize: Callable[[PromotedVersion], None] | None = None,
 ) -> PromotedVersion:
     """Admit staged file promotion and database compensation for its KB."""
     document = db.get_document_permission_by_id(document_id)
@@ -221,6 +236,26 @@ def promote_staged_version(
             staged_path=staged_path,
             content_hash=content_hash,
             uploaded_by=uploaded_by,
+            finalize=finalize,
+        )
+
+
+def _path_state(path: Path) -> bool | None:
+    """Report path presence, retaining recovery identity when inspection is blocked."""
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return None
+
+
+def _record_recovery_path(
+    db: UserDB, document_id: int, version_id: int, file_path: Path
+) -> None:
+    """Best-effort repoint a retained reservation to the surviving recovery file."""
+    with db.locked_transaction(immediate=True) as conn:
+        conn.execute(
+            "UPDATE document_versions SET file_path=? WHERE id=? AND document_id=?",
+            (str(file_path), version_id, document_id),
         )
 
 
@@ -233,25 +268,18 @@ def _promote_staged_version(
     staged_path: Path,
     content_hash: str,
     uploaded_by: int,
+    finalize: Callable[[PromotedVersion], None] | None = None,
 ) -> PromotedVersion:
-    """Reserve a version row and promote an already-staged upload file.
+    """Reserve a version, move its file, then atomically finalize database state.
 
-    ``POST /materials/upload`` streams bytes into ``<root>/staging`` before it
-    knows the version number, so the row is reserved first; the file is then
-    moved to :func:`final_version_path` and the row is repointed before the
-    index job is enqueued.  Keeping the database on the immutable final path
-    is what lets backups (which exclude ``staging``) satisfy their
-    ``required_file_keys`` check.
-
-    Any failure rolls the reserved version row back and leaves the upload in
-    ``staging`` (moving it back when only the row update failed), so the
-    caller can report the failure without enqueueing work or losing bytes.
-    The caller owns cleanup of a document permission it created for the
-    attempt.
+    The optional callback runs inside the short SQL transaction after the file
+    move. It must perform SQL only and must not commit; repository transaction
+    helpers reuse this transaction. With no callback, the historic path update
+    remains the only database finalization.
     """
     version_id: int | None = None
     final_path: Path | None = None
-    promoted = False
+    version_no: int | None = None
     try:
         version_id = db.create_document_version(
             document_id, filename, str(staged_path), content_hash, uploaded_by
@@ -262,25 +290,71 @@ def _promote_staged_version(
         version_no = int(version["version_no"])
         final_path = final_version_path(root, document_id, version_no, filename)
         promote_version(staged_path, final_path)
-        promoted = True
-        db.set_version_file_path(version_id, str(final_path))
+        promoted = PromotedVersion(version_id, version_no, final_path)
+        with db.locked_transaction(immediate=True) as conn:
+            if finalize is not None:
+                finalize(promoted)
+            else:
+                cursor = conn.execute(
+                    "UPDATE document_versions SET file_path=? "
+                    "WHERE id=? AND document_id=? AND status='staging' AND file_path=?",
+                    (str(final_path), version_id, document_id, str(staged_path)),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("reserved document version changed before finalization")
     except Exception as error:
+        recovery_required = False
+        recovery_path: Path | None = None
         if version_id is not None:
-            if promoted and final_path is not None:
+            stage_state = _path_state(staged_path)
+            final_state = _path_state(final_path) if final_path is not None else False
+
+            if stage_state is False and final_state is True and final_path is not None:
                 try:
                     promote_version(final_path, staged_path)
                 except Exception:
                     logger.exception("could not restore staged upload after failure")
-            try:
-                db.delete_document_version(version_id)
-            except Exception:
-                logger.exception("could not roll back reserved document version")
+                stage_state = _path_state(staged_path)
+                final_state = _path_state(final_path)
+
+            if stage_state is True and final_state is False:
+                try:
+                    db.delete_document_version(version_id)
+                except Exception:
+                    logger.exception("could not roll back reserved document version")
+                    try:
+                        retained = db.get_document_version_by_id(version_id)
+                    except Exception:
+                        retained = {"id": version_id}
+                    if retained is not None:
+                        recovery_required = True
+                        recovery_path = staged_path
+            else:
+                recovery_required = True
+                if final_path is not None and final_state is not False:
+                    recovery_path = final_path
+                elif stage_state is not False:
+                    recovery_path = staged_path
+                else:
+                    recovery_path = final_path
+
+            if recovery_required and recovery_path is not None:
+                try:
+                    _record_recovery_path(db, document_id, version_id, recovery_path)
+                except Exception:
+                    logger.exception("could not record staged upload recovery path")
+
         logger.exception(
             "staged material promotion failed",
             extra={"document_id": document_id, "document_filename": filename},
         )
-        raise VersionPromotionError("staged material promotion failed") from error
-    return PromotedVersion(version_id, version_no, final_path)
+        raise VersionPromotionError(
+            "staged material promotion failed",
+            recovery_required=recovery_required,
+            version_id=version_id if recovery_required else None,
+            file_path=recovery_path if recovery_required else None,
+        ) from error
+    return promoted
 
 
 @dataclass(frozen=True)

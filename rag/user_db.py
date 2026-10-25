@@ -610,6 +610,20 @@ class UserDB:
         """Enqueue the latest index job for a document, cancelling prior active ones."""
         return self.material_repo.enqueue_latest_index_job(document_id, version_id, content_hash, not_before)
 
+    def finalize_material_upload(
+        self,
+        document_id: int,
+        version_id: int,
+        staged_path: str | Path,
+        final_path: str | Path,
+        content_hash: str,
+        not_before: float,
+    ) -> int:
+        """Atomically finalize a promoted version and enqueue its indexing job."""
+        return self.material_repo.finalize_material_upload(
+            document_id, version_id, staged_path, final_path, content_hash, not_before
+        )
+
     def enqueue_material_job(self, document_id: int, version_id: int) -> int:
         """Enqueue a job immediately (test and maintenance helper)."""
         return self.material_repo.enqueue_material_job(document_id, version_id)

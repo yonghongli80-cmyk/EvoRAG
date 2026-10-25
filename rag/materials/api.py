@@ -35,7 +35,6 @@ from rag.materials.archives import (
     confirm_archive_import,
 )
 from rag.materials.formats import build_default_format_registry
-from rag.materials.jobs import enqueue_latest_index_job
 from rag.materials.locator import MaterialLocator, material_result_response
 from rag.materials.models import MaterialLimits, MaterialLocationQuery
 from rag.materials.organizer import (
@@ -292,6 +291,16 @@ async def upload_material(
                     else:
                         document_id = existing["id"]
                     try:
+                        def finalize_upload(promoted):
+                            db.finalize_material_upload(
+                                document_id,
+                                promoted.version_id,
+                                staged.path,
+                                promoted.file_path,
+                                staged.sha256,
+                                time.time(),
+                            )
+
                         promoted = promote_staged_version(
                             db,
                             _versions_root(request),
@@ -300,15 +309,15 @@ async def upload_material(
                             staged_path=staged.path,
                             content_hash=staged.sha256,
                             uploaded_by=user["id"],
+                            finalize=finalize_upload,
                         )
                     except VersionPromotionError as exc:
-                        if created_document:
+                        if created_document and not exc.recovery_required:
                             try:
                                 db.delete_document_permission(document_id)
                             except Exception:
                                 logger.exception("material promotion rollback failed")
                         raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
-                    enqueue_latest_index_job(db, document_id, promoted.version_id, staged.sha256, time.time())
                     _audit_org_material(db, user, "document_uploaded", kb_id)
                     return document_id, promoted
                 except HTTPException as exc:
