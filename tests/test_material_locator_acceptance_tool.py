@@ -7,7 +7,10 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
+from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,6 +67,56 @@ def test_round_order_alternates_whole_implementations():
     assert round_order(0) == ["old", "new"]
     assert round_order(1) == ["new", "old"]
     assert round_order(2) == ["old", "new"]
+
+
+def test_failed_timed_worker_keeps_completed_observations_before_propagating(tmp_path, monkeypatch):
+    import scripts.paired_material_locator_acceptance as acceptance
+
+    failure = RuntimeError("synthetic second observation failure")
+    calls = []
+
+    class FakeLocator:
+        def __init__(self, _db):
+            pass
+
+    def fake_snapshot(_locator, _query, _user):
+        calls.append(len(calls) + 1)
+        if len(calls) == 2:
+            raise failure
+        return ([['completed']], "full model input")
+
+    monkeypatch.setattr(acceptance, "snapshot", fake_snapshot)
+    active = threading.local()
+    outcome = acceptance._timed_worker(7, "new", FakeLocator, object(), object(), object(), 4, active)
+
+    assert outcome.worker_id == 7
+    assert len(outcome.observations) == 1
+    assert outcome.observations[0][0:2] == ([['completed']], "full model input")
+    assert outcome.error is failure
+    assert len(calls) == 2
+    assert getattr(active, "name", None) is None
+    assert getattr(active, "phase", None) is None
+
+    progress = {"runs": [], "in_progress": {"samples": [], "completed_rounds": 0}}
+    report_path = tmp_path / "partial.json"
+    future = Future()
+    future.set_result(outcome)
+    with pytest.raises(RuntimeError) as raised:
+        acceptance._collect_worker_outcomes(
+            [future], implementation="new", progress=progress, output_path=report_path
+        )
+
+    assert raised.value is failure
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    partial = persisted["in_progress"]["partial_phase_outputs"]["new"]["7"]
+    assert partial["observations"][0]["result"] == [['completed']]
+    assert partial["paired"] is False
+    assert partial["error"] == {"type": "RuntimeError", "message": str(failure)}
+    assert persisted["in_progress"]["samples"] == []
+
+    assert acceptance._record_run_failure(progress, failure) == 2
+    assert progress["status"] == "failed_with_partial"
+    assert progress["error"]["message"] == str(failure)
 
 
 def test_source_hashes_record_raw_and_lf_normalized_text(tmp_path):
@@ -178,7 +231,6 @@ def test_repository_counter_tracks_all_four_methods_and_each_phase():
         def list_material_documents_for_access_plan(self, *_args, **_kwargs):
             return [{"id": 3}]
 
-    from types import SimpleNamespace
 
     store = new_counter_store()
     active = SimpleNamespace(name="new", phase="diagnostic_probe")

@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +257,14 @@ def _prepare_locator_classes(db: Any, baseline_class: Any, new_class: Any, store
         install_repository_counters(repo, store, implementation, active_label)
 
 
+@dataclass
+class TimedWorkerOutcome:
+    worker_id: int
+    observations: list[tuple[list[list[Any]], str, int]]
+    error: BaseException | None = None
+    stopped_by_peer_failure: bool = False
+
+
 def _timed_worker(
     worker_id: int,
     implementation: str,
@@ -265,19 +274,75 @@ def _timed_worker(
     user: Any,
     sample_count: int,
     active_label: threading.local,
-) -> tuple[int, list[tuple[list[list[Any]], str, int]]]:
-    locator = locator_class(db)
-    outputs = []
-    for _sample in range(sample_count):
-        active_label.name = implementation
-        active_label.phase = "timed_measurement"
-        started = time.perf_counter_ns()
-        result = snapshot(locator, query, user)
-        elapsed = time.perf_counter_ns() - started
+    stop_event: threading.Event | None = None,
+) -> TimedWorkerOutcome:
+    observations = []
+    stopped_by_peer_failure = False
+    try:
+        locator = locator_class(db)
+        for _sample in range(sample_count):
+            if stop_event is not None and stop_event.is_set():
+                stopped_by_peer_failure = True
+                break
+            active_label.name = implementation
+            active_label.phase = "timed_measurement"
+            started = time.perf_counter_ns()
+            result = snapshot(locator, query, user)
+            elapsed = time.perf_counter_ns() - started
+            observations.append((result[0], result[1], elapsed))
+        return TimedWorkerOutcome(worker_id, observations, stopped_by_peer_failure=stopped_by_peer_failure)
+    except BaseException as exc:
+        if stop_event is not None:
+            stop_event.set()
+        return TimedWorkerOutcome(worker_id, observations, error=exc)
+    finally:
         active_label.name = None
         active_label.phase = None
-        outputs.append((result[0], result[1], elapsed))
-    return worker_id, outputs
+
+
+def _worker_outcome_record(outcome: TimedWorkerOutcome) -> dict[str, Any]:
+    return {
+        "paired": False,
+        "observations": [
+            {"result": result, "model_input": model_input, "elapsed_ns": elapsed}
+            for result, model_input, elapsed in outcome.observations
+        ],
+        "error": None if outcome.error is None else {
+            "type": type(outcome.error).__name__,
+            "message": str(outcome.error),
+        },
+        "stopped_by_peer_failure": outcome.stopped_by_peer_failure,
+    }
+
+
+def _collect_worker_outcomes(
+    futures: list[Any], *, implementation: str, progress: dict[str, Any], output_path: Path
+) -> dict[int, list[tuple[list[list[Any]], str, int]]]:
+    """Persist each finished worker once, then propagate the first original error."""
+    outcomes: dict[int, TimedWorkerOutcome] = {}
+    first_error: BaseException | None = None
+    phase_records = progress["in_progress"].setdefault("partial_phase_outputs", {}).setdefault(implementation, {})
+    for future in as_completed(futures):
+        outcome = future.result()
+        outcomes[outcome.worker_id] = outcome
+        phase_records[str(outcome.worker_id)] = _worker_outcome_record(outcome)
+        if outcome.error is not None:
+            progress["in_progress"]["last_round_status"] = "worker_failed_with_partial_observations"
+            if first_error is None:
+                first_error = outcome.error
+        elif first_error is None:
+            progress["in_progress"]["last_completed_implementation"] = implementation
+        write_json_atomic(output_path, progress)
+    if first_error is not None:
+        raise first_error
+    return {worker_id: outcome.observations for worker_id, outcome in outcomes.items()}
+
+
+def _record_run_failure(progress: dict[str, Any], exc: BaseException) -> int:
+    partial = bool(progress.get("runs") or progress.get("in_progress"))
+    progress["status"] = "failed_with_partial" if partial else "failed"
+    progress["error"] = {"code": "run_failed", "type": type(exc).__name__, "message": str(exc)}
+    return 2
 
 
 def _legacy_counter_fields(counters: dict[str, Any]) -> dict[str, Any]:
@@ -389,24 +454,18 @@ def run_case(
             write_json_atomic(output_path, progress)
             for implementation in order:
                 locator_class = baseline_class if implementation == "old" else new_class
-                outputs[implementation] = {}
+                stop_event = threading.Event()
                 with ThreadPoolExecutor(max_workers=case_spec["concurrency"]) as pool:
                     futures = [pool.submit(
                         _timed_worker, worker_id, implementation, locator_class, db, query, user,
-                        case_spec["samples_per_worker_per_round"], active_label,
+                        case_spec["samples_per_worker_per_round"], active_label, stop_event,
                     ) for worker_id in range(case_spec["concurrency"])]
-                    for future in as_completed(futures):
-                        worker_id, worker_samples = future.result()
-                        outputs[implementation][worker_id] = worker_samples
-                        progress["in_progress"]["partial_phase_outputs"][implementation] = {
-                            str(key): [
-                                {"result": item[0], "model_input": item[1], "elapsed_ns": item[2]}
-                                for item in value
-                            ]
-                            for key, value in outputs[implementation].items()
-                        }
-                        progress["in_progress"]["last_completed_implementation"] = implementation
-                        write_json_atomic(output_path, progress)
+                    outputs[implementation] = _collect_worker_outcomes(
+                        futures,
+                        implementation=implementation,
+                        progress=progress,
+                        output_path=output_path,
+                    )
             for worker_id in range(case_spec["concurrency"]):
                 for sample_id in range(case_spec["samples_per_worker_per_round"]):
                     old_value = outputs["old"][worker_id][sample_id]
@@ -575,8 +634,7 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
         write_json_atomic(output, progress)
         return 2
     except BaseException as exc:
-        progress["status"] = "failed_with_partial" if progress.get("runs") or progress.get("in_progress") else "failed"
-        progress["error"] = {"code": "run_failed", "type": type(exc).__name__, "message": str(exc)}
+        _record_run_failure(progress, exc)
         write_json_atomic(output, progress)
         return 2
     finally:
