@@ -100,6 +100,7 @@ class StartupLifecycle:
 
         # Do not add callbacks while holding _lock: Future callbacks may run
         # synchronously when the token is already complete.
+        token.add_done_callback(_diagnose_work_failure)
         token.add_done_callback(lambda completed: self._work_finished(generation, completed))
         loop = asyncio.get_running_loop()
         context = contextvars.copy_context()
@@ -166,7 +167,8 @@ class StartupLifecycle:
                         self._state = "cleanup_deferred"
                         deferred = True
                 if deferred:
-                    logger.error("API startup work exceeded cancellation grace; preserving shared resources")
+                    with suppress(BaseException):
+                        logger.error("API startup work exceeded cancellation grace; preserving shared resources")
                 else:
                     self._run_finalizer(generation, deferred=False)
             else:
@@ -181,23 +183,13 @@ class StartupLifecycle:
         """Future callback: never leak a BaseException into Future.set_*()."""
         try:
             should_finalize = False
-            cleanup_requested = False
             with self._lock:
                 if generation != self._generation or self._active_work is not token:
                     return
                 self._active_work = None
-                cleanup_requested = self._cleanup_requested
-                should_finalize = cleanup_requested and not self._finalizer_claimed
+                should_finalize = self._cleanup_requested and not self._finalizer_claimed
                 if self._cleanup_requested and not self._finalizer_done:
                     self._state = "cleanup_pending"
-            if cleanup_requested and not token.cancelled():
-                try:
-                    error = token.exception()
-                except BaseException:
-                    _log_callback_failure("read startup work failure")
-                else:
-                    if error is not None:
-                        _log_late_work_failure(error)
             if should_finalize:
                 self._run_finalizer(generation, deferred=True)
         except BaseException:
@@ -245,10 +237,23 @@ def _log_cleanup_failure(name: str, error: BaseException) -> None:
         )
 
 
-def _log_late_work_failure(error: BaseException) -> None:
+def _diagnose_work_failure(token: Future[None]) -> None:
+    """Log every owned worker failure independently of lifecycle callback state."""
+    try:
+        if token.cancelled():
+            return
+        error = token.exception()
+    except BaseException:
+        _log_callback_failure("read startup work failure")
+        return
+    if error is not None:
+        _log_work_failure(error)
+
+
+def _log_work_failure(error: BaseException) -> None:
     with suppress(BaseException):
         logger.error(
-            "API startup worker failed after cleanup was requested",
+            "API startup work failed",
             exc_info=(type(error), error, error.__traceback__),
         )
 

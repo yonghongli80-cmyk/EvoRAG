@@ -509,9 +509,311 @@ def test_late_worker_failure_after_cancel_is_logged_and_consumed(monkeypatch, ca
             assert not any(
                 "Future exception was never retrieved" in context.get("message", "") for context in loop_contexts
             )
-            assert "late startup worker failure" in caplog.text
+            assert (
+                sum(
+                    "API startup work failed" in record.getMessage()
+                    for record in caplog.records
+                    if record.name == "rag.startup_lifecycle"
+                )
+                == 1
+            )
+            assert any(record.exc_info and record.exc_info[1] is late_error for record in caplog.records)
         finally:
             release.set()
             loop.set_exception_handler(original_exception_handler)
+
+    asyncio.run(exercise())
+
+
+def test_failure_before_cleanup_intent_is_logged_once_when_cancel_wins(monkeypatch, caplog):
+    """A worker failure must be diagnosed if cancellation wins after its callback."""
+    from rag.startup_lifecycle import StartupLifecycle
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    callback_paused = threading.Event()
+    release_callback = threading.Event()
+    cleanup_calls = []
+    cancellation_seen = []
+    resource_open = threading.Event()
+    resource_open.set()
+    work_error = RuntimeError("worker failed before cleanup intent")
+    owner = StartupLifecycle(cancel_grace_seconds=0.0)
+    original_callback = owner._work_finished
+    original_finish = owner.finish
+
+    def pause_after_original_callback(generation, token):
+        original_callback(generation, token)
+        callback_paused.set()
+        if not release_callback.wait(10):
+            raise RuntimeError("test did not release completion callback")
+
+    monkeypatch.setattr(owner, "_work_finished", pause_after_original_callback)
+
+    async def capture_primary(cleanup_hooks, primary_error):
+        cancellation_seen.append(primary_error)
+        await original_finish(cleanup_hooks, primary_error)
+
+    monkeypatch.setattr(owner, "finish", capture_primary)
+    caplog.set_level(logging.ERROR, logger="rag.startup_lifecycle")
+
+    def fail_after_release():
+        worker_entered.set()
+        assert release_worker.wait(10), "test did not release worker"
+        raise work_error
+
+    def cleanup():
+        cleanup_calls.append("cleanup")
+        resource_open.clear()
+
+    async def exercise():
+        owner.enter()
+        work_task = asyncio.create_task(owner.to_thread(fail_after_release))
+        try:
+            assert await asyncio.to_thread(worker_entered.wait, 5), "worker did not enter"
+            release_worker.set()
+            assert await asyncio.to_thread(callback_paused.wait, 5), "callback did not reach barrier"
+
+            work_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await work_task
+            cancellation = raised.value
+            await owner.finish((("cleanup", cleanup),), cancellation)
+
+            assert cancellation_seen == [cancellation]
+            assert owner.state == "cleanup_attempted"
+            assert cleanup_calls == ["cleanup"]
+            assert not resource_open.is_set()
+            assert (
+                sum(
+                    "API startup work failed" in record.getMessage()
+                    for record in caplog.records
+                    if record.name == "rag.startup_lifecycle"
+                )
+                == 1
+            )
+            assert any(record.exc_info and record.exc_info[1] is work_error for record in caplog.records)
+        finally:
+            release_worker.set()
+            release_callback.set()
+            await asyncio.get_running_loop().shutdown_default_executor()
+
+    asyncio.run(exercise())
+
+
+def test_ordinary_startup_failure_is_logged_once_and_reraises_original(monkeypatch, caplog):
+    """Normal startup failure diagnosis must preserve the caller's exception object."""
+    from rag.startup_lifecycle import StartupLifecycle
+
+    owner = StartupLifecycle()
+    work_error = RuntimeError("ordinary startup failure")
+    cleanup_calls = []
+    caplog.set_level(logging.ERROR, logger="rag.startup_lifecycle")
+
+    async def exercise():
+        owner.enter()
+        with pytest.raises(RuntimeError) as raised:
+            await owner.to_thread(lambda: (_ for _ in ()).throw(work_error))
+
+        assert raised.value is work_error
+        await owner.finish((("cleanup", lambda: cleanup_calls.append("cleanup")),), None)
+
+    asyncio.run(exercise())
+
+    assert cleanup_calls == ["cleanup"]
+    assert (
+        sum(
+            "API startup work failed" in record.getMessage()
+            for record in caplog.records
+            if record.name == "rag.startup_lifecycle"
+        )
+        == 1
+    )
+    assert any(record.exc_info and record.exc_info[1] is work_error for record in caplog.records)
+
+
+def test_logger_baseexception_during_late_failure_does_not_escape_callback(monkeypatch):
+    """A broken logger cannot interrupt callback completion or cleanup."""
+    import rag.startup_lifecycle as lifecycle_module
+    from rag.startup_lifecycle import StartupLifecycle
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    cleanup_finished = threading.Event()
+    cleanup_calls = []
+    work_error = RuntimeError("late startup failure")
+    owner = StartupLifecycle(cancel_grace_seconds=0.0)
+
+    def logger_raises(*_args, **_kwargs):
+        raise KeyboardInterrupt("logger failed")
+
+    def fail_after_release():
+        worker_entered.set()
+        try:
+            assert release_worker.wait(10), "test did not release worker"
+            raise work_error
+        finally:
+            worker_finished.set()
+
+    def cleanup():
+        cleanup_calls.append("cleanup")
+        cleanup_finished.set()
+
+    async def exercise():
+        owner.enter()
+        work_task = asyncio.create_task(owner.to_thread(fail_after_release))
+        try:
+            assert await asyncio.to_thread(worker_entered.wait, 5), "worker did not enter"
+            work_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await work_task
+            await owner.finish((("cleanup", cleanup),), raised.value)
+            assert owner.state == "cleanup_deferred"
+
+            # The grace-expiry diagnostic belongs to finish(), not the worker
+            # completion callback under test.
+            monkeypatch.setattr(lifecycle_module.logger, "error", logger_raises)
+            release_worker.set()
+            assert await asyncio.to_thread(worker_finished.wait, 5), "worker did not finish"
+            assert await asyncio.to_thread(cleanup_finished.wait, 5), "cleanup did not finish"
+            assert owner.state == "cleanup_attempted"
+            assert cleanup_calls == ["cleanup"]
+        finally:
+            release_worker.set()
+            await asyncio.get_running_loop().shutdown_default_executor()
+
+    asyncio.run(exercise())
+
+
+def test_failure_diagnostic_survives_finish_before_resource_callback(monkeypatch, caplog):
+    """A completed token remains diagnosable if finish wins before callback dispatch."""
+    import rag.startup_lifecycle as lifecycle_module
+    from rag.startup_lifecycle import StartupLifecycle
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    diagnostic_paused = threading.Event()
+    release_diagnostic = threading.Event()
+    diagnostic_finished = threading.Event()
+    cleanup_calls = []
+    cancellation_seen = []
+    work_error = RuntimeError("worker failed before resource callback")
+    owner = StartupLifecycle(cancel_grace_seconds=0.0)
+    original_diagnostic = lifecycle_module._diagnose_work_failure
+    original_finish = owner.finish
+
+    def pause_before_diagnostic(token):
+        diagnostic_paused.set()
+        if not release_diagnostic.wait(10):
+            raise RuntimeError("test did not release diagnostic callback")
+        try:
+            original_diagnostic(token)
+        finally:
+            diagnostic_finished.set()
+
+    async def capture_primary(cleanup_hooks, primary_error):
+        cancellation_seen.append(primary_error)
+        await original_finish(cleanup_hooks, primary_error)
+
+    monkeypatch.setattr(lifecycle_module, "_diagnose_work_failure", pause_before_diagnostic)
+    monkeypatch.setattr(owner, "finish", capture_primary)
+    caplog.set_level(logging.ERROR, logger="rag.startup_lifecycle")
+
+    def fail_after_release():
+        worker_entered.set()
+        assert release_worker.wait(10), "test did not release worker"
+        raise work_error
+
+    async def exercise():
+        owner.enter()
+        work_task = asyncio.create_task(owner.to_thread(fail_after_release))
+        try:
+            assert await asyncio.to_thread(worker_entered.wait, 5), "worker did not enter"
+            release_worker.set()
+            assert await asyncio.to_thread(diagnostic_paused.wait, 5), "diagnostic callback did not reach barrier"
+
+            work_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await work_task
+            cancellation = raised.value
+            await owner.finish((("cleanup", lambda: cleanup_calls.append("cleanup")),), cancellation)
+
+            assert cancellation_seen == [cancellation]
+            assert cleanup_calls == ["cleanup"]
+            assert owner.state == "cleanup_attempted"
+            owner.enter()
+            release_diagnostic.set()
+            assert await asyncio.to_thread(diagnostic_finished.wait, 5), "diagnostic callback did not finish"
+
+            assert owner.state == "starting"
+            assert (
+                sum(
+                    "API startup work failed" in record.getMessage()
+                    for record in caplog.records
+                    if record.name == "rag.startup_lifecycle"
+                )
+                == 1
+            )
+            assert any(record.exc_info and record.exc_info[1] is work_error for record in caplog.records)
+            await owner.finish((), None)
+        finally:
+            release_worker.set()
+            release_diagnostic.set()
+            await asyncio.get_running_loop().shutdown_default_executor()
+
+    asyncio.run(exercise())
+
+
+def test_grace_expiry_logger_baseexception_preserves_cancel_and_deferred_cleanup(monkeypatch):
+    """Grace logging cannot replace cancellation or strand deferred cleanup."""
+    import rag.startup_lifecycle as lifecycle_module
+    from rag.startup_lifecycle import StartupLifecycle
+
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    cleanup_finished = threading.Event()
+    cleanup_primary = []
+    owner = StartupLifecycle(cancel_grace_seconds=0.0)
+    primary = asyncio.CancelledError("startup cancelled")
+
+    def logger_raises(*_args, **_kwargs):
+        raise KeyboardInterrupt("logger failed")
+
+    def blocked_worker():
+        worker_entered.set()
+        try:
+            assert release_worker.wait(10), "test did not release worker"
+        finally:
+            worker_finished.set()
+
+    def cleanup():
+        cleanup_primary.append(owner._primary_error)
+        cleanup_finished.set()
+
+    async def exercise():
+        owner.enter()
+        work_task = asyncio.create_task(owner.to_thread(blocked_worker))
+        try:
+            assert await asyncio.to_thread(worker_entered.wait, 5), "worker did not enter"
+            monkeypatch.setattr(lifecycle_module.logger, "error", logger_raises)
+
+            finish_error = None
+            try:
+                await owner.finish((("cleanup", cleanup),), primary)
+            except BaseException as error:
+                finish_error = error
+
+            assert finish_error is None
+            assert owner.state == "cleanup_deferred"
+            release_worker.set()
+            assert await asyncio.to_thread(worker_finished.wait, 5), "worker did not finish"
+            assert await asyncio.to_thread(cleanup_finished.wait, 5), "cleanup did not finish"
+            await work_task
+            assert cleanup_primary == [primary]
+        finally:
+            release_worker.set()
+            await asyncio.get_running_loop().shutdown_default_executor()
 
     asyncio.run(exercise())

@@ -10,6 +10,8 @@
 
 当前失败callback可在cleanup intent之前清active，随后取消胜出，次要失败没有诊断。对非cancelled token无条件读取异常并记录一次work-failure，不再依赖cleanup_requested。普通await仍向caller抛原错误对象；取消胜出仍是原CancelledError。日志、token callback均不得向Future setter抛BaseException，logger自身KeyboardInterrupt也不能影响资源清理。
 
+诊断注册为独立token done callback，与generation/active身份约束的资源callback分开：finish可能在资源callback之前看到token已done并清active，不能因旧资源callback早退丢日志。grace-expiry诊断本身也须隔离BaseException，不能覆盖原取消；该分支先用独立RED证实再修。两种完成先后顺序及普通错误身份均纳入focused GREEN。
+
 保留late failure现有消息或同样精确的语义，不能把cleanup前失败称为cleanup后；默认executor/ContextVars、generation/token gate、5秒排空grace、一次finalizer、cleanup顺序、stop=False资源保护均不改。不新增日志状态机或一般worker协议。
 
 真实Thread/Event先RED：原callback已处理failure、清active且看到无cleanup，外层wrapper再用屏障暂停；取消caller、finish后放行callback。证明主取消身份、一次清理、诊断恰一次；所有屏障finally释放。另测普通失败对象身份、logger抛BaseException及原late/loop-close路径。
