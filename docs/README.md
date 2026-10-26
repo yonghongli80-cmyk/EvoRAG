@@ -6,6 +6,7 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-26-material-locator-delivery.md`：材料定位两阶段成果的 main 快进集成、合并后新跑 92 项回归/4 项烟测、双远端交付与运行边界；服务器性能验收继续留空。
 - `reviews/2026-10-26-material-locator-many-kb.md`：多 KB 批量授权投影修复、92 项回归和生产锁 4 项烟测；源码仍本地，修复后压测按用户要求留空待服务器。
 - `material-locator-server-acceptance.md`：服务器性能验收清单；目标平台适配、完整配对矩阵及性能数值均未执行/未验收。
 - `reviews/2026-10-25-material-locator-overhead.md`：本地材料定位 SQL 授权投影与分配优化、完整等价、84 项回归及生产锁 4 项烟测；正式配对性能矩阵因资源门禁待补，尚未再次交付 main。
