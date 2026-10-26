@@ -136,6 +136,42 @@ def round_order(round_id: int) -> list[str]:
     return ["old", "new"] if round_id % 2 == 0 else ["new", "old"]
 
 
+def validate_run_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    """Reject noncanonical run parameters before output/context setup or RAG imports."""
+    try:
+        counts = tuple(int(value.strip()) for value in args.counts.split(","))
+        workers = tuple(int(value.strip()) for value in args.workers.split(","))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise AcceptanceError(
+            "run counts and workers must be comma-separated integers",
+            code="matrix_parameters_invalid",
+        ) from exc
+    thresholds = {
+        "min_free_bytes": args.min_free_bytes,
+        "max_working_set_bytes": args.max_working_set_bytes,
+    }
+    if (
+        counts != CORE_COUNTS
+        or workers != CORE_WORKERS
+        or args.rounds != 3
+        or args.warmups != 3
+        or args.samples != 10
+        or any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in thresholds.values())
+    ):
+        raise AcceptanceError(
+            "formal run must use the complete frozen core matrix and explicit positive resource thresholds",
+            code="matrix_parameters_invalid",
+            details={
+                "required_counts": list(CORE_COUNTS),
+                "required_workers": list(CORE_WORKERS),
+                "rounds": 3,
+                "warmups": 3,
+                "samples": 10,
+            },
+        )
+    return {"counts": counts, "workers": workers, "thresholds": thresholds}
+
+
 def _serialize_rows(rows: list[Any]) -> list[list[Any]]:
     return [[
         row.document_id,
@@ -572,6 +608,7 @@ def _write_preflight_start(output: Path, command: str) -> dict[str, Any]:
 
 
 def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]) -> int:
+    validated = validate_run_arguments(args)
     run_root = output.parent / f"{output.stem}-fixtures"
     if run_root.exists():
         raise AcceptanceError("fixture output directory already exists", code="run_directory_exists", details={"path": str(run_root)})
@@ -582,7 +619,7 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
         progress["environment"] = sanitize_process_environment(run_root)
         progress["priority"] = set_process_priority()
         progress["sqlite_version"] = sqlite3.sqlite_version
-        thresholds = {"min_free_bytes": args.min_free_bytes, "max_working_set_bytes": args.max_working_set_bytes}
+        thresholds = validated["thresholds"]
         progress["resource_initial"] = enforce_resource_gate(sample_resources(), **thresholds)
         sqlite_audit = install_sqlite_path_audit(run_root)
         progress["sqlite_audit"] = sqlite_audit
@@ -595,17 +632,8 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
         from rag.materials.locator import MaterialLocator
 
         baseline_class = load_frozen_baseline()
-        counts = tuple(int(value) for value in args.counts.split(","))
-        workers = tuple(int(value) for value in args.workers.split(","))
-        if not counts or any(value < 1 for value in counts) or not workers or any(value not in (1, 2) for value in workers):
-            raise AcceptanceError("invalid matrix counts/workers", code="matrix_parameters_invalid")
-        if (counts != CORE_COUNTS or workers != CORE_WORKERS or args.rounds != 3 or args.warmups != 3 or args.samples != 10
-                or args.min_free_bytes <= 0 or args.max_working_set_bytes <= 0):
-            raise AcceptanceError(
-                "formal run must use the complete frozen core matrix and explicit positive resource thresholds",
-                code="matrix_parameters_invalid",
-                details={"required_counts": list(CORE_COUNTS), "required_workers": list(CORE_WORKERS), "rounds": 3, "warmups": 3, "samples": 10},
-            )
+        counts = validated["counts"]
+        workers = validated["workers"]
         cases = core_case_matrix(counts, workers, rounds=args.rounds, warmups=args.warmups, samples=args.samples)
         if args.acl_extension:
             cases.extend(acl_extension_matrix(workers, rounds=args.rounds, warmups=args.warmups, samples=args.samples))
@@ -645,6 +673,8 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _json_parser().parse_args(argv)
+        if args.command == "run":
+            validate_run_arguments(args)
         if args.command == "freeze":
             manifest = validate_output_path(args.manifest, must_not_exist=True)
             payload = create_source_freeze(ROOT)

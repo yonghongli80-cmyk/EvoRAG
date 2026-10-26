@@ -119,6 +119,48 @@ def test_failed_timed_worker_keeps_completed_observations_before_propagating(tmp
     assert progress["error"]["message"] == str(failure)
 
 
+def test_invalid_run_arguments_fail_before_preflight_or_isolated_setup(tmp_path, monkeypatch, capsys):
+    import scripts.paired_material_locator_acceptance as acceptance
+
+    artifact_root = acceptance.ROOT / "artifacts" / "material-locator-acceptance"
+    output = artifact_root / f"invalid-run-{tmp_path.name}.json"
+    fixture_root = output.parent / f"{output.stem}-fixtures"
+    assert not output.exists()
+    assert not fixture_root.exists()
+    rag_modules_before = {name for name in sys.modules if name == "rag" or name.startswith("rag.")}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid run reached preflight, isolation, or RAG setup")
+
+    for name in (
+        "validate_output_path",
+        "verify_source_freeze",
+        "_run_matrix",
+        "configure_isolated_context",
+        "install_offline_network_guard",
+        "sanitize_process_environment",
+        "install_sqlite_path_audit",
+        "load_frozen_baseline",
+    ):
+        monkeypatch.setattr(acceptance, name, forbidden)
+
+    result = acceptance.main([
+        "run",
+        "--manifest", str(tmp_path / "freeze.json"),
+        "--output", str(output),
+        "--min-free-bytes", "1024",
+        "--max-working-set-bytes", "1024",
+        "--counts", "1000,invalid,10000",
+        "--workers", "1,2",
+    ])
+
+    assert result == 2
+    assert not output.exists()
+    assert not fixture_root.exists()
+    assert {name for name in sys.modules if name == "rag" or name.startswith("rag.")} == rag_modules_before
+    assert '"matrix_parameters_invalid"' in capsys.readouterr().out
+
+
 def test_source_hashes_record_raw_and_lf_normalized_text(tmp_path):
     path = tmp_path / "source.py"
     path.write_bytes(b"one\r\ntwo\r\n")

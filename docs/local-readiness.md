@@ -8,16 +8,18 @@
 
 | 子项目 | 本地工作 | 当前状态 |
 |---|---|---|
-| 可移植验收工具 | tracked CLI 分开 freeze/check/run，具备 Windows/Linux 资源门禁、冻结、隔离、完整对照和失败 partial 证据 | 26项fixture单测及分项/修复复审通过；真实Linux和正式run未执行 |
+| 可移植验收工具 | tracked CLI 分开 freeze/check/run，具备 Windows/Linux 资源门禁、冻结、隔离、完整对照和失败 partial 证据；非法run参数先于应用加载拒绝 | 27项fixture单测通过，分项和partial修复复审通过；最终参数顺序修正的增量复审待关闭；真实Linux和正式run未执行 |
 | API 启动治理 | 拆出纯导入启动实现，保留动态 facade/延迟依赖；修复后期启动 hook 失败时漏清理及清理错误覆盖原错误 | 定向37项及额外API用例1项、独立复审通过；生产锁合成启动烟测5项通过，完整后端待验证 |
-| SQL/事务迁移准备 | 只读 AST/SQL 清单工具，显式 unresolved/coverage；定义目标 UoW 合同，不修改 SQLite 运行行为 | 10项fixture单测及两轮修复复审通过，最终源码冻结后生成实际清单 |
-| 文档状态治理 | 统一当前交付、历史快照和真正未完成项，保留旧证据数字 | 本页与索引已整理，最终链接/工具接口核对待完成 |
+| SQL/事务迁移准备 | 只读 AST/SQL 清单工具，显式 unresolved/coverage；定义目标 UoW 合同，不修改 SQLite 运行行为 | 10项fixture单测及两轮修复复审通过；源树扫描208文件、850条静态SQL、103项unresolved，0读取/语法错误 |
+| 文档状态治理 | 统一当前交付、历史快照和真正未完成项，保留旧证据数字 | 链接与CLI help核对通过；最终整体验收结果另行回填 |
 
 上述准备不能替代服务器运行验收。工具拥有 Linux 分支或 cgroup fixture 单测通过，也不能证明在目标 Linux/容器中实际采样成功；查询数减少不能证明延迟或长尾改善。
 
 工具入口为 `python -m scripts.paired_material_locator_acceptance {freeze,check,run}`，仅从源Git checkout执行。`freeze`/`check`不导入RAG、不建数据库或运行定位；输出只允许新建在 `artifacts/material-locator-acceptance/` 下。`run`才生成负载，必须提供服务器选定的正数资源门槛、完整counts/workers，且本轮未调用。后续每次运行新建输出目录，不能复用旧freeze或覆盖历史报告。
 
 SQL准备入口见[静态清单说明](architecture/sql-portability-inventory.md)与[目标UoW合同](architecture/unit-of-work-contract.md)。Python SQL标记使用真实参数表达式起始行作源码锚点，另列SQL相对行/语句序号；这不等于token级源码映射。CLI遇动态SQL或解析空缺会输出报告并返回1，不能把该非零状态改报全覆盖成功。
+
+本轮只读扫描覆盖204个Python和4个SQL文件，另记录349个事务位置、50个代码可移植性标记；103个unresolved是无法从AST静态还原的表达式，不等于103个已证实bug。源清单绑定283887e的rag/scanner内容，最终候选仅新增验收工具参数校验时可核对这些文件未变再复用该清单；未来代码变化应另建报告。首次freeze/check已核验605个冻结文件且退出0，最终候选仍需独立生成新的清单，不将旧manifest复用为目标服务器验收。
 
 ## 已完成，不重复开发
 
