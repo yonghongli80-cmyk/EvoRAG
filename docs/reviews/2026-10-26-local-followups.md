@@ -58,4 +58,6 @@
 
 当前计划与过程见[实施计划](../superpowers/plans/2026-10-26-local-followups.md)和[设计](../superpowers/specs/2026-10-26-local-followups-design.md)。源审查用法见[SQL 与 writer 说明](../architecture/dynamic-sql-and-writer-review.md)。正式 Linux/cgroup、完整压力矩阵、P50/P95/P99/吞吐/SLO、真实存量迁移/上线恢复、两个真实脱敏表格 fixture、供应商真实返回头、PG/UoW、共享一致性/对象存储/多实例和生产 shadow 仍未因此完成；服务器项目继续按用户要求暂缓。
 
-工作记录及非 DB 证据归档：待整体验收和实际 submit 成功后填入回执。
+非DB证据已归档到D `artifacts/local-followups-2026-10-26/accepted-evidence`：**204份、2,918,559字节**，逐文件SHA256全部一致，实际归档退出0；未复制fixture数据库、依赖环境或.env。原始工作树、环境、SDD及失败证据继续保留；现有未跟踪AGENTS.md和公司记录目录未加入产品提交。最终文档与记录回执将另存closure快照，不覆盖初始证据。
+
+公司工作记录：待实际submit成功后填入回执。
