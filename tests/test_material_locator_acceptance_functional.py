@@ -200,9 +200,23 @@ for name, spec in profiles.items():
             assert [(int(row[0]), row[1]) for row in denied] == [(1, "public"), (2, "shared")]
 
         baseline_class = acceptance.load_frozen_baseline()
+        store = new_counter_store()
+        active = __import__("threading").local()
+        active.name, active.phase = None, None
+        acceptance._install_sql_trace(db, store, active)
+        for implementation in ("old", "new"):
+            install_repository_counters(db.material_repo, store, implementation, active)
+
+        def measured(implementation, operation, *args):
+            active.name, active.phase = implementation, "functional"
+            try:
+                return operation(*args)
+            finally:
+                active.name, active.phase = None, None
+
         query = MaterialLocationQuery(text="paired", subject=None, top_k=10)
-        old_value = snapshot(baseline_class(db), query, user)
-        new_value = snapshot(MaterialLocator(db), query, user)
+        old_value = measured("old", snapshot, baseline_class(db), query, user)
+        new_value = measured("new", snapshot, MaterialLocator(db), query, user)
         assert old_value == new_value, name
         assert {int(row[0]) for row in new_value[0]} == expected_ids, (name, new_value[0])
         assert new_value[1] == "\n".join(
@@ -222,12 +236,20 @@ for name, spec in profiles.items():
                 assert row is not None and row[0] is not None
                 version_ids.append(int(row[0]))
         semantic_query = MaterialLocationQuery(text="paired", subject=None, top_k=1)
-        expected_top1_old = snapshot(baseline_class(db), semantic_query, user)
-        expected_top1_new = snapshot(MaterialLocator(db), semantic_query, user)
+        expected_top1_old = measured(
+            "old", snapshot, baseline_class(db), semantic_query, user
+        )
+        expected_top1_new = measured(
+            "new", snapshot, MaterialLocator(db), semantic_query, user
+        )
         assert expected_top1_old == expected_top1_new, name
         assert {int(row[0]) for row in expected_top1_new[0]} <= expected_ids, name
-        old_semantic = semantic_probe(baseline_class, db, semantic_query, user)
-        new_semantic = semantic_probe(MaterialLocator, db, semantic_query, user)
+        old_semantic = measured(
+            "old", semantic_probe, baseline_class, db, semantic_query, user
+        )
+        new_semantic = measured(
+            "new", semantic_probe, MaterialLocator, db, semantic_query, user
+        )
         expected_call = [{
             "text": "paired", "allowed_version_ids": sorted(version_ids), "top_k": 1,
         }]
@@ -237,35 +259,52 @@ for name, spec in profiles.items():
         assert old_semantic["model_input"] == new_value[1]
         assert len(old_semantic["calls"][0]["allowed_version_ids"]) > semantic_query.top_k
 
-        store = new_counter_store()
-        active = __import__("threading").local()
-        active.name, active.phase = None, None
-        acceptance._install_sql_trace(db, store, active)
-        for implementation in ("old", "new"):
-            install_repository_counters(db.material_repo, store, implementation, active)
-        for implementation in ("old", "new"):
-            active.name, active.phase = implementation, "functional"
-            repo = db.material_repo
-            all_rows = repo.list_material_documents_with_current_version()
-            kb_ids = repo.list_material_document_kb_ids()
-            per_kb_rows = repo.list_material_documents_for_kb(
-                kb_ids[0], apply_legacy_acl=True, user_id=int(user["id"])
-            )
-            plan_rows = repo.list_material_documents_for_access_plan(
-                [(kb_ids[0], True)], user_id=int(user["id"])
-            )
-            assert len(all_rows) == 8
-            assert kb_ids
-            assert len(per_kb_rows) == len(plan_rows)
-        active.name, active.phase = None, None
-
         counts = repository_counter_snapshot(store)
         database_counts = database_counter_snapshot(store)
+        expected_calls = {
+            "old": {
+                method: int(method == "list_material_documents_with_current_version") * 3
+                for method in counter_methods
+            },
+            "new": {
+                method: 0
+                for method in counter_methods
+            },
+        }
+        expected_calls["new"]["list_material_document_kb_ids"] = 3
+        expected_rows = {
+            implementation: {method: 0 for method in counter_methods}
+            for implementation in ("old", "new")
+        }
+        expected_rows["old"]["list_material_documents_with_current_version"] = 8 * 3
+        expected_rows["new"]["list_material_document_kb_ids"] = (
+            spec["construction"]["kbs"] * 3
+        )
+        if spec["admin"]:
+            expected_calls["new"]["list_material_documents_with_current_version"] = 3
+            expected_rows["new"]["list_material_documents_with_current_version"] = 8 * 3
+        else:
+            expected_calls["new"]["list_material_documents_for_access_plan"] = 3
+            expected_rows["new"]["list_material_documents_for_access_plan"] = (
+                len(expected_ids) * 3
+            )
         for implementation in ("old", "new"):
             for method in counter_methods:
                 cell = counts[implementation][method]["functional"]
-                assert cell["calls"] == 1, (name, implementation, method, cell)
-                assert cell["returned_list_rows"] >= 0
+                assert cell["calls"] == expected_calls[implementation][method], (
+                    name,
+                    implementation,
+                    method,
+                    "instrumented calls must match real locator probe paths",
+                    cell,
+                )
+                assert cell["returned_list_rows"] == expected_rows[implementation][method], (
+                    name,
+                    implementation,
+                    method,
+                    "returned rows must come from real locator probes",
+                    cell,
+                )
             assert store["sql_by_phase"][implementation]["functional"], (
                 name, implementation, "missing functional SQL trace"
             )
