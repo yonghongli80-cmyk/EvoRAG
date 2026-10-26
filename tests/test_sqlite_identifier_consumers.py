@@ -89,6 +89,30 @@ def test_store_keeps_staging_atomic_when_identifier_contains_nul(tmp_path):
     assert not list(tmp_path.glob("dataset.sqlite3.*.staging"))
 
 
+def test_store_nul_failure_preserves_existing_dataset_bytes_and_rows(tmp_path):
+    target = tmp_path / "dataset.sqlite3"
+    write_dataset(target, _manual_workbook("sheet_0001", "c_0001", "old-value"))
+    before = _file_sha256(target)
+    with sqlite3.connect(target) as connection:
+        before_rows = connection.execute("SELECT __row_number, c_0001 FROM sheet_0001").fetchall()
+
+    try:
+        write_dataset(target, _manual_workbook("sheet\x00bad", "c_0001", "new-value"))
+    except (TypeError, ValueError, sqlite3.DatabaseError):
+        pass
+    else:
+        raise AssertionError("invalid SQLite identifier unexpectedly persisted")
+
+    assert _file_sha256(target) == before
+    with sqlite3.connect(target) as connection:
+        assert (
+            connection.execute("SELECT __row_number, c_0001 FROM sheet_0001").fetchall()
+            == before_rows
+            == [(2, "old-value")]
+        )
+    assert not list(tmp_path.glob("dataset.sqlite3.*.staging"))
+
+
 def _seed_api_dataset(client: TestClient, owner: dict, tmp_path: Path):
     db = client.app.state.user_db
     document_id = db.create_document_permission("quoted.xlsx", "rag_docs", owner["id"])
@@ -98,7 +122,11 @@ def _seed_api_dataset(client: TestClient, owner: dict, tmp_path: Path):
     target.parent.mkdir(parents=True, exist_ok=True)
     table_name = 'actual "table" 雪'
     column_name = 'actual "column" name'
-    stored_value = "this is stored data, not the identifier"
+    stored_values = {
+        1: "stored row one differs from identifier",
+        3: "stored row three differs from identifier",
+        5: "stored row five differs from identifier",
+    }
     with sqlite3.connect(target) as connection:
         connection.executescript(
             """
@@ -138,13 +166,13 @@ def _seed_api_dataset(client: TestClient, owner: dict, tmp_path: Path):
             f"(__row_number INTEGER NOT NULL, "
             f"{_quote_for_fixture(column_name)} TEXT)"
         )
-        connection.execute(
+        connection.executemany(
             f"INSERT INTO {_quote_for_fixture(table_name)} VALUES (?, ?)",
-            (2, stored_value),
+            [(row_number, stored_values[row_number]) for row_number in (5, 1, 3)],
         )
         connection.execute(
             "INSERT INTO sheet_manifest VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("sheet_0001", table_name, "quoted", 1, "visible", 1, 2, 1, 1),
+            ("sheet_0001", table_name, "quoted", 1, "visible", 1, 1, 3, 1),
         )
         connection.execute(
             "INSERT INTO column_manifest VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -165,22 +193,23 @@ def _seed_api_dataset(client: TestClient, owner: dict, tmp_path: Path):
         kb_id="rag_docs",
         filename="quoted.xlsx",
     )
-    return document_id, version_id, table_name, column_name, stored_value
+    return document_id, version_id, table_name, column_name, stored_values
 
 
 def test_rows_reads_quoted_manifest_identifiers_and_keeps_pagination_contract(isolated_api, make_user, tmp_path):
     isolated_api._transport.raise_server_exceptions = False
     owner, headers = make_user("quoted-identifiers-owner")
-    document_id, version_id, table_name, column_name, stored_value = _seed_api_dataset(isolated_api, owner, tmp_path)
+    document_id, version_id, table_name, column_name, stored_values = _seed_api_dataset(isolated_api, owner, tmp_path)
 
-    response = isolated_api.get(
-        f"/documents/{document_id}/versions/{version_id}/sheets/sheet_0001/rows?after_row=1&limit=1",
-        headers=headers,
-    )
+    endpoint = f"/documents/{document_id}/versions/{version_id}/sheets/sheet_0001/rows"
+    response = isolated_api.get(endpoint, params={"after_row": 0, "limit": 2}, headers=headers)
 
     assert response.status_code == 200
     body = response.json()
-    assert body["rows"] == [{"row_number": 2, "values": [stored_value]}]
+    assert body["rows"] == [
+        {"row_number": 1, "values": [stored_values[1]]},
+        {"row_number": 3, "values": [stored_values[3]]},
+    ]
     assert body["columns"] == [
         {
             "column_key": column_name,
@@ -192,6 +221,18 @@ def test_rows_reads_quoted_manifest_identifiers_and_keeps_pagination_contract(is
     assert body["can_edit"] is True
     assert table_name not in response.text
     assert "sqlite" not in response.text.lower()
+
+    cursor_page = isolated_api.get(endpoint, params={"after_row": 1, "limit": 1}, headers=headers)
+    assert cursor_page.status_code == 200
+    assert cursor_page.json()["rows"] == [{"row_number": 3, "values": [stored_values[3]]}]
+
+    last_page = isolated_api.get(endpoint, params={"after_row": 3, "limit": 1}, headers=headers)
+    assert last_page.status_code == 200
+    assert last_page.json()["rows"] == [{"row_number": 5, "values": [stored_values[5]]}]
+
+    empty_page = isolated_api.get(endpoint, params={"after_row": 5, "limit": 2}, headers=headers)
+    assert empty_page.status_code == 200
+    assert empty_page.json()["rows"] == []
 
 
 def _create_minimal_snapshot(path: Path) -> None:
