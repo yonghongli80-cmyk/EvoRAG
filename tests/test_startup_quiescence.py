@@ -1,6 +1,8 @@
 """Real-thread regression coverage for early API startup cancellation."""
 
 import asyncio
+import gc
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -417,3 +419,99 @@ def test_completion_after_event_loop_close_runs_cleanup_without_pending_task():
         if not loop.is_closed():
             loop.close()
         asyncio.set_event_loop(None)
+
+
+def test_late_worker_failure_after_cancel_is_logged_and_consumed(monkeypatch, caplog):
+    """Late thread errors must not replace cancellation or leak Future warnings."""
+    import rag.api as api
+    from rag.startup_lifecycle import StartupLifecycle
+
+    entered = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+    cleanup_finished = threading.Event()
+    resource_open = threading.Event()
+    resource_open.set()
+    worker_saw_open_resource = []
+    cleanup_calls = []
+    observed_primary_errors = []
+    late_error = RuntimeError("late startup worker failure")
+    loop_contexts = []
+
+    def blocked_index_then_fail():
+        entered.set()
+        try:
+            release.wait(10)
+            worker_saw_open_resource.append(resource_open.is_set())
+            raise late_error
+        finally:
+            worker_finished.set()
+
+    def close_resources():
+        cleanup_calls.append("close")
+        resource_open.clear()
+        cleanup_finished.set()
+
+    monkeypatch.setattr(api, "_run_legacy_kb_migration", lambda: None)
+    monkeypatch.setattr(api, "auto_index_on_startup", blocked_index_then_fail)
+    monkeypatch.setattr(api, "_run_staged_version_migration", lambda: None)
+    monkeypatch.setattr(api, "start_backup_scheduler", lambda: None)
+    monkeypatch.setattr(api, "start_evolution_worker", lambda: None)
+    monkeypatch.setattr(api, "restore_question_set_rollout", lambda: None)
+    monkeypatch.setattr(api, "stop_backup_scheduler", lambda: cleanup_calls.append("backup"))
+    monkeypatch.setattr(api, "stop_evolution_worker", lambda: cleanup_calls.append("evolution"))
+    monkeypatch.setattr(api, "close_pipeline_processors", close_resources)
+    owner = StartupLifecycle(cancel_grace_seconds=0.05)
+    monkeypatch.setattr(api.app.state, "startup_lifecycle_owner", owner)
+
+    original_finish = owner.finish
+
+    async def capture_primary_error(cleanup_hooks, primary_error):
+        observed_primary_errors.append(primary_error)
+        return await original_finish(cleanup_hooks, primary_error)
+
+    monkeypatch.setattr(owner, "finish", capture_primary_error)
+    caplog.set_level(logging.ERROR, logger="rag.startup_lifecycle")
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        original_exception_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: loop_contexts.append(context))
+        lifespan_task = asyncio.create_task(_run_lifespan(api))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5), "index worker did not enter"
+            lifespan_task.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await lifespan_task
+
+            assert len(observed_primary_errors) == 1
+            assert observed_primary_errors[0] is raised.value
+            assert owner.state == "cleanup_deferred"
+            assert not worker_finished.is_set()
+            assert resource_open.is_set()
+            assert cleanup_calls == []
+
+            release.set()
+            assert await asyncio.to_thread(worker_finished.wait, 5)
+            assert await asyncio.to_thread(cleanup_finished.wait, 5)
+            assert not loop.is_closed(), "late error must be delivered while its loop is alive"
+            # Drain the real default executor while the exception handler is
+            # still installed, then let its completion callbacks run before
+            # forcing Future finalizers.
+            await loop.shutdown_default_executor()
+            for _ in range(3):
+                await asyncio.sleep(0)
+                gc.collect()
+
+            assert worker_saw_open_resource == [True]
+            assert cleanup_calls == ["backup", "evolution", "close"]
+            assert not resource_open.is_set()
+            assert not any(
+                "Future exception was never retrieved" in context.get("message", "") for context in loop_contexts
+            )
+            assert "late startup worker failure" in caplog.text
+        finally:
+            release.set()
+            loop.set_exception_handler(original_exception_handler)
+
+    asyncio.run(exercise())
