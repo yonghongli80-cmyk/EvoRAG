@@ -351,16 +351,19 @@ class _PythonInventory(ast.NodeVisitor):
                                 "classification": "sql_lex_error",
                             }
                         )
-                    for relative_line, statement in statements:
+                    for statement_index, (relative_line, statement) in enumerate(statements, start=1):
                         active_sql = _active_sql(statement)
                         for marker, pattern in _SQL_TRANSACTION_PATTERNS:
                             if pattern.search(active_sql):
                                 self.transaction_markers.append(
                                     {
                                         "path": self.relative_path,
-                                        "line": sql_node.lineno + relative_line - 1,
+                                        "line": sql_node.lineno,
                                         "owner": self.owner,
                                         "marker": marker,
+                                        "location_kind": "python_expression_start",
+                                        "sql_relative_line": relative_line,
+                                        "statement_index": statement_index,
                                     }
                                 )
         if name in _TRANSACTION_CALLS:
@@ -490,6 +493,7 @@ def scan_tree(root: Path) -> dict[str, Any]:
                                 "line": line,
                                 "owner": "<sql-file>",
                                 "marker": marker,
+                                "location_kind": "sql_file_actual_line",
                             }
                         )
 

@@ -108,6 +108,9 @@ def test_scan_records_sql_file_and_transaction_markers_with_owners_and_source_li
         (14, "write_connection", "SampleRepository.save"),
         (4, "begin", "<sql-file>"),
     ]
+    sql_file_marker = next(marker for marker in markers if marker["owner"] == "<sql-file>")
+    assert sql_file_marker["line"] == 4
+    assert sql_file_marker["location_kind"] == "sql_file_actual_line"
     assert [
         (marker["line"], marker["marker"], marker["owner"])
         for marker in report["code_markers"]
@@ -136,14 +139,59 @@ COMMIT;""")
     report = audit_sql_portability.scan_tree(rag_root)
 
     assert [
-        (marker["line"], marker["marker"], marker["owner"])
+        (
+            marker["line"],
+            marker["marker"],
+            marker["owner"],
+            marker["location_kind"],
+            marker["sql_relative_line"],
+            marker["statement_index"],
+        )
         for marker in report["transaction_markers"]
     ] == [
-        (6, "begin", "Migrator.apply"),
-        (7, "commit", "Migrator.apply"),
+        (3, "begin", "Migrator.apply", "python_expression_start", 4, 3),
+        (3, "commit", "Migrator.apply", "python_expression_start", 5, 4),
     ]
     assert report["unresolved"] == []
     assert report["coverage"]["complete"] is True
+
+
+def test_python_sql_marker_locations_anchor_to_ast_expression_and_keep_sql_offsets(
+    tmp_path: Path,
+) -> None:
+    rag_root = tmp_path / "rag"
+    rag_root.mkdir()
+    source = rag_root / "line_mapping.py"
+    source.write_text(
+        "class Migrator:\n"
+        "    def apply(self, conn):\n"
+        '        conn.executescript("CREATE TABLE t(id);\\nBEGIN;\\nCOMMIT;")\n'
+        "        conn.executescript(\n"
+        '            "CREATE TABLE u(id);\\n"\n'
+        '            + "BEGIN;\\n"\n'
+        '            + "COMMIT;"\n'
+        "        )\n",
+        encoding="utf-8",
+    )
+
+    report = audit_sql_portability.scan_tree(rag_root)
+
+    assert [
+        (
+            marker["line"],
+            marker["marker"],
+            marker["owner"],
+            marker["location_kind"],
+            marker["sql_relative_line"],
+            marker["statement_index"],
+        )
+        for marker in report["transaction_markers"]
+    ] == [
+        (3, "begin", "Migrator.apply", "python_expression_start", 2, 2),
+        (3, "commit", "Migrator.apply", "python_expression_start", 3, 3),
+        (5, "begin", "Migrator.apply", "python_expression_start", 2, 2),
+        (5, "commit", "Migrator.apply", "python_expression_start", 3, 3),
+    ]
 
 
 def test_scan_reports_syntax_errors_without_claiming_complete_coverage(tmp_path: Path) -> None:

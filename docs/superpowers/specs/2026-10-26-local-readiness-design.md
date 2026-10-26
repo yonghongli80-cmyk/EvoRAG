@@ -44,7 +44,7 @@ Windows 延迟加载 ctypes API，采可用内存/自身 working set并设置 Be
 
 新增离线 `scripts/audit_sql_portability.py` 和单测。默认只读取显式 rag 根的 .py/.sql，不读取业务DB、.env、artifact或导入应用；无 eval、exec、SQL执行、驱动安装或自动重写。Python用AST提取 execute/executemany/executescript 的字面量及纯静态字符串拼接，动态/f-string/变量/不支持表达式标记 unresolved，语法/读文件失败显式报告。SQL文件按方言标记扫描；注释/字符串处理保守并说明局限。
 
-JSON按path/line稳定排序，记录 owner function、sink、静态/动态分类、SQLite特性（PRAGMA、AUTOINCREMENT、INSERT OR/REPLACE、rowid、FTS/MATCH/virtual table、strftime等）及事务/commit/rollback/read/write_connection位置。它是候选 SQL 静态盘点，不宣称全部SQL已解析或PG不兼容已证明。输出必须显式有 unresolved/coverage 字段，路径/行精确可复核，已有输出拒绝覆盖；诊断无改写/执行副作用。
+JSON按path/line稳定排序，记录 owner function、sink、静态/动态分类、SQLite特性（PRAGMA、AUTOINCREMENT、INSERT OR/REPLACE、rowid、FTS/MATCH/virtual table、strftime等）及事务/commit/rollback/read/write_connection位置。Python SQL 字面量的源码位置统一锚定参数表达式的实际 AST 起始行，另列 SQL 内相对行/statement位置；不把解码后的换行或拼接结果当作真实 Python 源码行。SQL 文件标记仍使用文件实际行。此取舍保留可核查的源码锚点，精确 token 级反向映射不在本轮范围。它是候选 SQL 静态盘点，不宣称全部SQL已解析或PG不兼容已证明。输出必须显式有 unresolved/coverage 字段，路径/行精确可复核，已有输出拒绝覆盖；诊断无改写/执行副作用。
 
 配套 `docs/architecture/sql-portability-inventory.md` 和 `docs/architecture/unit-of-work-contract.md` 说明实际清单、当前分散事务与目标UoW、跨repo原子性、savepoint/整命令重试/outbox、合成golden与未来PG环境准入。只交付工具与迁移准备契约，不新增空壳主库adapter、不改变SQLite业务语义，不把文档或测试准备称PG支持。
 
