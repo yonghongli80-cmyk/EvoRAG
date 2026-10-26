@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import sys
@@ -96,6 +95,7 @@ from rag.routers.system import (
 from rag.routers.system import (
     record_http_request as record_http_request,
 )
+from rag.startup_lifecycle import StartupLifecycle
 from rag.wiki.api import router as wiki_router
 
 # Module-level logging
@@ -128,12 +128,13 @@ def restore_question_set_rollout():
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    _run_legacy_kb_migration()
-    await asyncio.to_thread(auto_index_on_startup)
-    await asyncio.to_thread(_run_staged_version_migration)
-
+    startup_lifecycle = _app.state.startup_lifecycle_owner
+    startup_lifecycle.enter()
     primary_error = None
     try:
+        _run_legacy_kb_migration()
+        await startup_lifecycle.to_thread(auto_index_on_startup)
+        await startup_lifecycle.to_thread(_run_staged_version_migration)
         start_backup_scheduler()
         start_evolution_worker()
         restore_question_set_rollout()
@@ -142,21 +143,12 @@ async def lifespan(_app: FastAPI):
         primary_error = error
         raise
     finally:
-        first_cleanup_error = None
         cleanup_hooks = (
             ("stop_backup_scheduler", stop_backup_scheduler),
             ("stop_evolution_worker", stop_evolution_worker),
             ("close_pipeline_processors", close_pipeline_processors),
         )
-        for name, cleanup in cleanup_hooks:
-            try:
-                cleanup()
-            except BaseException as error:
-                logger.exception("API lifecycle cleanup hook failed: %s", name)
-                if first_cleanup_error is None:
-                    first_cleanup_error = error
-        if primary_error is None and first_cleanup_error is not None:
-            raise first_cleanup_error
+        await startup_lifecycle.finish(cleanup_hooks, primary_error)
 
 
 app = FastAPI(
@@ -164,6 +156,7 @@ app = FastAPI(
     description="基于检索增强生成的智能知识库系统",
     lifespan=lifespan,
 )
+app.state.startup_lifecycle_owner = StartupLifecycle()
 
 # Mount modular routers
 app.include_router(operations_router)

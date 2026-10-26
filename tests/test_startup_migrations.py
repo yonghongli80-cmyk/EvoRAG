@@ -7,6 +7,7 @@ still point into the excluded ``staging`` directory.
 """
 
 import asyncio
+import contextvars
 from pathlib import Path
 
 import pytest
@@ -51,9 +52,12 @@ def test_lifespan_runs_lifecycle_migrations_in_sync_workers_before_backups(
 
     order: list[str] = []
     in_sync_worker: dict[str, bool] = {}
+    startup_context = contextvars.ContextVar("startup_context", default=None)
+    in_startup_context: dict[str, object] = {}
 
     def record(name: str) -> None:
         order.append(name)
+        in_startup_context[name] = startup_context.get()
         try:
             current_task = asyncio.current_task()
         except RuntimeError:
@@ -78,6 +82,7 @@ def test_lifespan_runs_lifecycle_migrations_in_sync_workers_before_backups(
         monkeypatch.setattr(api, name, lambda: None)
 
     async def _enter() -> None:
+        startup_context.set("api-lifespan-context")
         async with api.lifespan(api.app):
             pass
 
@@ -88,6 +93,12 @@ def test_lifespan_runs_lifecycle_migrations_in_sync_workers_before_backups(
     assert in_sync_worker["index"] is True
     assert in_sync_worker["staged_versions"] is True
     assert in_sync_worker["backups"] is False
+    assert in_startup_context == {
+        "legacy_kb": "api-lifespan-context",
+        "index": "api-lifespan-context",
+        "staged_versions": "api-lifespan-context",
+        "backups": "api-lifespan-context",
+    }
 
 
 def test_startup_repairs_committed_versions_left_in_staging(isolated_api, make_user):
