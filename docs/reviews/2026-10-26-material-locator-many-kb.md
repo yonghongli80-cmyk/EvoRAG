@@ -48,4 +48,4 @@
 
 09:43:51 最终检查：原 8080 仍为 PID48512、启动时间 2026-10-23T14:09:17.6870660+08:00，ready 200，配置哈希保持；D main `542a36f`、跟踪树干净。只做必要健康检查和 `.env` 哈希核对，没有读取业务资料/数据库、重启、reload、部署或运行恢复/迁移。
 
-本轮设计、实现和独立复审按[计划](../superpowers/plans/2026-10-26-material-locator-many-kb.md)执行。原始证据在 C 工作树 ignored `artifacts/material-locator-acceptance-2026-10-26/`、专属 `.superpowers/sdd/2026-10-26-material-locator-many-kb/`；Attempt4 原件在旧 artifact/verification，旧运行和原环境均保留。公司记录与归档在实际提交/校验后补回执，不预填成功。
+本轮设计、实现和独立复审按[计划](../superpowers/plans/2026-10-26-material-locator-many-kb.md)执行。原始证据在 C 工作树 ignored `artifacts/material-locator-acceptance-2026-10-26/`、专属 `.superpowers/sdd/2026-10-26-material-locator-many-kb/`；Attempt4 原件在旧 artifact/verification，旧运行和原环境均保留。验收文档提交 `f919bfe`；公司记录已实际 submit 成功：`R-20261026-B9CF2494`、`pending_review`，timer `T-990C8E3E458E`，实际退出 0。随后只补回执，受测产品源码仍为 `7200e30`。
