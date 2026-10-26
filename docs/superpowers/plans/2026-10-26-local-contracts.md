@@ -54,7 +54,7 @@
 - [x] 各task独立SPEC/QUALITY、原作者fix-loop；一次整分支review、最多一波final修复与scoped review。
 - [x] 最终源冻结、生产锁合成启动/identifier烟测、一次完整后端回归、Ruff/格式、前后freeze/check；不相加分项或复用上一批3462/5数字。
 - [x] 新SQL inventory；重新审查B影响的finding/evidence，其余仅匹配identity/hash后保留；新manifest严格Rag source refs/raw hash，独立生成物核对；新writer候选，PG/writer未证明标记保留。
-- [ ] 更新当前入口/交接/本批报告和剩余待办，核对原服务PID/start/ready/env hash/Dmain与跟踪树；实际submit当前唯一记录、非DB归档，保留local branch，不merge/push/deploy。
+- [x] 更新当前入口/交接/本批报告和剩余待办，核对原服务PID/start/ready/env hash/Dmain与跟踪树；实际submit当前唯一记录、非DB归档，保留local branch，不merge/push/deploy。
 
 ## Preflight
 
