@@ -38,6 +38,8 @@
 
 初始build必须unreviewed。人工/AI逐项源代码审查可标 `understood_shape`、`needs_followup`、`external_source` 等明确disposition；有证据指针/rationale，有限identifier需要列closed-set来源，绑定值形状与语法片段分开，opaque SQL不能捏造模板，needs_followup要有下一步。validator仅证明完整性和绑定，不自动证明rationale正确、SQL安全或PG可移植。输出review coverage与portability readiness分开，后者保持未验。
 
+复审补充的机械来源合同：本批 evidence 仅接受 Rag 源根内相对 `path#L正整数`，文件与行号必须存在，reviewed finding 须含自身 source_ref；每项 `evidence_sha256` 精确记录所引用文件的原始 SHA256，校验时逐个比对当前内容，跨文件引用改变也须失效。unreviewed 的引用与hash映射为空。external_source 仍引用连接器源码，不新增外部URL证据类型。记录hash是显式审查/重绑动作，validator不能自动补当前hash来掩盖过期；语义判断仍由独立审查承担。
+
 生成并独立复核本次103项的源审查register到专属artifact；可按group共享rationale但每finding有自己的hash/指针/disposition。不强行把全部未知“resolved”，不执行/评估SQL，也不自动重写业务代码。
 
 新增 `scripts/audit_transaction_ownership.py`，AST只读发现read/write/locked_transaction/transaction/write_cursor/get_write_connection、raw execute/commit/rollback、sqlite3.connect构造与词法with上下文。记录路径/行/owner、connection hint、嵌套/直接commit/可能caller-owned、private store与外部datasource边界；未知类型/别名/动态分派明确unknown，不能把grep或AST hit当可达操作数/完整writer证明。Rag和scripts明确范围，诊断fixture writer单独分域不混作业务入口。
