@@ -340,17 +340,29 @@ class _PythonInventory(ast.NodeVisitor):
                             "features": _features(sql),
                         }
                     )
-                    active_sql = _active_sql(sql)
-                    for marker, pattern in _SQL_TRANSACTION_PATTERNS:
-                        if pattern.search(active_sql):
-                            self.transaction_markers.append(
-                                {
-                                    "path": self.relative_path,
-                                    "line": sql_node.lineno,
-                                    "owner": self.owner,
-                                    "marker": marker,
-                                }
-                            )
+                    statements, well_formed = _sql_statements(sql)
+                    if not well_formed:
+                        self.unresolved.append(
+                            {
+                                "path": self.relative_path,
+                                "line": sql_node.lineno,
+                                "owner": self.owner,
+                                "sink": name,
+                                "classification": "sql_lex_error",
+                            }
+                        )
+                    for relative_line, statement in statements:
+                        active_sql = _active_sql(statement)
+                        for marker, pattern in _SQL_TRANSACTION_PATTERNS:
+                            if pattern.search(active_sql):
+                                self.transaction_markers.append(
+                                    {
+                                        "path": self.relative_path,
+                                        "line": sql_node.lineno + relative_line - 1,
+                                        "owner": self.owner,
+                                        "marker": marker,
+                                    }
+                                )
         if name in _TRANSACTION_CALLS:
             self.transaction_markers.append(
                 {

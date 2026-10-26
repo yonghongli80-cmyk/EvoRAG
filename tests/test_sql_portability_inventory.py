@@ -114,6 +114,38 @@ def test_scan_records_sql_file_and_transaction_markers_with_owners_and_source_li
     ] == [(15, "lastrowid", "SampleRepository.save")]
 
 
+def test_executescript_scans_each_literal_statement_for_transaction_markers(
+    tmp_path: Path,
+) -> None:
+    rag_root = tmp_path / "rag"
+    rag_root.mkdir()
+    source = rag_root / "migration.py"
+    source.write_text(
+        '''\
+class Migrator:
+    def apply(self, conn):
+        conn.executescript("""CREATE TABLE t(id);
+-- ROLLBACK; COMMIT;
+INSERT INTO t VALUES ('text; BEGIN; COMMIT;');
+BEGIN;
+COMMIT;""")
+''',
+        encoding="utf-8",
+    )
+
+    report = audit_sql_portability.scan_tree(rag_root)
+
+    assert [
+        (marker["line"], marker["marker"], marker["owner"])
+        for marker in report["transaction_markers"]
+    ] == [
+        (6, "begin", "Migrator.apply"),
+        (7, "commit", "Migrator.apply"),
+    ]
+    assert report["unresolved"] == []
+    assert report["coverage"]["complete"] is True
+
+
 def test_scan_reports_syntax_errors_without_claiming_complete_coverage(tmp_path: Path) -> None:
     rag_root = tmp_path / "rag"
     rag_root.mkdir()
