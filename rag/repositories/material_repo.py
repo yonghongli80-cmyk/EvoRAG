@@ -555,6 +555,75 @@ class MaterialRepository(BaseRepository):
             rows = conn.execute(statement, params).fetchall()
         return [dict(row) for row in rows]
 
+    def list_material_documents_for_access_plan(
+        self,
+        access_plan: Sequence[tuple[str, bool]],
+        *,
+        user_id: int | None,
+    ) -> list[dict[str, Any]]:
+        """Project complete rows for ordered KBs already authorized by the caller.
+
+        Each plan item is ``(kb_id, apply_legacy_acl)``. Legacy names are
+        resolved in SQL as KB/name pairs, so a matching filename in another KB
+        cannot grant access. Plan chunks stay contiguous to preserve the
+        caller's KB order when the SQLite variable limit requires batching.
+        """
+        plan = tuple(access_plan)
+        if not plan:
+            return []
+        for kb_id, apply_legacy_acl in plan:
+            if not isinstance(kb_id, str) or type(apply_legacy_acl) is not bool:
+                raise TypeError("access plan items must be (str, bool) pairs")
+
+        columns = (
+            "SELECT dp.id, dp.doc_name, dp.kb_id, dp.owner_id, dp.scope, "
+            "dp.protected, dp.current_version_id, dp.logical_path, "
+            "dp.document_type, dp.tags_json, dp.subject_user_id, dp.updated_at, "
+            "dp.metadata_version, dp.deleted_at, "
+            "dv.original_filename AS current_filename, "
+            "dv.validity_status AS current_validity_status, "
+            "dv.version_no AS current_version_no "
+        )
+        documents: list[dict[str, Any]] = []
+        with self.cm.read_connection() as conn:
+            variable_limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+            chunk_size = min(300, (variable_limit - 2) // 3)
+            if chunk_size < 1:
+                raise ValueError("SQLite variable limit is too low for one access-plan item")
+
+            for start in range(0, len(plan), chunk_size):
+                chunk = plan[start : start + chunk_size]
+                values_sql = ", ".join("(?, ?, ?)" for _ in chunk)
+                statement = (
+                    "WITH access_plan(kb_id, apply_legacy_acl, ordinal) AS (VALUES "
+                    f"{values_sql}), "
+                    "legacy_names(kb_id, doc_name) AS ("
+                    "SELECT DISTINCT names.kb_id COLLATE BINARY, "
+                    "names.doc_name COLLATE BINARY "
+                    "FROM access_plan plan "
+                    "JOIN document_permissions names ON names.kb_id = plan.kb_id "
+                    "WHERE plan.apply_legacy_acl = 1 AND (names.owner_id = ? "
+                    "OR names.scope = 'public' OR (names.scope = 'shared' "
+                    "AND names.id IN (SELECT doc_id FROM document_shares WHERE user_id = ?)))"
+                    ") " + columns + "FROM access_plan plan "
+                    "JOIN document_permissions dp ON dp.kb_id = plan.kb_id "
+                    "JOIN document_versions dv "
+                    "ON dv.id = dp.current_version_id AND dv.status = 'current' "
+                    "LEFT JOIN legacy_names allowed_names "
+                    "ON allowed_names.kb_id COLLATE BINARY = dp.kb_id COLLATE BINARY "
+                    "AND allowed_names.doc_name COLLATE BINARY = dp.doc_name COLLATE BINARY "
+                    "WHERE dp.deleted_at IS NULL "
+                    "AND (plan.apply_legacy_acl = 0 OR allowed_names.kb_id IS NOT NULL) "
+                    "ORDER BY plan.ordinal, dp.id"
+                )
+                parameters: list[Any] = []
+                for ordinal, (kb_id, apply_legacy_acl) in enumerate(plan[start : start + chunk_size], start=start):
+                    parameters.extend((kb_id, int(apply_legacy_acl), ordinal))
+                parameters.extend((user_id, user_id))
+                rows = conn.execute(statement, tuple(parameters)).fetchall()
+                documents.extend(dict(row) for row in rows)
+        return documents
+
     def create_organization_proposal(
         self, actor_id: int, instruction_hash: str, expires_at: float
     ) -> int:

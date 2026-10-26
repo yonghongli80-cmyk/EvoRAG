@@ -42,15 +42,22 @@ def iter_visible_material_documents(db: UserDB, user: dict) -> Iterator[tuple[in
                     yield int(row["id"]), row
         return
 
-    rows_by_kb = {kb_id: [] for kb_id in kb_ids}
-    for kb_id in full_kbs:
-        rows_by_kb[kb_id] = db.material_repo.list_material_documents_for_kb(kb_id, apply_legacy_acl=False)
-    for kb_id in legacy_kbs:
-        rows_by_kb[kb_id] = db.material_repo.list_material_documents_for_kb(
+    full_set = set(full_kbs)
+    legacy_set = set(legacy_kbs)
+    access_plan = [(kb_id, kb_id in legacy_set) for kb_id in kb_ids if kb_id in full_set or kb_id in legacy_set]
+    if not access_plan:
+        return
+    if len(access_plan) == 1:
+        kb_id, apply_legacy_acl = access_plan[0]
+        rows = db.material_repo.list_material_documents_for_kb(
             kb_id,
-            apply_legacy_acl=True,
+            apply_legacy_acl=apply_legacy_acl,
+            user_id=int(user_id) if apply_legacy_acl and user_id is not None else None,
+        )
+    else:
+        rows = db.material_repo.list_material_documents_for_access_plan(
+            access_plan,
             user_id=int(user_id) if user_id is not None else None,
         )
-    for kb_id in kb_ids:
-        for row in rows_by_kb[kb_id]:
-            yield int(row["id"]), row
+    for row in rows:
+        yield int(row["id"]), row
