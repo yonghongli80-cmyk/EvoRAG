@@ -27,7 +27,7 @@
 **Files:** rag/startup_lifecycle.py、rag/api.py；tests/test_startup_quiescence.py、tests/test_startup_migrations.py（必要兼容更新，不削弱既有断言）。Material supervisor默认只读，真有必要改需先root裁决。
 
 - [ ] 真实Thread/Event测试先RED：cancel时线程仍用资源却无随后清理；超时保留、完成后仅一次；queued cancel、重复cancel、不误关新owner、loop关闭后finalizer、原始错误/contextvars/正常顺序。
-- [ ] 实现owned-work追踪与app gate，保留default to_thread/上下文，5秒grace(测试可短注入)，按spec处理primary/cleanup与busy worker边界。
+- [ ] 实现owned-work追踪与app gate，保留default executor/ContextVars与to_thread等价后台同步语义，5秒grace(测试可短注入)，按spec处理primary/cleanup与busy worker边界。
 - [ ] 串行GREEN新/改startup+原index/lifecycle/legacy/architecture/API相关用例、Ruff/format；task1报告exactPID/exit/命令/输出与保留边界。
 
 ### Task 2: Tiny SQLite fixture functional validation

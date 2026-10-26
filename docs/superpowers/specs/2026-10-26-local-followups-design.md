@@ -8,7 +8,7 @@
 
 ### 选定边界
 
-新增纯标准库 `rag/startup_lifecycle.py`，API保持原同步legacy迁移→后台同步index→后台同步staged迁移→backup/evolution/restore→yield顺序、公共facade、ContextVars和默认executor行为。优先保留 `asyncio.to_thread`，内部用自有工作令牌跟踪“实际fn是否仍可能运行”：可由Executor桥接内部管理 concurrent Future 状态，queued cancel成功必须保证fn不会再进入，running任务只有fn退出后才完成。不得从已取消的asyncio等待推断工作结束，不引入新专用服务或默认新线程池。
+新增纯标准库 `rag/startup_lifecycle.py`，API保持原同步legacy迁移→后台同步index→后台同步staged迁移→backup/evolution/restore→yield顺序、公共facade、ContextVars和默认executor行为。可用 `asyncio.to_thread` 的owned wrapper，或等价的 `loop.run_in_executor(None, copy_context().run, wrapper)`，不强制保留一个在loop关闭后无法完成的asyncio Task；内部用自有工作令牌跟踪“实际fn是否仍可能运行”：可由Executor桥接内部管理 concurrent Future 状态，queued cancel成功必须保证fn不会再进入，running任务只有fn退出后才完成。不得从已取消的asyncio等待推断工作结束，不引入新专用服务或默认新线程池。
 
 每个app有启动owner/门闩；前一次abandoned工作仍在运行或其finalizer正在清理时，新启动在开始迁移/索引前拒绝，防止关闭新旧共享资源。正常启动完成可释放启动准入；不把该本地门闩称作多实例/数据库持久fencing。旧完成信号重复触发或晚到，不能清理新一轮资源。
 
