@@ -52,3 +52,5 @@
 正式Linux/cgroup/容器实测、服务器完整矩阵与P50/P95/P99/吞吐/容量、业务SLO、两项真实fixture、实际供应商返回头、PG主库/共享一致性/对象存储/多实例和生产shadow均未因此完成。下一阶段次序见[本地状态与剩余路线图](../local-readiness.md)，服务器压力门禁见[验收清单](../material-locator-server-acceptance.md)。
 
 实现/审查/整合工作记录已实际submit成功：`R-20261026-1133AA67`、`pending_review`，timer `T-016DB524EDC8`，实际退出0；验收文档提交77883e4，之后仅补回执，产品源码仍为d837501。初始工具勘查曾由子代理单独提交咨询记录 `R-20261026-C0FFC07B`（无timer，含一次无JSON失败后实际成功），后续明确仅root记录；本轮实现/审查/整合记录与该静态咨询分开范围，不重复登记咨询为实现成果。
+
+归档回执：非DB证据149份、1,936,518字节已复制到D `artifacts/local-prep-2026-10-26/accepted-evidence`，逐文件SHA256全部一致；未复制fixture DB、环境、依赖或.env。初始归档快照保留，本次最终文档/摘要回执另存其closure目录，原件与全部工作树继续保留。

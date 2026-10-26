@@ -69,4 +69,4 @@
 
 **Preflight:** Task1/2/3源码、测试互不共享；只共享解释器/测试CPU，以root许可串行运行。Task4独立文案可并行，精确CLI/状态依赖1/3 READY；不由docs改代码。Task2两个行为阶段同一owner顺序实施。root独占Git/recorder，review只读可并行。新需求/设计裁决写本SDD ledger，避免未记录扩大范围。
 
-- [ ] 非DB证据归档及逐文件hash核对，实际完成后补回执。
+- [x] 非DB证据149份已归档D专属artifact，逐文件SHA256全部一致；本次最终文档回执另存closure子目录。
