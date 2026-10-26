@@ -1,5 +1,6 @@
 # RAGv3 生产化升级方案（多实例）
 
+> 2026-10-26 当前状态统一见[本地准备与剩余工作](docs/local-readiness.md)。材料定位成果已交付main99834ca；服务器上线、业务迁移和修复后正式压测按用户要求暂缓。本文旧阶段记录保留历史，不把设计/配置/隔离合成验收等同产品多实例就绪。
 > 2026-10-25：新增[容量与候选SLO](docs/capacity-and-slo.md)、[DAL/PostgreSQL ADR](docs/architecture/data-access-postgresql.md)和[共享状态/存储/worker ADR](docs/architecture/shared-state-storage-workers.md)。材料定位组件27组合成测量已完成；ADR为设计与门禁，PG/对象存储/共享fencing/多实例未实现或运行验收，正式业务SLO未验收。详见[本轮报告](docs/reviews/2026-10-25-capacity-architecture.md)。
 
 > **状态：Phase 0 观测与真实模型合成资料基线已完成，真实业务分布/容量/稳定SLO仍待验收；Phase 1 配置与独立合成运行验收已完成，用户业务存量迁移未执行。** 日期：2026-10-24。
@@ -28,7 +29,7 @@
 **顺序**：Phase 0 观测基线 → Phase 1 Qdrant server → Phase 2 PostgreSQL → Phase 3 Redis 共享缓存/锁 →
 Phase 4 对象存储 → Phase 5 多副本与独立 worker → Phase 6 安全与容灾。
 
-**先做 0+1**：Qdrant 本地模式的独占目录锁是当前多进程的硬阻塞，不解决它，Redis、多副本都无从谈起。
+**0+1 的配置和隔离合成验收已完成，业务迁移尚未执行**：当前业务仍使用本地向量目录时不能让多进程共用该路径；仅切换 Qdrant URL 也不足以令 SQLite/本机文件应用多实例就绪。后续依赖顺序以新 ADR 和当前路线图为准。
 
 ---
 
@@ -41,7 +42,7 @@ Phase 4 对象存储 → Phase 5 多副本与独立 worker → Phase 6 安全与
 | SQLite | `ConnectionManager`：单写连接 + 线程本地只读连接 | 多副本写会锁；WAL 放共享盘不安全 | `rag/db/connection.py` |
 | SQL 方言 | 多张SQLite表、`INSERT OR IGNORE`、`lastrowid`、`PRAGMA`、FTS5；不沿用历史56表数量 | 不能直接换 Postgres，盘点见新ADR | `rag/repositories/schema.py`、`rag/db_migrations.py` |
 | Redis | 只给 LLM 池并发门用 | 答案缓存 `cached=None`；改写缓存是进程内 | `rag/llm_pool/router.py`、`rag/pipeline_prepare.py` |
-| 文件 | `data/upload`、`data/document_versions`、`data/structured_datasets` | 本机盘；Docker `COPY . .` 有带入风险 | `rag/context.py:27`、`.dockerignore` |
+| 文件 | `data/upload`、`data/document_versions`、`data/structured_datasets` | 本机盘；构建上下文已有数据/密钥/本机记录排除与引导白名单，新增本机文件仍须按部署指南核对 | `rag/context.py:27`、`.dockerignore` |
 | Worker | 素材/演化/备份在 API 进程内启动 | 多副本会重复跑 | `rag/api.py` lifespan |
 | 观测 | `/ready`、`/metrics` 与执行轨迹；rerank/generation 直接测量；日志统一请求/KB/逻辑路由 | 新负载采样与部署验收继续跟踪 | `rag/stage_timing.py`、`rag/logging_config.py`、`docs/phase0-observability-and-baseline.md` |
 
@@ -238,6 +239,8 @@ Client ──TLS──> LB / Reverse Proxy
 ---
 
 ## 9. 实施记录（2026-10-22，S7：Phase 0 + Phase 1 配置面）
+
+本节是当日历史记录；其中 daemon 不可用等状态已由10月24日宿主修复和隔离合成验收覆盖，详见当前交接。保留原表，不用它重新判定今天的 Docker 状态。
 
 | 项 | 内容 |
 | --- | --- |

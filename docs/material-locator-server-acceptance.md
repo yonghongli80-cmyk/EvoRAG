@@ -1,6 +1,6 @@
 # 材料定位服务器性能验收清单
 
-**状态：未执行；未通过性能验收。** 修复后的服务器配对压测尚未运行，当前没有可报告的性能收益、容量结论或 SLO 结论。本清单用于未来在指定部署服务器完成验收；本轮不适配或运行压测。
+**状态：服务器压测未执行，未通过性能验收。** 本地隔离分支已准备tracked Windows/Linux工具、fixture单测与分项复审，正式完整后端验证和本机只读freeze/check结果见[当前本地状态](local-readiness.md)。真实Linux/cgroup与服务器负载仍未验，没有修复后的性能收益、容量或SLO结论。
 
 本轮仅代码正确性受测冻结为 `7200e3040e77355c5859dfb5ea03383275301d5e`，见[整改报告](reviews/2026-10-26-material-locator-many-kb.md)。服务器执行时仍须绑定实际部署版本。旧 source fixture 的固定 **LF 标准化** SHA256 为 `54593297c81a31000dee9c26336db3198bc85e3e334f001cddb7f33766434bfc`；各文件原始字节哈希另记，跨 OS 不混淆 CRLF/LF 口径。
 
@@ -11,7 +11,18 @@
 - [ ] 固定 fixture 生成器版本、参数、随机种子（若适用）及生成数据摘要。所有旧新比较使用同一份真实 SQLite fixture 的副本或只读快照，确认 schema、行数、索引和逻辑内容一致；不连业务数据库，不使用真实资料或生产 `.env`。
 - [ ] 在目标服务器确定资源停止门槛、运行时段及并发限制，并记录依据和执行负责人。不得把旧 Windows 工作站的资源门槛直接当作服务器门槛，也不得临场降低门槛以完成矩阵。
 - [ ] 确认负载进程与业务服务、真实环境变量、数据库、资料目录和向量服务隔离。无外部模型/API 请求；若运行需要应用初始化，显式指向本次新建的合成数据目录并验证路径。
-- [ ] 确认目标平台适配完成并单独复核：现存 `paired_benchmark_task3.py` 使用 Windows 专属 `ctypes`/`kernel32`/`psapi` 资源 API，非 Windows 会明确退出；不能假定原命令可在 Linux 直接运行。后续需实现并审查目标平台资源采样/门禁适配，再由 root 冻结 helper 哈希；不得在本任务中执行该适配或负载。
+- [ ] 确认目标平台实机门禁通过：历史 `paired_benchmark_task3.py` 仍为Windows专属并保留不可变；新tracked入口 `scripts/paired_material_locator_acceptance.py` 分开资源/支持层，包含Linux v1/v2及可见祖先限制的分支和fixture测试。源码准备不等于实机通过，需在目标机核验真实proc/cgroup/priority与namespace可见性边界，再绑定最终helper哈希；本轮未执行正式负载。
+
+## 本地只读准备命令
+
+每次换一个新的run目录，以下两条不运行locator或创建DB：
+
+```bash
+python -m scripts.paired_material_locator_acceptance freeze --manifest artifacts/material-locator-acceptance/new-server-run/freeze.json
+python -m scripts.paired_material_locator_acceptance check --manifest artifacts/material-locator-acceptance/new-server-run/freeze.json --output artifacts/material-locator-acceptance/new-server-run/check.json
+```
+
+正式 `run` 另需明确 `--min-free-bytes`、`--max-working-set-bytes`、`--counts 1000,5000,10000` 和 `--workers 1,2`，固定三轮/三预热/十测量；按需加 `--acl-extension`，独立增加N100混合权限case各C1/2（2条/90对）。门槛由目标服务器条件确定并记录，不把旧工作站默认值当生产SLO。本轮不执行该命令。旧fixture及历史partial不覆盖或续拼。
 
 ## 配对矩阵
 

@@ -1,15 +1,16 @@
 # 文档状态索引
 
-> 更新日期：2026-10-25
+> 更新日期：2026-10-26
 
 项目功能、依赖和启动方式以根目录 `README.md`、当前代码、自动化测试和 Git 提交为准。历史设计文档保留决策背景，不等同于尚未完成的待办。
 
 ## 当前有效入口
 
+- `local-readiness.md`：唯一当前状态摘要与本地准备路线图；区分已交付源码、本轮本地准备、后续架构实现和服务器/业务未验门槛。旧报告按日期理解，不据历史空复选框重复开发。
 - `reviews/2026-10-26-material-locator-delivery.md`：材料定位两阶段成果的 main 快进集成、合并后新跑 92 项回归/4 项烟测、双远端交付与运行边界；服务器性能验收继续留空。
-- `reviews/2026-10-26-material-locator-many-kb.md`：多 KB 批量授权投影修复、92 项回归和生产锁 4 项烟测；源码仍本地，修复后压测按用户要求留空待服务器。
-- `material-locator-server-acceptance.md`：服务器性能验收清单；目标平台适配、完整配对矩阵及性能数值均未执行/未验收。
-- `reviews/2026-10-25-material-locator-overhead.md`：本地材料定位 SQL 授权投影与分配优化、完整等价、84 项回归及生产锁 4 项烟测；正式配对性能矩阵因资源门禁待补，尚未再次交付 main。
+- `reviews/2026-10-26-material-locator-many-kb.md`：多 KB 批量授权投影修复及当时92项回归/生产锁4项烟测；“仍本地”是该报告当时快照，后续源码已由交付报告覆盖，服务器压测仍留空。
+- `material-locator-server-acceptance.md`：服务器性能验收清单与tracked工具准备入口；本地实现/fixture测试不等于目标平台实测，完整配对矩阵与性能数值继续留空。
+- `reviews/2026-10-25-material-locator-overhead.md`：SQL授权投影/分配优化的84项回归和生产锁4项烟测历史快照；其“未交付main”已被后续交付覆盖，旧partial不代表修复后性能。
 - `reviews/2026-10-25-local-results-delivery.md`：KB清理/会话与Compose/恢复/容量架构四专项新增成果的集成、快进双推、3341/5+330及运行保护核对。
 - `capacity-and-slo.md`：单机试点建议、27组材料定位组件结果、候选SLO及正式业务验收条件。
 - `architecture/data-access-postgresql.md`、`architecture/shared-state-storage-workers.md`：源码盘点、全writer迁移水位、SQL原子epoch及后续共享存储/worker门禁；提案不等于已实现。
