@@ -2,6 +2,8 @@
 
 **状态：未执行；未通过性能验收。** 修复后的服务器配对压测尚未运行，当前没有可报告的性能收益、容量结论或 SLO 结论。本清单用于未来在指定部署服务器完成验收；本轮不适配或运行压测。
 
+本轮仅代码正确性受测冻结为 `7200e3040e77355c5859dfb5ea03383275301d5e`，见[整改报告](reviews/2026-10-26-material-locator-many-kb.md)。服务器执行时仍须绑定实际部署版本。旧 source fixture 的固定 **LF 标准化** SHA256 为 `54593297c81a31000dee9c26336db3198bc85e3e334f001cddb7f33766434bfc`；各文件原始字节哈希另记，跨 OS 不混淆 CRLF/LF 口径。
+
 ## 开始前：绑定被测对象与环境
 
 - [ ] 记录新旧源码冻结信息：仓库、基线 commit、修复版 commit，以及产品和测试 Git 树的完整冻结状态。记录并核验 tracked diff 与 untracked files 均为空（或将其明确纳入冻结快照），并保存完整树的可复核标识。至少单独记录 `rag/repositories/material_repo.py`、`rag/materials/locator_visibility.py`、`rag/materials/locator.py`、本次相关测试文件、旧 source fixture 和 benchmark/helper 的 SHA-256；不能只用 locator.py 的 SHA 代表修复版。修复版最终 commit 由 root 在冻结时填写；如尚未提交，则启动前绑定实际冻结快照和文件哈希。源码、测试或 helper 变化后须重新冻结，不能沿用旧结果。

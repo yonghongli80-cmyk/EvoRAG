@@ -4,6 +4,8 @@
 
 **当前状态：** 实现/独立复审/整分支复审通过；冻结b50af49，统一84通过/0跳过、生产锁4项通过、Ruff通过。正式配对矩阵受1GiB可用内存门禁停止，保留partial，尚未完成性能验收；代码仍本地，未再次合并/部署。详见[结果与限制](../../reviews/2026-10-25-material-locator-overhead.md)。
 
+**2026-10-26 接续：** 按用户要求性能验收留空并转服务器，当前不要本机重试矩阵；多 KB 修复及新正确性结果见[新计划](2026-10-26-material-locator-many-kb.md)。
+
 **Goal:** 在完整权限/输出等价前提下减少材料定位全量载入与中间映射。
 **Architecture:** Task1新增真实SQL授权投影/可见迭代器；Task2接入默认定位快路径、保留custom兼容；Task3独立完整等价与配对基准。旧full reader保留给organizer与冻结baseline。
 **Tech Stack:** 当前Python3.12/SQLite/UserDB/pytest/Ruff，无新依赖。
@@ -57,5 +59,5 @@
 
 - [x] 分项规格/质量与原implementer修复/增量复审，最终一次整分支复查及必要单次修复波次，冻结源码。
 - [x] 新3文件+既有locator/batched/organizer/FTS/org/doc-security相关统一回归、Ruff/format、生产锁实际locator API烟测；不在D业务配置下测试。
-- [ ] **deferred_resource：前三次正式尝试均退出2，完整性能验收待补。** pytest结束后root成对基准，核对完整等价/全表hash/真实计数和资源；按实际值报告收益/代价，未达改进则回到证据定位而非删保护或改口径。
+- [ ] **服务器性能验收空缺：2026-10-26 用户明确留待服务器，本机不再压测。前三次及追加 Attempt4 历史结果保留，不代表修复后性能。** pytest结束后root成对基准，核对完整等价/全表hash/真实计数和资源；按实际值报告收益/代价，未达改进则回到证据定位而非删保护或改口径。
 - [x] **文档已更新，公司记录 R-20261025-749029B5 实际submit成功。** 更新交接、计划、验收/裁决和公司实际submit；原服务PID/start/ready/env hash保持。源码留本地新分支可审阅，不自动再次合并或部署；main/两远端已交付542a36f事实保持。

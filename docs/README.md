@@ -6,6 +6,8 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-26-material-locator-many-kb.md`：多 KB 批量授权投影修复、92 项回归和生产锁 4 项烟测；源码仍本地，修复后压测按用户要求留空待服务器。
+- `material-locator-server-acceptance.md`：服务器性能验收清单；目标平台适配、完整配对矩阵及性能数值均未执行/未验收。
 - `reviews/2026-10-25-material-locator-overhead.md`：本地材料定位 SQL 授权投影与分配优化、完整等价、84 项回归及生产锁 4 项烟测；正式配对性能矩阵因资源门禁待补，尚未再次交付 main。
 - `reviews/2026-10-25-local-results-delivery.md`：KB清理/会话与Compose/恢复/容量架构四专项新增成果的集成、快进双推、3341/5+330及运行保护核对。
 - `capacity-and-slo.md`：单机试点建议、27组材料定位组件结果、候选SLO及正式业务验收条件。
