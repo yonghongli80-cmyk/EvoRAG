@@ -49,4 +49,6 @@
 
 入口：[本地当前状态](../local-readiness.md)、[设计](../superpowers/specs/2026-10-26-local-contracts-design.md)、[计划](../superpowers/plans/2026-10-26-local-contracts.md)。本批原始证据在 `artifacts/local-contracts-2026-10-26/`。
 
-工作记录与非DB归档回执：待最终回归和实际操作完成后填入。
+非DB归档实际退出0：161份、3,128,233字节已保存至D `artifacts/local-contracts-2026-10-26/accepted-evidence`，逐文件SHA256全部一致；未复制业务/fixture数据库、依赖或.env。源工作树、环境、SDD及全部失败原件继续保留，AGENTS.md和公司记录目录未加入产品提交。最终文档与记录回执另存closure快照，不覆盖初始证据。
+
+公司工作记录待实际submit成功后补回执。
