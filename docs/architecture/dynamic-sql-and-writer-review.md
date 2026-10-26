@@ -2,7 +2,9 @@
 
 **Status: local source-review preparation.** The tools in this document inventory syntax and bind review records to source snapshots. They do not execute application code or SQL, prove a dynamic expression safe, establish complete writer coverage, implement a Unit of Work, or claim PostgreSQL compatibility.
 
-## Scope and current evidence
+Latest local snapshot: `cdf039a` uses 98 identity/source/evidence-hash unchanged reviews and 5 explicit source rereviews after SQLite quoting changed. Final dispositions are 90 `understood_shape`, 10 `needs_followup`, and 3 `external_source`; 401 canonical references bind 32 Rag files. Inventory coverage remains incomplete and portability remains `not_assessed`. See the [local-contracts acceptance](../reviews/2026-10-26-local-contracts.md) and [command transaction boundaries](command-transaction-boundaries.md). The round-one seed and counts below are historical; changed sources must be rereviewed rather than silently rebound to current hashes.
+
+## Round-one scope and historical evidence
 
 The frozen round-one SQL inventory scanned 208 files and records 103 unresolved SQL sink expressions: 65 `dynamic_fstring`, 36 `dynamic_expression`, and 2 `unsupported_expression`. Its coverage is incomplete by definition. It also records 349 transaction markers (136 `commit`, 85 `read_connection`, 58 `transaction`, 55 `write_connection`, 8 `rollback`, 7 `begin`) and 50 `lastrowid` code markers. Those counts are lexical observations; they are not distinct command counts, call reachability, transaction ownership, or writer completeness.
 

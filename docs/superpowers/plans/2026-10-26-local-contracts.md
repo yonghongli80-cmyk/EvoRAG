@@ -27,33 +27,33 @@
 **Files:** `rag/startup_lifecycle.py`；`tests/test_startup_quiescence.py`（若加后超限，新建`tests/test_startup_failure_diagnostics.py`）。
 **Interface:** 保留StartupLifecycle公开方法；内部失败诊断不依赖cleanup_requested，保留原late消息语义。
 
-- [ ] 真实Thread/Event测试RED：原callback先清active/观察无intent，再屏障暂停，取消caller并finish；断言日志恰一次、原取消身份、清理一次，finally放行全部线程。另测普通异常对象和logger KeyboardInterrupt防泄漏。
-- [ ] 最小修复读取/记录所有非cancelled失败token，日志outside lock且BaseException隔离；不改grace/gate/finalizer/worker协议。
-- [ ] GREEN新/原quiescence+startup migrations+pipeline lifecycle，Ruff/format；报告实际PID/nativeexit/log与边界，root提交和独立SPEC/QUALITY。
+- [x] 真实Thread/Event测试RED：原callback先清active/观察无intent，再屏障暂停，取消caller并finish；断言日志恰一次、原取消身份、清理一次，finally放行全部线程。另测普通异常对象和logger KeyboardInterrupt防泄漏。
+- [x] 最小修复读取/记录所有非cancelled失败token，日志outside lock且BaseException隔离；不改grace/gate/finalizer/worker协议。
+- [x] GREEN新/原quiescence+startup migrations+pipeline lifecycle，Ruff/format；报告实际PID/nativeexit/log与边界，root提交和独立SPEC/QUALITY。
 
 ### Task 2: SQLite identifier contract
 
 **Files:** 新`rag/sqlite_identifiers.py`；改`rag/spreadsheets/store.py`、`rag/spreadsheets/api.py`、`rag/staging_audit.py`；新`tests/test_sqlite_identifiers.py`、`tests/test_sqlite_identifier_consumers.py`（可再按消费者拆focused新文件，先告知root，不改原超长测试）。
 **Produces:** `quote_sqlite_identifier(value: str) -> str`，str-only/TypeError、NUL/ValueError、double quote escape、空名保留，消息不含输入。固定SQL值仍?参数。
 
-- [ ] helper与真实consumer测试先RED：含引号表/列实际DDL/DML、store原子stage、rows真实响应、snapshot额外列读取；普通parser键/分页/公式语义保持。非法值/NUL仅可表达边界测试。
-- [ ] 实现小helper并仅替换spec列出的动态identifier；不改ACL/路径/归档身份/只读guard/错误HTTP状态/DQS开关，不过滤额外列。
-- [ ] GREEN新focused及既有spreadsheet store/API、staging audit/jobs兼容相关；Ruff/format/预算。报告实际命令、nativeexit、SQL值/对象hash与未覆盖实际fixture，root提交独立SPEC/QUALITY。
+- [x] helper与真实consumer测试先RED：含引号表/列实际DDL/DML、store原子stage、rows真实响应、snapshot额外列读取；普通parser键/分页/公式语义保持。非法值/NUL仅可表达边界测试。
+- [x] 实现小helper并仅替换spec列出的动态identifier；不改ACL/路径/归档身份/只读guard/错误HTTP状态/DQS开关，不过滤额外列。
+- [x] GREEN新focused及既有spreadsheet store/API、staging audit/jobs兼容相关；Ruff/format/预算。报告实际命令、nativeexit、SQL值/对象hash与未覆盖实际fixture，root提交独立SPEC/QUALITY。
 
 ### Task 3: Command transaction boundaries
 
 **Files:** 新`docs/architecture/command-transaction-boundaries.md`；`scripts/review_dynamic_sql.py`仅模块docstring。
 **Consumes:** 0b48872的KB删除/上传/索引发布/恢复真实调用链；B仅quoting不改变事务协议，文档以函数名及审查版本作锚点。
 
-- [ ] 根据recon补完整source-linked操作表，三命令各列SQL commit ownership、跨repo连接、外部副作用、补偿/unknown与最小合成故障矩阵。
-- [ ] 明确当前不保证全局/分布式原子，给后续UoW设计和可本地验证顺序；不新建运行时UoW、CM或新事务。
-- [ ] 更新docstring已有证据来源检查摘要，Ruff/format；不为纯文档写测试。root独立规格/事实复审，必要只读查源。
+- [x] 根据recon补完整source-linked操作表，三命令各列SQL commit ownership、跨repo连接、外部副作用、补偿/unknown与最小合成故障矩阵。
+- [x] 明确当前不保证全局/分布式原子，给后续UoW设计和可本地验证顺序；不新建运行时UoW、CM或新事务。
+- [x] 更新docstring已有证据来源检查摘要，Ruff/format；不为纯文档写测试。root独立规格/事实复审，必要只读查源。
 
 ### Task 4: Root integration
 
-- [ ] 各task独立SPEC/QUALITY、原作者fix-loop；一次整分支review、最多一波final修复与scoped review。
-- [ ] 最终源冻结、生产锁合成启动/identifier烟测、一次完整后端回归、Ruff/格式、前后freeze/check；不相加分项或复用上一批3462/5数字。
-- [ ] 新SQL inventory；重新审查B影响的finding/evidence，其余仅匹配identity/hash后保留；新manifest严格Rag source refs/raw hash，独立生成物核对；新writer候选，PG/writer未证明标记保留。
+- [x] 各task独立SPEC/QUALITY、原作者fix-loop；一次整分支review、最多一波final修复与scoped review。
+- [x] 最终源冻结、生产锁合成启动/identifier烟测、一次完整后端回归、Ruff/格式、前后freeze/check；不相加分项或复用上一批3462/5数字。
+- [x] 新SQL inventory；重新审查B影响的finding/evidence，其余仅匹配identity/hash后保留；新manifest严格Rag source refs/raw hash，独立生成物核对；新writer候选，PG/writer未证明标记保留。
 - [ ] 更新当前入口/交接/本批报告和剩余待办，核对原服务PID/start/ready/env hash/Dmain与跟踪树；实际submit当前唯一记录、非DB归档，保留local branch，不merge/push/deploy。
 
 ## Preflight
