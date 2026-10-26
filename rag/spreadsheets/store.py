@@ -14,6 +14,7 @@ from pathlib import Path
 
 from rag.spreadsheets.models import ColumnType
 from rag.spreadsheets.parser import ParsedSheet, ParsedWorkbook
+from rag.sqlite_identifiers import quote_sqlite_identifier
 
 
 @dataclass(frozen=True)
@@ -116,22 +117,15 @@ def read_dataset_schema(db_path: Path) -> tuple[DatasetSheetSchema, ...]:
     re-parses the original workbook.  ``unit`` and ``sample_values_json`` are
     deliberately absent: the dataset format does not record them.
     """
-    connection = sqlite3.connect(
-        f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True
-    )
+    connection = sqlite3.connect(f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
         merged_counts = {
             row["sheet_key"]: int(row["total"])
-            for row in connection.execute(
-                "SELECT sheet_key, COUNT(*) AS total FROM merged_ranges GROUP BY sheet_key"
-            )
+            for row in connection.execute("SELECT sheet_key, COUNT(*) AS total FROM merged_ranges GROUP BY sheet_key")
         }
         formula_sheets = {
-            row["sheet_key"]
-            for row in connection.execute(
-                "SELECT DISTINCT sheet_key FROM formula_cells"
-            )
+            row["sheet_key"] for row in connection.execute("SELECT DISTINCT sheet_key FROM formula_cells")
         }
         columns_by_sheet: dict[str, list[DatasetColumnSchema]] = {}
         for row in connection.execute(
@@ -220,11 +214,10 @@ def _create_manifest_schema(connection: sqlite3.Connection) -> None:
 
 def _write_sheet(connection: sqlite3.Connection, sheet: ParsedSheet) -> DatasetSheetManifest:
     table_name = sheet.sheet_key
-    columns_sql = ", ".join(f'"{column.column_key}"' for column in sheet.columns)
+    columns_sql = ", ".join(quote_sqlite_identifier(column.column_key) for column in sheet.columns)
     connection.execute(
-        f'CREATE TABLE "{table_name}" (__row_number INTEGER NOT NULL, __row_hash TEXT NOT NULL'
-        + (f", {columns_sql}" if columns_sql else "")
-        + ")"
+        f"CREATE TABLE {quote_sqlite_identifier(table_name)} "
+        "(__row_number INTEGER NOT NULL, __row_hash TEXT NOT NULL" + (f", {columns_sql}" if columns_sql else "") + ")"
     )
     connection.execute(
         "INSERT INTO sheet_manifest "
@@ -264,8 +257,7 @@ def _write_sheet(connection: sqlite3.Connection, sheet: ParsedSheet) -> DatasetS
         [(sheet.sheet_key, value) for value in sheet.merged_ranges],
     )
     connection.executemany(
-        "INSERT INTO formula_cells (sheet_key, row_number, column_key, formula, cached_value) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO formula_cells (sheet_key, row_number, column_key, formula, cached_value) VALUES (?, ?, ?, ?, ?)",
         [
             (
                 sheet.sheet_key,
@@ -282,13 +274,13 @@ def _write_sheet(connection: sqlite3.Connection, sheet: ParsedSheet) -> DatasetS
     )
     if sheet.rows:
         insert_columns = "__row_number, __row_hash" + (
-            ", " + ", ".join(f'"{column.column_key}"' for column in sheet.columns)
+            ", " + ", ".join(quote_sqlite_identifier(column.column_key) for column in sheet.columns)
             if sheet.columns
             else ""
         )
         marks = ", ".join("?" for _ in range(2 + len(sheet.columns)))
         connection.executemany(
-            f'INSERT INTO "{table_name}" ({insert_columns}) VALUES ({marks})',
+            f"INSERT INTO {quote_sqlite_identifier(table_name)} ({insert_columns}) VALUES ({marks})",
             [_canonical_row(row, sheet) for row in sheet.rows],
         )
     return DatasetSheetManifest(
@@ -301,8 +293,7 @@ def _write_sheet(connection: sqlite3.Connection, sheet: ParsedSheet) -> DatasetS
 
 def _canonical_row(row, sheet: ParsedSheet) -> tuple[object, ...]:
     values = tuple(
-        canonical_cell(cell.value, column.inferred_type)
-        for cell, column in zip(row.cells, sheet.columns, strict=True)
+        canonical_cell(cell.value, column.inferred_type) for cell, column in zip(row.cells, sheet.columns, strict=True)
     )
     normalized = json.dumps(values, ensure_ascii=False, default=str, separators=(",", ":"))
     row_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()

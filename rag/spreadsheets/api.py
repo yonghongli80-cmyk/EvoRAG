@@ -1,4 +1,5 @@
 """Versioned spreadsheet read and cell-edit routes."""
+
 import asyncio
 import sqlite3
 from pathlib import Path
@@ -25,6 +26,7 @@ from rag.spreadsheets.edit_service import (
     SpreadsheetEditService,
     SpreadsheetEditServiceError,
 )
+from rag.sqlite_identifiers import quote_sqlite_identifier
 from rag.user_db import VersionConflict
 
 router = APIRouter()
@@ -85,9 +87,7 @@ def spreadsheet_change_audit_detail(
     request: Request,
     user: dict = Depends(require_user),  # noqa: B008 - FastAPI dependency marker
 ):
-    detail = get_spreadsheet_audit_detail(
-        request.app.state.user_db, user, session_id
-    )
+    detail = get_spreadsheet_audit_detail(request.app.state.user_db, user, session_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="spreadsheet audit not found")
     return detail
@@ -202,9 +202,7 @@ async def get_spreadsheet_edit_status(
         raise HTTPException(status_code=404, detail="spreadsheet edit not found")
     document = await asyncio.to_thread(db.get_document_permission_by_id, document_id)
     if document is None or not (
-        user.get("is_admin")
-        or session["actor_user_id"] == user["id"]
-        or document["owner_id"] == user["id"]
+        user.get("is_admin") or session["actor_user_id"] == user["id"] or document["owner_id"] == user["id"]
     ):
         raise HTTPException(status_code=404, detail="spreadsheet edit not found")
     return {
@@ -253,6 +251,7 @@ async def restore_spreadsheet_version(
         ) from exc
     return result.model_dump()
 
+
 @router.get("/documents/{document_id}/versions/{version_id}/sheets/{sheet_key}/rows")
 def rows(
     document_id: int,
@@ -300,8 +299,13 @@ def rows(
         if sheet is None:
             raise HTTPException(404, "sheet not found")
         keys = [row[0] for row in columns]
-        quoted = ", ".join(f'"{key}"' for key in keys)
-        result = connection.execute(f'SELECT __row_number, {quoted} FROM "{sheet[0]}" WHERE __row_number > ? ORDER BY __row_number LIMIT ?', (after_row, limit)).fetchall()
+        quoted = ", ".join(quote_sqlite_identifier(key) for key in keys)
+        result = connection.execute(
+            f"SELECT __row_number, {quoted} "
+            f"FROM {quote_sqlite_identifier(sheet[0])} "
+            "WHERE __row_number > ? ORDER BY __row_number LIMIT ?",
+            (after_row, limit),
+        ).fetchall()
         non_editable = {
             f"{get_column_letter(int(str(row[1]).removeprefix('c_')))}{row[0]}"
             for row in connection.execute(
@@ -333,9 +337,7 @@ def rows(
             # address is materialized.
             window_min_row = max(min_row, first_row)
             window_max_row = min(max_row, last_row)
-            window_cells = (window_max_row - window_min_row + 1) * (
-                max_col - min_col + 1
-            )
+            window_cells = (window_max_row - window_min_row + 1) * (max_col - min_col + 1)
             if (
                 merged_annotations + window_cells > MAX_MERGED_CELL_ANNOTATIONS
                 or len(non_editable) + window_cells > MAX_NON_EDITABLE_CELLS
@@ -346,9 +348,7 @@ def rows(
             for row_number in range(window_min_row, window_max_row + 1):
                 for column_number in range(min_col, max_col + 1):
                     if (column_number, row_number) != (min_col, min_row):
-                        non_editable.add(
-                            f"{get_column_letter(column_number)}{row_number}"
-                        )
+                        non_editable.add(f"{get_column_letter(column_number)}{row_number}")
         non_editable_cells = sorted(non_editable)
         if len(non_editable_cells) > MAX_NON_EDITABLE_CELLS:
             non_editable_cells = non_editable_cells[:MAX_NON_EDITABLE_CELLS]
@@ -359,10 +359,7 @@ def rows(
         except HTTPException:
             can_edit = False
         return {
-            "rows": [
-                {"row_number": row[0], "values": list(row[1:])}
-                for row in result
-            ],
+            "rows": [{"row_number": row[0], "values": list(row[1:])} for row in result],
             "columns": [
                 {
                     "column_key": row[0],

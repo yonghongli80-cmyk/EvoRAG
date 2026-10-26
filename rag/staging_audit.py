@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from rag.kb_document_cleanup import resolve_owned_version_path
+from rag.sqlite_identifiers import quote_sqlite_identifier
 
 SCHEMA_VERSION = 1
 _CORE_COLUMNS = {
@@ -154,7 +155,7 @@ def _sqlite_uri(path: Path) -> str:
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row["name"]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({quote_sqlite_identifier(table)})")}
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
@@ -207,17 +208,15 @@ def _validate_row_metadata(
         for field in filesystem_path_fields:
             value = row.get(field)
             if isinstance(value, str) and "\x00" in value:
-                raise _SnapshotMetadataError(
-                    f"NUL byte in filesystem path metadata in {table}.{field}"
-                )
+                raise _SnapshotMetadataError(f"NUL byte in filesystem path metadata in {table}.{field}")
 
 
 def _select_rows(conn: sqlite3.Connection, table: str, columns: set[str]) -> list[dict]:
     if not columns:
         return []
-    selected = ", ".join(f'"{column}"' for column in sorted(columns))
+    selected = ", ".join(quote_sqlite_identifier(column) for column in sorted(columns))
     order = ' ORDER BY "id"' if "id" in columns else ""
-    return [dict(row) for row in conn.execute(f'SELECT {selected} FROM "{table}"{order}')]
+    return [dict(row) for row in conn.execute(f"SELECT {selected} FROM {quote_sqlite_identifier(table)}{order}")]
 
 
 def _add_finding(
@@ -713,9 +712,7 @@ def _diagnose_version(
         )
 
     staging_declaration_missing = (
-        status == "staging"
-        and file_state == "missing"
-        and _lexically_within(declared_path, versions_root)
+        status == "staging" and file_state == "missing" and _lexically_within(declared_path, versions_root)
     )
     if staging_declaration_missing:
         if ownership != "owned":
