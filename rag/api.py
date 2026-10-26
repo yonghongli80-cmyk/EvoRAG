@@ -14,16 +14,23 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import rag.api_startup as api_startup
 from config import settings
-from rag.api_security import log_security_mode
+from rag.api_security import log_security_mode as log_security_mode
 from rag.backups.scheduler import start_backup_scheduler, stop_backup_scheduler
 from rag.context import (
     _DB_PATH as _DB_PATH,
 )
 from rag.context import (
-    DATA_DIR,
-    KB_FILES_ROOT,
-    SUPPORTED_EXTENSIONS,
+    DATA_DIR as DATA_DIR,
+)
+from rag.context import (
+    KB_FILES_ROOT as KB_FILES_ROOT,
+)
+from rag.context import (
+    SUPPORTED_EXTENSIONS as SUPPORTED_EXTENSIONS,
+)
+from rag.context import (
     _get_or_create_pipeline,
     _pipeline_lock,
     get_pipeline,
@@ -45,13 +52,13 @@ from rag.context import (
 from rag.context import (
     get_gap_analyzer as get_gap_analyzer,
 )
-from rag.document_sources.upload import UploadDocumentSource
-from rag.document_versions import ingest_document_version
+from rag.document_sources.upload import UploadDocumentSource as UploadDocumentSource
+from rag.document_versions import ingest_document_version as ingest_document_version
 from rag.evolution.api import router as evolution_router
 from rag.evolution.worker import start_evolution_worker, stop_evolution_worker
 from rag.kb_metadata import generate_summary as generate_summary
 from rag.kb_metadata import generate_toc as generate_toc
-from rag.knowledge_base import KnowledgeBaseManager
+from rag.knowledge_base import KnowledgeBaseManager as KnowledgeBaseManager
 from rag.llm_pool import get_llm_pool_router as get_llm_pool_router
 from rag.loader import load as load_document
 from rag.logging_config import logging_context, normalize_request_id, setup_logging
@@ -124,15 +131,32 @@ async def lifespan(_app: FastAPI):
     _run_legacy_kb_migration()
     await asyncio.to_thread(auto_index_on_startup)
     await asyncio.to_thread(_run_staged_version_migration)
-    start_backup_scheduler()
-    start_evolution_worker()
-    restore_question_set_rollout()
+
+    primary_error = None
     try:
+        start_backup_scheduler()
+        start_evolution_worker()
+        restore_question_set_rollout()
         yield
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        stop_backup_scheduler()
-        stop_evolution_worker()
-        close_pipeline_processors()
+        first_cleanup_error = None
+        cleanup_hooks = (
+            ("stop_backup_scheduler", stop_backup_scheduler),
+            ("stop_evolution_worker", stop_evolution_worker),
+            ("close_pipeline_processors", close_pipeline_processors),
+        )
+        for name, cleanup in cleanup_hooks:
+            try:
+                cleanup()
+            except BaseException as error:
+                logger.exception("API lifecycle cleanup hook failed: %s", name)
+                if first_cleanup_error is None:
+                    first_cleanup_error = error
+        if primary_error is None and first_cleanup_error is not None:
+            raise first_cleanup_error
 
 
 app = FastAPI(
@@ -178,269 +202,38 @@ def _stop_material_worker() -> bool:
 
 
 def _run_document_version_migration() -> None:
-    """Create version-1 rows for documents created before versioning."""
-    from rag.document_versions import migrate_existing_document_versions
-
-    try:
-        report = migrate_existing_document_versions(
-            user_db, _versions_root(), DATA_DIR
-        )
-        if report.migrated or report.missing:
-            logger.info(
-                "document version migration: migrated=%s missing=%s unchanged=%s",
-                report.migrated,
-                report.missing,
-                report.unchanged,
-            )
-    except Exception:
-        logger.exception("document version migration failed")
+    """Compatibility facade for the startup migration implementation."""
+    return api_startup._run_document_version_migration(sys.modules[__name__])
 
 
 def _run_material_metadata_migration() -> None:
-    """Backfill material FTS/metadata rows without re-embedding content."""
-    from rag.materials.migration import migrate_material_metadata
-
-    try:
-        user_db.create_material_schema()
-        report = migrate_material_metadata(user_db)
-        if report.migrated_documents:
-            logger.info(
-                "material metadata migration: migrated=%s missing=%s",
-                report.migrated_documents,
-                report.missing_sources,
-            )
-    except Exception:
-        logger.exception("material metadata migration failed")
+    """Compatibility facade for the startup migration implementation."""
+    return api_startup._run_material_metadata_migration(sys.modules[__name__])
 
 
 def _run_spreadsheet_migration() -> None:
-    from rag.spreadsheets.migration import migrate_existing_spreadsheets
-    try:
-        report = migrate_existing_spreadsheets(
-            user_db,
-            Path(getattr(app.state, "structured_datasets_root", settings.structured_datasets_root)),
-        )
-        if report.migrated or report.failed:
-            logger.info("spreadsheet migration: migrated=%s failed=%s", report.migrated, report.failed)
-    except Exception:
-        logger.exception("spreadsheet migration failed")
+    """Compatibility facade for the startup migration implementation."""
+    return api_startup._run_spreadsheet_migration(sys.modules[__name__])
 
 
 def _register_repo_document_version(doc_name: str, source_path: Path) -> bool:
-    """Register a repository fixture as an immutable document version when missing."""
-    from rag.vector_store import delete_unversioned_points
-
-    permission = user_db.get_document_permission(doc_name, "rag_docs")
-    if permission is None or permission.get("current_version_id"):
-        return False
-    actor = user_db.ensure_development_user()
-    manager = KnowledgeBaseManager()
-    source = UploadDocumentSource.from_bytes(doc_name, source_path.read_bytes())
-    ingest_document_version(
-        user_db,
-        manager,
-        source,
-        "rag_docs",
-        actor,
-        "overwrite",
-        Path(settings.document_versions_root),
-    )
-    delete_unversioned_points("rag_docs", doc_name)
-    return True
+    """Compatibility facade for repository document version registration."""
+    return api_startup._register_repo_document_version(sys.modules[__name__], doc_name, source_path)
 
 
 def _run_legacy_kb_migration() -> None:
-    """Assign every legacy knowledge base an explicit organization policy.
-
-    The 2026-08-20 plan (§7) retires the personal KB ACL during migration: a
-    legacy knowledge base becomes ``unassigned`` and stays administrator-only
-    until an administrator explicitly assigns an organization.  Running this on
-    every start is what makes the fail-closed guard in ``require_kb_view``
-    deterministic instead of depending on a manual ``seed.py`` invocation.
-    """
-    from rag.org_auth.migration import migrate_legacy_knowledge_bases
-
-    try:
-        report = migrate_legacy_knowledge_bases(user_db)
-        logger.info(
-            "legacy knowledge base migration: migrated=%s remaining=%s",
-            report.migrated,
-            report.unmigrated,
-        )
-        if report.unmigrated:
-            logger.warning(
-                "legacy knowledge base migration incomplete: %s knowledge base(s) "
-                "still lack an organization policy and stay owner/administrator-only",
-                report.unmigrated,
-            )
-    except Exception:
-        logger.exception("legacy knowledge base migration failed")
+    """Compatibility facade for the startup migration implementation."""
+    return api_startup._run_legacy_kb_migration(sys.modules[__name__])
 
 
 def _run_staged_version_migration() -> None:
-    """Promote committed version files left behind under ``staging/``.
-
-    Older ``POST /materials/upload`` rows stored ``document_versions.file_path``
-    in the transient ``staging`` directory, which backups exclude, so the
-    authoritative backup failed with ``referenced_file_missing`` forever.  The
-    migration is idempotent and must run before the backup scheduler can open a
-    window; a failure is logged and never blocks startup.
-    """
-    from rag.document_versions import migrate_staged_document_versions
-
-    try:
-        report = migrate_staged_document_versions(user_db, _versions_root())
-        if report.migrated or report.missing or report.conflicts or report.skipped:
-            logger.info(
-                "staged version migration: migrated=%s unchanged=%s missing=%s "
-                "skipped=%s conflicts=%s",
-                report.migrated,
-                report.unchanged,
-                report.missing,
-                report.skipped,
-                report.conflicts,
-            )
-    except Exception:
-        logger.exception("staged version migration failed")
+    """Compatibility facade for staged document version repair."""
+    return api_startup._run_staged_version_migration(sys.modules[__name__])
 
 
 def auto_index_on_startup():
     """启动时增量索引 data/upload/ 下的文件。"""
-    log_security_mode()
-    _run_document_version_migration()
-    _run_material_metadata_migration()
-    _run_spreadsheet_migration()
-    if not DATA_DIR.is_dir():
-        _start_material_worker()
-        return
-
-    from rag.folder_indexer import compute_file_hash, diff_index, index_folder, load_index_state, save_index_state
-    state_path = str(DATA_DIR.parent / "index_state.json")
-    stored_state = load_index_state(state_path)
-
-    current_hashes = {}
-    for fpath in DATA_DIR.iterdir():
-        if fpath.is_file() and fpath.suffix.lower() in SUPPORTED_EXTENSIONS:
-            current_hashes[fpath.name] = compute_file_hash(str(fpath))
-
-    added, modified, deleted = diff_index(current_hashes, stored_state)
-    changed = added + modified
-
-    collection_check_failed = False
-    try:
-        from rag.vector_store import COLLECTION_NAME, _get_client
-
-        collection_available = _get_client().collection_exists(COLLECTION_NAME)
-    except Exception as e:
-        logger.warning("无法确认向量索引状态，将跳过本次自动索引: %s", e)
-        collection_check_failed = True
-        collection_available = None
-    if collection_available is False:
-        logger.warning("向量索引集合不存在，将重建索引")
-        changed = list(current_hashes)
-
-    def _init_admin():
-        admin_username = settings.init_admin_username
-        if not admin_username:
-            return
-        target = user_db.get_user_by_username(admin_username)
-        if target and not target.get("is_admin"):
-            user_db.set_user_admin(target["id"], True)
-            logger.info("已将用户 %s 设置为管理员", admin_username)
-
-    SYSTEM_OWNER_ID = 0
-
-    def _sync_repo_files():
-        import shutil
-        repo_upload = Path("/app/repo_upload")
-        if not repo_upload.is_dir():
-            repo_upload = Path(__file__).resolve().parent.parent / "data" / "upload"
-        if not repo_upload.is_dir():
-            return
-
-        manifest_path = repo_upload / ".repo_files"
-        repo_file_names = set()
-        if manifest_path.is_file():
-            for line in manifest_path.read_text(encoding="utf-8").splitlines():
-                name = line.strip()
-                if name:
-                    repo_file_names.add(name)
-        else:
-            for fpath in repo_upload.iterdir():
-                if fpath.is_file() and fpath.suffix.lower() in SUPPORTED_EXTENSIONS:
-                    repo_file_names.add(fpath.name)
-
-        if not DATA_DIR.is_dir():
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-        for fname in repo_file_names:
-            src = repo_upload / fname
-            if not src.is_file():
-                continue
-            dest = DATA_DIR / fname
-            if not dest.exists():
-                shutil.copy2(str(src), str(dest))
-                logger.info("同步仓库文件: %s", fname)
-            existing = user_db.get_document_permission(fname, "rag_docs")
-            if not existing:
-                user_db.create_document_permission(
-                    fname, "rag_docs", SYSTEM_OWNER_ID,
-                    is_public=True, protected=True
-                )
-                logger.info("创建受保护权限: %s (owner=system)", fname)
-            elif existing.get("owner_id") == SYSTEM_OWNER_ID and (not existing.get("protected") or existing.get("scope") != "public"):
-                with user_db.locked_transaction() as conn:
-                    conn.execute(
-                        "UPDATE document_permissions SET protected = 1, is_public = 1, scope = 'public' WHERE id = ?",
-                        (existing["id"],)
-                    )
-                logger.info("更新为受保护+公开: %s", fname)
-
-            try:
-                if _register_repo_document_version(fname, dest):
-                    logger.info("已登记文档版本: %s", fname)
-            except Exception:
-                logger.exception("仓库文件版本登记失败: %s", fname)
-
-    if collection_check_failed:
-        try:
-            _init_admin()
-            _sync_repo_files()
-        except Exception as e:
-            logger.warning("管理员初始化失败: %s", e)
-        return
-
-    if not changed and not deleted:
-        logger.info("索引无需更新（%d 文件）", len(current_hashes))
-        with _pipeline_lock.write():
-            set_pipeline(_get_or_create_pipeline("rag_docs"))
-        _init_admin()
-        _sync_repo_files()
-        _start_material_worker()
-        return
-
-    logger.info("索引变化: %d 新增, %d 修改, %d 删除", len(added), len(modified), len(deleted))
-
-    try:
-        if changed:
-            stats = index_folder(str(DATA_DIR))
-            logger.info("索引完成: %d 文件, %d 分块", stats["files"], stats["chunks"])
-
-        new_state = {"files": {}}
-        for name, h in current_hashes.items():
-            new_state["files"][name] = {"hash": h}
-        save_index_state(state_path, new_state)
-
-        with _pipeline_lock.write():
-            set_pipeline(_get_or_create_pipeline("rag_docs"))
-    except Exception as e:
-        logger.warning("启动索引失败: %s", e)
-
-    try:
-        _init_admin()
-        _sync_repo_files()
-    except Exception as e:
-        logger.warning("管理员初始化失败: %s", e)
-    _start_material_worker()
+    return api_startup.auto_index_on_startup(sys.modules[__name__])
 
 
 @app.middleware("http")
@@ -453,10 +246,7 @@ async def browser_session_middleware(request, call_next):
         scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
         expected_origin = f"{scheme}://{request.headers.get('host', '')}"
         fetch_site = request.headers.get("sec-fetch-site", "")
-        if (
-            (origin and origin.rstrip("/") != expected_origin.rstrip("/"))
-            or fetch_site == "cross-site"
-        ):
+        if (origin and origin.rstrip("/") != expected_origin.rstrip("/")) or fetch_site == "cross-site":
             return JSONResponse(status_code=403, content={"detail": "跨站请求被拒绝"})
     if token and b"authorization" not in header_names:
         request.scope["headers"] = [
@@ -539,9 +329,7 @@ async def metrics_middleware(request, call_next):
     finally:
         route = request.scope.get("route")
         route_path = getattr(route, "path", "") or "unmatched"
-        record_http_request(
-            request.method, route_path, status_code, time.perf_counter() - started
-        )
+        record_http_request(request.method, route_path, status_code, time.perf_counter() - started)
 
 
 app.state.user_db = user_db
