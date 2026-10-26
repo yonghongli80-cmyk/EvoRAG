@@ -57,6 +57,35 @@ def _build(root: Path) -> tuple[Path, Path, dict]:
     return source_root, inventory_path, manifest
 
 
+def _mark_reviewed(
+    manifest: dict,
+    source_root: Path,
+    *,
+    evidence: list[str],
+    disposition: str = "understood_shape",
+) -> None:
+    finding = manifest["findings"][0]
+    refs_by_path = {reference.rsplit("#L", 1)[0] for reference in evidence}
+    finding.update(
+        {
+            "disposition": disposition,
+            "sql_shape_class": "reviewed_fixture_shape",
+            "rationale": "Fixture-backed local evidence for this source shape.",
+            "evidence": evidence,
+            "evidence_sha256": {
+                relative: hashlib.sha256((source_root / relative).read_bytes()).hexdigest() for relative in refs_by_path
+            },
+            "next_step": "Trace remaining call sites." if disposition == "needs_followup" else "",
+        }
+    )
+    manifest["coverage"] = {
+        "finding_count": 1,
+        "source_bound_dispositions": 1,
+        "unreviewed": 0,
+        "complete": True,
+    }
+
+
 def test_build_binds_each_finding_to_exact_inventory_identity_and_source_hash(
     tmp_path: Path,
 ) -> None:
@@ -80,6 +109,8 @@ def test_build_binds_each_finding_to_exact_inventory_identity_and_source_hash(
     }
     assert finding["source_sha256"] == hashlib.sha256(raw_source).hexdigest()
     assert finding["finding_id"]
+    assert finding["evidence"] == []
+    assert finding["evidence_sha256"] == {}
 
 
 def test_new_manifest_starts_unreviewed_and_keeps_portability_unassessed(
@@ -167,6 +198,7 @@ def test_followup_requires_next_step_and_validator_does_not_upgrade_portability(
             "disposition": "needs_followup",
             "rationale": "Call-site provenance is not established.",
             "evidence": ["sample.py#L4"],
+            "evidence_sha256": {"sample.py": hashlib.sha256((source_root / "sample.py").read_bytes()).hexdigest()},
             "sql_shape_class": "opaque_runtime_query",
             "next_step": "Trace callers and the query value source.",
         }
@@ -182,6 +214,98 @@ def test_followup_requires_next_step_and_validator_does_not_upgrade_portability(
 
     assert result["coverage"]["complete"] is True
     assert result["source_inventory_complete"] is False
+    assert result["portability_readiness"] == "not_assessed"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "missing.py#L1",
+        "../outside.py#L1",
+        "sample.py#L0",
+        "sample.py#L99",
+        "sample.py#Lnot-a-line",
+    ],
+)
+def test_validator_rejects_nonexistent_escaping_or_invalid_line_evidence(tmp_path: Path, reference: str) -> None:
+    source_root, inventory_path, manifest = _build(tmp_path)
+    _mark_reviewed(manifest, source_root, evidence=["sample.py#L4"])
+    finding = manifest["findings"][0]
+    finding["evidence"] = [reference]
+    relative = reference.rsplit("#L", 1)[0]
+    finding["evidence_sha256"] = {
+        relative: hashlib.sha256((source_root / relative).read_bytes()).hexdigest()
+        if relative == "sample.py"
+        else "0" * 64
+    }
+
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+
+def test_validator_requires_exact_hash_map_and_rejects_missing_or_forged_hashes(
+    tmp_path: Path,
+) -> None:
+    source_root, inventory_path, manifest = _build(tmp_path)
+    _mark_reviewed(manifest, source_root, evidence=["sample.py#L4"])
+    finding = manifest["findings"][0]
+
+    finding["evidence_sha256"] = {}
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+    finding["evidence_sha256"] = {
+        "sample.py": hashlib.sha256((source_root / "sample.py").read_bytes()).hexdigest(),
+        "unused.py": "0" * 64,
+    }
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+    finding["evidence_sha256"] = {"sample.py": "0" * 64}
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+
+def test_validator_requires_each_finding_source_ref_in_its_evidence(tmp_path: Path) -> None:
+    source_root, inventory_path, manifest = _build(tmp_path)
+    _mark_reviewed(manifest, source_root, evidence=["sample.py#L3"])
+
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+
+def test_validator_binds_cross_file_evidence_and_rejects_stale_content(
+    tmp_path: Path,
+) -> None:
+    source_root, inventory_path, manifest = _build(tmp_path)
+    supporting_file = source_root / "parser.py"
+    supporting_file.write_text("def build_key():\n    return 'fixed'\n", encoding="utf-8")
+    _mark_reviewed(
+        manifest,
+        source_root,
+        evidence=["sample.py#L4", "parser.py#L1"],
+    )
+
+    result = review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+    assert result["coverage"]["complete"] is True
+
+    supporting_file.write_text("def build_key():\n    return input()\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+
+def test_external_source_disposition_requires_local_source_binding(tmp_path: Path) -> None:
+    source_root, inventory_path, manifest = _build(tmp_path)
+    _mark_reviewed(
+        manifest,
+        source_root,
+        evidence=["sample.py#L4"],
+        disposition="external_source",
+    )
+
+    result = review_dynamic_sql.validate_manifest(manifest, inventory_path, source_root)
+
+    assert result["coverage"]["complete"] is True
     assert result["portability_readiness"] == "not_assessed"
 
 

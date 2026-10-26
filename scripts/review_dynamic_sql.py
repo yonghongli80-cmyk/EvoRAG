@@ -12,7 +12,7 @@ import argparse
 import hashlib
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -56,6 +56,54 @@ def _source_file(root: Path, relative: str) -> Path:
         if cursor.is_symlink():
             raise ManifestError(f"source path traverses a symlink: {relative}")
     return resolved
+
+
+def _evidence_location(reference: str) -> tuple[str, int]:
+    if not isinstance(reference, str) or reference.count("#L") != 1:
+        raise ManifestError("evidence must use a local path#Lpositive_line reference")
+    relative, line_text = reference.rsplit("#L", 1)
+    relative_path = PurePosixPath(relative)
+    if (
+        not relative
+        or "\\" in relative
+        or relative != relative_path.as_posix()
+        or relative_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative_path.parts)
+    ):
+        raise ManifestError("evidence path must be normalized and source-root relative")
+    if not line_text.isascii() or not line_text.isdecimal() or int(line_text) < 1:
+        raise ManifestError("evidence line must be a positive integer")
+    return relative, int(line_text)
+
+
+def _validate_evidence(finding: dict[str, Any], source_root: Path) -> None:
+    evidence = finding.get("evidence")
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or any(not isinstance(reference, str) or not reference.strip() for reference in evidence)
+    ):
+        raise ManifestError(f"finding {finding['finding_id']} needs source evidence")
+    if len(set(evidence)) != len(evidence):
+        raise ManifestError(f"finding {finding['finding_id']} contains duplicate evidence refs")
+    if finding["source_ref"] not in evidence:
+        raise ManifestError(f"finding {finding['finding_id']} must cite its own source_ref")
+
+    current_hashes: dict[str, str] = {}
+    for reference in evidence:
+        relative, line = _evidence_location(reference)
+        source_file = _source_file(source_root, relative)
+        raw_source = source_file.read_bytes()
+        if line > len(raw_source.splitlines()):
+            raise ManifestError(f"evidence line is outside the source file: {reference}")
+        current_hashes[relative] = _sha256(raw_source)
+
+    supplied_hashes = finding.get("evidence_sha256")
+    if not isinstance(supplied_hashes, dict) or set(supplied_hashes) != set(current_hashes):
+        raise ManifestError(f"finding {finding['finding_id']} evidence_sha256 must exactly cover its refs")
+    for relative, current_hash in current_hashes.items():
+        if supplied_hashes.get(relative) != current_hash:
+            raise ManifestError(f"finding {finding['finding_id']} has stale evidence hash for {relative}")
 
 
 def _finding_identity(item: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +190,7 @@ def build_manifest(inventory_path: str | Path, source_root: str | Path) -> dict[
                 "sql_shape_class": "",
                 "rationale": "",
                 "evidence": [],
+                "evidence_sha256": {},
                 "next_step": "",
             }
         )
@@ -213,19 +262,15 @@ def validate_manifest(manifest: dict[str, Any], inventory_path: str | Path, sour
         if not isinstance(disposition, str) or disposition not in _DISPOSITIONS:
             raise ManifestError(f"finding {finding_id} has an unknown disposition")
         evidence = item.get("evidence")
+        evidence_sha256 = item.get("evidence_sha256")
         rationale = item.get("rationale")
         next_step = item.get("next_step", "")
         sql_shape_class = item.get("sql_shape_class", "")
         if disposition == "unreviewed":
-            if evidence or rationale or next_step or sql_shape_class:
+            if evidence or evidence_sha256 or rationale or next_step or sql_shape_class:
                 raise ManifestError(f"unreviewed finding {finding_id} contains review claims")
             continue
-        if (
-            not isinstance(evidence, list)
-            or not evidence
-            or any(not isinstance(ref, str) or not ref.strip() for ref in evidence)
-        ):
-            raise ManifestError(f"finding {finding_id} needs source evidence")
+        _validate_evidence(item, root)
         if not isinstance(rationale, str) or not rationale.strip():
             raise ManifestError(f"finding {finding_id} needs a rationale")
         if not isinstance(sql_shape_class, str) or not sql_shape_class.strip():
