@@ -1,9 +1,12 @@
 """Build and validate a source-bound review manifest for unresolved SQL findings.
 
-This module treats inventory and source files as data. It never imports or
-executes application modules, evaluates SQL, or declares a SQL expression safe
-or portable. A valid manifest proves only exact inventory/source binding and
-the presence of per-finding review fields.
+This module treats inventories and source files as data. It never imports or
+executes application modules, evaluates SQL, or declares SQL safe or portable.
+Validation checks exact finding-set identity, source and inventory freshness,
+normalized in-root ``path#Lline`` evidence references, line bounds, required
+source references, and exact per-file SHA-256 coverage for referenced evidence.
+It validates evidence structure and hashes, not whether a rationale is true or
+whether SQL is safe, complete, or PostgreSQL-compatible.
 """
 
 from __future__ import annotations
