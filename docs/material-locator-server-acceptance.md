@@ -24,6 +24,14 @@ python -m scripts.paired_material_locator_acceptance check --manifest artifacts/
 
 正式 `run` 另需明确 `--min-free-bytes`、`--max-working-set-bytes`、`--counts 1000,5000,10000` 和 `--workers 1,2`，固定三轮/三预热/十测量；按需加 `--acl-extension`，独立增加N100混合权限case各C1/2（2条/90对）。门槛由目标服务器条件确定并记录，不把旧工作站默认值当生产SLO。本轮不执行该命令。旧fixture及历史partial不覆盖或续拼。
 
+## 本地非计时功能验证
+
+新增 `tests/test_material_locator_acceptance_functional.py` 用独立子进程和新建 Temp SQLite 检查四种合成 profile：双 KB 普通用户、many-KB 普通用户、mixed ACL、双 KB admin；每份 fixture 最多 8 篇。它对比冻结旧 locator 与当前 locator 的完整有序结果字段和 `model_input`，以 `top_k=1` 核对完整 allowed version ID 集合，并检查只读前后全表逻辑 hash、四种 repository 方法计数和按实现/functional phase 保存的 SQL trace。首个 diagnostic 注入异常用例会禁止 worker pool、计时器及资源采样路径，并检查 partial 状态和 DB 关闭。
+
+合成 fixture profile 已升至版本 2。`construction_attributes` 中的 owner、owner-hidden、scope 与组织 KB 数量是构造维度；`effective_acl` 独立记录真实 locator visibility iterator 得出的可见/隐藏文档 ID 和数量。构造属性可能重叠，不得相加为 ACL 总数。mixed ACL 的 8 篇小 profile 包含组织拒绝 KB 中一篇 public 与一篇 shared 文档，用于确认组织拒绝优先于文档 scope。
+
+上述用例是本地 SQLite 功能正确性验证，不包含预热、计时、吞吐/延迟输出或资源采样，不改变正式 18 case/810 对矩阵及 ACL 扩展 2 case/90 对合同。测试实现已准备；GREEN 运行状态以单独 Task2 报告记录。它不能替代真实 Linux 门禁、服务器压测或业务 SLO 验收。
+
 ## 配对矩阵
 
 - [ ] 旧 case-loop 基础矩阵应为 18 条 case 记录：每个 requested_N/C 组合各含双 KB 主场景、many-KB(N=100) 和 admin(N=100) 小场景；总计 810 对 timed samples（1,620 个耗时值）。many-KB/admin 的 requested_N 仅为 case 标签，实际数据规模为 N=100，不计入大规模。新增 hidden 分布属于扩展矩阵，单独记录参数和样本，不并入这 18 条/810 对基础矩阵。

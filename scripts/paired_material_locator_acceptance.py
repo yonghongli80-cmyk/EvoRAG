@@ -53,6 +53,20 @@ CORE_CASES = (
     ("many-kb-user", "many-kb", False),
     ("two-kb-admin", "two-kb", True),
 )
+FIXTURE_PROFILE_VERSION = 2
+
+# The first eight mixed-ACL rows are deliberately arranged so the small fixture
+# contains both a public and a shared document in an organization-denied KB.
+_MIXED_ACL_PROFILE = (
+    ("kb-org-deny", "public", False),
+    ("kb-org-deny", "shared", False),
+    ("kb-org-allow", "private", False),
+    ("kb-a", "private", False),
+    ("kb-a", "private", True),
+    ("kb-b", "public", False),
+    ("kb-b", "shared", False),
+    ("kb-b", "private", False),
+)
 
 
 def case_directory_name(*, requested_n: int, actual_n: int, case: str, concurrency: int) -> str:
@@ -83,20 +97,24 @@ def core_case_matrix(
                 raise ValueError("concurrency must be 1 or 2")
             for name, distribution, admin in CORE_CASES:
                 actual_n = requested_n if name == "two-kb-user" else min(requested_n, 100)
-                cases.append({
-                    "case": name,
-                    "distribution": distribution,
-                    "admin": admin,
-                    "requested_n": requested_n,
-                    "actual_n": actual_n,
-                    "concurrency": concurrency,
-                    "rounds": rounds,
-                    "warmups": warmups,
-                    "samples_per_worker_per_round": samples,
-                    "expected_pairs": rounds * samples * concurrency,
-                    "directory": case_directory_name(requested_n=requested_n, actual_n=actual_n, case=name, concurrency=concurrency),
-                    "matrix_group": "core",
-                })
+                cases.append(
+                    {
+                        "case": name,
+                        "distribution": distribution,
+                        "admin": admin,
+                        "requested_n": requested_n,
+                        "actual_n": actual_n,
+                        "concurrency": concurrency,
+                        "rounds": rounds,
+                        "warmups": warmups,
+                        "samples_per_worker_per_round": samples,
+                        "expected_pairs": rounds * samples * concurrency,
+                        "directory": case_directory_name(
+                            requested_n=requested_n, actual_n=actual_n, case=name, concurrency=concurrency
+                        ),
+                        "matrix_group": "core",
+                    }
+                )
     return cases
 
 
@@ -113,20 +131,24 @@ def acl_extension_matrix(
     for concurrency in workers:
         if concurrency not in (1, 2):
             raise ValueError("concurrency must be 1 or 2")
-        cases.append({
-            "case": "acl-extension",
-            "distribution": "mixed-acl",
-            "admin": False,
-            "requested_n": 100,
-            "actual_n": 100,
-            "concurrency": concurrency,
-            "rounds": rounds,
-            "warmups": warmups,
-            "samples_per_worker_per_round": samples,
-            "expected_pairs": rounds * samples * concurrency,
-            "directory": case_directory_name(requested_n=100, actual_n=100, case="acl-extension", concurrency=concurrency),
-            "matrix_group": "acl_extension",
-        })
+        cases.append(
+            {
+                "case": "acl-extension",
+                "distribution": "mixed-acl",
+                "admin": False,
+                "requested_n": 100,
+                "actual_n": 100,
+                "concurrency": concurrency,
+                "rounds": rounds,
+                "warmups": warmups,
+                "samples_per_worker_per_round": samples,
+                "expected_pairs": rounds * samples * concurrency,
+                "directory": case_directory_name(
+                    requested_n=100, actual_n=100, case="acl-extension", concurrency=concurrency
+                ),
+                "matrix_group": "acl_extension",
+            }
+        )
     return cases
 
 
@@ -173,19 +195,22 @@ def validate_run_arguments(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _serialize_rows(rows: list[Any]) -> list[list[Any]]:
-    return [[
-        row.document_id,
-        row.document_version_id,
-        row.filename,
-        row.logical_path,
-        row.document_type,
-        row.updated_at,
-        row.ocr_warning,
-        row.citation.location.kind,
-        row.citation.location.value,
-        row.rank,
-        row.source,
-    ] for row in rows]
+    return [
+        [
+            row.document_id,
+            row.document_version_id,
+            row.filename,
+            row.logical_path,
+            row.document_type,
+            row.updated_at,
+            row.ocr_warning,
+            row.citation.location.kind,
+            row.citation.location.value,
+            row.rank,
+            row.source,
+        ]
+        for row in rows
+    ]
 
 
 def snapshot(locator: Any, query: Any, user: Any) -> tuple[list[list[Any]], str]:
@@ -202,12 +227,19 @@ def _create_org_policy(db: Any, user_id: int, *, allow: bool) -> str:
             "INSERT INTO org_people(person_code,user_id,display_name,job_title,active) VALUES(?,?,?,?,1)",
             (f"PERSON-{org}", user_id, "synthetic", "tester"),
         )
-        connection.execute("INSERT INTO org_memberships(person_code,org_code,is_primary) VALUES(?,?,1)", (f"PERSON-{org}", org))
-        connection.execute("INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, org))
+        connection.execute(
+            "INSERT INTO org_memberships(person_code,org_code,is_primary) VALUES(?,?,1)", (f"PERSON-{org}", org)
+        )
+        connection.execute(
+            "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?,?,'organization')", (kb_id, org)
+        )
     return kb_id
 
 
-def build_synthetic_fixture(path: Path, count: int, distribution: str, admin_case: bool = False) -> tuple[Any, dict[str, Any], Any]:
+def build_synthetic_fixture(
+    path: Path, count: int, distribution: str, admin_case: bool = False
+) -> tuple[Any, dict[str, Any], Any]:
+    from rag.materials.locator_visibility import iter_visible_material_documents
     from rag.materials.models import MaterialLocationQuery
     from rag.user_db import UserDB
 
@@ -223,23 +255,38 @@ def build_synthetic_fixture(path: Path, count: int, distribution: str, admin_cas
         else:
             allowed_org_kb = denied_org_kb = None
 
-        fixture_counts = {"documents": 0, "owner": 0, "public": 0, "shared": 0, "hidden": 0, "organization_allowed": 0, "organization_denied": 0, "kbs": set()}
+        fixture_counts = {
+            "documents": 0,
+            "owner": 0,
+            "private": 0,
+            "public": 0,
+            "shared": 0,
+            "owner_hidden": 0,
+            "organization_allowed": 0,
+            "organization_denied": 0,
+            "kbs": set(),
+        }
+        document_ids: set[int] = set()
         for index in range(count):
-            if distribution == "many-kb":
+            if distribution == "mixed-acl":
+                kb_id, scope, is_hidden = _MIXED_ACL_PROFILE[index % len(_MIXED_ACL_PROFILE)]
+            elif distribution == "many-kb":
                 kb_id = f"kb-{index:06d}"
-            elif distribution == "mixed-acl":
-                kb_id = ("kb-a", "kb-b", allowed_org_kb, denied_org_kb)[index % 4]
+                scope = "private"
+                is_hidden = not admin_case and index % 7 == 6
             else:
                 kb_id = "kb-a" if index % 2 == 0 else "kb-b"
-            is_hidden = (distribution == "mixed-acl" and index % 5 == 4) or (distribution != "mixed-acl" and not admin_case and index % 7 == 6)
-            if distribution == "mixed-acl" and index % 4 == 2:
-                kb_id = allowed_org_kb
-            elif distribution == "mixed-acl" and index % 4 == 3:
-                kb_id = denied_org_kb
+                scope = "private"
+                is_hidden = not admin_case and index % 7 == 6
+            if distribution == "mixed-acl":
+                if kb_id == "kb-org-allow" and allowed_org_kb != kb_id:
+                    raise AssertionError("mixed ACL allowed KB profile does not match its policy")
+                if kb_id == "kb-org-deny" and denied_org_kb != kb_id:
+                    raise AssertionError("mixed ACL denied KB profile does not match its policy")
             subject_owner = hidden_owner_id if is_hidden else owner_id
-            scope = "public" if distribution == "mixed-acl" and index % 5 == 0 else ("shared" if distribution == "mixed-acl" and index % 5 == 1 else "private")
             filename = f"synthetic-{index:06d}.txt"
             document_id = db.create_document_permission(filename, kb_id, subject_owner, scope=scope)
+            document_ids.add(document_id)
             if scope == "shared":
                 db.share_document(document_id, owner_id, subject_owner, "view")
             with db.locked_transaction() as connection:
@@ -247,17 +294,18 @@ def build_synthetic_fixture(path: Path, count: int, distribution: str, admin_cas
                     "UPDATE document_permissions SET subject_user_id=?, document_type=?, logical_path=?, updated_at=? WHERE id=?",
                     (owner_id, "memo", "Synthetic/Acceptance", 1750000000.0 + index, document_id),
                 )
-            version_id = db.create_document_version(document_id, filename, f"/synthetic/{index}", f"hash-{index}", subject_owner)
+            version_id = db.create_document_version(
+                document_id, filename, f"/synthetic/{index}", f"hash-{index}", subject_owner
+            )
             db.activate_document_version(document_id, version_id, kb_id, filename)
-            db.insert_material_search_fts(document_id, version_id, filename, "Synthetic/Acceptance", "memo", "[]", "paired synthetic benchmark")
+            db.insert_material_search_fts(
+                document_id, version_id, filename, "Synthetic/Acceptance", "memo", "[]", "paired synthetic benchmark"
+            )
             fixture_counts["documents"] += 1
             fixture_counts["kbs"].add(kb_id)
+            fixture_counts[scope] += 1
             if is_hidden:
-                fixture_counts["hidden"] += 1
-            elif scope == "public":
-                fixture_counts["public"] += 1
-            elif scope == "shared":
-                fixture_counts["shared"] += 1
+                fixture_counts["owner_hidden"] += 1
             else:
                 fixture_counts["owner"] += 1
             if kb_id == allowed_org_kb:
@@ -268,7 +316,25 @@ def build_synthetic_fixture(path: Path, count: int, distribution: str, admin_cas
         user = db.get_user_by_id(owner_id)
         user = {**user, "is_admin": bool(admin_case)}
         query = MaterialLocationQuery(text="paired", subject=None, top_k=10)
-        db._acceptance_fixture_summary = {**fixture_counts, "kbs": len(fixture_counts["kbs"])}
+        visible_ids = {
+            document_id
+            for document_id, document in iter_visible_material_documents(db, user)
+            if document.get("current_version_id") is not None
+        }
+        hidden_ids = document_ids - visible_ids
+        db._acceptance_fixture_summary = {
+            "profile_version": FIXTURE_PROFILE_VERSION,
+            "construction_attributes": {
+                **{key: value for key, value in fixture_counts.items() if key != "kbs"},
+                "kbs": len(fixture_counts["kbs"]),
+            },
+            "effective_acl": {
+                "visible_document_ids": sorted(visible_ids),
+                "hidden_document_ids": sorted(hidden_ids),
+                "visible_count": len(visible_ids),
+                "hidden_count": len(hidden_ids),
+            },
+        }
         return db, user, query
     except BaseException:
         db.close()
@@ -282,12 +348,15 @@ def _install_sql_trace(db: Any, store: dict[str, Any], active_label: threading.l
         connection = original(*args, **kwargs)
         connection.set_trace_callback(lambda statement: append_sql_trace(store, active_label, statement))
         from scripts.material_locator_acceptance_support import _ConnectionCounter
+
         return _ConnectionCounter(connection, store, active_label)
 
     db.cm.get_read_connection = traced_connection
 
 
-def _prepare_locator_classes(db: Any, baseline_class: Any, new_class: Any, store: dict[str, Any], active_label: threading.local) -> None:
+def _prepare_locator_classes(
+    db: Any, baseline_class: Any, new_class: Any, store: dict[str, Any], active_label: threading.local
+) -> None:
     repo = db.material_repo
     for implementation in ("old", "new"):
         install_repository_counters(repo, store, implementation, active_label)
@@ -343,7 +412,9 @@ def _worker_outcome_record(outcome: TimedWorkerOutcome) -> dict[str, Any]:
             {"result": result, "model_input": model_input, "elapsed_ns": elapsed}
             for result, model_input, elapsed in outcome.observations
         ],
-        "error": None if outcome.error is None else {
+        "error": None
+        if outcome.error is None
+        else {
             "type": type(outcome.error).__name__,
             "message": str(outcome.error),
         },
@@ -404,12 +475,20 @@ def _legacy_counter_fields(counters: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_case(
-    *, case_spec: dict[str, Any], case_dir: Path, baseline_class: Any, new_class: Any,
-    progress: dict[str, Any], output_path: Path, thresholds: dict[str, int],
+    *,
+    case_spec: dict[str, Any],
+    case_dir: Path,
+    baseline_class: Any,
+    new_class: Any,
+    progress: dict[str, Any],
+    output_path: Path,
+    thresholds: dict[str, int],
 ) -> dict[str, Any]:
     case_dir.mkdir(parents=True, exist_ok=False)
     database_path = case_dir / "users.sqlite3"
-    db, user, query = build_synthetic_fixture(database_path, case_spec["actual_n"], case_spec["distribution"], case_spec["admin"])
+    db, user, query = build_synthetic_fixture(
+        database_path, case_spec["actual_n"], case_spec["distribution"], case_spec["admin"]
+    )
     try:
         before_hash = logical_database_hash(db)
         fixture_summary = db._acceptance_fixture_summary
@@ -479,23 +558,36 @@ def run_case(
         for round_id in range(round_count):
             order = round_order(round_id)
             outputs: dict[str, dict[int, list[tuple[list[list[Any]], str, int]]]] = {}
-            progress["in_progress"].update({
-                "last_round_status": "round_started",
-                "round_id": round_id,
-                "phase_order": order,
-                "completed_rounds": round_id,
-                "samples": list(samples),
-                "partial_phase_outputs": {},
-            })
+            progress["in_progress"].update(
+                {
+                    "last_round_status": "round_started",
+                    "round_id": round_id,
+                    "phase_order": order,
+                    "completed_rounds": round_id,
+                    "samples": list(samples),
+                    "partial_phase_outputs": {},
+                }
+            )
             write_json_atomic(output_path, progress)
             for implementation in order:
                 locator_class = baseline_class if implementation == "old" else new_class
                 stop_event = threading.Event()
                 with ThreadPoolExecutor(max_workers=case_spec["concurrency"]) as pool:
-                    futures = [pool.submit(
-                        _timed_worker, worker_id, implementation, locator_class, db, query, user,
-                        case_spec["samples_per_worker_per_round"], active_label, stop_event,
-                    ) for worker_id in range(case_spec["concurrency"])]
+                    futures = [
+                        pool.submit(
+                            _timed_worker,
+                            worker_id,
+                            implementation,
+                            locator_class,
+                            db,
+                            query,
+                            user,
+                            case_spec["samples_per_worker_per_round"],
+                            active_label,
+                            stop_event,
+                        )
+                        for worker_id in range(case_spec["concurrency"])
+                    ]
                     outputs[implementation] = _collect_worker_outcomes(
                         futures,
                         implementation=implementation,
@@ -508,12 +600,20 @@ def run_case(
                     new_value = outputs["new"][worker_id][sample_id]
                     if old_value[:2] != new_value[:2]:
                         raise AssertionError("timed full output/model_input mismatch")
-                    samples.append({
-                        "round": round_id, "worker": worker_id, "sample": sample_id,
-                        "phase_order": order, "old_ns": old_value[2], "new_ns": new_value[2],
-                        "old_result": old_value[0], "new_result": new_value[0],
-                        "old_model_input": old_value[1], "new_model_input": new_value[1],
-                    })
+                    samples.append(
+                        {
+                            "round": round_id,
+                            "worker": worker_id,
+                            "sample": sample_id,
+                            "phase_order": order,
+                            "old_ns": old_value[2],
+                            "new_ns": new_value[2],
+                            "old_result": old_value[0],
+                            "new_result": new_value[0],
+                            "old_model_input": old_value[1],
+                            "new_model_input": new_value[1],
+                        }
+                    )
             progress["in_progress"] = {
                 **case_spec,
                 "last_round_status": "round_complete_pending_resource_gate",
@@ -611,7 +711,9 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
     validated = validate_run_arguments(args)
     run_root = output.parent / f"{output.stem}-fixtures"
     if run_root.exists():
-        raise AcceptanceError("fixture output directory already exists", code="run_directory_exists", details={"path": str(run_root)})
+        raise AcceptanceError(
+            "fixture output directory already exists", code="run_directory_exists", details={"path": str(run_root)}
+        )
     run_root.mkdir(parents=True, exist_ok=False)
     rag_context = None
     try:
@@ -637,7 +739,10 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
         cases = core_case_matrix(counts, workers, rounds=args.rounds, warmups=args.warmups, samples=args.samples)
         if args.acl_extension:
             cases.extend(acl_extension_matrix(workers, rounds=args.rounds, warmups=args.warmups, samples=args.samples))
-        progress["matrix"] = {"core": [case for case in cases if case["matrix_group"] == "core"], "acl_extension": [case for case in cases if case["matrix_group"] == "acl_extension"]}
+        progress["matrix"] = {
+            "core": [case for case in cases if case["matrix_group"] == "core"],
+            "acl_extension": [case for case in cases if case["matrix_group"] == "acl_extension"],
+        }
         progress["status"] = "running"
         write_json_atomic(output, progress)
     except BaseException:
@@ -647,7 +752,15 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
     try:
         for case_spec in cases:
             case_dir = run_root / case_spec["directory"]
-            record = run_case(case_spec=case_spec, case_dir=case_dir, baseline_class=baseline_class, new_class=MaterialLocator, progress=progress, output_path=output, thresholds=thresholds)
+            record = run_case(
+                case_spec=case_spec,
+                case_dir=case_dir,
+                baseline_class=baseline_class,
+                new_class=MaterialLocator,
+                progress=progress,
+                output_path=output,
+                thresholds=thresholds,
+            )
             progress["runs"].append(record)
             progress.pop("in_progress", None)
             write_json_atomic(output, progress)
@@ -657,8 +770,16 @@ def _run_matrix(args: argparse.Namespace, output: Path, progress: dict[str, Any]
         write_json_atomic(output, progress)
         return 0
     except ResourceGateError as exc:
-        progress["status"] = "resource_blocked_with_partial" if progress.get("runs") or progress.get("in_progress") else "resource_blocked"
-        progress["error"] = {"code": exc.details.get("error_code", "resource_gate_failed"), "message": str(exc), "details": exc.details}
+        progress["status"] = (
+            "resource_blocked_with_partial"
+            if progress.get("runs") or progress.get("in_progress")
+            else "resource_blocked"
+        )
+        progress["error"] = {
+            "code": exc.details.get("error_code", "resource_gate_failed"),
+            "message": str(exc),
+            "details": exc.details,
+        }
         write_json_atomic(output, progress)
         return 2
     except BaseException as exc:
@@ -679,7 +800,14 @@ def main(argv: list[str] | None = None) -> int:
             manifest = validate_output_path(args.manifest, must_not_exist=True)
             payload = create_source_freeze(ROOT)
             write_json_new(manifest, payload)
-            _emit({"status": "frozen", "manifest": str(manifest), "commit": payload["commit"], "files": len(payload["files"])})
+            _emit(
+                {
+                    "status": "frozen",
+                    "manifest": str(manifest),
+                    "commit": payload["commit"],
+                    "files": len(payload["files"]),
+                }
+            )
             return 0
 
         output = validate_output_path(args.output, must_not_exist=True)
@@ -696,7 +824,11 @@ def main(argv: list[str] | None = None) -> int:
             progress["source_freeze"] = verify_source_freeze(ROOT, args.manifest)
             baseline_hash = source_hashes(BASELINE)
             new_locator_hash = source_hashes(ROOT / "rag" / "materials" / "locator.py")
-            progress["source_sha256"] = {"baseline_raw": baseline_hash["raw_sha256"], "baseline": baseline_hash["lf_sha256"], "new": new_locator_hash["lf_sha256"]}
+            progress["source_sha256"] = {
+                "baseline_raw": baseline_hash["raw_sha256"],
+                "baseline": baseline_hash["lf_sha256"],
+                "new": new_locator_hash["lf_sha256"],
+            }
             progress["baseline_sha256"] = baseline_hash["lf_sha256"]
             progress["new_sha256"] = new_locator_hash["lf_sha256"]
             write_json_atomic(output, progress)
@@ -712,7 +844,14 @@ def main(argv: list[str] | None = None) -> int:
             _emit({"status": "failed", "error": progress["error"], "output": str(output)})
             return 2
     except (AcceptanceError, OSError, ValueError) as exc:
-        payload = {"status": "failed", "error": {"code": getattr(exc, "code", "invalid_arguments"), "message": str(exc), "details": getattr(exc, "details", {})}}
+        payload = {
+            "status": "failed",
+            "error": {
+                "code": getattr(exc, "code", "invalid_arguments"),
+                "message": str(exc),
+                "details": getattr(exc, "details", {}),
+            },
+        }
         _emit(payload)
         return 2
 

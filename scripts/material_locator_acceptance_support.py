@@ -46,13 +46,15 @@ COUNTER_METHODS = (
     "list_material_documents_for_kb",
     "list_material_documents_for_access_plan",
 )
-COUNTER_PHASES = ("diagnostic_probe", "semantic_probe", "warmup", "timed_measurement")
+COUNTER_PHASES = ("diagnostic_probe", "semantic_probe", "warmup", "timed_measurement", "functional")
 
 
 class AcceptanceError(RuntimeError):
     """A reproducibility or safety precondition failed."""
 
-    def __init__(self, message: str, *, code: str = "acceptance_preflight_failed", details: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str = "acceptance_preflight_failed", details: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.details = details or {}
@@ -88,7 +90,9 @@ def _git(root: Path, *args: str) -> str:
             timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise AcceptanceError("Git source-freeze query failed", code="git_unavailable", details={"args": list(args), "error": str(exc)}) from exc
+        raise AcceptanceError(
+            "Git source-freeze query failed", code="git_unavailable", details={"args": list(args), "error": str(exc)}
+        ) from exc
     return result.stdout.strip()
 
 
@@ -124,7 +128,9 @@ def create_source_freeze(root: Path = ROOT) -> dict[str, Any]:
     root = root.resolve()
     status = _relevant_status(root)
     if status:
-        raise AcceptanceError("source roots contain modified or untracked files", code="source_tree_dirty", details={"status": status})
+        raise AcceptanceError(
+            "source roots contain modified or untracked files", code="source_tree_dirty", details={"status": status}
+        )
     commit = _git(root, "rev-parse", "HEAD")
     entries = []
     for path in _frozen_paths(root):
@@ -132,7 +138,9 @@ def create_source_freeze(root: Path = ROOT) -> dict[str, Any]:
         entries.append({"path": relative, **source_hashes(path)})
     baseline = next((entry for entry in entries if entry["path"] == "tests/fixtures/material_locator_542a36f.py"), None)
     if baseline is None or baseline["lf_sha256"] != BASELINE_LF_SHA256:
-        raise AcceptanceError("baseline fixture LF hash mismatch", code="baseline_hash_mismatch", details={"actual": baseline})
+        raise AcceptanceError(
+            "baseline fixture LF hash mismatch", code="baseline_hash_mismatch", details={"actual": baseline}
+        )
     payload = {
         "format_version": 1,
         "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -154,7 +162,11 @@ def verify_source_freeze(root: Path, manifest_path: Path) -> dict[str, Any]:
     try:
         expected = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise AcceptanceError("freeze manifest cannot be read", code="freeze_manifest_unreadable", details={"path": str(manifest_path), "error": str(exc)}) from exc
+        raise AcceptanceError(
+            "freeze manifest cannot be read",
+            code="freeze_manifest_unreadable",
+            details={"path": str(manifest_path), "error": str(exc)},
+        ) from exc
     if expected.get("format_version") != 1:
         raise AcceptanceError("unsupported freeze manifest version", code="freeze_manifest_version")
     if expected.get("manifest_sha256") != _manifest_digest(expected):
@@ -166,14 +178,31 @@ def verify_source_freeze(root: Path, manifest_path: Path) -> dict[str, Any]:
         raise AcceptanceError("source roots changed after freeze", code="source_tree_dirty", details={"status": status})
     commit = _git(root, "rev-parse", "HEAD")
     if expected.get("commit") != commit:
-        raise AcceptanceError("repository commit differs from freeze", code="freeze_commit_mismatch", details={"expected": expected.get("commit"), "actual": commit})
-    actual_entries = [{"path": path.relative_to(root).as_posix(), **source_hashes(path)} for path in _frozen_paths(root)]
+        raise AcceptanceError(
+            "repository commit differs from freeze",
+            code="freeze_commit_mismatch",
+            details={"expected": expected.get("commit"), "actual": commit},
+        )
+    actual_entries = [
+        {"path": path.relative_to(root).as_posix(), **source_hashes(path)} for path in _frozen_paths(root)
+    ]
     if expected.get("files") != actual_entries:
         expected_by_path = {entry.get("path"): entry for entry in expected.get("files", [])}
         actual_by_path = {entry["path"]: entry for entry in actual_entries}
-        differences = sorted(path for path in set(expected_by_path) | set(actual_by_path) if expected_by_path.get(path) != actual_by_path.get(path))
-        raise AcceptanceError("source hash manifest differs", code="freeze_hash_mismatch", details={"paths": differences})
-    return {"verified": True, "commit": commit, "file_count": len(actual_entries), "manifest_sha256": expected["manifest_sha256"]}
+        differences = sorted(
+            path
+            for path in set(expected_by_path) | set(actual_by_path)
+            if expected_by_path.get(path) != actual_by_path.get(path)
+        )
+        raise AcceptanceError(
+            "source hash manifest differs", code="freeze_hash_mismatch", details={"paths": differences}
+        )
+    return {
+        "verified": True,
+        "commit": commit,
+        "file_count": len(actual_entries),
+        "manifest_sha256": expected["manifest_sha256"],
+    }
 
 
 def validate_output_path(path: Path, root: Path = ROOT, *, must_not_exist: bool = True) -> Path:
@@ -182,9 +211,15 @@ def validate_output_path(path: Path, root: Path = ROOT, *, must_not_exist: bool 
     try:
         absolute.relative_to(allowed)
     except ValueError as exc:
-        raise AcceptanceError("output must be inside artifacts/material-locator-acceptance", code="output_path_forbidden", details={"path": str(absolute)}) from exc
+        raise AcceptanceError(
+            "output must be inside artifacts/material-locator-acceptance",
+            code="output_path_forbidden",
+            details={"path": str(absolute)},
+        ) from exc
     if must_not_exist and absolute.exists():
-        raise AcceptanceError("refusing to overwrite existing output", code="output_exists", details={"path": str(absolute)})
+        raise AcceptanceError(
+            "refusing to overwrite existing output", code="output_exists", details={"path": str(absolute)}
+        )
     return absolute
 
 
@@ -195,7 +230,9 @@ def write_json_new(path: Path, payload: dict[str, Any]) -> None:
             json.dump(payload, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
     except FileExistsError as exc:
-        raise AcceptanceError("refusing to overwrite existing output", code="output_exists", details={"path": str(path)}) from exc
+        raise AcceptanceError(
+            "refusing to overwrite existing output", code="output_exists", details={"path": str(path)}
+        ) from exc
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -228,7 +265,13 @@ def sanitize_process_environment(run_dir: Path) -> dict[str, Any]:
     os.environ["TEMP"] = os.environ["TMP"] = os.environ["TMPDIR"] = str(temp_dir)
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[name] = "1"
-    return {"environment_allowlist": sorted(os.environ), "home": str(home), "secrets_retained": False, "blas_threads": "1", "temporary_directory": str(temp_dir)}
+    return {
+        "environment_allowlist": sorted(os.environ),
+        "home": str(home),
+        "secrets_retained": False,
+        "blas_threads": "1",
+        "temporary_directory": str(temp_dir),
+    }
 
 
 def install_offline_network_guard() -> dict[str, Any]:
@@ -265,8 +308,20 @@ def install_offline_network_guard() -> dict[str, Any]:
     socket.getnameinfo = blocked_name_lookup
     socket._material_locator_guard_installed = True  # type: ignore[attr-defined]
     return {
-        "installed": True, "policy": "no_dns_or_ip_connect",
-        "patched": ["socket.connect", "socket.connect_ex", "socket.sendto", "socket.sendmsg", "socket.create_connection", "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex", "socket.gethostbyaddr", "socket.getnameinfo"],
+        "installed": True,
+        "policy": "no_dns_or_ip_connect",
+        "patched": [
+            "socket.connect",
+            "socket.connect_ex",
+            "socket.sendto",
+            "socket.sendmsg",
+            "socket.create_connection",
+            "socket.getaddrinfo",
+            "socket.gethostbyname",
+            "socket.gethostbyname_ex",
+            "socket.gethostbyaddr",
+            "socket.getnameinfo",
+        ],
     }
 
 
@@ -276,7 +331,14 @@ def disable_dotenv_loading() -> None:
     except ImportError as exc:
         raise AcceptanceError("pydantic-settings is unavailable", code="dotenv_guard_unavailable") from exc
 
-    def environment_only(cls: Any, settings_cls: Any, init_settings: Any, env_settings: Any, dotenv_settings: Any, file_secret_settings: Any) -> tuple[Any, ...]:
+    def environment_only(
+        cls: Any,
+        settings_cls: Any,
+        init_settings: Any,
+        env_settings: Any,
+        dotenv_settings: Any,
+        file_secret_settings: Any,
+    ) -> tuple[Any, ...]:
         del cls, settings_cls, dotenv_settings, file_secret_settings
         return init_settings, env_settings
 
@@ -294,13 +356,17 @@ def install_sqlite_path_audit(run_root: Path) -> dict[str, Any]:
         if value == ":memory:":
             resolved = value
         elif value.startswith("file:"):
-            raise AcceptanceError("SQLite URI connections are disabled", code="sqlite_uri_forbidden", details={"database": value})
+            raise AcceptanceError(
+                "SQLite URI connections are disabled", code="sqlite_uri_forbidden", details={"database": value}
+            )
         else:
             candidate = Path(value).resolve()
             try:
                 candidate.relative_to(allowed_root)
             except ValueError as exc:
-                raise AcceptanceError("SQLite path is outside this run", code="sqlite_path_forbidden", details={"path": str(candidate)}) from exc
+                raise AcceptanceError(
+                    "SQLite path is outside this run", code="sqlite_path_forbidden", details={"path": str(candidate)}
+                ) from exc
             resolved = str(candidate)
         with lock:
             opened.append(resolved)
@@ -340,7 +406,12 @@ def configure_isolated_context(run_dir: Path) -> tuple[Any, dict[str, str]]:
 
 
 def logical_database_hash(db: Any) -> dict[str, Any]:
-    tables = [row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+    tables = [
+        row[0]
+        for row in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
     digest = hashlib.sha256()
     table_rows: dict[str, int] = {}
     for table in tables:
@@ -354,9 +425,16 @@ def logical_database_hash(db: Any) -> dict[str, Any]:
         digest.update(table.encode("utf-8"))
         digest.update(b"\0")
         for row in rows:
-            digest.update(json.dumps(tuple(row), ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8"))
+            digest.update(
+                json.dumps(tuple(row), ensure_ascii=False, default=str, separators=(",", ":")).encode("utf-8")
+            )
             digest.update(b"\n")
-    return {"algorithm": "sha256-json-rows-v1", "sha256": digest.hexdigest(), "tables": table_rows, "row_count": sum(table_rows.values())}
+    return {
+        "algorithm": "sha256-json-rows-v1",
+        "sha256": digest.hexdigest(),
+        "tables": table_rows,
+        "row_count": sum(table_rows.values()),
+    }
 
 
 def new_counter_store() -> dict[str, Any]:
@@ -374,7 +452,11 @@ def new_counter_store() -> dict[str, Any]:
         "lock": lock,
         "counts": counts,
         "sql": {"old": [], "new": []},
-        "query_counts": {"old": {"all": 0, "document_projection": 0, "kb_id_projection": 0, "access_plan_batch": 0}, "new": {"all": 0, "document_projection": 0, "kb_id_projection": 0, "access_plan_batch": 0}},
+        "sql_by_phase": {implementation: {phase: [] for phase in COUNTER_PHASES} for implementation in ("old", "new")},
+        "query_counts": {
+            "old": {"all": 0, "document_projection": 0, "kb_id_projection": 0, "access_plan_batch": 0},
+            "new": {"all": 0, "document_projection": 0, "kb_id_projection": 0, "access_plan_batch": 0},
+        },
         "fetched_rows": {"old": {"document_rows": 0, "kb_id_rows": 0}, "new": {"document_rows": 0, "kb_id_rows": 0}},
         "lock_guard": threading.Lock(),
     }
@@ -422,6 +504,9 @@ def append_sql_trace(store: dict[str, Any], active_label: Any, statement: str) -
     if name in store["sql"]:
         with store["lock_guard"]:
             store["sql"][name].append(statement)
+            phase = getattr(active_label, "phase", None)
+            if phase in store["sql_by_phase"][name]:
+                store["sql_by_phase"][name][phase].append(statement)
 
 
 class _CursorCounter:
@@ -481,14 +566,18 @@ class _ConnectionCounter:
         if name in self._store["query_counts"]:
             with self._store["lock_guard"]:
                 self._store["query_counts"][name]["all"] += 1
-        return _CursorCounter(self._connection.execute(statement, parameters), statement, self._store, self._active_label)
+        return _CursorCounter(
+            self._connection.execute(statement, parameters), statement, self._store, self._active_label
+        )
 
     def executemany(self, statement: str, parameters: Any) -> _CursorCounter:
         name = getattr(self._active_label, "name", None)
         if name in self._store["query_counts"]:
             with self._store["lock_guard"]:
                 self._store["query_counts"][name]["all"] += 1
-        return _CursorCounter(self._connection.executemany(statement, parameters), statement, self._store, self._active_label)
+        return _CursorCounter(
+            self._connection.executemany(statement, parameters), statement, self._store, self._active_label
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._connection, name)
@@ -506,14 +595,31 @@ def semantic_probe(locator_cls: Any, db: Any, query: Any, user: Any) -> dict[str
     rows = locator.locate(query, user)
     return {
         "calls": calls,
-        "result": [[row.document_id, row.document_version_id, row.filename, row.logical_path, row.document_type, row.updated_at, row.ocr_warning, row.citation.location.kind, row.citation.location.value, row.rank, row.source] for row in rows],
+        "result": [
+            [
+                row.document_id,
+                row.document_version_id,
+                row.filename,
+                row.logical_path,
+                row.document_type,
+                row.updated_at,
+                row.ocr_warning,
+                row.citation.location.kind,
+                row.citation.location.value,
+                row.rank,
+                row.source,
+            ]
+            for row in rows
+        ],
         "model_input": locator.model_input,
     }
 
 
 def load_frozen_baseline(path: Path = BASELINE, expected_lf_sha: str = BASELINE_LF_SHA256) -> Any:
     if source_hashes(path)["lf_sha256"] != expected_lf_sha:
-        raise AcceptanceError("frozen baseline source hash mismatch", code="baseline_hash_mismatch", details={"path": str(path)})
+        raise AcceptanceError(
+            "frozen baseline source hash mismatch", code="baseline_hash_mismatch", details={"path": str(path)}
+        )
     spec = importlib.util.spec_from_file_location("material_locator_542a36f", path)
     if spec is None or spec.loader is None:
         raise AcceptanceError("cannot load frozen baseline source", code="baseline_load_failed")
