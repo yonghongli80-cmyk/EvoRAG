@@ -53,6 +53,6 @@
 - [x] 源码冻结后一次完整后端离线回归(启动公共路径风险)，生产锁小型功能/生命周期烟测与源码前后check，实际skip理由保留，不重复前端/压力。
 - [x] 验证当前SQL103源形状与新writer范围，root真实生成新inventory/manifest/proof，未解析或未知不伪报完成。
 - [x] 更新当前路线图/交接/本批结果裁决，确认原服务PID/start/ready/env hash、Dmain/跟踪树不变；旧批事实不改成新结果。
-- [ ] root实际submit本独立事项记录并核对成功、归档非DB证据及hash，保留分支/env/历史，无自动merge/push/deploy。
+- [x] root实际submit本独立事项记录并核对成功、归档非DB证据及hash，保留分支/env/历史，无自动merge/push/deploy。
 
 **Preflight:** Task1仅Rag startup+对应tests，Task2仅scripts fixture/新functional test+server文档，Task3两个新静态工具/测试/架构doc，互不编辑。Task4 root文档消费1/2/3 READY后更新，不抢子任务文件。共享测试解释器和CPU以root许可串行；review只读可并发。Task2元数据改变不改变核心18/810/扩展2/90样本合同。Task3源bindings最终需候选同hash，不能将早期snapshot硬标当前。
