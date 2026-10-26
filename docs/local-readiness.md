@@ -1,10 +1,10 @@
 # 本地准备与当前剩余工作
 
-更新：2026-10-26。当前已交付 main 为 `99834ca`，材料定位两阶段成果已合并并双推，见[交付记录](reviews/2026-10-26-material-locator-delivery.md)。本页作为文档状态索引的当前摘要；历史报告中的“仍本地”“Docker不可用”等须结合日期，不直接作为新待办。
+更新：2026-10-26。按用户停用旧机的交付要求，Gitee/GitHub main已从 `99834ca` 快进到 `e3c842a`，交付此前本地33个提交；之后仅追加交接文档，最终refs见[旧机交付与迁移说明](reviews/2026-10-26-machine-handoff.md)。D工作区磁盘main暂留旧版本以保护在线服务，迁移包Git main指向交付版本。本页作为文档状态索引的当前摘要；历史报告中的“仍本地”“Docker不可用”等须结合日期，不直接作为新待办。
 
 用户要求继续并发Luna，由root主导本地工作，服务器上线近期暂缓。当前隔离分支 `codex/local-contracts-2026-10-26` 基于上一批 `0b48872`；旧 local-readiness/local-followups 分支继续保留。当前[合同加固计划](superpowers/plans/2026-10-26-local-contracts.md)推进启动诊断竞态、SQLite identifier引用和操作级事务清单。本轮不切换原服务、不读业务数据库或资料，不运行正式压力矩阵，不自动合并推送。
 
-此前3423/5、605文件，以及上一批 `e4b07ec` 的 **3462通过/5跳过、2089.65秒/退出0**、生产锁6项、612文件前后核对，分别是[local-readiness](reviews/2026-10-26-local-readiness.md)和[local-followups](reviews/2026-10-26-local-followups.md)历史结果。本批冻结 `cdf039a`，完整后端 **3481通过/5跳过、1892.99秒/退出0**，分项/整分支复审、生产锁8项、全树Ruff/9文件格式、615文件前后核对通过，不复用旧数字。详见[本批合同加固验收](reviews/2026-10-26-local-contracts.md)。源码仍本地，不能把阶段结项称全项目完成。
+此前3423/5、605文件，以及上一批 `e4b07ec` 的 **3462通过/5跳过、2089.65秒/退出0**、生产锁6项、612文件前后核对，分别是[local-readiness](reviews/2026-10-26-local-readiness.md)和[local-followups](reviews/2026-10-26-local-followups.md)历史结果。本批冻结 `cdf039a`，完整后端 **3481通过/5跳过、1892.99秒/退出0**，分项/整分支复审、生产锁8项、全树Ruff/9文件格式、615文件前后核对通过，不复用旧数字。详见[本批合同加固验收](reviews/2026-10-26-local-contracts.md)。源码现已双推，仍不能把阶段结项称全项目完成。
 
 ## 本轮本地交付范围
 

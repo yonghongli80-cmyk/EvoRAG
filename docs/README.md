@@ -6,10 +6,11 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-26-machine-handoff.md`：旧机停用前的双远端交付、私密迁移包和恢复边界；覆盖下列历史报告中的“仍本地/未推送”。业务数据只在本地迁移包，不进入Git。
 - `local-readiness.md`：唯一当前状态摘要与本地准备路线图；区分已交付源码、本轮本地准备、后续架构实现和服务器/业务未验门槛。旧报告按日期理解，不据历史空复选框重复开发。
-- `reviews/2026-10-26-local-contracts.md`：本批启动失败诊断、合法SQLite identifier引用和命令级事务图；冻结cdf039a，完整3481通过/5跳过、8项烟测、615文件前后核对与独立复审通过，未合并推送。
+- `reviews/2026-10-26-local-contracts.md`：本批启动失败诊断、合法SQLite identifier引用和命令级事务图；冻结cdf039a，完整3481通过/5跳过、8项烟测、615文件前后核对与独立复审通过；源码现已双推，原报告保留当时状态。
 - `architecture/command-transaction-boundaries.md`：KB删除、上传/索引发布、受控恢复的SQL owner、reader边界、外部效果、补偿及unknown；拟议故障矩阵不是已执行证明。
-- `reviews/2026-10-26-local-followups.md`：上一批启动排空与异常诊断、四组小型SQLite功能对照、SQL源证据与writer候选历史快照；冻结e4b07ec完整后端3462通过/5跳过、生产锁6项、612文件前后核对，仍未合并推送。
+- `reviews/2026-10-26-local-followups.md`：上一批启动排空与异常诊断、四组小型SQLite功能对照、SQL源证据与writer候选历史快照；冻结e4b07ec完整后端3462通过/5跳过、生产锁6项、612文件前后核对；源码现已双推，原报告保留当时状态。
 - `reviews/2026-10-26-local-readiness.md`：更早一期本地工具/API启动/SQL清单历史基线，完整3423通过/5跳过、生产锁5项烟测、605文件前后核对和裁决；最新结果见local-contracts报告。
 - `reviews/2026-10-26-material-locator-delivery.md`：材料定位两阶段成果的 main 快进集成、合并后新跑 92 项回归/4 项烟测、双远端交付与运行边界；服务器性能验收继续留空。
 - `reviews/2026-10-26-material-locator-many-kb.md`：多 KB 批量授权投影修复及当时92项回归/生产锁4项烟测；“仍本地”是该报告当时快照，后续源码已由交付报告覆盖，服务器压测仍留空。
