@@ -72,22 +72,31 @@ class ConnectionManager:
 
     def get_read_connection(self) -> sqlite3.Connection:
         """Get or initialize the thread-local read-only connection."""
-        if self._closed:
-            raise RuntimeError("ConnectionManager is closed")
+        with self._all_conns_lock:
+            if self._closed:
+                raise RuntimeError("ConnectionManager is closed")
+            conn = getattr(self._local, "read_conn", None)
+            if conn is not None:
+                return conn
 
-        conn = getattr(self._local, "read_conn", None)
-        if conn is None:
-            conn = sqlite3.connect(
-                self.db_path,
-                check_same_thread=False,
-                timeout=self.timeout,
-            )
+        conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=self.timeout,
+        )
+        try:
             if self.row_factory is not None:
                 conn.row_factory = self.row_factory
             self._configure_connection(conn, is_writer=False)
-            self._local.read_conn = conn
             with self._all_conns_lock:
+                if self._closed:
+                    raise RuntimeError("ConnectionManager is closed")
                 self._all_read_conns.append(conn)
+                self._local.read_conn = conn
+        except BaseException:
+            with contextlib.suppress(Exception):
+                conn.close()
+            raise
         return conn
 
     @contextmanager
@@ -112,6 +121,8 @@ class ConnectionManager:
         if self._closed:
             raise RuntimeError("ConnectionManager is closed")
         with self._write_lock:
+            if self._closed:
+                raise RuntimeError("ConnectionManager is closed")
             yield self._write_conn
 
     @contextmanager
@@ -130,6 +141,8 @@ class ConnectionManager:
         if self._closed:
             raise RuntimeError("ConnectionManager is closed")
         with self._write_lock:
+            if self._closed:
+                raise RuntimeError("ConnectionManager is closed")
             if self._write_conn.in_transaction:
                 yield self._write_conn
                 return
@@ -148,18 +161,16 @@ class ConnectionManager:
 
     def close(self) -> None:
         """Close write connection and all registered read connections."""
-        with self._write_lock:
+        with self._write_lock, self._all_conns_lock:
             if self._closed:
                 return
             self._closed = True
             with contextlib.suppress(Exception):
                 self._write_conn.close()
-
-            with self._all_conns_lock:
-                for conn in self._all_read_conns:
-                    with contextlib.suppress(Exception):
-                        conn.close()
-                self._all_read_conns.clear()
+            for conn in self._all_read_conns:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            self._all_read_conns.clear()
 
     def __enter__(self) -> ConnectionManager:
         return self
