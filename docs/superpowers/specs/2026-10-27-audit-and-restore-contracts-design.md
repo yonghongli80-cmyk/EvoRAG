@@ -20,6 +20,7 @@
 6. restore-test：报告在发布目录前准备好；报告失败只清本次拥有的临时目录，正式目标不出现，随后可重试。既有目标不覆盖。
 7. 配置到项目外的本地Qdrant目录同样受restore-test保护，包括与目标的祖先/后代重叠。保护信息从构造context时的设置传递；不读取目标存储，不启动Qdrant。
 8. SQL helper继续允许SQLite合法非canonical/quoted名称，值保持绑定、NUL拒绝。明确自定义SQL、旧catalog、dataset与snapshot信任来源，不收紧历史schema兼容。
+9. 显式runtime SELECT工具对文件数据库按只读模式打开；缺失文件失败而不创建空库，合法含空格/Unicode/#/%的路径仍能查询，原SELECT限制/query_only/1000行上限及:memory:兼容保持。此项先独立行为RED，不把调用方传入的db_path伪称HTTP任意文件漏洞。
 
 ## 实施边界
 

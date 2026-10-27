@@ -89,3 +89,13 @@
 - [ ] 核对原服务状态/配置/main/跟踪树保持，记录所有真实缺口和后续架构依赖；实际submit当前根任务工作记录并检查成功。
 
 执行状态、RED/GREEN证据与判断写入本计划专属SDD ledger，完成后将结果回填本页。本地代码完成不等于目标服务器或真实业务验收完成。
+
+## T5：显式SELECT工具的文件只读打开（可与T1/T2/T3并行，T4冻结前完成）
+
+**Files:** `rag/tools.py`；新增`tests/test_sql_tool_readonly.py`。
+
+**Interfaces:** create_sql_tool(db_path)及返回callable不变。文件路径通过Path.resolve().as_uri()编码后加mode=ro，SQLite以uri=True打开；:memory:保持特例。保留SQL关键词/分号门禁、query_only和结果上限。
+
+- [ ] 先写行为RED：缺失db路径执行SELECT1不应成功或留下文件，查询错误也不创建空库；合法含空格/Unicode/#/%路径返回手工预置行，:memory: SELECT仍工作。
+- [ ] root RED确认文件创建缺陷后才改打开方式；不扩大授权DB范围，不改变允许SQL集合。
+- [ ] root GREEN新模块与既有test_tools组，独立复审、提交。T4说明此文件生命周期问题与SQL授权信任边界的区别。

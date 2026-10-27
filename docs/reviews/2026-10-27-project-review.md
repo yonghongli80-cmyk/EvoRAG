@@ -18,6 +18,7 @@
 | R4/P2 | organization confirm/rollback返回后逐项无条件审计 | conflict/未变更项被记成success；同key replay与已rolled_back项再次写审计。同KB多项产生不可区分的重复KB事件 | T3c |
 | R5/P2 | `rag/backups/service.py:restore_test` rename后写报告 | 报告I/O失败留下正式目标，下一次restore-test被target_not_empty拒绝 | T2 |
 | R6/P2 | `scripts/backup.py` restore-test保护根 | 外置本地Qdrant目录不在project/data内时未受保护，可能被当隔离恢复目的地 | T2 |
+| R7/待复现 | `rag/tools.py:create_sql_tool` | 只读查询面使用默认sqlite3.connect，路径缺失时可能新建空数据库；应由行为RED确认，再使用文件只读打开，保留已有路径与memory兼容 | T5 |
 
 R1/R2修复不能仅调整HTTP异常：必须验证业务SQL与审计共同提交/回滚，并保留原文件补偿。R3把审计放在cleanup之后会因policy已删除漏记，应在同一终态事务内先读取policy/写审计再执行cleanup。OrgRepository.locked_read使用独立reader；不得宣称所有词法嵌套读取都共享writer快照。
 
