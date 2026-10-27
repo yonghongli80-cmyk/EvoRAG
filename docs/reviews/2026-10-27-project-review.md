@@ -19,7 +19,7 @@
 | R5/P2 | `rag/backups/service.py:restore_test` rename后写报告 | 报告I/O失败留下正式目标，下一次restore-test被target_not_empty拒绝 | T2 |
 | R6/P2 | `scripts/backup.py` restore-test保护根 | 外置本地Qdrant目录不在project/data内时未受保护，可能被当隔离恢复目的地 | T2 |
 | R7/P2 | `rag/tools.py:create_sql_tool` | 只读查询面使用默认sqlite3.connect；真实RED确认缺失路径SELECT1成功建空库、缺表查询报错后仍留空库。改用文件只读打开，保留已有路径与memory兼容 | T5 |
-| R8/待复现 | `rag/repositories/schema.py:rebuild_document_versions_status` | 固定列复制不会保留未知旧列/生成列，可能静默丢弃扩展数据/逻辑。可信来源不能代替schema兼容；先用合成旧库确认，再在DDL前拒绝不支持的列布局 | T6 |
+| R8/P2 | `rag/repositories/schema.py:rebuild_document_versions_status` | 三种合成旧表RED确认固定列复制会完成升级却丢失额外普通/生成列。重建前按完整列集合与hidden标志拒绝未知布局，保持已知schema大小写/列序兼容 | T6 |
 
 R1/R2修复不能仅调整HTTP异常：必须验证业务SQL与审计共同提交/回滚，并保留原文件补偿。R3把审计放在cleanup之后会因policy已删除漏记，应在同一终态事务内先读取policy/写审计再执行cleanup。OrgRepository.locked_read使用独立reader；不得宣称所有词法嵌套读取都共享writer快照。
 
@@ -32,3 +32,14 @@ R1/R2修复不能仅调整HTTP异常：必须验证业务SQL与审计共同提�
 服务器真实矩阵/P99/SLO、真实脱敏fixture/供应商证据/业务质量、真实存量切换仍按既有安排留空；PG/UoW、共享状态、对象存储、多实例和生产shadow按依赖推进，不由本轮局部SQL事务修复冒称完成。
 
 下一步：[设计](../superpowers/specs/2026-10-27-audit-and-restore-contracts-design.md)、[计划](../superpowers/plans/2026-10-27-review-remediation.md)。
+
+## 分项实现与源码冻结前验证
+
+| 范围 | 独立运行证据 | 实现与复审 |
+|---|---|---|
+| 隔离恢复 | 原始2项行为RED；backup七组72通过/36.06秒/native0 | 报告随temporary一起发布；context追加默认空保护根并传递本地Qdrant路径；scoped SPEC/QUALITY PASS，f2f16c1 |
+| 删除/上传/归档/只读SQL | 扩大组106通过/1项Windows fork跳过/119.19秒/native0；覆盖补强后32通过/23.39秒/native0 | audit/终态提交、archive aggregate transaction、hash写锁外与真实取消审计；只读打开不建空库；T1/T3a/T5分别scoped PASS，36d159c/c06f371/f11986a |
+| 归档确认/回收/恢复 | 首轮1失败/65通过定位独立提交的container路径；修正后新state+archive组27通过/29.51秒/native0 | file_path与entry hash/激活/manifest/result/jobs/audit同commit，既有补偿保留；scoped PASS，7509838 |
+| 整理与旧schema保护 | 组织/新guard/旧材料组43通过/78.09秒/native0；旧版本/migration/FK专项23通过/25.05秒/native0 | 仅真实改变KB的成功audit、replay去重；固定table_xinfo拒绝未知列，已知大小写/列序正常升级；scoped PASS，b85b5ea/dc26363 |
+
+各行有重叠，不能相加当完整后端。原始测试包括明确的故障RED、fixture父行/探针事务错误及修复过程，全部保留于`artifacts/review-remediation-2026-10-27/`；没有把测试夹具错误统计成产品缺陷。格式调整保留AST相等证明；全源树Ruff已通过。最终全量回归、生产锁烟测和源前后校验另行追加，本节不复用昨日3481/5。

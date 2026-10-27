@@ -1,5 +1,15 @@
 # 本地准备与当前剩余工作
 
+## 当前：2026-10-27 复查整改
+
+用户授权先审查再修复、继续并发Luna。当前隔离分支`codex/review-remediation-2026-10-27`从8184463开始；两远端main开始时均为8184463，D磁盘main保留99834ca。开始检查时8080已经没有监听，本轮保持该现状，不启动服务、不读业务库/材料、不改.env正文。旧20261026迁移包保留原封存版本。
+
+本批修复组织审计与上传/归档/删除/回收恢复/整理的提交边界、假成功与replay重复，隔离恢复目录发布/外置Qdrant保护、只读SQL工具缺失文件建库，以及旧版本表未知列的静默丢失保护。SQLite输入信任合同见[SQL边界](architecture/sql-trust-boundaries.md)，当前事务与已验故障子集见[命令边界](architecture/command-transaction-boundaries.md)。分项验收及后续完整回归以[本轮复查](reviews/2026-10-27-project-review.md)为准，不能把下方历史3481/5当本批新结果。
+
+这完成的是本轮本地合同整改。PG主库/UoW、完整writer admission与授权/共享快照、持久幂等/outbox/fencing、共享存储/多实例、真实fixture/供应商证据与业务质量仍有后续工作；目标服务器矩阵/P99/SLO、真实存量迁移/切换继续保留验收空缺。
+
+## 历史：2026-10-26 本地准备与交付
+
 更新：2026-10-26。按用户停用旧机的交付要求，Gitee/GitHub main已从 `99834ca` 快进到 `e3c842a`，交付此前本地33个提交；之后仅追加交接文档，最终refs见[旧机交付与迁移说明](reviews/2026-10-26-machine-handoff.md)。D工作区磁盘main暂留旧版本以保护在线服务，迁移包Git main指向交付版本。本页作为文档状态索引的当前摘要；历史报告中的“仍本地”“Docker不可用”等须结合日期，不直接作为新待办。
 
 用户要求继续并发Luna，由root主导本地工作，服务器上线近期暂缓。当前隔离分支 `codex/local-contracts-2026-10-26` 基于上一批 `0b48872`；旧 local-readiness/local-followups 分支继续保留。当前[合同加固计划](superpowers/plans/2026-10-26-local-contracts.md)推进启动诊断竞态、SQLite identifier引用和操作级事务清单。本轮不切换原服务、不读业务数据库或资料，不运行正式压力矩阵，不自动合并推送。

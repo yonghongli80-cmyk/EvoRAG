@@ -1,4 +1,28 @@
-# Command transaction boundaries: three source-traced operations
+# Command transaction boundaries and local fault contracts
+
+## 当前合同：2026-10-27
+
+本节覆盖本轮实际调整的提交点；后面原始三条静态图保留其冻结时事实，不再据其中的“后置独立审计”推断当前实现。分项证据和最终受测版本见[本轮复查](../reviews/2026-10-27-project-review.md)。这是局部命令整改，不是完整writer/UoW、PG或跨存储原子性证明。
+
+| 命令 | 现有SQL owner与当前审计位置 | SQL以外的效果与失败边界 |
+|---|---|---|
+| KB删除 | intent/cancel仍分别提交；`KBMutationPermit.finish_delete`拥有最终transaction，callback内先组织audit再cleanup，最后lifecycle终态共同commit/rollback | 文件/Qdrant/BM25/Wiki清理在终态SQL前，失败后不会恢复已删投影/文件；保持deleting及已提交intent，允许按原计划重试 |
+| 普通材料上传 | permission/version reservation仍有前置提交；`promote_staged_version`的finalize transaction同时提交path CAS、latest job和组织audit | staging→final移动在SQL外；失败按现有补偿移回stage/移除reservation或标记recovery-needed，保留旧current/owner/job。普通重传不是全局幂等请求协议 |
+| 归档初次上传 | inspection/hash之后的短transaction覆盖container/version/manifest/entries与组织audit；manifest/entry helper使用cm.transaction参与，不再直接commit；last_*只表示成功提交 | quarantine复制/检查/hash在writer外；本次失败清本次quarantine，调用方源文件与已有container历史保留。进程崩溃时的现场对账另需恢复协议 |
+| 归档确认 | 现有activation transaction加入container file_path、entry hashes与组织audit，和current版本/FTS/manifest/result/latest jobs一起提交；same-key replay提前返回不新写audit | 复制/解压/预留及已有补偿在SQL外；失败删除本次final副本并保留quarantine源，不能把预备文件复制称为SQLite rollback |
+| 回收/恢复 | 现有immediate transaction覆盖document/version/job/local material audit和组织audit；API不再提交后另记成功 | 文件仍按原协议留存，异步purge另有事务/外部效果；本命令SQL回滚不代表purge协议已全部验收 |
+| 整理confirm/rollback | 各自现有transaction写metadata/CAS、batch item及组织audit；只收集本次真正改变的KB，按action/KB去重；conflict、未应用、confirm replay和already rolled_back不新增成功事件 | 不改变现有响应结构或新增全局idempotency-key协议；不把每个返回item均当实际变更 |
+| 历史暂存恢复 | 原`apply_staging_recovery`的外层immediate transaction仍拥有path/manifest CAS与receipt | archive_rehome复制保留源；copy不随SQL rollback消失，匹配目标可复用，冲突/partial失败闭合；身份/归属/引用/hash/链接检查保持 |
+
+共享`record_org_material_audit`要求调用者已在写事务内，并复用`OrgAuditService.record`的嵌套事务参与行为。它不提供独立commit或新savepoint。组织policy和ACL helper中的reader仍可能是独立只读连接；词法上位于writer context内不等于同一连接/快照，完整授权writer admission仍需后续核定。
+
+### 已验切点与仍缺切点
+
+本轮临时SQLite/合成文件测试覆盖：删除audit/cleanup/真实deferred commit失败及重试；新/旧文档上传audit失败；新/旧归档entry/audit/deferred commit失败；hash在writer外；archive确认audit失败、路径/hash/SQL回滚及same-key replay；回收/恢复audit失败；整理partial/conflict/replay/实际rollback与confirm/rollback audit失败。原始日志分别保存，分项计数不可相加冒充完整后端。
+
+原始矩阵中其他取消/每个投影调用、所有commit不确定结果、组织身份/权限跨进程变更、进程崩溃/磁盘故障全矩阵，以及所有background/startup/maintenance writer仍需逐项覆盖。当前测试不证明多实例fencing、外部效果exactly-once、未知commit结果自动reconcile或PG可用。
+
+## 历史静态图：原冻结基线
 
 Status: command-level source map for planning a later Unit of Work (UoW), not a complete writer inventory, transaction redesign, PostgreSQL adapter, or proof of cross-store atomicity. The call chains below were traced at frozen source basis `0b488725ab08a111ced41e7732d5d22d4d08a8ef`. Branch B changes SQLite identifier quoting only; it does not alter these transaction protocols. Function names and file paths are the source anchors; line numbers are intentionally omitted because the frozen transaction map is the review basis, not a claim about final-tree line positions.
 
