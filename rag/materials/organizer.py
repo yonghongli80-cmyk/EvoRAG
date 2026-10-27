@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from rag.api_security import require_doc_edit, require_kb_edit
 from rag.generator import generate_structured
 from rag.kb_lifecycle import assert_kb_available_in_tx
+from rag.materials.org_audit import record_org_material_audit
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
@@ -310,6 +311,7 @@ class OrganizationService:
         with self.db._lock, self.db.transaction(immediate=True):
             batch_id = self.db._create_organization_batch_in_tx(proposal_id, actor["id"], idempotency_key)
             batch_items = []
+            changed_kb_ids: set[str] = set()
             for item in selected:
                 applied = self._apply_item_in_tx(item, authorized_ids)
                 row_id = self._record_batch_item_in_tx(
@@ -329,6 +331,13 @@ class OrganizationService:
                 batch_items.append(
                     OrganizationBatchItem(id=row_id, document_id=item["document_id"], status=applied["status"], reason_code=applied["reason_code"])
                 )
+                if applied["status"] == "applied":
+                    kb_row = self.db._conn.execute(
+                        "SELECT kb_id FROM document_permissions WHERE id=?",
+                        (item["document_id"],),
+                    ).fetchone()
+                    if kb_row is not None:
+                        changed_kb_ids.add(str(kb_row["kb_id"]))
             if batch_items:
                 applied_count = sum(1 for i in batch_items if i.status == "applied")
                 if applied_count == 0:
@@ -339,6 +348,10 @@ class OrganizationService:
                 self.db._conn.execute(
                     "UPDATE material_organization_batches SET status=? WHERE id=?",
                     (status, batch_id),
+                )
+            for kb_id in sorted(changed_kb_ids):
+                record_org_material_audit(
+                    self.db, actor, "organization_confirmed", kb_id
                 )
         return OrganizationBatchResult(
             batch_id=batch_id, proposal_id=proposal_id, status=status, items=tuple(batch_items)
@@ -457,6 +470,7 @@ class OrganizationService:
         batch_items = self.db.list_organization_batch_items(batch_id)
         with self.db._lock, self.db.transaction(immediate=True):
             items = []
+            changed_kb_ids: set[str] = set()
             for row in batch_items:
                 if row["status"] == "rolled_back":
                     items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="rolled_back", reason_code=""))
@@ -477,14 +491,14 @@ class OrganizationService:
                     continue
                 if row["before_tags_json"] is None:
                     # Batch recorded before the D-10 payload columns existed.
-                    self.db._conn.execute(
+                    restored = self.db._conn.execute(
                         "UPDATE document_permissions "
                         "SET logical_path=?, metadata_version=? "
                         "WHERE id=? AND metadata_version=?",
                         (row["before_logical_path"], row["before_metadata_version"], row["document_id"], row["after_metadata_version"]),
                     )
                 else:
-                    self.db._conn.execute(
+                    restored = self.db._conn.execute(
                         "UPDATE document_permissions "
                         "SET logical_path=?, tags_json=?, document_type=?, metadata_version=? "
                         "WHERE id=? AND metadata_version=?",
@@ -497,11 +511,20 @@ class OrganizationService:
                             row["after_metadata_version"],
                         ),
                     )
+                if restored.rowcount != 1:
+                    items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="metadata_conflict", reason_code="changed_since"))
+                    continue
                 self.db._conn.execute(
                     "UPDATE material_organization_batch_items SET status='rolled_back' WHERE id=?",
                     (row["id"],),
                 )
+                if current is not None:
+                    changed_kb_ids.add(str(current["kb_id"]))
                 items.append(OrganizationBatchItem(id=row["id"], document_id=row["document_id"], status="rolled_back", reason_code=""))
+            for kb_id in sorted(changed_kb_ids):
+                record_org_material_audit(
+                    self.db, actor, "organization_rolled_back", kb_id
+                )
         return OrganizationBatchResult(batch_id=batch_id, proposal_id=batch["proposal_id"], status="rolled_back", items=tuple(items))
 
     def _batch_result(self, batch_id: int, status: str) -> OrganizationBatchResult:
