@@ -53,9 +53,10 @@
 
 ## Task 4: root集成、冻结与本批记录
 **Files:** Update docs/local-readiness.md, docs/README.md; Create docs/reviews/2026-10-27-org-command-snapshots.md; new artifacts/org-command-snapshots-2026-10-27.
-- [ ] 新计划独立ledger/brief和前后原目录基线，root串行跑RED/GREEN，禁止实现代理ready后私自编辑。
-- [ ] 三任务独立审查，消除重要问题；全树Ruff、变更模块必要格式及既有组织/材料授权集成回归。
-- [ ] 代码停止修改后提交冻结，跑完整后端与生产锁烟测，官方源清单前后校验，按新源码重建SQL/writer清单和受影响SQL来源审查。
-- [ ] 整批独立复审与单次修复波，文档区分本轮结果、已交付main、仍待服务器/完整writer准入。
-- [ ] 实际提交本事项公司记录并核对成功回执；保留本地待审成果，不自动推送新批或更新补充包。
+- 本轮完整回归额外允许只修 tests/test_material_visibility_batch_plan.py 的连接计数代理：补齐真实SQLite连接的in_transaction/rollback委托，保留所有ACL/行集合/查询数断言，不改变生产快照逻辑。首轮失败及源码核对保留，修后重新冻结验证。
+- [x] 新计划独立ledger/brief和前后原目录基线，root串行跑RED/GREEN，禁止实现代理ready后私自编辑。
+- [x] 三任务独立审查，消除重要问题；全树Ruff、变更模块必要格式及既有组织/材料授权集成回归。
+- [x] 代码停止修改后提交冻结，跑完整后端与生产锁烟测，官方源清单前后校验，按新源码重建SQL/writer清单和受影响SQL来源审查。
+- [x] 整批独立复审与单次修复波，文档区分本轮结果、已交付main、仍待服务器/完整writer准入。
+- [x] 实际提交本事项公司记录并核对成功回执；保留本地待审成果，不自动推送新批或更新补充包。
 
