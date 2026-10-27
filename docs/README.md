@@ -6,6 +6,9 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-27-org-command-snapshots.md`：组织管理命令audit提交、授权读取快照与本批真实验收；上一批main交付和当前本地新批分开。
+- `superpowers/plans/2026-10-27-org-command-snapshots.md`：四写六读整改及source绑定所有权图、独立复审和隔离验证计划。
+- `architecture/organization-command-ownership.md`：本批精确四写六读的连接/transaction/audit与快照owner图，不代表全量writer或完整准入。
 - `reviews/2026-10-27-local-safety-followups.md`：先计划、并发6.1 Terra的本地安全后续；purge所有权/路径、连接关闭竞态、writer AST边界与本轮独立复审/验收状态。
 - `superpowers/plans/2026-10-27-local-safety-followups.md`：上述三项实现、复审与隔离集成验收计划；服务器验收保留。
 - `handoff-2026-10-27.md`：本轮交付与换机补充入口；受测版本、Git交付方法、已拷走旧业务包与新增代码包的边界，以及真实上线仍缺步骤。
