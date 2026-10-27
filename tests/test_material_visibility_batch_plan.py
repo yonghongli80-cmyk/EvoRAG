@@ -241,6 +241,13 @@ def test_mixed_org_and_legacy_plan_omits_denied_org_rows(interleaved_kb_db, monk
         def getlimit(self, category):
             return self.connection.getlimit(category)
 
+        @property
+        def in_transaction(self):
+            return self.connection.in_transaction
+
+        def rollback(self):
+            return self.connection.rollback()
+
     @contextmanager
     def counted_read():
         with original_read() as connection:
