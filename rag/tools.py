@@ -6,6 +6,7 @@ import operator
 import os
 import sqlite3
 import uuid
+from pathlib import Path
 
 SAFE_OPS = {
     ast.Add: operator.add,
@@ -100,7 +101,11 @@ def create_sql_tool(db_path: str):
         for token in tokens:
             if token in _BLOCKED_KEYWORDS:
                 raise ValueError(f"禁止使用 {token} 关键字")
-        conn = sqlite3.connect(db_path)
+        if db_path == ":memory:":
+            conn = sqlite3.connect(db_path)
+        else:
+            db_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(db_uri, uri=True)
         conn.execute("PRAGMA query_only = ON")  # Hard defense: SQLite refuses all writes
         try:
             cursor = conn.execute(sql)
