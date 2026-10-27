@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -34,9 +35,7 @@ def test_restore_test_copies_and_revalidates_backup(complete_backup, tmp_path):
 
 
 @pytest.mark.parametrize("target_kind", ["project", "data", "qdrant", "backup"])
-def test_restore_rejects_protected_targets(
-    complete_backup, restore_roots, target_kind
-):
+def test_restore_rejects_protected_targets(complete_backup, restore_roots, target_kind):
     with pytest.raises(BackupError, match="restore_target_protected"):
         restore_test(
             complete_backup,
@@ -62,3 +61,32 @@ def test_restore_report_contains_no_absolute_paths(complete_backup, tmp_path):
 
     assert str(tmp_path) not in payload
     assert json.loads(payload)["vector_rebuild_required"] is True
+
+
+def test_restore_report_write_failure_cleans_temporary_and_allows_retry(complete_backup, tmp_path, monkeypatch):
+    isolation_root = tmp_path / "isolation"
+    backup_id = complete_backup.name
+    destination = isolation_root / backup_id
+    original_write_bytes = Path.write_bytes
+    report_write_attempts = 0
+
+    def fail_first_report_write(path, payload):
+        nonlocal report_write_attempts
+        if path.name == "restore-report.json":
+            report_write_attempts += 1
+            if report_write_attempts == 1:
+                raise OSError("simulated report write failure")
+        return original_write_bytes(path, payload)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_first_report_write)
+
+    with pytest.raises(OSError, match="simulated report write failure"):
+        restore_test(complete_backup, isolation_root, protected_roots=())
+
+    assert not destination.exists()
+    assert not list(isolation_root.glob(f".{backup_id}.restore-*"))
+
+    report = restore_test(complete_backup, isolation_root, protected_roots=())
+
+    assert report.target == destination
+    assert (destination / "restore-report.json").is_file()

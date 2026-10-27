@@ -33,14 +33,10 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     create = commands.add_parser("create")
-    create.add_argument(
-        "--trigger", choices=("manual", "scheduled", "deploy"), default="manual"
-    )
+    create.add_argument("--trigger", choices=("manual", "scheduled", "deploy"), default="manual")
 
     create_due = commands.add_parser("create-if-due")
-    create_due.add_argument(
-        "--trigger", choices=("manual", "scheduled", "deploy"), default="scheduled"
-    )
+    create_due.add_argument("--trigger", choices=("manual", "scheduled", "deploy"), default="scheduled")
 
     verify = commands.add_parser("verify")
     verify.add_argument("backup_id")
@@ -54,12 +50,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _write_json(payload: object, stream) -> None:
-    stream.write(
-        json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        + "\n"
-    )
+    stream.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
 
 
 def _resolve_backup_id(context: BackupContext, backup_id: str) -> Path:
@@ -106,9 +97,7 @@ def main(
             else:
                 _write_json(_record_payload(result), sys.stdout)
         elif arguments.command == "verify":
-            result = verify_backup(
-                _resolve_backup_id(context, arguments.backup_id)
-            )
+            result = verify_backup(_resolve_backup_id(context, arguments.backup_id))
             _write_json(_record_payload(result), sys.stdout)
         elif arguments.command == "restore-test":
             backup_dir = _resolve_backup_id(context, arguments.backup_id)
@@ -118,6 +107,7 @@ def main(
                 context.backup_root,
                 *context.file_roots.values(),
                 *(path.parent for path in context.databases.values()),
+                *context.restore_protected_roots,
             )
             result = restore_test(
                 backup_dir,

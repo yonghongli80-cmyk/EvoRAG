@@ -66,9 +66,10 @@ def snapshot_sqlite(source: Path, target: Path) -> DatabaseEntry:
         with target.open("xb"):
             pass
         source_uri = f"file:{source.resolve().as_posix()}?mode=ro"
-        with closing(
-            sqlite3.connect(source_uri, uri=True, timeout=30)
-        ) as source_db, closing(sqlite3.connect(target)) as target_db:
+        with (
+            closing(sqlite3.connect(source_uri, uri=True, timeout=30)) as source_db,
+            closing(sqlite3.connect(target)) as target_db,
+        ):
             source_db.backup(target_db)
             target_db.execute("PRAGMA journal_mode=DELETE")
     except (OSError, sqlite3.Error) as error:
@@ -76,9 +77,7 @@ def snapshot_sqlite(source: Path, target: Path) -> DatabaseEntry:
 
     try:
         target_uri = f"file:{target.resolve().as_posix()}?mode=ro"
-        with closing(
-            sqlite3.connect(target_uri, uri=True, timeout=30)
-        ) as snapshot_db:
+        with closing(sqlite3.connect(target_uri, uri=True, timeout=30)) as snapshot_db:
             result = snapshot_db.execute("PRAGMA integrity_check").fetchone()
     except sqlite3.Error as error:
         raise BackupError("sqlite_integrity_failed") from error
@@ -114,11 +113,7 @@ def copy_file_verified(source: Path, target: Path, logical_path: str) -> FileEnt
 
     before_metadata = (before_stat.st_size, before_stat.st_mtime_ns)
     after_metadata = (after_stat.st_size, after_stat.st_mtime_ns)
-    if (
-        before_metadata != after_metadata
-        or before_hash != after_hash
-        or target_hash != before_hash
-    ):
+    if before_metadata != after_metadata or before_hash != after_hash or target_hash != before_hash:
         raise BackupError("source_changed_during_copy")
 
     return FileEntry(path=logical_path, size=before_stat.st_size, sha256=before_hash)
@@ -140,12 +135,7 @@ def _safe_posix_path(raw_path: str) -> PurePosixPath:
     if "\\" in raw_path:
         raise BackupError("unsafe_manifest_path")
     path = PurePosixPath(raw_path)
-    if (
-        not raw_path
-        or path.is_absolute()
-        or ".." in path.parts
-        or str(path) != raw_path
-    ):
+    if not raw_path or path.is_absolute() or ".." in path.parts or str(path) != raw_path:
         raise BackupError("unsafe_manifest_path")
     return path
 
@@ -215,18 +205,13 @@ def _directory_matches_backup_id(directory_name: str, backup_id: str) -> bool:
     return (
         directory_name == backup_id
         or directory_name == f".incomplete-{backup_id}"
-        or re.fullmatch(
-            rf"\.{re.escape(backup_id)}\.restore-[0-9a-f]{{12}}", directory_name
-        )
-        is not None
+        or re.fullmatch(rf"\.{re.escape(backup_id)}\.restore-[0-9a-f]{{12}}", directory_name) is not None
     )
 
 
 def _validate_manifest_semantics(manifest: BackupManifest) -> None:
     database_names = [entry.name for entry in manifest.databases]
-    required_databases = {
-        entry.name for entry in manifest.databases if entry.required
-    }
+    required_databases = {entry.name for entry in manifest.databases if entry.required}
     if (
         manifest.qdrant_included
         or not manifest.vector_rebuild_required
@@ -287,9 +272,7 @@ def verify_backup(backup_dir: Path) -> BackupVerification:
     if not set(required_keys).issubset(manifest.file_keys):
         raise BackupError("required_file_missing")
 
-    actual_payloads = _payload_files(resolved_backup / "sqlite") | _payload_files(
-        resolved_backup / "files"
-    )
+    actual_payloads = _payload_files(resolved_backup / "sqlite") | _payload_files(resolved_backup / "files")
     expected_payloads = database_paths | file_paths
     if actual_payloads != expected_payloads:
         raise BackupError("unexpected_backup_file")
@@ -319,9 +302,7 @@ def verify_backup(backup_dir: Path) -> BackupVerification:
         if size != entry.size or digest != entry.sha256:
             raise BackupError("file_hash_mismatch")
 
-    total_bytes = sum(entry.size for entry in manifest.databases) + sum(
-        entry.size for entry in manifest.files
-    )
+    total_bytes = sum(entry.size for entry in manifest.databases) + sum(entry.size for entry in manifest.files)
     if manifest.total_files != len(expected_payloads) or manifest.total_bytes != total_bytes:
         raise BackupError("manifest_totals_mismatch")
 
@@ -385,9 +366,7 @@ def _iter_source_files(root: Path) -> Iterator[Path]:
         raise BackupError("symbolic_link_rejected")
     resolved_root = root.resolve()
     for current_root, directory_names, file_names in os.walk(root):
-        directory_names[:] = sorted(
-            name for name in directory_names if name not in _TRANSIENT_DIRECTORIES
-        )
+        directory_names[:] = sorted(name for name in directory_names if name not in _TRANSIENT_DIRECTORIES)
         current = Path(current_root)
         for directory_name in directory_names:
             if (current / directory_name).is_symlink():
@@ -404,15 +383,11 @@ def _iter_source_files(root: Path) -> Iterator[Path]:
 
 
 def _table_exists(database: sqlite3.Connection, table: str) -> bool:
-    row = database.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
-    ).fetchone()
+    row = database.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
     return row is not None
 
 
-def _logical_key_for_reference(
-    raw_path: str, context: BackupContext, preferred_root: str
-) -> str:
+def _logical_key_for_reference(raw_path: str, context: BackupContext, preferred_root: str) -> str:
     source_path = Path(raw_path)
     candidates: list[tuple[str, Path]] = []
     if source_path.is_absolute():
@@ -441,20 +416,17 @@ def _required_file_keys(users_snapshot: Path, context: BackupContext) -> tuple[s
     queries = (
         (
             "document_versions",
-            "SELECT file_path FROM document_versions "
-            "WHERE status IN ('current', 'historical')",
+            "SELECT file_path FROM document_versions WHERE status IN ('current', 'historical')",
             "document_versions",
         ),
         (
             "kb_documents",
-            "SELECT file_path FROM kb_documents "
-            "WHERE status = 'indexed' AND file_path IS NOT NULL",
+            "SELECT file_path FROM kb_documents WHERE status = 'indexed' AND file_path IS NOT NULL",
             "kb_files",
         ),
         (
             "structured_datasets",
-            "SELECT storage_key FROM structured_datasets "
-            "WHERE status IN ('ready', 'historical')",
+            "SELECT storage_key FROM structured_datasets WHERE status IN ('ready', 'historical')",
             "structured_datasets",
         ),
     )
@@ -467,9 +439,7 @@ def _required_file_keys(users_snapshot: Path, context: BackupContext) -> tuple[s
                     continue
                 for row in database.execute(query):
                     if row[0]:
-                        keys.add(
-                            _logical_key_for_reference(str(row[0]), context, preferred_root)
-                        )
+                        keys.add(_logical_key_for_reference(str(row[0]), context, preferred_root))
     except BackupError:
         raise
     except sqlite3.Error as error:
@@ -488,9 +458,7 @@ def _remove_staging(staging: Path, backup_root: Path) -> None:
     try:
         resolved_root = backup_root.resolve()
         resolved_staging = staging.resolve()
-        if resolved_staging.parent != resolved_root or not staging.name.startswith(
-            ".incomplete-"
-        ):
+        if resolved_staging.parent != resolved_root or not staging.name.startswith(".incomplete-"):
             raise BackupError("unsafe_staging_path")
         if staging.exists():
             shutil.rmtree(staging)
@@ -500,15 +468,11 @@ def _remove_staging(staging: Path, backup_root: Path) -> None:
         raise BackupError("staging_cleanup_failed") from error
 
 
-def _create_backup_locked(
-    validated: BackupContext, trigger: str, timestamp: float
-) -> BackupRecord:
+def _create_backup_locked(validated: BackupContext, trigger: str, timestamp: float) -> BackupRecord:
     if trigger not in {"manual", "scheduled", "deploy"}:
         raise BackupError("invalid_backup_trigger")
 
-    backup_id = datetime.fromtimestamp(timestamp, UTC).strftime(
-        "%Y%m%dT%H%M%SZ"
-    ) + f"-{uuid.uuid4().hex[:12]}"
+    backup_id = datetime.fromtimestamp(timestamp, UTC).strftime("%Y%m%dT%H%M%SZ") + f"-{uuid.uuid4().hex[:12]}"
     staging = validated.backup_root / f".incomplete-{backup_id}"
     final_path = validated.backup_root / backup_id
 
@@ -535,13 +499,9 @@ def _create_backup_locked(
         for logical_root, source_root in sorted(validated.file_roots.items()):
             for source in _iter_source_files(source_root):
                 relative = source.relative_to(source_root).as_posix()
-                logical_path = (
-                    PurePosixPath(logical_root) / PurePosixPath(relative)
-                ).as_posix()
+                logical_path = (PurePosixPath(logical_root) / PurePosixPath(relative)).as_posix()
                 target = staging / "files" / logical_root / Path(relative)
-                file_entries.append(
-                    copy_file_verified(source, target, logical_path)
-                )
+                file_entries.append(copy_file_verified(source, target, logical_path))
 
         users_snapshot = staging / "sqlite" / "users.db"
         required_file_keys = _required_file_keys(users_snapshot, validated)
@@ -551,9 +511,7 @@ def _create_backup_locked(
 
         database_entries.sort(key=lambda entry: entry.name)
         file_entries.sort(key=lambda entry: entry.path)
-        total_bytes = sum(entry.size for entry in database_entries) + sum(
-            entry.size for entry in file_entries
-        )
+        total_bytes = sum(entry.size for entry in database_entries) + sum(entry.size for entry in file_entries)
         manifest = BackupManifest(
             schema_version=1,
             backup_id=backup_id,
@@ -574,9 +532,7 @@ def _create_backup_locked(
         verification = verify_backup(staging)
         staging.replace(final_path)
         try:
-            prune_verified_backups(
-                validated.backup_root, validated.retention_count
-            )
+            prune_verified_backups(validated.backup_root, validated.retention_count)
         except BackupError:
             logger.warning("backup_retention_failed")
         return BackupRecord(
@@ -594,9 +550,7 @@ def _create_backup_locked(
         raise
 
 
-def create_backup(
-    context: BackupContext, trigger: str, now: float | None = None
-) -> BackupRecord:
+def create_backup(context: BackupContext, trigger: str, now: float | None = None) -> BackupRecord:
     validated = context.validate()
     timestamp = time.time() if now is None else now
     if trigger not in {"manual", "scheduled", "deploy"}:
@@ -611,11 +565,7 @@ def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
         return ()
     records: list[BackupRecord] = []
     for path in sorted(root.iterdir()):
-        if (
-            not path.is_dir()
-            or path.is_symlink()
-            or not _FORMAL_BACKUP_PATTERN.fullmatch(path.name)
-        ):
+        if not path.is_dir() or path.is_symlink() or not _FORMAL_BACKUP_PATTERN.fullmatch(path.name):
             continue
         try:
             verification = verify_backup(path)
@@ -634,9 +584,7 @@ def list_verified_backups(root: Path) -> tuple[BackupRecord, ...]:
                 vector_rebuild_required=verification.vector_rebuild_required,
             )
         )
-    return tuple(
-        sorted(records, key=lambda record: (record.created_at, record.backup_id))
-    )
+    return tuple(sorted(records, key=lambda record: (record.created_at, record.backup_id)))
 
 
 def prune_verified_backups(root: Path, keep: int) -> tuple[str, ...]:
@@ -665,9 +613,7 @@ def prune_verified_backups(root: Path, keep: int) -> tuple[str, ...]:
     return tuple(deleted)
 
 
-def create_if_due(
-    context: BackupContext, trigger: str, now: float | None = None
-) -> BackupRecord | None:
+def create_if_due(context: BackupContext, trigger: str, now: float | None = None) -> BackupRecord | None:
     timestamp = time.time() if now is None else now
     validated = context.validate()
     validated.backup_root.mkdir(parents=True, exist_ok=True)
@@ -713,17 +659,13 @@ def restore_test(
         raise BackupError("restore_target_not_empty")
 
     isolation.mkdir(parents=True, exist_ok=True)
-    temporary = isolation / (
-        f".{source_verification.backup_id}.restore-{uuid.uuid4().hex[:12]}"
-    )
+    temporary = isolation / (f".{source_verification.backup_id}.restore-{uuid.uuid4().hex[:12]}")
     try:
         for path in source.rglob("*"):
             if path.is_symlink():
                 raise BackupError("symbolic_link_rejected")
         shutil.copytree(source, temporary)
-        verify_backup(temporary)
-        temporary.rename(destination)
-        restored_verification = verify_backup(destination)
+        restored_verification = verify_backup(temporary)
         report_payload = {
             "backup_id": restored_verification.backup_id,
             "database_count": restored_verification.database_count,
@@ -732,9 +674,9 @@ def restore_test(
             "total_bytes": restored_verification.total_bytes,
             "vector_rebuild_required": restored_verification.vector_rebuild_required,
         }
-        (destination / "restore-report.json").write_bytes(
-            deterministic_json_bytes(report_payload)
-        )
+        (temporary / "restore-report.json").write_bytes(deterministic_json_bytes(report_payload))
+        verify_backup(temporary)
+        temporary.rename(destination)
         return RestoreReport(
             backup_id=restored_verification.backup_id,
             status=restored_verification.status,
@@ -746,10 +688,7 @@ def restore_test(
     except Exception:
         if temporary.exists():
             resolved_temporary = temporary.resolve()
-            if (
-                resolved_temporary.parent != isolation
-                or ".restore-" not in temporary.name
-            ):
+            if resolved_temporary.parent != isolation or ".restore-" not in temporary.name:
                 raise BackupError("unsafe_restore_path") from None
             shutil.rmtree(temporary)
         raise

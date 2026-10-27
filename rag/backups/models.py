@@ -27,6 +27,7 @@ class BackupContext:
     interval_days: int = 7
     retention_count: int = 8
     check_interval_seconds: int = 3600
+    restore_protected_roots: tuple[Path, ...] = ()
 
     def validate(self) -> BackupContext:
         backup = self.backup_root.resolve()
@@ -34,10 +35,7 @@ class BackupContext:
             path.resolve().parent for path in self.databases.values()
         )
         if any(
-            backup == source
-            or backup.is_relative_to(source)
-            or source.is_relative_to(backup)
-            for source in sources
+            backup == source or backup.is_relative_to(source) or source.is_relative_to(backup) for source in sources
         ):
             raise BackupError("backup_root_overlaps_source")
         return replace(self, backup_root=backup)
@@ -122,9 +120,7 @@ class RestoreReport:
 
 
 def deterministic_json_bytes(payload: object) -> bytes:
-    return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def parse_schema_one_manifest(payload: Mapping[str, object]) -> BackupManifest:
@@ -139,7 +135,8 @@ def parse_schema_one_manifest(payload: Mapping[str, object]) -> BackupManifest:
             python_version=str(payload["python_version"]),
             trigger=str(payload["trigger"]),
             databases=tuple(
-                DatabaseEntry(**entry) for entry in payload["databases"]  # type: ignore[arg-type]
+                DatabaseEntry(**entry)
+                for entry in payload["databases"]  # type: ignore[arg-type]
             ),
             files=tuple(FileEntry(**entry) for entry in payload["files"]),  # type: ignore[arg-type]
             required_file_keys=tuple(str(item) for item in payload["required_file_keys"]),  # type: ignore[union-attr]
@@ -180,5 +177,6 @@ def context_from_settings(configured: Settings | None = None) -> BackupContext:
         interval_days=configured.backup_interval_days,
         retention_count=configured.backup_retention_count,
         check_interval_seconds=configured.backup_check_interval_seconds,
+        restore_protected_roots=((Path(configured.qdrant_path),) if not configured.qdrant_url else ()),
     )
     return context.validate()
