@@ -2,9 +2,9 @@
 
 ## 当前：2026-10-27 复查整改
 
-用户授权先审查再修复、继续并发Luna。当前隔离分支`codex/review-remediation-2026-10-27`从8184463开始；两远端main开始时均为8184463，D磁盘main保留99834ca。开始检查时8080已经没有监听，本轮保持该现状，不启动服务、不读业务库/材料、不改.env正文。旧20261026迁移包保留原封存版本。
+用户授权先审查再修复、继续并发Luna。隔离分支`codex/review-remediation-2026-10-27`从8184463开始；受测源码5c501f1已快进交付两远端main，之后仅追加交接回执，见[最新交接](handoff-2026-10-27.md)。D磁盘main保留99834ca；8080开始即未监听，结束验收保持该现状，不启动服务或迁移业务数据。用户确认旧20261026业务迁移包已经拷走，本轮只生成代码/测试补充包。
 
-本批修复组织审计与上传/归档/删除/回收恢复/整理的提交边界、假成功与replay重复，隔离恢复目录发布/外置Qdrant保护、只读SQL工具缺失文件建库，以及旧版本表未知列的静默丢失保护。SQLite输入信任合同见[SQL边界](architecture/sql-trust-boundaries.md)，当前事务与已验故障子集见[命令边界](architecture/command-transaction-boundaries.md)。分项验收及后续完整回归以[本轮复查](reviews/2026-10-27-project-review.md)为准，不能把下方历史3481/5当本批新结果。
+本批修复组织审计与上传/归档/删除/回收恢复/整理的提交边界、假成功与replay重复，隔离恢复目录发布/外置Qdrant保护、只读SQL工具缺失文件建库，以及旧版本表未知列的静默丢失保护。完整后端3517通过/5跳过、1988.53秒/native0，生产锁15场景、622文件前后核对及独立复审通过；不能把下方历史3481/5当本批新结果。SQLite输入信任合同见[SQL边界](architecture/sql-trust-boundaries.md)，当前事务与已验故障子集见[命令边界](architecture/command-transaction-boundaries.md)，完整证据见[本轮复查](reviews/2026-10-27-project-review.md)。
 
 这完成的是本轮本地合同整改。PG主库/UoW、完整writer admission与授权/共享快照、持久幂等/outbox/fencing、共享存储/多实例、真实fixture/供应商证据与业务质量仍有后续工作；目标服务器矩阵/P99/SLO、真实存量迁移/切换继续保留验收空缺。
 

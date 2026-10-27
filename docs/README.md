@@ -6,6 +6,7 @@
 
 ## 当前有效入口
 
+- `handoff-2026-10-27.md`：本轮交付与换机补充入口；受测版本、Git交付方法、已拷走旧业务包与新增代码包的边界，以及真实上线仍缺步骤。
 - `reviews/2026-10-27-project-review.md`：本轮先审查、并发Luna整改及分项/最终验收；组织审计提交、归档恢复、只读SQL与旧schema保护，剩余服务器/长期架构门槛分开记录。
 - `architecture/sql-trust-boundaries.md`：10条SQL follow-up的调用方/artifact/catalog信任合同；保留合法quoted扩展，不伪称PG或完整writer支持。
 - `reviews/2026-10-26-machine-handoff.md`：旧机停用前的双远端交付、私密迁移包和恢复边界；覆盖下列历史报告中的“仍本地/未推送”。业务数据只在本地迁移包，不进入Git。

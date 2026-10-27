@@ -42,4 +42,27 @@ R1/R2修复不能仅调整HTTP异常：必须验证业务SQL与审计共同提�
 | 归档确认/回收/恢复 | 首轮1失败/65通过定位独立提交的container路径；修正后新state+archive组27通过/29.51秒/native0 | file_path与entry hash/激活/manifest/result/jobs/audit同commit，既有补偿保留；scoped PASS，7509838 |
 | 整理与旧schema保护 | 组织/新guard/旧材料组43通过/78.09秒/native0；旧版本/migration/FK专项23通过/25.05秒/native0 | 仅真实改变KB的成功audit、replay去重；固定table_xinfo拒绝未知列，已知大小写/列序正常升级；scoped PASS，b85b5ea/dc26363 |
 
-各行有重叠，不能相加当完整后端。原始测试包括明确的故障RED、fixture父行/探针事务错误及修复过程，全部保留于`artifacts/review-remediation-2026-10-27/`；没有把测试夹具错误统计成产品缺陷。格式调整保留AST相等证明；全源树Ruff已通过。最终全量回归、生产锁烟测和源前后校验另行追加，本节不复用昨日3481/5。
+各行有重叠，不能相加当完整后端。原始测试包括明确的故障RED、fixture父行/探针事务错误及修复过程，全部保留于`artifacts/review-remediation-2026-10-27/`；没有把测试夹具错误统计成产品缺陷。格式调整保留AST相等证明；最终根级结果见下节，不复用昨日3481/5。
+
+## 最终根级验收
+
+冻结受测源码为`5c501f15e6592f789a6841a41f01c81756a5a389`，后续交接回执只改文档。
+
+| 检查 | 实际结果与边界 |
+|---|---|
+| 完整后端 | **3517 passed / 5 skipped，1988.53秒，native0**；JUnit3522项、0failure/0error。单pytest、BelowNormal、BLAS1、离线网络门禁、新建短OS临时目录 |
+| 生产依赖锁 | **15个场景通过，native0，10.313秒，SQLite3.49.1**；8个原启动/取消线程/identifier场景与7个新增隔离/事务/归档/recycle/readonly/legacy/backup场景；真实私有SQLite与合成文件，不连接provider/服务 |
+| 源码稳定性 | tracked freeze/check的622文件前后一致，manifest摘要`a5249e5f42ea612b2514497d9d305deaa1d0c0b8a1a5d9ba84cc05d64dbdb7ff`；C无.env |
+| 静态检查 | 全源树Ruff0；新增模块/测试与本次完整格式化的13文件format-check0；未声称原有全部大文件已通过全树format |
+| 独立复审 | 每任务SPEC/QUALITY、冻结整分支和生成证据一致性审计通过；人工审查字段保持false，Luna审查不伪称用户亲自复审 |
+| 新SQL来源 | 211文件（207Python/4SQL）、854静态条目、103unresolved、0错误；scanner按不完整合同退出1。82记录仅因身份/全部hash未变而保留，21条实际源复审；最终90understood/10followup/3external，403引用绑定32Rag文件，validator/CLI native0；PG仍not_assessed |
+| writer候选 | 233文件、1703 AST候选、0错误/native0；writer_completeness仍not_proven |
+| 原目录状态 | 11:47再次核对：8080仍无监听（开始即如此）、Dmain99834ca/跟踪树干净、.env哈希保持；未启动服务、未迁移真实业务数据 |
+
+五项skip为Windows fork/FIFO/terminate限制三项、缺真实脱敏表格fixture两项。生产锁首次试跑误用了新归档的current version参数，第二次触及旧定位验收护栏默认拒绝全部URI；仅验收脚本改为正确参数、并在同一私有根内受限允许`mode=ro` URI，额外验证越界与写URI拒绝。产品代码、正式定位工具门槛和旧失败原件均保持；最终第3次15场景native0，预期注入异常日志不当作失败。
+
+行数取舍：既有`knowledge.py`原1018行，本轮仅局部增加4行为1022，保留已测结构以免为数值做无关重构；其余本轮修改的Rag源文件不超过1000行（schema976、archives952）。大路由职责拆分可独立排期，不假称本批已完成。
+
+12:12实际核对Gitee/GitHub main从8184463快进到受测5c501f1、标签一致、无强推；之后仅追加交接回执，最终main以实际refs及代码测试补充包的code-info/交付回执为准。本机D磁盘源码保留，源码交付不代表部署。用户确认20261026业务迁移包已经拷走，本轮只做新增代码和验收补充，不重新读取/打包业务库或.env。
+
+本地审查整改工作记录已实际submit：`R-20261027-ACFC835E`，pending_review，timer`T-D8F7098E3462`，native0；交付/补充包作为后续独立事项记录。原始证据及所有失败迭代均保留。服务器/真实迁移、完整writer/授权共享快照、PG/UoW、共享存储/多实例与自动生产shadow仍是后续门槛，不能据本批通过称全项目全部完成。
