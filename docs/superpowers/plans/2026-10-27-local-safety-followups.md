@@ -55,10 +55,10 @@
 ## Task 4: Root 集成与本轮证据
 **Files:** Update docs/local-readiness.md; docs/architecture/command-transaction-boundaries.md; docs/architecture/dynamic-sql-and-writer-review.md; Create docs/reviews/2026-10-27-local-safety-followups.md.
 **Interfaces:** 仅 root 修改共享文档、运行证据脚本、冻结和测试；不得把旧补充包当新源码包。
-- [ ] 为本轮新建 artifacts/local-safety-followups-2026-10-27 与独立 SDD ledger；记录前后 main/状态/.env 哈希和8080基线，不读取配置正文/业务库。
-- [ ] 每任务 RED/GREEN 后独立复审；所有产品变动停止后跑 Ruff、变更模块格式检查和相关集成回归，按风险运行完整后端。
-- [ ] 重新生成 writer 候选清单，记录解析覆盖与 unknown，仍 not_proven；运行源码前后哈希检查，禁止复用上一轮冻结。
-- [ ] 若 Rag 源码改变，重新绑定受影响 SQL 审查来源；未变条目只有身份和全部证据哈希一致才保留，变更条目实际复核。
-- [ ] 完整分支独立复审并更新当前文档，列出本轮实测、真实 skip、服务器验收和长期架构待办。
-- [ ] 提交公司中文工作记录并检查成功回执。本轮默认保留可评审的本地改动，不自动更新既有交付包或推送。
+- [x] 为本轮新建 artifacts/local-safety-followups-2026-10-27 与独立 SDD ledger；记录前后 main/状态/.env 哈希和8080基线，不读取配置正文/业务库。
+- [x] 每任务 RED/GREEN 后独立复审；所有产品变动停止后跑 Ruff、变更模块格式检查和相关集成回归，按风险运行完整后端。
+- [x] 重新生成 writer 候选清单，记录解析覆盖与 unknown，仍 not_proven；运行源码前后哈希检查，禁止复用上一轮冻结。
+- [x] 若 Rag 源码改变，重新绑定受影响 SQL 审查来源；未变条目只有身份和全部证据哈希一致才保留，变更条目实际复核。
+- [x] 完整分支独立复审并更新当前文档，列出本轮实测、真实 skip、服务器验收和长期架构待办。
+- [x] 提交公司中文工作记录并检查成功回执。本轮默认保留可评审的本地改动，不自动更新既有交付包或推送。
 

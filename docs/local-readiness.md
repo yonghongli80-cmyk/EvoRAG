@@ -1,12 +1,20 @@
 # 本地准备与当前剩余工作
 
-## 当前：2026-10-27 Terra 本地安全后续（最终验收中）
+## 当前：2026-10-27 Terra 本地安全后续（本地验收完成）
 
-用户要求先计划、再并发 6.1 Terra，继续保留服务器验收。在 C 隔离分支 `codex/local-safety-2026-10-27` 推进 purge 文件规划/跨文档引用、SQLite 关闭竞态及 writer AST 保守作用域；原 D 工作区和业务数据不操作，既有代码测试补充包保持 `8eac1fa`。本轮完整回归与源码绑定尚待收尾，不使用下文上一轮3517/5替代。
+用户要求先计划、再并发 6.1 Terra，继续保留服务器验收。在 C 隔离分支 `codex/local-safety-2026-10-27` 完成 purge 文件规划/跨文档引用、SQLite 关闭竞态及 writer AST 保守作用域；原 D 工作区和业务数据未操作，既有代码测试补充包保持 `8eac1fa`。本轮受测冻结 `f047a73`，完整后端3572通过/5跳过、2151.06秒/native0，625受测文件前后匹配；本批未合并双推，不使用下文上一轮3517/5替代。
 
-见[本轮计划](superpowers/plans/2026-10-27-local-safety-followups.md)与[实施、复审和验收](reviews/2026-10-27-local-safety-followups.md)。局部实现及独立复审已拦截相对暂存路径、缺根、根外链接引用和 AST 早退出/正例回归；整批复审另确认重叠根下的其他文档数据集持有者保护缺口，已进入唯一最终修复波。最终数字和源提交以本轮报告为准。
+见[本轮计划](superpowers/plans/2026-10-27-local-safety-followups.md)与[实施、复审和验收](reviews/2026-10-27-local-safety-followups.md)。局部实现及独立复审已拦截相对暂存路径、缺根、根外链接引用和 AST 早退出/正例回归；整批复审另确认重叠根下的其他文档数据集持有者保护缺口，已修复且限定复核通过。生产锁5场景、新SQL来源绑定和完整后端通过；5项平台/真实fixture空缺保留，完整数字和证据以本轮报告为准。
 
 服务器矩阵/P99/SLO、真实迁移恢复、完整 writer admission/授权快照、PG/UoW与共享状态/多实例仍按既有依赖保留。当前工作是小范围本地合同完善，不代表这些长期架构已完成。
+
+### 本轮之后仍可在本地推进（未执行）
+
+1. 逐条业务命令补 writer 所有权图：请求、后台、启动和维护入口要追到实际连接/commit及文件或向量效果，扩大已知故障切点；AST 的1707个语法候选不是这些入口已全部闭合。
+2. 同库授权读取与写入准入：核对 OrgRepository 独立reader与材料命令writer的快照关系，在合成并发/撤权中固定所需行为，再设计 writer admission 和共享快照。不能只把reader调用包进writer context就当同一快照。
+3. 将10项动态SQL follow-up按具体调用方/metadata/旧库边界继续补负例和明确合同；已有信任说明不等于漏洞已证实或PG兼容，只有复现问题才改产品。
+
+这些是后续本地候选，不列为本批已完成；PG双adapter/共享存储仍是依赖上述边界的大项目。真实fixture、供应商真实证据和Linux/服务器专项继续保持未验，不用合成输入代替。
 
 ## 历史：2026-10-27 上午复查整改
 
@@ -61,7 +69,7 @@ SQL准备入口见[静态清单说明](architecture/sql-portability-inventory.md
 
 API前期owned-work排空与一次清理保持，线程未结束则保留资源，material worker stop=False保护不变。本批独立token诊断已覆盖此前cleanup intent前或finish先赢时的诊断缺口，也隔离grace日志异常。5秒grace不是进程或全部清理hook的硬上限，不回滚已提交迁移；不宣称全部worker已停或分布式fencing已实现。
 
-本地仍可逐项核定10项SQL输入/metadata/旧库信任合同，按[操作级事务图](architecture/command-transaction-boundaries.md)补故障矩阵与幂等/审计合同，再设计完整writer/UoW迁移。授权helper读取不假称共享writer snapshot，独立组织审计不假称与删除终态提交原子；文档中提出的故障测试未伪称已运行。这些follow-up并非10个已证实bug。
+本地仍可逐项核定10项SQL输入/metadata/旧库信任合同，按[操作级事务图](architecture/command-transaction-boundaries.md)补故障矩阵与幂等/审计合同，再设计完整writer/UoW迁移。授权helper读取不假称共享writer snapshot；当前组织审计已与删除终态收拢，但这不代表跨存储原子或完整writer admission。文档中尚未实际执行的故障测试不作已验结果。这些follow-up并非10个已证实bug。
 
 单机上线不要求先实现全部扩容架构；扩大实例数前则须通过相关 ADR 的一致性与恢复门槛。SQL 静态清单只标记候选和未解析项，不是全部 SQL 已证明可移植的证书。
 
