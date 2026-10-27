@@ -373,8 +373,12 @@ def coordinate_kb_deletion(
             get_wiki_indexer(user_db).remove_kb_content(kb_id, db=user_db)
             manager.delete_kb(kb_id)
             cleanup_kb_files(plan)
-            _audit_org_event(actor, "kb_deleted", kb_id, "authorized", user_db)
-            permit.finish_delete(lambda conn: finish_kb_cleanup_sql(conn, kb_id, plan))
+
+            def finalize_delete_sql(conn):
+                _audit_org_event(actor, "kb_deleted", kb_id, "authorized", user_db)
+                finish_kb_cleanup_sql(conn, kb_id, plan)
+
+            permit.finish_delete(finalize_delete_sql)
         except Exception as exc:
             try:
                 permit.fail_delete(getattr(exc, "code", "cleanup_failed"))
