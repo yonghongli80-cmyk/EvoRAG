@@ -620,6 +620,33 @@ def rebuild_document_versions_status(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if row is None or "recycle_pending" in (row["sql"] or ""):
         return
+    expected_columns = {
+        "id",
+        "document_id",
+        "version_no",
+        "original_filename",
+        "file_path",
+        "content_hash",
+        "uploaded_by",
+        "status",
+        "validity_status",
+        "created_at",
+        "superseded_at",
+        "restored_from_version_id",
+    }
+    ascii_lower = str.maketrans(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+    )
+    columns = conn.execute("PRAGMA table_xinfo(document_versions)").fetchall()
+    names = [column["name"].translate(ascii_lower) for column in columns]
+    if (
+        len(columns) != len(expected_columns)
+        or set(names) != expected_columns
+        or any(column["hidden"] != 0 for column in columns)
+    ):
+        raise RuntimeError(
+            "cannot rebuild document_versions with unsupported legacy columns"
+        )
     indexes = [
         dict(r)
         for r in conn.execute(
