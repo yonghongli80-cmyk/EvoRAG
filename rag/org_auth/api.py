@@ -72,15 +72,15 @@ def assign_knowledge_base_policy(
                 "WHERE kb_id=?",
                 (body.org_code, body.kb_type, body.sensitivity, kb_id),
             )
-    OrgAuditService(db).record(
-        int(user["id"]),
-        "kb_policy_assigned",
-        "knowledge_base",
-        kb_id,
-        "success",
-        body.org_code,
-        {"kb_type": body.kb_type, "sensitivity": body.sensitivity},
-    )
+        OrgAuditService(db).record(
+            int(user["id"]),
+            "kb_policy_assigned",
+            "knowledge_base",
+            kb_id,
+            "success",
+            body.org_code,
+            {"kb_type": body.kb_type, "sensitivity": body.sensitivity},
+        )
     return {
         "kb_id": kb_id,
         "org_code": body.org_code,
@@ -261,15 +261,15 @@ def update_person(person_code: str, body: PersonUpdate, request: Request, user: 
             conn.execute("DELETE FROM org_sensitive_qualifications WHERE person_code=?", (person_code,))
             conn.executemany("INSERT INTO org_sensitive_qualifications VALUES(?,?)", ((person_code, value) for value in body.sensitivities))
             conn.execute("UPDATE org_people SET security_version=security_version+1 WHERE person_code=?", (person_code,))
-    OrgAuditService(db).record(
-        int(user["id"]),
-        "person_updated",
-        "person",
-        person_code,
-        "success",
-        "admin_update",
-        {"changed": changed},
-    )
+        OrgAuditService(db).record(
+            int(user["id"]),
+            "person_updated",
+            "person",
+            person_code,
+            "success",
+            "admin_update",
+            {"changed": changed},
+        )
     return {"status": "updated"}
 
 
@@ -329,7 +329,7 @@ def create_grant(body: GrantRequest, request: Request, user: dict = Depends(requ
             raise HTTPException(status_code=404, detail="资源不存在")
         cur = conn.execute("INSERT INTO kb_org_grants(kb_id,subject_type,subject_id,role,effect,granted_by) VALUES(?,?,?,?,?,?)", (body.kb_id, body.subject_type, body.subject_id, body.role, body.effect, user["id"]))
         _invalidate_grant_subject(conn, body.subject_type, body.subject_id)
-    OrgAuditService(db).record(int(user["id"]), "grant_created", "knowledge_base", body.kb_id, "success", body.effect)
+        OrgAuditService(db).record(int(user["id"]), "grant_created", "knowledge_base", body.kb_id, "success", body.effect)
     return {"id": int(cur.lastrowid)}
 
 
@@ -345,10 +345,10 @@ def revoke_grant(grant_id: int, request: Request, user: dict = Depends(require_u
             raise HTTPException(status_code=404, detail="资源不存在")
         conn.execute("UPDATE kb_org_grants SET active=0 WHERE id=?", (grant_id,))
         _invalidate_grant_subject(conn, grant["subject_type"], grant["subject_id"])
-    OrgAuditService(db).record(
-        int(user["id"]), "grant_revoked", "knowledge_base", grant["kb_id"],
-        "success", "admin_revoke",
-    )
+        OrgAuditService(db).record(
+            int(user["id"]), "grant_revoked", "knowledge_base", grant["kb_id"],
+            "success", "admin_revoke",
+        )
     return {"status": "revoked", "id": grant_id}
 
 
