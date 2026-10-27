@@ -18,6 +18,8 @@ existed still be collected.
 
 from __future__ import annotations
 
+import os
+import stat
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -216,22 +218,9 @@ def purge_document(
         if now <= (doc["restore_until"] or 0):
             raise RecycleError("restore_window_open")
 
-        versions = db._conn.execute(
-            "SELECT id, file_path FROM document_versions WHERE document_id = ?",
-            (document_id,),
-        ).fetchall()
-        for version in versions:
-            version_ids.append(int(version["id"]))
-            path = Path(version["file_path"])
-            if path.is_file():
-                with suppress(OSError):
-                    removed_bytes += path.stat().st_size
-                version_files.append(path)
-
-        dataset_files, dataset_bytes = _dataset_files(
-            db, document_id, structured_datasets_root
+        version_files, dataset_files, version_ids, removed_bytes = _plan_purge_files(
+            db, document_id, versions_root, structured_datasets_root
         )
-        removed_bytes += dataset_bytes
 
     for path in [*version_files, *dataset_files]:
         path.unlink(missing_ok=True)
@@ -295,30 +284,141 @@ def purge_document(
     )
 
 
-def _dataset_files(
-    db: UserDB, document_id: int, structured_datasets_root: Path | None
-) -> tuple[list[Path], int]:
-    """Return the immutable dataset files and their total size for a document."""
-    if structured_datasets_root is None:
-        return [], 0
+def _absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _check_no_links(path: Path) -> None:
+    # Check the root itself and its parents too, including Windows junctions.
+    for component in reversed((path, *path.parents)):
+        try:
+            if component.is_symlink() or getattr(component, "is_junction", lambda: False)():
+                raise RecycleError("purge_path_unsafe_link")
+        except OSError as exc:
+            raise RecycleError("purge_path_invalid") from exc
+
+
+def _path_options(root: Path, raw: str | Path) -> list[Path]:
+    root = _absolute_path(Path(root))
+    path = Path(raw)
+    if ".." in path.parts:
+        raise RecycleError("purge_path_outside_root")
+    candidates = [_absolute_path(path)] if path.is_absolute() else [
+        _absolute_path(root / path), _absolute_path(path)
+    ]
+    options = []
+    for candidate in candidates:
+        if candidate != root and candidate.is_relative_to(root) and candidate not in options:
+            options.append(candidate)
+    if not options:
+        raise RecycleError("purge_path_outside_root")
+    return options
+
+
+def _candidate(root: Path, raw: str | Path) -> Path:
+    options = _path_options(root, raw)
+    existing = []
+    for path in options:
+        _check_no_links(path)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RecycleError("purge_path_invalid") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise RecycleError("purge_path_invalid")
+        existing.append(path)
+    if len(existing) > 1:
+        raise RecycleError("purge_path_ambiguous")
+    return existing[0] if existing else options[0]
+
+
+def _plan_purge_files(db: UserDB, document_id: int, versions_root: Path | None,
+                      datasets_root: Path | None) -> tuple[list[Path], list[Path], list[int], int]:
+    """Validate every deletion target and reference before any external effect."""
     from rag.spreadsheets.store import resolve_dataset_path
 
-    rows = db._conn.execute(
-        "SELECT document_version_id FROM structured_datasets WHERE document_id = ?",
+    versions = db._conn.execute(
+        "SELECT id, file_path FROM document_versions WHERE document_id=?", (document_id,)
+    ).fetchall()
+    ids = [int(row["id"]) for row in versions]
+    version_files: list[Path] = []
+    for row in versions:
+        raw = str(row["file_path"] or "")
+        if not raw:
+            raise RecycleError("purge_path_invalid")
+        if versions_root is None:
+            # Without a root even a relative retry target cannot be located safely.
+            raise RecycleError("purge_versions_root_missing")
+        version_files.append(_candidate(versions_root, raw))
+
+    datasets = db._conn.execute(
+        "SELECT document_version_id FROM structured_datasets WHERE document_id=?", (document_id,)
+    ).fetchall()
+    if datasets and datasets_root is None:
+        raise RecycleError("purge_datasets_root_missing")
+    dataset_files: list[Path] = []
+    for row in datasets:
+        version_id = int(row["document_version_id"])
+        if version_id not in ids:
+            raise RecycleError("purge_dataset_identity_mismatch")
+        if datasets_root is not None:
+            try:
+                path = resolve_dataset_path(_absolute_path(datasets_root), document_id, version_id)
+            except ValueError as exc:
+                raise RecycleError("purge_dataset_identity_mismatch") from exc
+            dataset_files.append(_candidate(datasets_root, path))
+
+    foreign_datasets = db._conn.execute(
+        "SELECT document_id, document_version_id FROM structured_datasets WHERE document_id<>?",
         (document_id,),
     ).fetchall()
-    files: list[Path] = []
+    if foreign_datasets and datasets_root is None:
+        raise RecycleError("purge_datasets_root_missing")
+    dataset_references = []
+    for row in foreign_datasets:
+        try:
+            dataset_references.append(resolve_dataset_path(
+                _absolute_path(datasets_root), int(row["document_id"]), int(row["document_version_id"])
+            ))
+        except (TypeError, ValueError) as exc:
+            raise RecycleError("purge_dataset_identity_mismatch") from exc
+
+    targets = {os.path.normcase(str(path)) for path in [*version_files, *dataset_files]}
+    if targets:
+        references = db._conn.execute(
+            "SELECT file_path FROM document_versions WHERE document_id<>?", (document_id,)
+        ).fetchall()
+        sources = db._conn.execute(
+            "SELECT source_path FROM material_archive_manifests WHERE container_document_id<>?", (document_id,)
+        ).fetchall()
+        for reference_value in [*(row[0] for row in references), *(row[0] for row in sources), *dataset_references]:
+            raw = str(reference_value or "")
+            if not raw:
+                continue
+            reference = Path(raw)
+            if not reference.is_absolute() and versions_root is None:
+                raise RecycleError("purge_versions_root_missing")
+            options = [_absolute_path(reference)]
+            if not reference.is_absolute():
+                options.append(_absolute_path(Path(versions_root) / reference))
+            for path in options:
+                key = os.path.normcase(str(path))
+                try:
+                    resolved_key = os.path.normcase(str(path.resolve()))
+                except (OSError, RuntimeError) as exc:
+                    raise RecycleError("purge_path_invalid") from exc
+                if key in targets or resolved_key in targets:
+                    raise RecycleError("purge_path_shared")
+
+    existing_versions = [path for path in version_files if path.is_file()]
+    existing_datasets = [path for path in dataset_files if path.is_file()]
     total = 0
-    for row in rows:
-        with suppress(ValueError):
-            path = resolve_dataset_path(
-                structured_datasets_root, document_id, int(row["document_version_id"])
-            )
-            if path.is_file():
-                with suppress(OSError):
-                    total += path.stat().st_size
-                files.append(path)
-    return files, total
+    for path in [*existing_versions, *existing_datasets]:
+        with suppress(OSError):
+            total += path.stat().st_size
+    return existing_versions, existing_datasets, ids, total
 
 
 def _has_active_purge_job(db: UserDB, document_id: int, now: float, cooldown: float) -> bool:
@@ -404,9 +504,24 @@ def scan_due_purges(
 
 
 def _prune_empty_dirs(root: Path) -> None:
-    with suppress(OSError):
-        for child in reversed(list(root.rglob("*"))):
-            if child.is_dir():
-                child.rmdir()
-        if root.is_dir():
-            root.rmdir()
+    # Never recurse through a link, even when an unrelated child is present.
+    try:
+        _check_no_links(_absolute_path(root))
+    except RecycleError:
+        return
+    pending = [root]
+    directories = []
+    while pending:
+        directory = pending.pop()
+        try:
+            if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
+                continue
+            if not directory.is_dir():
+                continue
+            directories.append(directory)
+            pending.extend(directory.iterdir())
+        except OSError:
+            continue
+    for directory in reversed(directories):
+        with suppress(OSError):
+            directory.rmdir()

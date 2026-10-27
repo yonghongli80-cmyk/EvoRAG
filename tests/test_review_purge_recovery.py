@@ -48,12 +48,12 @@ def purge_fixture(tmp_path):
             "UPDATE document_permissions SET deleted_at=1, restore_until=2 WHERE id=?",
             (document_id,),
         )
-    yield db, document_id, file_path, dataset_path, datasets_root
+    yield db, document_id, file_path, dataset_path, datasets_root, versions_root
     db.close()
 
 
 def test_failed_file_unlink_keeps_purge_retryable(purge_fixture, monkeypatch):
-    db, document_id, file_path, dataset_path, datasets_root = purge_fixture
+    db, document_id, file_path, dataset_path, datasets_root, versions_root = purge_fixture
     real_unlink = Path.unlink
 
     def deny_target(self, *args, **kwargs):
@@ -64,7 +64,7 @@ def test_failed_file_unlink_keeps_purge_retryable(purge_fixture, monkeypatch):
     monkeypatch.setattr(Path, "unlink", deny_target)
     with pytest.raises(PermissionError, match="temporarily locked"):
         purge_document(
-            db, document_id, now=PURGE_TIME, structured_datasets_root=datasets_root
+            db, document_id, now=PURGE_TIME, versions_root=versions_root, structured_datasets_root=datasets_root
         )
 
     doc = db.get_document_permission_by_id(document_id)
@@ -77,7 +77,7 @@ def test_failed_file_unlink_keeps_purge_retryable(purge_fixture, monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", real_unlink)
     result = purge_document(
-        db, document_id, now=PURGE_TIME + 1, structured_datasets_root=datasets_root
+        db, document_id, now=PURGE_TIME + 1, versions_root=versions_root, structured_datasets_root=datasets_root
     )
 
     assert result.status == "purged"
@@ -88,7 +88,7 @@ def test_failed_file_unlink_keeps_purge_retryable(purge_fixture, monkeypatch):
 
 
 def test_vector_cleanup_error_does_not_mark_document_purged(purge_fixture):
-    db, document_id, _file_path, _dataset_path, datasets_root = purge_fixture
+    db, document_id, _file_path, _dataset_path, datasets_root, versions_root = purge_fixture
     vector_store = RecoveringVectorStore(fail=True)
 
     with pytest.raises(RuntimeError, match="vector store unavailable"):
@@ -97,6 +97,7 @@ def test_vector_cleanup_error_does_not_mark_document_purged(purge_fixture):
             document_id,
             now=PURGE_TIME,
             vector_store=vector_store,
+            versions_root=versions_root,
             structured_datasets_root=datasets_root,
         )
 
@@ -108,6 +109,7 @@ def test_vector_cleanup_error_does_not_mark_document_purged(purge_fixture):
         document_id,
         now=PURGE_TIME + 1,
         vector_store=vector_store,
+        versions_root=versions_root,
         structured_datasets_root=datasets_root,
     )
 
