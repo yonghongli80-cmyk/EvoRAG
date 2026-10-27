@@ -4,7 +4,7 @@
 
 本轮用户要求先计划、再并发 6.1 Terra，root 统筹，服务器验收保留且不影响业务数据。基线为双远端已交付的 `8eac1fa`；当前仅在 C 隔离工作区分支 `codex/local-safety-2026-10-27` 开发。此前补充包保持其冻结版本，不自动覆盖。本轮未切换 D 工作区、不读业务库或配置正文、不启动服务。
 
-本轮受测源码冻结为 `f047a739a33ab477087a5f09673574d78e465d9b`。完整后端 **3572通过/5跳过、2151.06秒/native0**，JUnit3577项0失败0错误；625受测文件前后核对一致。三项独立SPEC/QUALITY、最终整批修复复核、生产锁5场景及SQL来源绑定均通过。随后仅更新文档，本批保持本地隔离分支，不合并双推或覆盖旧补充包。设计与计划见[设计](../superpowers/specs/2026-10-27-local-safety-followups-design.md)和[计划](../superpowers/plans/2026-10-27-local-safety-followups.md)。
+本轮受测源码冻结为 `f047a739a33ab477087a5f09673574d78e465d9b`。完整后端 **3572通过/5跳过、2151.06秒/native0**，JUnit3577项0失败0错误；625受测文件前后核对一致。三项独立SPEC/QUALITY、最终整批修复复核、生产锁5场景及SQL来源绑定均通过。本地验收结项时保留隔离分支；14:37用户后续授权后，两端main从8eac1fa快进交付90e9768、标签一致，无强推。其后仅追加交付文档，最终主提交以实际refs为准；旧补充包按用户要求暂不更新。设计与计划见[设计](../superpowers/specs/2026-10-27-local-safety-followups-design.md)和[计划](../superpowers/plans/2026-10-27-local-safety-followups.md)。
 
 ## 三项本地合同
 
