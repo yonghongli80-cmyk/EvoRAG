@@ -52,6 +52,8 @@ class _OwnershipCandidates(ast.NodeVisitor):
         self.lexical_scope: list[str] = []
         self.imports: dict[str, str] = {}
         self.hints: dict[str, str] = {}
+        self.class_enclosing_states: list[tuple[dict[str, str], dict[str, str]]] = []
+        self.class_owner_depths: list[int] = []
         self.candidates: list[dict[str, Any]] = []
 
     @property
@@ -60,25 +62,50 @@ class _OwnershipCandidates(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import) -> None:
         for item in node.names:
+            name = item.asname or item.name.split(".")[0]
+            self._invalidate_target(ast.Name(id=name, ctx=ast.Store()))
             kind = _import_kind(item.name)
             if kind:
-                self.imports[item.asname or item.name.split(".")[0]] = kind
+                self.imports[name] = kind
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
         for item in node.names:
+            name = item.asname or item.name
+            self._invalidate_target(ast.Name(id=name, ctx=ast.Store()))
             kind = _import_kind(module, item.name)
             if kind:
-                self.imports[item.asname or item.name] = kind
+                self.imports[name] = kind
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        enclosing = self._state()
+        # Nested class bodies, like methods, cannot close over a class namespace.
+        in_class = self.class_owner_depths and len(self.owners) == self.class_owner_depths[-1]
+        visible = self.class_enclosing_states[-1] if in_class else enclosing
+        self._set_state(visible)
+        self.class_enclosing_states.append(visible)
         self.owners.append(node.name)
-        self.generic_visit(node)
+        self.class_owner_depths.append(len(self.owners))
+        self._visit_statements(node.body)
+        self.class_owner_depths.pop()
         self.owners.pop()
+        self.class_enclosing_states.pop()
+        self._set_state(enclosing)
+        self._invalidate_target(ast.Name(id=node.name, ctx=ast.Store()))
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.owners.append(node.name)
         old_imports = self.imports
+        # A method does not close over its class body's namespace.
+        if self.class_owner_depths and len(self.owners) == self.class_owner_depths[-1] + 1:
+            self.imports = dict(self.class_enclosing_states[-1][0])
+        visible_imports = self.imports
         local_names = {argument.arg for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
         if node.args.vararg is not None:
             local_names.add(node.args.vararg.arg)
@@ -90,15 +117,151 @@ class _OwnershipCandidates(ast.NodeVisitor):
         local_names.update(
             child.id for child in ast.walk(node) if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store)
         )
-        self.imports = {name: kind for name, kind in old_imports.items() if name not in local_names}
+        for statement in node.body:
+            for child in ast.walk(statement):
+                local_names.update(self._binding_names(child))
+        self.imports = {name: kind for name, kind in visible_imports.items() if name not in local_names}
         old_hints = self.hints
         self.hints = {}
         self.generic_visit(node)
         self.hints = old_hints
         self.imports = old_imports
         self.owners.pop()
+        self._invalidate_target(ast.Name(id=node.name, ctx=ast.Store()))
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+    def _state(self) -> tuple[dict[str, str], dict[str, str]]:
+        return dict(self.imports), dict(self.hints)
+
+    def _set_state(self, state: tuple[dict[str, str], dict[str, str]]) -> None:
+        self.imports, self.hints = (dict(part) for part in state)
+
+    def _merge_states(self, states: list[tuple[dict[str, str], dict[str, str]]]) -> None:
+        merged = []
+        for index in range(2):
+            first = states[0][index]
+            merged.append(
+                {key: value for key, value in first.items() if all(s[index].get(key) == value for s in states[1:])}
+            )
+        self._set_state((merged[0], merged[1]))
+
+    def _visit_statements(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            self.visit(statement)
+
+    @staticmethod
+    def _binding_names(node: ast.AST) -> set[str]:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return {node.name}
+        if isinstance(node, ast.Import):
+            return {item.asname or item.name.split(".")[0] for item in node.names}
+        if isinstance(node, ast.ImportFrom):
+            return {item.asname or item.name for item in node.names if item.name != "*"}
+        return set()
+
+    def _invalidate_stores(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            for child in ast.walk(statement):
+                if isinstance(child, (ast.Name, ast.Attribute)) and isinstance(child.ctx, (ast.Store, ast.Del)):
+                    self._invalidate_target(child)
+                for name in self._binding_names(child):
+                    self._invalidate_target(ast.Name(id=name, ctx=ast.Store()))
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        before = self._state()
+        self._visit_statements(node.body)
+        body = self._state()
+        self._set_state(before)
+        self._visit_statements(node.orelse)
+        self._merge_states([body, self._state()])
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self.visit(node.test)
+        before = self._state()
+        self.visit(node.body)
+        body = self._state()
+        self._set_state(before)
+        self.visit(node.orelse)
+        self._merge_states([body, self._state()])
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        states = []
+        for value in node.values:
+            self.visit(value)
+            states.append(self._state())
+        self._merge_states(states)
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.iter)
+        before = self._state()
+        self._invalidate_stores(node.body)
+        self._invalidate_target(node.target)
+        uncertain = self._state()
+        self._visit_statements(node.body)
+        body = self._state()
+        self._merge_states([before, uncertain, body])
+        self._visit_statements(node.orelse)
+        self._merge_states([before, uncertain, body, self._state()])
+
+    visit_AsyncFor = visit_For
+
+    def visit_While(self, node: ast.While) -> None:
+        self._invalidate_stores(node.body)
+        self.visit(node.test)
+        before = self._state()
+        self._visit_statements(node.body)
+        body = self._state()
+        self._merge_states([before, body])
+        self._visit_statements(node.orelse)
+        self._merge_states([before, body, self._state()])
+
+    def visit_Try(self, node: ast.Try | ast.TryStar) -> None:
+        possible = [self._state()]
+        for statement in node.body:
+            self.visit(statement)
+            possible.append(self._state())
+        self._visit_statements(node.orelse)
+        exits = [self._state()]
+        for handler in node.handlers:
+            self._merge_states(possible)
+            self._invalidate_stores(node.body)
+            if handler.type is not None:
+                self.visit(handler.type)
+            if handler.name:
+                self.imports.pop(handler.name, None)
+                self.hints.pop(handler.name, None)
+            self._visit_statements(handler.body)
+            if handler.name:
+                self.imports.pop(handler.name, None)
+                self.hints.pop(handler.name, None)
+            exits.append(self._state())
+        self._merge_states(exits + possible if node.finalbody else exits)
+        self._visit_statements(node.finalbody)
+
+    visit_TryStar = visit_Try
+
+    def visit_Match(self, node: ast.Match) -> None:
+        self.visit(node.subject)
+        before = self._state()
+        exits = [before]
+        for case in node.cases:
+            self._set_state(before)
+            # Pattern captures are local assignments; do not infer their values.
+            for child in ast.walk(case.pattern):
+                name = getattr(child, "name", None)
+                if name:
+                    self.imports.pop(name, None)
+                    self.hints.pop(name, None)
+                if isinstance(child, ast.MatchMapping) and child.rest:
+                    self.imports.pop(child.rest, None)
+                    self.hints.pop(child.rest, None)
+            if case.guard is not None:
+                self.visit(case.guard)
+            self._visit_statements(case.body)
+            exits.append(self._state())
+        self._merge_states(exits)
 
     def _call_kind(self, node: ast.Call) -> str | None:
         name = _attribute_name(node.func)
@@ -211,7 +374,7 @@ class _OwnershipCandidates(ast.NodeVisitor):
         )
 
     def visit_With(self, node: ast.With) -> None:
-        old_hints = dict(self.hints)
+        before = self._state()
         added_scopes: list[str] = []
         for item in node.items:
             context = item.context_expr
@@ -232,13 +395,21 @@ class _OwnershipCandidates(ast.NodeVisitor):
                     )
         for statement in node.body:
             self.visit(statement)
-        self.hints = old_hints
+        after = self._state()
+        # Exceptions may be suppressed at any point in the body. Preserve
+        # sequential hints while visiting sinks, then invalidate any binding
+        # that could differ at such an exit before merging the final state.
+        self._invalidate_stores(node.body)
+        uncertain = self._state()
+        self._merge_states([before, uncertain, after])
         if added_scopes:
             del self.lexical_scope[-len(added_scopes) :]
 
     visit_AsyncWith = visit_With
 
     def _assigned_hint(self, value: ast.AST | None) -> str:
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            return self._connection_hint(value)
         if not isinstance(value, ast.Call):
             return "unknown"
         kind = self._call_kind(value)
@@ -256,15 +427,19 @@ class _OwnershipCandidates(ast.NodeVisitor):
         if target is None:
             return
         for child in ast.walk(target):
-            if isinstance(child, ast.Name):
-                self.imports.pop(child.id, None)
-                self.hints.pop(child.id, None)
+            if isinstance(child, (ast.Name, ast.Attribute)):
+                key = self._receiver_key(child)
+                if key:
+                    for existing in list(self.hints):
+                        if existing == key or existing.startswith(key + "."):
+                            self.hints.pop(existing, None)
+                if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+                    self.imports.pop(child.id, None)
 
     def _record_assignment(self, target: ast.AST, value: ast.AST | None) -> None:
         key = self._receiver_key(target)
         hint = self._assigned_hint(value)
-        if isinstance(target, ast.Name):
-            self.imports.pop(target.id, None)
+        self._invalidate_target(target)
         if key:
             if hint == "unknown":
                 self.hints.pop(key, None)
@@ -285,6 +460,19 @@ class _OwnershipCandidates(ast.NodeVisitor):
             self.visit(node.value)
         self.visit(node.annotation)
         self._record_assignment(node.target, node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.visit(node.value)
+        self._record_assignment(node.target, node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.visit(node.target)
+        self.visit(node.value)
+        self._invalidate_target(node.target)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self._invalidate_target(target)
 
     def _emit_attribute_candidate(self, node: ast.Attribute) -> None:
         hint = self._connection_hint(node)
