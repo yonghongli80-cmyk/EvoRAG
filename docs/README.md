@@ -6,6 +6,8 @@
 
 ## 当前有效入口
 
+- `reviews/2026-10-27-local-safety-followups.md`：先计划、并发6.1 Terra的本地安全后续；purge所有权/路径、连接关闭竞态、writer AST边界与本轮独立复审/验收状态。
+- `superpowers/plans/2026-10-27-local-safety-followups.md`：上述三项实现、复审与隔离集成验收计划；服务器验收保留。
 - `handoff-2026-10-27.md`：本轮交付与换机补充入口；受测版本、Git交付方法、已拷走旧业务包与新增代码包的边界，以及真实上线仍缺步骤。
 - `reviews/2026-10-27-project-review.md`：本轮先审查、并发Luna整改及分项/最终验收；组织审计提交、归档恢复、只读SQL与旧schema保护，剩余服务器/长期架构门槛分开记录。
 - `architecture/sql-trust-boundaries.md`：10条SQL follow-up的调用方/artifact/catalog信任合同；保留合法quoted扩展，不伪称PG或完整writer支持。

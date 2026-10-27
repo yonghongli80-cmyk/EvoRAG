@@ -11,6 +11,7 @@
 | 归档初次上传 | inspection/hash之后的短transaction覆盖container/version/manifest/entries与组织audit；manifest/entry helper使用cm.transaction参与，不再直接commit；last_*只表示成功提交 | quarantine复制/检查/hash在writer外；本次失败清本次quarantine，调用方源文件与已有container历史保留。进程崩溃时的现场对账另需恢复协议 |
 | 归档确认 | 现有activation transaction加入container file_path、entry hashes与组织audit，和current版本/FTS/manifest/result/latest jobs一起提交；same-key replay提前返回不新写audit | 复制/解压/预留及已有补偿在SQL外；失败删除本次final副本并保留quarantine源，不能把预备文件复制称为SQLite rollback |
 | 回收/恢复 | 现有immediate transaction覆盖document/version/job/local material audit和组织audit；API不再提交后另记成功 | 文件仍按原协议留存，异步purge另有事务/外部效果；本命令SQL回滚不代表purge协议已全部验收 |
+| 到期purge（Terra后续） | 初始短事务收集/校验版本、数据集身份和外来版本/归档/派生数据集引用；外部清理全部成功后，另一事务写purged终态和最小审计 | 缺根、根外目标/链接、歧义相对路径或共享目标在任何unlink/vector前失败闭合；支持既有root-relative和相对root产生的暂存路径；外来引用允许经根外链接/父目录指回目标，不能把引用的根边界当删除目标边界。unlink/vector或终态失败保留记录重试；不提供跨进程snapshot/fencing或文件rollback。当前验收见[Terra本地报告](../reviews/2026-10-27-local-safety-followups.md) |
 | 整理confirm/rollback | 各自现有transaction写metadata/CAS、batch item及组织audit；只收集本次真正改变的KB，按action/KB去重；conflict、未应用、confirm replay和already rolled_back不新增成功事件 | 不改变现有响应结构或新增全局idempotency-key协议；不把每个返回item均当实际变更 |
 | 历史暂存恢复 | 原`apply_staging_recovery`的外层immediate transaction仍拥有path/manifest CAS与receipt | archive_rehome复制保留源；copy不随SQL rollback消失，匹配目标可复用，冲突/partial失败闭合；身份/归属/引用/hash/链接检查保持 |
 
