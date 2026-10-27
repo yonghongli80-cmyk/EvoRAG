@@ -654,7 +654,6 @@ def _confirm_archive_import_under_gate(
                 )
                 continue
             content_hash = _sha256_file(staged)
-            db.set_material_archive_entry_content(entry["id"], content_hash)
             planned.append(
                 {
                     "id": entry["id"],
@@ -676,7 +675,6 @@ def _confirm_archive_import_under_gate(
         )
         container_final.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_path, container_final)
-        db.set_version_file_path(container_ver["id"], str(container_final))
         promoted_files.append(container_final)
 
         # Diff children by stable key + content hash; stage new child versions.
@@ -737,6 +735,15 @@ def _confirm_archive_import_under_gate(
             # directly on the connection (the ``_in_tx`` pattern) and never
             # re-acquire ``UserDB._lock``.
             with db._lock, db.transaction(immediate=True) as conn:
+                for p in planned:
+                    conn.execute(
+                        "UPDATE material_archive_entries SET content_hash=? WHERE id=?",
+                        (p["content_hash"], p["id"]),
+                    )
+                conn.execute(
+                    "UPDATE document_versions SET file_path=? WHERE id=?",
+                    (str(container_final), container_ver["id"]),
+                )
                 db._activate_document_version_in_tx(
                     container["id"], manifest["container_version_id"], container["kb_id"], container["doc_name"]
                 )
@@ -774,6 +781,9 @@ def _confirm_archive_import_under_gate(
                         c["content_hash"],
                         time.time(),
                     )
+                record_org_material_audit(
+                    db, actor, "archive_confirmed", container["kb_id"]
+                )
         except BaseException:
             for c in created:
                 if c["new_doc"]:

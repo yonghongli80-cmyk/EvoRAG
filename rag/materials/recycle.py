@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rag.kb_lifecycle import KBLifecycleError, assert_kb_available_in_tx
+from rag.materials.org_audit import record_org_material_audit
 from rag.user_db import UserDB
 
 RESTORE_WINDOW_SECONDS = 30 * 86400
@@ -118,6 +119,7 @@ def delete_to_recycle(
                 (doc["current_version_id"],),
             )
         _append_audit(db, document_id, actor["id"], "delete_to_recycle", now)
+        record_org_material_audit(db, actor, "document_recycled", str(doc["kb_id"]))
     return RecycleRecord(
         document_id=document_id,
         status="deleted",
@@ -177,6 +179,7 @@ def restore_from_recycle(
                 (now, document_id, PURGE_JOB_TYPE),
             )
         _append_audit(db, document_id, actor["id"], "restore_from_recycle", now)
+        record_org_material_audit(db, actor, "document_restored", str(doc["kb_id"]))
     return RestoreResult(document_id=document_id, status="restored", metadata_version=expected_metadata_version + 1)
 
 

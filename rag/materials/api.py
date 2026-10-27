@@ -449,7 +449,6 @@ async def confirm_archive(
         _raise_archive_error(exc)
     except KBLifecycleError as exc:
         raise lifecycle_http_error(exc) from exc
-    _audit_org_material(db, user, "archive_confirmed", container["kb_id"])
     return {
         "status": result.status,
         "container_document_id": result.container_document_id,
@@ -482,7 +481,6 @@ async def delete_material(request: Request, document_id: int, user: dict = Depen
         )
     except RecycleError as exc:
         _raise_recycle_error(exc)
-    _audit_org_material(db, user, "document_recycled", document["kb_id"])
     return {
         "status": record.status,
         "document_id": record.document_id,
@@ -518,7 +516,6 @@ async def restore_material(
         )
     except RecycleError as exc:
         _raise_recycle_error(exc)
-    _audit_org_material(db, user, "document_restored", document["kb_id"])
     return {
         "status": result.status,
         "document_id": result.document_id,
