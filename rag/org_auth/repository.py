@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import nullcontext
 
 from rag.org_auth.models import PersonProfile
 from rag.org_auth.schema import install_org_schema
@@ -15,15 +16,33 @@ def is_org_policy(value: object) -> bool:
 
 
 class OrgRepository:
-    def __init__(self, db):
+    def __init__(self, db, *, read_connection=None):
         self.db = db
+        self._read_connection = read_connection
+
+    def _read(self):
+        if self._read_connection is not None:
+            return nullcontext(self._read_connection)
+        return self.db.locked_read()
+
+    def get_user_by_id(self, user_id: int) -> dict | None:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT id, username, is_admin, password_changed_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"id": row["id"], "username": row["username"],
+                "is_admin": bool(row["is_admin"]),
+                "password_changed_at": row["password_changed_at"]}
 
     def install_schema(self) -> None:
         with self.db.locked_transaction() as conn:
             install_org_schema(conn)
 
     def table_names(self) -> set[str]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
     def create_unit(self, code: str, parent_code: str | None, name: str, kind: str) -> None:
@@ -35,12 +54,12 @@ class OrgRepository:
             conn.executemany("INSERT INTO org_units(code,parent_code,name,kind) VALUES(?,?,?,?)", rows)
 
     def get_unit(self, code: str) -> dict | None:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             row = conn.execute("SELECT * FROM org_units WHERE code=?", (code,)).fetchone()
         return dict(row) if row else None
 
     def descendants(self, code: str) -> set[str]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             rows = conn.execute("""
                 WITH RECURSIVE tree(code) AS (
                   SELECT code FROM org_units WHERE code=? AND active=1
@@ -50,7 +69,7 @@ class OrgRepository:
         return {r[0] for r in rows}
 
     def get_person_for_user(self, user_id: int) -> dict | None:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             row = conn.execute("SELECT * FROM org_people WHERE user_id=?", (user_id,)).fetchone()
         return dict(row) if row else None
 
@@ -61,7 +80,7 @@ class OrgRepository:
         memberships = self.memberships(person["person_code"])
         primary = next(({"code": m["org_code"], "name": m["name"]} for m in memberships if m["is_primary"]), None)
         secondary = tuple({"code": m["org_code"], "name": m["name"]} for m in memberships if not m["is_primary"])
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             username = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()[0]
         return PersonProfile(
             person_code=person["person_code"], user_id=user_id, username=username,
@@ -77,26 +96,26 @@ class OrgRepository:
         return bool(person["active"]) and security_version == int(person["security_version"])
 
     def memberships(self, person_code: str) -> list[dict]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             rows = conn.execute("SELECT m.*,u.name,u.active FROM org_memberships m JOIN org_units u ON u.code=m.org_code WHERE person_code=?", (person_code,)).fetchall()
         return [dict(r) for r in rows]
 
     def manager_scopes(self, person_code: str) -> set[str]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             rows = conn.execute("SELECT org_code FROM org_manager_scopes WHERE person_code=?", (person_code,)).fetchall()
         return {r[0] for r in rows}
 
     def qualifications(self, person_code: str) -> set[str]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             rows = conn.execute("SELECT sensitivity FROM org_sensitive_qualifications WHERE person_code=?", (person_code,)).fetchall()
         return {r[0] for r in rows}
 
     def get_kb_policy(self, kb_id: str) -> dict | None:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             row = conn.execute("SELECT * FROM kb_org_policies WHERE kb_id=?", (kb_id,)).fetchone()
         return dict(row) if row else None
 
     def grants(self, kb_id: str) -> list[dict]:
-        with self.db.locked_read() as conn:
+        with self._read() as conn:
             rows = conn.execute("SELECT * FROM kb_org_grants WHERE kb_id=? AND active=1", (kb_id,)).fetchall()
         return [dict(r) for r in rows]
