@@ -21,6 +21,7 @@
 7. 配置到项目外的本地Qdrant目录同样受restore-test保护，包括与目标的祖先/后代重叠。保护信息从构造context时的设置传递；不读取目标存储，不启动Qdrant。
 8. SQL helper继续允许SQLite合法非canonical/quoted名称，值保持绑定、NUL拒绝。明确自定义SQL、旧catalog、dataset与snapshot信任来源，不收紧历史schema兼容。
 9. 显式runtime SELECT工具对文件数据库按只读模式打开；缺失文件失败而不创建空库，合法含空格/Unicode/#/%的路径仍能查询，原SELECT限制/query_only/1000行上限及:memory:兼容保持。此项先独立行为RED，不把调用方传入的db_path伪称HTTP任意文件漏洞。
+10. 需要重建旧document_versions状态CHECK时，在任何DDL/PRAGMA切换前核定完整列布局；未知额外列及生成/隐藏列失败闭合，保留原表/数据/对象。已知12列旧schema继续升级并保留支持的index/trigger/FK；已含recycle_pending、无需重建的表不被收紧。此合同不限制另一数据库中的合法扩展spreadsheet名称/列。
 
 ## 实施边界
 

@@ -50,7 +50,7 @@
 
 ## T3a：普通/归档上传提交审计（与T1/T2并行）
 
-**Files:** 修改`rag/materials/api.py`、`rag/materials/archives.py`、`rag/repositories/material_repo.py`；新增`rag/materials/org_audit.py`与`tests/test_material_upload_audit_atomicity.py`，按需用独立archive测试模块。
+**Files:** 修改`rag/materials/api.py`、`rag/materials/archives.py`、`rag/repositories/material_repo.py`和`tests/test_material_upload_cancellation.py`；新增`rag/materials/org_audit.py`与`tests/test_material_upload_audit_atomicity.py`，按需用独立archive测试模块。取消回归改为观察真实组织审计落库，保留worker/stage/线程断言，不能为旧API helper spy恢复后置审计。
 
 **Interfaces:** `record_org_material_audit(db, actor, action, kb_id) -> None`复用原org policy判定与OrgAuditService.record合同，API兼容helper可委托它；不独立commit。普通上传在finalize回调内调用。archive upload inspection/hash后，短db transaction内聚合已有permission/version/manifest/entry与audit；相关manifest/entry helper改用cm.transaction而非直接commit。初始create_document_version已带quarantine路径，移除冗余set_version_file_path以免穿透事务。
 
@@ -99,3 +99,13 @@
 - [ ] 先写行为RED：缺失db路径执行SELECT1不应成功或留下文件，查询错误也不创建空库；合法含空格/Unicode/#/%路径返回手工预置行，:memory: SELECT仍工作。
 - [ ] root RED确认文件创建缺陷后才改打开方式；不扩大授权DB范围，不改变允许SQL集合。
 - [ ] root GREEN新模块与既有test_tools组，独立复审、提交。T4说明此文件生命周期问题与SQL授权信任边界的区别。
+
+## T6：旧版本表重建前拒绝未知列（与T3b/T3c文件独立，T4冻结前完成）
+
+**Files:** `rag/repositories/schema.py`；新增`tests/test_document_versions_legacy_schema_guard.py`。
+
+**Interfaces:** rebuild_document_versions_status(conn)签名与已知schema的DDL不变。仅需要重建的legacy表，先用固定PRAGMA table_xinfo核定已知12列且hidden=0；名字按SQLite ASCII大小写兼容，未知/生成列以不回显schema内容的RuntimeError拒绝。检查必须在foreign_keys/legacy_alter_table切换与BEGIN/DDL前；已经支持recycle_pending的表保留原早返回行为。
+
+- [ ] 合成旧表分别携带额外真实业务字段、virtual/stored生成列，确认旧代码可成功升级却丢列的行为RED；新合同应拒绝且原table SQL、值、index/trigger、FK开关与事务状态保持。
+- [ ] 已知12列旧库仍能升级并保留canonical字段数据和自定义index/trigger，新增recycle_pending状态可用。禁止把spreadsheet扩展schema误纳入此限制。
+- [ ] root RED后实施最小只读schema guard，不改UserDB schema/数据迁移内容，不在实际业务库运行。root GREEN本模块及已有版本迁移/FK回归，独立复审、提交。
