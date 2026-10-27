@@ -19,13 +19,26 @@ from rag.kb_lifecycle import KBBusy, kb_mutation
 from rag.user_db import UserDB
 
 
-def _route_context(tmp_path: Path):
+def _route_context(tmp_path: Path, *, kb_id: str = "rag_docs", is_admin: bool = False):
     import rag.materials.api as material_api
 
     db = UserDB(tmp_path / "users.db")
     db.create_material_schema()
     user_id = db.create_user("upload-worker", "Password-123!")
-    user = {"id": user_id, "username": "upload-worker", "is_admin": False}
+    if is_admin:
+        db.set_user_admin(user_id, True)
+    user = {"id": user_id, "username": "upload-worker", "is_admin": is_admin}
+    if kb_id != "rag_docs":
+        with db.locked_transaction(immediate=True) as conn:
+            conn.execute("INSERT INTO org_units(code,name,kind) VALUES('TEST','Synthetic team','team')")
+            conn.execute(
+                "INSERT INTO kb_metadata(kb_id,name,owner_id) VALUES(?,?,?)",
+                (kb_id, "Synthetic organization KB", user_id),
+            )
+            conn.execute(
+                "INSERT INTO kb_org_policies(kb_id,org_code,kb_type) VALUES(?, 'TEST', 'organization')",
+                (kb_id,),
+            )
     versions_root = tmp_path / "versions"
     request = SimpleNamespace(
         app=SimpleNamespace(
@@ -34,7 +47,7 @@ def _route_context(tmp_path: Path):
                 document_versions_root=versions_root,
             )
         ),
-        query_params={},
+        query_params={"kb_id": kb_id},
     )
     return material_api, db, user, request, versions_root
 
@@ -101,7 +114,8 @@ def test_cancelled_upload_keeps_stage_until_ordinary_or_archive_worker_finishes(
 ):
     import rag.materials.archives as archives
 
-    material_api, db, user, request, versions_root = _route_context(tmp_path)
+    kb_id = "kb_upload_cancel"
+    material_api, db, user, request, versions_root = _route_context(tmp_path, kb_id=kb_id, is_admin=True)
     stages = _capture_stage(monkeypatch, material_api)
     entered = threading.Event()
     release = threading.Event()
@@ -111,13 +125,15 @@ def test_cancelled_upload_keeps_stage_until_ordinary_or_archive_worker_finishes(
     operation_threads: list[int] = []
     audit_events: list[tuple[str, int]] = []
 
-    real_audit = material_api._audit_org_material
+    from rag.org_auth.audit import OrgAuditService
 
-    def record_audit(*args, **kwargs):
-        audit_events.append((args[2], threading.get_ident()))
-        return real_audit(*args, **kwargs)
+    real_audit = OrgAuditService.record
 
-    monkeypatch.setattr(material_api, "_audit_org_material", record_audit)
+    def record_audit(service, actor_id, action, target_type, target_id, result, reason, details=None):
+        audit_events.append((action, threading.get_ident()))
+        return real_audit(service, actor_id, action, target_type, target_id, result, reason, details)
+
+    monkeypatch.setattr(OrgAuditService, "record", record_audit)
 
     if is_archive:
         real_copyfile = archives.shutil.copyfile
@@ -166,7 +182,7 @@ def test_cancelled_upload_keeps_stage_until_ordinary_or_archive_worker_finishes(
             await caller
 
         stage_remained_after_cancellation = stage.is_file()
-        gate_remained_busy = await asyncio.to_thread(_kb_is_busy, db, "rag_docs")
+        gate_remained_busy = await asyncio.to_thread(_kb_is_busy, db, kb_id)
         release.set()
 
         assert await asyncio.to_thread(worker_operation_finished.wait, 5)
@@ -183,6 +199,13 @@ def test_cancelled_upload_keeps_stage_until_ordinary_or_archive_worker_finishes(
         assert len(audit_events) == 1
         assert audit_events[0][1] == operation_threads[0]
         assert audit_events[0][1] != caller_thread
+        with db.locked_read() as conn:
+            persisted_events = conn.execute(
+                "SELECT actor_id,action,target_type,target_id,result,reason FROM org_audit_events ORDER BY id"
+            ).fetchall()
+        assert [tuple(event) for event in persisted_events] == [
+            (user["id"], audit_events[0][0], "knowledge_base", kb_id, "success", "authorized")
+        ]
 
         if is_archive:
             manifest = db.get_material_archive_manifest(1)
@@ -190,7 +213,7 @@ def test_cancelled_upload_keeps_stage_until_ordinary_or_archive_worker_finishes(
             assert Path(manifest["source_path"]).is_file()
             assert audit_events[0][0] == "archive_uploaded"
         else:
-            document = db.get_document_permission(filename, "rag_docs")
+            document = db.get_document_permission(filename, kb_id)
             assert document is not None
             versions = db.list_document_versions(document["id"])
             assert len(versions) == 1

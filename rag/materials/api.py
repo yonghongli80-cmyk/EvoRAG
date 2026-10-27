@@ -37,6 +37,7 @@ from rag.materials.archives import (
 from rag.materials.formats import build_default_format_registry
 from rag.materials.locator import MaterialLocator, material_result_response
 from rag.materials.models import MaterialLimits, MaterialLocationQuery
+from rag.materials.org_audit import record_org_material_audit
 from rag.materials.organizer import (
     OrganizationError,
     OrganizationInstruction,
@@ -45,7 +46,6 @@ from rag.materials.organizer import (
 from rag.materials.recycle import RecycleError, delete_to_recycle, restore_from_recycle
 from rag.materials.staging import MaterialTooLarge, stream_upload_to_stage
 from rag.materials.upload_execution import run_upload_worker
-from rag.org_auth.audit import OrgAuditService
 from rag.org_auth.models import OrgRole
 from rag.org_auth.repository import OrgRepository, is_org_policy
 from rag.org_auth.service import OrgAuthorizationService
@@ -106,11 +106,10 @@ def _archive_limits() -> ArchiveLimits:
 
 
 def _audit_org_material(db, user: dict, action: str, kb_id: str) -> None:
-    if is_org_policy(OrgRepository(db).get_kb_policy(kb_id)):
-        OrgAuditService(db).record(
-            int(user["id"]), action, "knowledge_base", kb_id,
-            "success", "authorized",
-        )
+    # Preserve the helper's historical standalone behavior for routes that
+    # have not yet moved their audit into a mutation transaction.
+    with db.locked_transaction():
+        record_org_material_audit(db, user, action, kb_id)
 
 
 def _read_signature(path: Path) -> bytes:
@@ -256,7 +255,6 @@ async def upload_material(
                             user,
                             staged.path,
                         )
-                        _audit_org_material(db, user, "archive_uploaded", kb_id)
                         return preview
                     finally:
                         staged.path.unlink(missing_ok=True)
@@ -300,6 +298,9 @@ async def upload_material(
                                 staged.sha256,
                                 time.time(),
                             )
+                            record_org_material_audit(
+                                db, user, "document_uploaded", kb_id
+                            )
 
                         promoted = promote_staged_version(
                             db,
@@ -318,7 +319,6 @@ async def upload_material(
                             except Exception:
                                 logger.exception("material promotion rollback failed")
                         raise HTTPException(status_code=500, detail="material_promotion_failed") from exc
-                    _audit_org_material(db, user, "document_uploaded", kb_id)
                     return document_id, promoted
                 except HTTPException as exc:
                     if exc.status_code == 500 and exc.detail == "material_promotion_failed":

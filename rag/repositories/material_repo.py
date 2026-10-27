@@ -297,14 +297,13 @@ class MaterialRepository(BaseRepository):
         created_by: int,
         expires_at: float,
     ) -> int:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
             cur = conn.execute(
                 "INSERT INTO material_archive_manifests "
                 "(container_document_id, container_version_id, source_path, status, created_by, expires_at) "
                 "VALUES (?, ?, ?, 'pending_confirmation', ?, ?)",
                 (container_document_id, container_version_id, source_path, created_by, expires_at),
             )
-            conn.commit()
             return int(cur.lastrowid)
 
     def get_material_archive_manifest(self, manifest_id: int) -> dict[str, Any] | None:
@@ -332,14 +331,13 @@ class MaterialRepository(BaseRepository):
         state: str,
         reason_code: str = "",
     ) -> int:
-        with self.cm.write_connection() as conn:
+        with self.cm.transaction(immediate=True) as conn:
             cur = conn.execute(
                 "INSERT INTO material_archive_entries "
                 "(manifest_id, relative_path, normalized_path, child_source_key, size_bytes, content_hash, state, reason_code) "
                 "VALUES (?, ?, ?, ?, ?, '', ?, ?)",
                 (manifest_id, relative_path, normalized_path, child_source_key, size_bytes, state, reason_code),
             )
-            conn.commit()
             return int(cur.lastrowid)
 
     def list_material_archive_entries(self, manifest_id: int) -> list[dict[str, Any]]:

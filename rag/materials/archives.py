@@ -34,6 +34,7 @@ from rag.document_version_store import final_version_path
 from rag.kb_lifecycle import kb_mutation
 from rag.materials.formats import FormatCapabilityRegistry
 from rag.materials.models import FormatCapability
+from rag.materials.org_audit import record_org_material_audit
 from rag.user_db import UserDB
 
 _CHUNK = 64 * 1024
@@ -853,39 +854,44 @@ class ArchiveService:
             if resolution.capability is None or not resolution.capability.archive_container:
                 raise ArchiveRejected("not_an_archive", filename)
             manifest = inspect_archive(quarantine, resolution.capability, self.limits)
+            archive_hash = _sha256_file(quarantine)
 
-            existing = self.db.get_document_permission(filename, kb_id)
-            if existing is None:
-                container_id = self.db.create_document_permission(filename, kb_id, actor["id"], 1, False)
-            else:
-                container_id = existing["id"]
-            container_version_id = self.db.create_document_version(
-                container_id, filename, str(quarantine), _sha256_file(quarantine), actor["id"]
-            )
-            self.db.set_version_file_path(container_version_id, str(quarantine))
-            manifest_id = self.db.create_material_archive_manifest(
-                container_id, container_version_id, str(quarantine), actor["id"], time.time() + 3600
-            )
-
-            entries = []
-            for e in manifest.entries:
-                key = child_source_key(container_id, e.normalized_path) if e.normalized_path else ""
-                entry_id = self.db.add_material_archive_entry(
-                    manifest_id, e.relative_path, e.normalized_path, key, e.size_bytes, e.state, e.reason_code
-                )
-                entries.append(
-                    ArchiveEntry(
-                        relative_path=e.relative_path,
-                        normalized_path=e.normalized_path,
-                        child_source_key=key,
-                        size_bytes=e.size_bytes,
-                        content_hash=e.content_hash,
-                        state=e.state,
-                        reason_code=e.reason_code,
-                        is_dir=e.is_dir,
-                        id=entry_id,
+            with self.db.locked_transaction(immediate=True):
+                existing = self.db.get_document_permission(filename, kb_id)
+                if existing is None:
+                    container_id = self.db.create_document_permission(
+                        filename, kb_id, actor["id"], 1, False
                     )
+                else:
+                    container_id = existing["id"]
+                container_version_id = self.db.create_document_version(
+                    container_id, filename, str(quarantine), archive_hash, actor["id"]
                 )
+                manifest_id = self.db.create_material_archive_manifest(
+                    container_id, container_version_id, str(quarantine), actor["id"], time.time() + 3600
+                )
+
+                entries = []
+                for e in manifest.entries:
+                    key = child_source_key(container_id, e.normalized_path) if e.normalized_path else ""
+                    entry_id = self.db.add_material_archive_entry(
+                        manifest_id, e.relative_path, e.normalized_path, key, e.size_bytes, e.state, e.reason_code
+                    )
+                    entries.append(
+                        ArchiveEntry(
+                            relative_path=e.relative_path,
+                            normalized_path=e.normalized_path,
+                            child_source_key=key,
+                            size_bytes=e.size_bytes,
+                            content_hash=e.content_hash,
+                            state=e.state,
+                            reason_code=e.reason_code,
+                            is_dir=e.is_dir,
+                            id=entry_id,
+                        )
+                    )
+                record_org_material_audit(self.db, actor, "archive_uploaded", kb_id)
+
             self.last_container_id = container_id
             self.last_manifest_id = manifest_id
             return ArchiveManifestPreview(
