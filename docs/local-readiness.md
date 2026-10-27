@@ -2,13 +2,13 @@
 
 ## 当前：2026-10-27 组织管理提交与授权快照（本地验收完成）
 
-上一批已按用户授权快进双推至两端main的ce6da1b，标签一致；本批在C隔离分支codex/org-command-snapshots-2026-10-27继续，补充包暂不更新，原D目录/业务数据不操作。见[新计划](superpowers/plans/2026-10-27-org-command-snapshots.md)、[阶段与最终验收](reviews/2026-10-27-org-command-snapshots.md)和[四写六读所有权图](architecture/organization-command-ownership.md)。
+本批98d1a1a已按后续授权快进双推至两端main，标签一致，无强推；其后只整理进度/资源交接文档，最终refs以实际核对及包内code-info为准。原D目录/业务数据不操作，旧包不覆盖，新建最新资源包。统一入口见[最新进度与资源](progress-2026-10-27.md)、[计划](superpowers/plans/2026-10-27-org-command-snapshots.md)、[完整验收](reviews/2026-10-27-org-command-snapshots.md)和[四写六读所有权图](architecture/organization-command-ownership.md)。
 
 四个组织管理命令的audit已加入原transaction；授权六公开读入口加入单次调用一致快照；scope图44引用已绑定。三个任务及整批独立审查通过；最终受测b7e8867完整后端3591通过/5跳过、2171.08秒/native0，628文件前后一致，生产锁5场景通过。首轮计数代理接口失败、7行测试修正及27项定向回归均保留证据，生产实现与6cfd052一致；不使用下文3572/5替代。
 
 这仍不是完整writer admission或从鉴权到写入的共同事务；服务响应也不保证权限在响应时刻仍未变化。服务器/真实恢复/SQL输入follow-up/PG与共享存储门槛继续保留。
 
-本地仍可继续：其他业务命令的writer图及故障矩阵、把授权读取与后续写入准入衔接、10项SQL输入合同的负例与边界核定。当前只完成四写六读范围；新成果尚未再次合并双推，补充包按用户要求暂不更新。
+本地仍可继续：其他业务命令的writer图及故障矩阵、把授权读取与后续写入准入衔接、10项SQL输入合同的负例与边界核定。当前只完成四写六读范围；代码交付与资源整理不代表服务器或真实业务已验收。
 
 ## 历史：2026-10-27 Terra 本地安全后续（已交付）
 

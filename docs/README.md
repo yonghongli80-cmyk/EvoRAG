@@ -6,6 +6,7 @@
 
 ## 当前有效入口
 
+- `progress-2026-10-27.md`：最新统一进度、已交付代码、三轮验收版本、仍可本地推进事项、服务器空缺及最新资源包使用入口。
 - `reviews/2026-10-27-org-command-snapshots.md`：组织管理命令audit提交、授权读取快照与本批真实验收；上一批main交付和当前本地新批分开。
 - `superpowers/plans/2026-10-27-org-command-snapshots.md`：四写六读整改及source绑定所有权图、独立复审和隔离验证计划。
 - `architecture/organization-command-ownership.md`：本批精确四写六读的连接/transaction/audit与快照owner图，不代表全量writer或完整准入。
